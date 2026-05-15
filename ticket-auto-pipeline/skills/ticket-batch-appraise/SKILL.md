@@ -28,7 +28,7 @@ Read `CLAUDE.md` and extract: `{REPOS_ROOT}` (parent path of all service dirs), 
 Create a TaskCreate for every remaining step (Steps 1 through 4). Each task subject = the step heading. Mark each step completed as soon as it finishes. At session end, write a trace file:
 
 ```bash
-cat > /home/mortal/workspace/workbench/credit-network.biz/git/tickets/batch-appraise-{timestamp}.md << 'TRACE'
+cat > "$TICKETS_ROOT/batch-appraise-{timestamp}.md" << 'TRACE'
 # batch-appraise session — {today}
 **Tickets:** {N} submitted, {M} completed, {F} failed
 

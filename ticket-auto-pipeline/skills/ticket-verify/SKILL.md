@@ -60,7 +60,7 @@ If `--from-step` is not provided, proceed normally from Step 1.
 Read both knowledge sources before fetching the ticket:
 
 ```bash
-cat /home/mortal/.claude/skills/app-knowledge/SKILL.md
+cat "$HOME/.claude/skills/app-knowledge/SKILL.md"
 ```
 
 Then load the project nav hints:
@@ -93,14 +93,14 @@ Skip this step if `--env local` is set.
 
 If `--user` was provided, use it. If `--password` was provided, use it. Otherwise:
 
-1. Scan the ticket `description` for an email address matching typical test users (e.g. `sandra@sdtlaw.co.za`, `user@domain.co.za`). The ticket description often contains a `**User:**` field or an inline mention like "Log in as X (email)".
+1. Scan the ticket `description` for an email address matching typical test users (e.g. `user@example.com`). The ticket description often contains a `**User:**` field or an inline mention like "Log in as X (email)".
 2. If found → `derived_user = email`, `derived_password = "admin"`.
 3. If an email is found but `--user` was also passed → `--user` takes precedence.
 4. If an email is found but `--password` was also passed → `--password` takes precedence.
 5. If no email found in the description:
    - **If `--from-auto`** → post a comment to the Linear ticket:
      ```
-     ⚠️ Cannot verify: no user found in ticket description. Please add the test user email to the ticket (e.g. "**User:** sandra@sdtlaw.co.za").
+     ⚠️ Cannot verify: no user found in ticket description. Please add the test user email to the ticket (e.g. "**User:** user@example.com").
      ```
      Then abort with a FAIL verdict (skip to Step 7 with WHAT_FAILED = "No test user email in ticket description").
    - **Otherwise** → ask the user: "No user email found in the ticket. Which user should I log in as? (provide --user <email>)"
@@ -109,7 +109,7 @@ If `--user` was provided, use it. If `--password` was provided, use it. Otherwis
 ### 1c — Load local workspace
 
 ```bash
-find /home/mortal/workspace/workbench/credit-network.biz/git/tickets -type d -name "{TICKET-ID}*"
+find "$TICKETS_ROOT" -type d -name "{TICKET-ID}*"
 ```
 
 If found, read:
@@ -122,7 +122,7 @@ If not found, continue — the Linear description alone is sufficient.
 ### 1d — Load openspec change (if present)
 
 ```bash
-ls /home/mortal/workspace/workbench/credit-network.biz/git/tickets/openspec/changes/ | grep -i "{ticket-id-lowercase}"
+ls "$TICKETS_ROOT/openspec/changes/" | grep -i "{ticket-id-lowercase}"
 ```
 
 If found, read `tasks.md` to understand what was implemented and any "Manually verify" tasks — these become your verification checklist.

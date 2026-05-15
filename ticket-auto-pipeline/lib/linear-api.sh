@@ -187,7 +187,7 @@ get_project_config() {
 
   # 3. Legacy workspace roots (container and host paths)
   if [ -z "$uat_url" ]; then
-    for ws in /home/dexter/repos /home/mortal/workspace/workbench; do
+    for ws in "$HOME/repos" "$HOME/workspace/workbench"; do
       [ -d "$ws" ] || continue
       local found
       found=$(grep -rhoP 'UAT_URL[=:]\s*\K\S+' "$ws"/*/CLAUDE.md 2>/dev/null | head -1 || true)

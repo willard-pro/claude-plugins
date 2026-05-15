@@ -13,8 +13,8 @@ This file is a living reference. Append new learnings at the bottom of each sect
 
 | Name | URL | Notes |
 |---|---|---|
-| Local (dev) | http://localhost:9000 | Runs against local microservices |
-| UAT | https://uat.credit-network.biz | Staging environment |
+| Local (dev) | {LOCAL_URL} | Runs against local microservices |
+| UAT | {UAT_URL} | Staging environment |
 
 ---
 
@@ -24,7 +24,7 @@ Roles are encoded in the JWT and decoded client-side by the Angular app. The UI 
 
 | Profile | Example User | Organisation type | Notes |
 |---|---|---|---|
-| Attorney | sandra@sdtlaw.co.za | Law firm (e.g. SDT INCORPORATED) | Sees LEGAL state handovers as "Active"; limited action set |
+| Attorney | <!-- test user email from Linear ticket --> | Law firm | Sees LEGAL state handovers as "Active"; limited action set |
 | Collection Agency | — | Debt collection agency | Sees full handover lifecycle |
 
 ### Attorney-specific behaviour

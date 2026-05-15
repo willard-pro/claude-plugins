@@ -15,7 +15,7 @@ Run `basename "$(pwd)"`. If the result is NOT `tickets`, abort immediately and t
 
 ## Credentials
 
-Read `/home/mortal/.claude/skills/ticket-reproduce/credentials.md` to look up the password for the user and environment before any login attempt. The credentials file is the source of truth — never assume a default password.
+Read `$HOME/.claude/skills/ticket-reproduce/credentials.md` to look up the password for the user and environment before any login attempt. The credentials file is the source of truth — never assume a default password.
 
 ---
 
@@ -55,9 +55,9 @@ TRACE
 ## Step 2 — Load app knowledge and credentials
 
 Read in parallel:
-1. `/home/mortal/.claude/skills/app-knowledge/SKILL.md` — navigation patterns, role-based UI rules, state mappings, known quirks
+1. `$HOME/.claude/skills/app-knowledge/SKILL.md` — navigation patterns, role-based UI rules, state mappings, known quirks
 2. `{TICKETS_ROOT}/nav-hints.md` — click-by-click navigation paths for feature areas (never use `page.goto()` for in-app nav)
-3. `/home/mortal/.claude/skills/ticket-reproduce/credentials.md` — environment-specific passwords
+3. `$HOME/.claude/skills/ticket-reproduce/credentials.md` — environment-specific passwords
 
 From the ticket-setup output (or context.md), extract:
 - **User** to log in as (look for a "User:" or "Log in as" field in the description)
@@ -149,7 +149,7 @@ Write the plan to `{ticket-dir}/reproduce.md`:
 ```markdown
 # Reproduction Plan — {TICKET-ID}
 
-**Environment:** UAT — https://uat.credit-network.biz
+**Environment:** UAT — {UAT_URL}
 **User:** {email}
 **Password:** {password from credentials.md for this env}
 **Generated:** {today's date}
@@ -166,7 +166,7 @@ Write the plan to `{ticket-dir}/reproduce.md`:
 
 | # | Action | Detail | Assert |
 |---|--------|--------|--------|
-| 1 | Log in | Navigate to https://uat.credit-network.biz, fill username = {email}, password = admin, click Sign In | Nav bar shows org name confirming authenticated session |
+| 1 | Log in | Navigate to {UAT_URL}, fill username = {email}, password = admin, click Sign In | Nav bar shows org name confirming authenticated session |
 | 2 | ... | ... | — |
 | N | Observe bug | Navigate to {page}, find {field} | **BUG:** Shows "{actual value}" — Expected: "{expected value}" |
 
@@ -224,7 +224,7 @@ Open a browser and navigate UAT step by step.
 
 ### Login
 ```bash
-playwright-cli open https://uat.credit-network.biz
+playwright-cli open {UAT_URL}
 playwright-cli snapshot
 # Fill login form
 playwright-cli fill [username field ref] "{email}"
@@ -235,7 +235,7 @@ playwright-cli snapshot
 
 Confirm login success: nav bar must show the org name. If login fails or nav bar is incomplete (missing Handovers / Administration), note it and attempt a second navigation to trigger the enriched JWT flow:
 ```bash
-playwright-cli goto https://uat.credit-network.biz/handover
+playwright-cli goto {UAT_URL}/handover
 playwright-cli snapshot
 ```
 

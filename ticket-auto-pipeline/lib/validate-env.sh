@@ -63,14 +63,14 @@ fi
 if grep -q 'LOCAL_URL.*http' "$CLAUDE_MD" 2>/dev/null; then
   pass "LOCAL_URL ($(grep 'LOCAL_URL' "$CLAUDE_MD" | head -1 | sed 's/.*`//;s/`.*//'))"
 else
-  fail "LOCAL_URL" "add 'LOCAL_URL = http://localhost:9000' to CLAUDE.md"
+  fail "LOCAL_URL" "add 'LOCAL_URL = {LOCAL_URL}' to CLAUDE.md"
 fi
 
 # -- UAT_URL ------------------------------------------------------------------
 if grep -q 'UAT_URL.*https\?://' "$CLAUDE_MD" 2>/dev/null; then
   pass "UAT_URL ($(grep 'UAT_URL' "$CLAUDE_MD" | head -1 | sed 's/.*`//;s/`.*//'))"
 else
-  fail "UAT_URL" "add 'UAT_URL = https://uat.credit-network.biz/' to CLAUDE.md"
+  fail "UAT_URL" "add 'UAT_URL = {UAT_URL}' to CLAUDE.md"
 fi
 
 # -- BE_TEST_CMD (optional) ---------------------------------------------------
