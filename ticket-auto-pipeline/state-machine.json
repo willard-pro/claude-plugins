@@ -1,0 +1,105 @@
+{
+  "well_known_states": ["Backlog", "Blocked"],
+  "well_known_labels": ["bug", "feature", "repro-failed"],
+  "triggers": {
+    "appraise-start": {
+      "from": "Backlog",
+      "to": "Todo",
+      "adds": ["claimed", "{complexity}"],
+      "removes": [],
+      "set_assignee": "me",
+      "description": "Claim a ticket and begin appraisal"
+    },
+    "appraise-complete": {
+      "from": "Todo",
+      "to": "Approve",
+      "adds": [],
+      "removes": [],
+      "description": "Appraisal done — awaiting human review"
+    },
+    "human-approve": {
+      "from": "Approve",
+      "to": "Ready",
+      "adds": ["approved"],
+      "removes": ["rejected"],
+      "description": "Human approved the plan"
+    },
+    "human-reject": {
+      "from": "Approve",
+      "to": "Todo",
+      "adds": [],
+      "removes": [],
+      "description": "Human rejected the plan — return to Todo for re-appraisal"
+    },
+    "implement-outcome": {
+      "from": null,
+      "to": null,
+      "adds": ["{outcome}"],
+      "removes": [],
+      "description": "Record implementation difficulty label (Smooth/Rough/Hard)"
+    },
+    "implement-complete": {
+      "from": "Ready",
+      "to": "Review",
+      "adds": [],
+      "removes": ["approved"],
+      "description": "Implementation pushed — enter code review"
+    },
+    "pr-review-pass-done": {
+      "from": "Review",
+      "to": "Done",
+      "adds": ["reviewed"],
+      "removes": ["rejected", "claimed"],
+      "description": "PR approved with no UAT required — close to Done"
+    },
+    "pr-review-pass-uat": {
+      "from": "Review",
+      "to": "UAT",
+      "adds": ["reviewed"],
+      "removes": ["rejected"],
+      "description": "PR approved with UAT required — move to UAT"
+    },
+    "pr-review-fail": {
+      "from": null,
+      "to": null,
+      "adds": ["rejected"],
+      "removes": [],
+      "description": "PR review found issues — mark rejected (no state change)"
+    },
+    "pr-iterate": {
+      "from": "Review",
+      "to": "Ready",
+      "adds": ["approved"],
+      "removes": ["reviewed", "rejected"],
+      "description": "Iterating on PR feedback — return to Ready"
+    },
+    "uat-pass": {
+      "from": "UAT",
+      "to": "Done",
+      "adds": [],
+      "removes": ["claimed", "reviewed"],
+      "description": "UAT passed — close ticket"
+    },
+    "uat-fail": {
+      "from": "UAT",
+      "to": "Ready",
+      "adds": ["rejected"],
+      "removes": ["reviewed"],
+      "description": "UAT failed — return to Ready for another pass"
+    },
+    "needs-info": {
+      "from": null,
+      "to": null,
+      "adds": ["needs-info"],
+      "removes": [],
+      "description": "Block ticket — waiting for external information"
+    },
+    "needs-info-resolved": {
+      "from": null,
+      "to": null,
+      "adds": [],
+      "removes": ["needs-info"],
+      "description": "Unblock ticket — information received"
+    }
+  }
+}

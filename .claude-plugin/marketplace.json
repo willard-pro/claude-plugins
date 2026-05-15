@@ -1,0 +1,17 @@
+{
+  "name": "willard-pro-claude-plugins",
+  "owner": {
+    "name": "John Willard"
+  },
+  "metadata": {
+    "description": "Claude Code plugins by willard-pro — ticket automation pipelines and development tooling"
+  },
+  "plugins": [
+    {
+      "name": "ticket-auto-pipeline",
+      "version": "0.1.0",
+      "source": "./ticket-auto-pipeline",
+      "description": "Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. Bundles 20+ skills, state machine config, pipeline safety gates, and retrospective analysis."
+    }
+  ]
+}

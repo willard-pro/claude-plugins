@@ -1,0 +1,17 @@
+{
+  "name": "ticket-auto-pipeline",
+  "version": "0.1.0",
+  "description": "Fully autonomous Linear ticket pipeline — appraise, verify, implement, and merge with zero user input. Includes 20+ slash commands, state-machine-driven flow control, safety gates, and retrospective analysis.",
+  "author": {
+    "name": "John Willard"
+  },
+  "repository": "https://github.com/willard-pro/claude-plugins",
+  "license": "UNLICENSED",
+  "keywords": [
+    "linear",
+    "ticket",
+    "pipeline",
+    "automation",
+    "project-management"
+  ]
+}

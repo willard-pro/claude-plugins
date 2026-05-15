@@ -1,0 +1,783 @@
+---
+name: ticket-auto
+description: Fully autonomous ticket pipeline — appraise, exec, implement, PR review, merge. Requires zero user input beyond the ticket ID. Stops only for complex tickets at the approve gate. Use when the user says "/ticket-auto <ID>", "auto <ID>", "process ticket <ID>", or "run ticket <ID> end to end".
+---
+
+# Ticket Auto — Autonomous Pipeline
+
+You have been given a ticket ID as the argument (e.g. `WIL-42`). Execute the full pipeline below — no user interaction beyond reporting results.
+
+## Guard — Verify working directory + environment
+
+Run `basename "$(pwd)"`. If the result is NOT `tickets`, abort immediately and tell the user to `cd` to the tickets workspace and re-run.
+
+Run `bash ~/.claude/skills/lib/validate-env.sh ./CLAUDE.md`. If it exits non-zero, report the failures and stop — do not proceed until all required values are configured.
+
+---
+
+## Step 0 — Clear context: Run `/clear`.
+
+---
+
+## Step 0.1 — Resolve autonomy flag
+
+Resolve `{AUTONOMY}` from the argument string using three-tier precedence: CLI arg → `$TICKET_AUTONOMY` env var → `manual` default.
+
+```bash
+if echo "{TICKET_ARG}" | grep -qw '\-\-semi-auto'; then
+  AUTONOMY="semi-auto"
+elif echo "{TICKET_ARG}" | grep -qw '\-\-auto'; then
+  AUTONOMY="auto"
+elif echo "{TICKET_ARG}" | grep -qw '\-\-manual'; then
+  AUTONOMY="manual"
+elif [ -n "$TICKET_AUTONOMY" ]; then
+  case "$TICKET_AUTONOMY" in
+    manual|auto|semi-auto) AUTONOMY="$TICKET_AUTONOMY" ;;
+    *) echo "WARN: unrecognised TICKET_AUTONOMY value '$TICKET_AUTONOMY', defaulting to manual"
+       AUTONOMY="manual" ;;
+  esac
+else
+  AUTONOMY="manual"
+fi
+# Strip flag from arg to get the bare ticket ID
+TICKET_ID=$(echo "{TICKET_ARG}" | sed 's/--semi-auto//;s/--auto//;s/--manual//' | tr -s ' ' | xargs)
+```
+
+Set `{AUTONOMY}` and `{TICKET_ID}` — used throughout the pipeline.
+
+---
+
+## Step 0.4 — Preflight: Linear config + API key check
+
+Before creating any log file, validate that the Linear team is correctly configured.
+
+```bash
+SENTINEL_DIR="$HOME/.claude/state/ticket-flow"
+SM="$HOME/.claude/skills/ticket-flow/state-machine.json"
+SM_HASH=$(sha256sum "$SM" | cut -d' ' -f1)
+
+# Resolve team ID from env or first available team
+TEAM_ID="${LINEAR_TEAM_ID:-}"
+if [ -z "$TEAM_ID" ]; then
+  teams=$(LINEAR_API_KEY="$LINEAR_API_KEY" bash -c \
+    "source ~/.claude/skills/lib/linear-api.sh; linear_graphql '{\"query\":\"query{teams{nodes{id name}}}\"}'")
+  team_count=$(echo "$teams" | jq '.data.teams.nodes | length')
+  [ "$team_count" -eq 1 ] || { echo "Multiple Linear teams — set LINEAR_TEAM_ID"; exit 1; }
+  TEAM_ID=$(echo "$teams" | jq -r '.data.teams.nodes[0].id')
+fi
+
+SENTINEL="$SENTINEL_DIR/validated-${TEAM_ID}"
+```
+
+**Warm hit** — sentinel exists and hash matches: skip validation.
+```bash
+if [ -f "$SENTINEL" ] && grep -q "^sm_hash=${SM_HASH}$" "$SENTINEL" 2>/dev/null; then
+  echo "Preflight: sentinel valid — skipping Linear config check"
+  # Log after pipeline log is initialized (Step 0.6 logs META|preflight|skip|sentinel-valid)
+else
+  # Cold run — run full validation
+  bash ~/.claude/skills/ticket-flow/validate-linear-config.sh "$TEAM_ID" || {
+    echo "Preflight failed: Linear config validation error. Fix the team config and retry." >&2
+    exit 1
+  }
+fi
+```
+
+**API key check** — always verify connectivity:
+```bash
+me=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_me" 2>&1) || {
+  echo "Preflight failed: Linear API key unset or rejected (exit 4). Set LINEAR_API_KEY." >&2
+  exit 4
+}
+echo "Preflight: authenticated as $(echo "$me" | jq -r '.name // "unknown"')"
+```
+
+Log preflight result after the pipeline log is initialized in Step 0.6:
+- Warm hit: `|META|preflight|skip|sentinel-valid`
+- Cold run: `|META|preflight|ok|<states>/<labels>` (written by validate-linear-config.sh itself)
+
+---
+
+## Step 0.5 — Detect project context
+
+Read `CLAUDE.md` and extract: `{REPOS_ROOT}` (parent path of all service dirs), `{ISSUE_PREFIX}` (issue ID prefix, e.g. `CRE`), `{BE_SERVICES}` (BE service dir names).
+
+---
+
+## Step 0.6 — Create task tracker + initialize pipeline log
+
+Initialize retry counters:
+- `{VERIFY_ATTEMPTS}` = 0 (capped at 3, for Step 4.5 retries)
+- `{VERIFY_RETRIES}` = 0 (capped at 3, resets per PR iteration, for Step 5d2 retries)
+
+Create a TaskCreate for every remaining step (Steps 1 through 6). Each task subject = the step heading. Mark each step completed as soon as it finishes — do not batch.
+
+Initialize the pipeline log and launch the dashboard:
+
+```bash
+mkdir -p ./logs
+LOG_FILE="$PWD/logs/{TICKET-ID}-pipeline.log"
+touch "$LOG_FILE"
+YELLOW=$(tput setaf 3); BOLD=$(tput bold); RESET=$(tput sgr0)
+if [ -n "$TMUX" ]; then
+  tmux split-window -h "python3 ~/.claude/skills/ticket-auto/dashboard.py $LOG_FILE; read"
+  echo "${BOLD}${YELLOW}(Dashboard opened in right pane.)${RESET}"
+else
+  echo "${BOLD}${YELLOW}Dashboard ready. In a second terminal run:${RESET}"
+  echo "${BOLD}${YELLOW}  python3 ~/.claude/skills/ticket-auto/dashboard.py $LOG_FILE${RESET}"
+fi
+```
+
+Log the resolved autonomy mode immediately after dashboard launch:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|autonomy|info|{AUTONOMY}" >> {LOG_FILE}
+```
+
+### Logging convention
+
+The orchestrator owns the pipeline log file. Sub-agents write their own step-level progress directly to `$LOG_FILE` using the format from `~/.claude/skills/pipeline-log-format.md`. Each sub-agent skill has a `## Logging (--from-auto)` section that handles this.
+
+Pattern for every agent-spawn step:
+```bash
+# Before spawn — write one waiting entry for the whole phase:
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|{PHASE}|{phase}|waiting|Agent launched — {what it does}" >> {LOG_FILE}
+# ... spawn agent (with LOG_FILE export in prompt), wait for result ...
+# After agent returns — write the phase-level done/fail:
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|{PHASE}|{phase}|done|{result summary}" >> {LOG_FILE}
+```
+
+The waiting/done pair gives the dashboard phase-level progress. The sub-agent's own `|start|`/`|done|` entries fill in step-level detail live.
+
+At session end, write a trace file:
+
+```bash
+cat > {ticket-dir}/auto-session.md << 'TRACE'
+# auto session — {ISSUE-ID}
+**Date:** {today}
+**Outcome:** {completed | stopped: <reason>}
+
+## Step trace
+- [x] Step 1: Appraise — {simple|complex}, {N} files traced
+- [x] Step 2: Exec — {simple-fix|openspec: <name>}
+- [x] Step 3: Gate — {auto-approved|stopped: complex}
+- [x] Step 4: Implement — {Smooth|Rough|Hard}
+- [x] Step 4.6: Wiki Maintenance — {N} errata processed
+- [x] Step 4.5: Verify — {✅ PASS (N attempts)|❌ FAIL after N|skipped: no UI}
+- [x] Step 5: PR review — {✅|⚠️}, {N} iterations, {N} re-verify retries
+- [x] Step 6: Report — done
+TRACE
+```
+
+---
+
+## Step 0.7 — Crash-recovery detection
+
+Run `/ticket-detect-resume {TICKET-ID}` inline (execute the skill logic directly — no agent spawn needed). Parse the `DETECT_RESUME_RESULT` block and set all variables:
+
+`{RESUME_STEP}`, `{APPRAISE_FROM}`, `{EXEC_FROM}`, `{IMPLEMENT_FROM}`, `{MAINTENANCE_FROM}`, `{VERIFY_FROM}`, `{PR_REVIEW_FROM}`, `{PR_ITERATE_FROM}`, `{TICKET_DIR}`, `{COMPLEXITY}`, `{ARTIFACT_TYPE}`, `{BRANCH}`, `{TICKET_TITLE}`, `{VERIFY_ATTEMPTS}`, `{ITERATION}`, `{AUTONOMY}` (read from `META|autonomy|info|` log line).
+
+**If `RESUME_STEP = SCHEMA_MISMATCH`:**
+Report:
+```
+{TICKET-ID} pipeline log has an incompatible schema version.
+Log file: {LOG_FILE}
+Log version: {SCHEMA_LOG_VERSION}  Expected: {SCHEMA_EXPECTED}
+
+The log cannot be safely resumed. Options:
+  1. Archive the log (mv {LOG_FILE} {LOG_FILE}.bak) and restart from Step 1.
+  2. Investigate manually if a partial run may have left Linear state inconsistent.
+```
+Stop here.
+
+**If `RESUME_STEP = GATE_STILL_HELD`:**
+Report:
+```
+{TICKET-ID} is still held — the gate fired because this is a complex ticket.
+Add the `approved` label in Linear and re-run `/ticket-auto {TICKET-ID}`.
+```
+Stop here.
+
+**If recovering (`RESUME_STEP ≠ STEP_1`):**
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|recovery|info|Resuming from {RESUME_STEP}" >> {LOG_FILE}
+```
+Mark tasks for all steps before `{RESUME_STEP}` as completed in the TaskCreate tracker.
+
+---
+
+## Entry-point dispatch
+
+Based on `{RESUME_STEP}`, jump directly to the corresponding step. Steps before the entry point are not executed.
+
+| RESUME_STEP | Jump to |
+|-------------|---------|
+| STEP_1 | Step 1 (Appraise) |
+| STEP_2 | Step 2 (Exec) |
+| STEP_3 | Step 3 (Gate) |
+| STEP_4 | Step 4 (Implement) |
+| STEP_4_5 | Step 4.5 (Verify) |
+| STEP_4_6 | Step 4.6 (Wiki Maintenance) |
+| STEP_5 | Step 5 (PR Review loop) |
+| STEP_6 | Step 6 (Report) |
+
+---
+
+## Step 1 — Appraise
+
+Write the waiting log entry:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|waiting|Agent launched — investigating {TICKET-ID}" >> {LOG_FILE}
+```
+
+Write the phase context file so the token-tracker hook knows where to log:
+
+```bash
+echo "APPRAISE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+```
+
+Spawn a `general-purpose` agent to investigate the ticket:
+
+```
+Run /ticket-appraise {TICKET-ID} --from-auto{if {APPRAISE_FROM} is non-empty: ` --from-step {APPRAISE_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}". Follow the skill exactly. When you hit Resume mode and the workspace already exists, if asked "continue or re-investigate?", choose "continue" — do not prompt. Report only the final handoff output.
+```
+
+Wait for the agent. Extract from its result:
+- `{COMPLEXITY}` — `simple` or `complex`
+- `{TICKET_DIR}` — local workspace path (derive from the find command in Step 1 of appraise-exec pattern, or read from agent output)
+- `{TICKET_TITLE}` — the full ticket title. If not present in the agent's handoff, call `mcp__linear-server__get_issue` with `id: "{TICKET-ID}"` to get it before writing the META title line.
+
+If the agent fails → write fail log and stop:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|fail|Agent failed" >> {LOG_FILE}
+```
+
+On success, write the done log entry and META title:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|{COMPLEXITY}, {N} files traced" >> {LOG_FILE}
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|title|info|{TICKET-ID}: {TICKET_TITLE}" >> {LOG_FILE}
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|notes:{TICKET_DIR}/notes.md" >> {LOG_FILE}
+```
+
+---
+
+## Step 2 — Exec
+
+Write the waiting log entry:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|waiting|Agent launched — creating artifacts for {TICKET-ID}" >> {LOG_FILE}
+```
+
+Write the phase context file so the token-tracker hook knows where to log:
+
+```bash
+echo "EXEC|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+```
+
+Spawn a `general-purpose` agent to create artifacts:
+
+```
+Run /ticket-appraise-exec {TICKET-ID} --from-auto{if {EXEC_FROM} is non-empty: ` --from-step {EXEC_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}". Follow the skill exactly. Report only the final handoff output.
+```
+
+Wait for the agent. Extract:
+- `{ARTIFACT_TYPE}` — `simple-fix` or `openspec:<name>`
+
+If the agent fails → write fail log and stop:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|fail|Agent failed" >> {LOG_FILE}
+```
+
+On success:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|{ARTIFACT_TYPE}" >> {LOG_FILE}
+```
+
+Resolve and log the plan artifact path so the dashboard can display it:
+
+```bash
+PLAN_PATH=$(find {TICKET_DIR} -name "simple-fix.md" -print -quit 2>/dev/null)
+if [ -z "$PLAN_PATH" ]; then
+  CHANGE_DIR=$(ls -d openspec/changes/*/ 2>/dev/null | grep -i "{ticket-id-lowercase}" | head -1)
+  if [ -n "$CHANGE_DIR" ]; then
+    PLAN_PATH="${CHANGE_DIR}tasks.md"
+  fi
+fi
+if [ -n "$PLAN_PATH" ]; then
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|plan:$PLAN_PATH" >> {LOG_FILE}
+fi
+```
+
+---
+
+## Step 2.5 — Artifact-existence gate
+
+**Skip this step when `RESUME_STEP >= STEP_4`** — the artifact was already validated in the prior run.
+
+Resolve the plan artifact path:
+```bash
+PLAN_PATH=$(grep '|META|artifact|info|plan:' {LOG_FILE} | tail -1 | cut -d'|' -f5 | sed 's/^plan://')
+```
+
+If `PLAN_PATH` is empty (Step 2 failed before logging it), fall back:
+```bash
+PLAN_PATH=$(find {TICKET_DIR} -name "simple-fix.md" -print -quit 2>/dev/null)
+if [ -z "$PLAN_PATH" ]; then
+  CHANGE_DIR=$(ls -d openspec/changes/*/ 2>/dev/null | grep -i "{ticket-id-lowercase}" | head -1)
+  [ -n "$CHANGE_DIR" ] && PLAN_PATH="${CHANGE_DIR}tasks.md"
+fi
+```
+
+If `PLAN_PATH` is still empty, or the file does not exist on disk:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|EXEC_NO_ARTIFACT — expected: ${PLAN_PATH:-unknown}" >> {LOG_FILE}
+```
+Stop. Report: `{TICKET-ID} pipeline halted: artifact file not found at '${PLAN_PATH}'. Re-run Step 2 or check ticket-appraise-exec output.`
+
+On success proceed silently to Step 3.
+
+---
+
+## Step 3 — Gate
+
+Read `notes.md` from the ticket directory to confirm complexity:
+
+```bash
+find . -type d -name "{TICKET-ID}*"
+```
+
+Read `{ticket-dir}/notes.md` and extract the `## Complexity` section.
+
+Write the gate start event:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|start|Evaluating complexity gate" >> {LOG_FILE}
+```
+
+- **`complex`** → held regardless of flag. Write log events, then stop:
+  ```bash
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-result|info|complex — held ({AUTONOMY})" >> {LOG_FILE}
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|fail|held: complex ticket" >> {LOG_FILE}
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|outcome|info|stopped: complex" >> {LOG_FILE}
+  ```
+  Report:
+
+```
+## {TICKET-ID} — gate held
+
+**Reason:** Complex ticket — multi-service or cross-layer changes.
+**Artifacts:** {ticket-dir} (notes.md + {ARTIFACT_TYPE})
+**To proceed:** Review the plan, then add the `approved` label and re-run `/ticket-auto {TICKET-ID} --auto`.
+```
+
+  Mark remaining tasks as deleted (they won't run this session). Stop here.
+
+- **`simple` + `{AUTONOMY}` = `manual`** → held. Write log events, then stop:
+  ```bash
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-result|info|simple — held (manual mode)" >> {LOG_FILE}
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|fail|held: manual mode" >> {LOG_FILE}
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|outcome|info|stopped: manual" >> {LOG_FILE}
+  ```
+  Report:
+
+```
+## {TICKET-ID} — gate held
+
+**Reason:** Manual mode — human approval required for all tickets.
+**Artifacts:** {ticket-dir} (notes.md + {ARTIFACT_TYPE})
+**To proceed:** Run `/ticket-flow {TICKET-ID} human-approve`, then re-run `/ticket-auto {TICKET-ID} --auto`.
+```
+
+  Mark remaining tasks as deleted. Stop here.
+
+- **`simple` + `{AUTONOMY}` = `auto` or `semi-auto`** → auto-approve. Run `/ticket-flow {TICKET-ID} human-approve`. Write log events:
+  ```bash
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-result|info|simple — auto-approved ({AUTONOMY})" >> {LOG_FILE}
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >> {LOG_FILE}
+  ```
+  Proceed to Step 4.
+
+---
+
+## Step 4 — Implement
+
+Call `mcp__linear-server__get_issue` with `id: "{TICKET-ID}"` and verify the `approved` label is present. If missing (shouldn't happen given Step 3, but verify) — add it now for simple tickets, or stop for complex.
+
+Write the waiting log entry:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|waiting|Agent launched — implementing {TICKET-ID}" >> {LOG_FILE}
+```
+
+Write the phase context file so the token-tracker hook knows where to log:
+
+```bash
+echo "IMPLEMENT|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+```
+
+Spawn a `general-purpose` agent:
+
+```
+Run /ticket-implement {TICKET-ID} --from-auto{if {IMPLEMENT_FROM} is non-empty: ` --from-step {IMPLEMENT_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}". Follow the skill exactly. Use Serena for all code navigation — mandatory. Commit and push. Report the final output including branch name.
+
+After this agent returns, clear `{IMPLEMENT_FROM}` (set to empty) — loop re-invocations in Step 5d always start fresh.
+```
+
+Wait for the agent. Extract:
+- `{OUTCOME}` — `Smooth`, `Rough`, or `Hard`
+- `{MISMATCH}` — whether a complexity mismatch was reported (look for "Complexity mismatch" in the output)
+
+If the agent fails → write fail log and stop:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|fail|Agent failed" >> {LOG_FILE}
+```
+
+On success:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|{OUTCOME}, branch: {branch}" >> {LOG_FILE}
+```
+
+### Step 4a — Verify outcome label
+
+Call `mcp__linear-server__get_issue` with `id: "{TICKET-ID}"`. Check that:
+
+**Outcome label is present:** The `Smooth`, `Rough`, or `Hard` label must be set. If missing, run `/ticket-flow {TICKET-ID} implement-outcome --data outcome={OUTCOME}`.
+
+This is critical for training data (predicted-vs-actual complexity pairs). State change to `Review` happens in Step 4.5 — verification gates PR creation and `implement-complete`.
+
+---
+
+## Step 4.5 — Verify on localhost
+
+Only if the ticket has a UI surface. Otherwise note "skipped: no UI" and proceed to Step 4.6 (Wiki Maintenance).
+
+### Step 4.5a — Verification attempt
+
+Write log start event:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|start|Attempt {VERIFY_ATTEMPTS}/3 — running Playwright UAT" >> {LOG_FILE}
+```
+
+Write the phase context file so the token-tracker hook knows where to log:
+
+```bash
+echo "VERIFY|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+```
+
+Run `/ticket-verify {TICKET-ID} --env local --from-auto{if {VERIFY_FROM} is non-empty: ` --from-step {VERIFY_FROM}`}`.
+Extract `{VERDICT}` (PASS or FAIL).
+After this call, clear `{VERIFY_FROM}` (set to empty) — retry re-invocations always start fresh.
+
+Write log result event:
+```bash
+# PASS:
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|done|PASS" >> {LOG_FILE}
+# FAIL:
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|fail|FAIL — criteria not met" >> {LOG_FILE}
+```
+
+- **PASS** → proceed to Step 4.6 (Wiki Maintenance).
+- **FAIL** → proceed to Step 4.5b.
+
+### Step 4.5b — Retry decision
+
+Increment `{VERIFY_ATTEMPTS}`.
+
+If `{VERIFY_ATTEMPTS} >= 3`:
+  Stop. Report:
+  ```
+  ## {TICKET-ID} — max verify attempts reached
+
+  **Failed criteria:** {list}
+  See {ticket-dir}/notes.md for the REMEDIATION_BRIEF.
+  Manual intervention needed.
+  ```
+
+If `{VERIFY_ATTEMPTS} < 3`:
+  Report "Verification attempt {VERIFY_ATTEMPTS}/3 failed. Re-implementing."
+  **Loop back to Step 4** (re-spawn the implement agent with `--from-auto`).
+  ticket-implement Step 2.5 detects the Verification FAIL in notes.md,
+  appends `## Verification #N` to the plan, and implements the fix.
+  After Step 4 completes, proceed through 4a to 4.5a again.
+  Step 4.6 (Wiki Maintenance) runs after VERIFY passes.
+  Do NOT re-initialize `{VERIFY_ATTEMPTS}`.
+
+Pass `--from-auto` to the ticket-implement agent spawn in Step 4 — add `--from-auto` to the agent prompt.
+
+---
+
+## Step 4.6 — Wiki Maintenance
+
+Incorporate any errata discovered during implementation into the project wiki so downstream tickets benefit from corrected call chains.
+
+Write the waiting log entry:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|waiting|Agent launched — wiki maintenance for {TICKET-ID}" >> {LOG_FILE}
+```
+
+Write the phase context file so the token-tracker hook knows where to log:
+
+```bash
+echo "MAINTENANCE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+```
+
+Spawn a `general-purpose` agent:
+
+```
+Run /wiki-maintenance. Before starting, run: export LOG_FILE="{LOG_FILE}". Process any unresolved errata entries that were appended by ticket-implement Step 4c. Edit only wiki files — do not modify source code. Report the final output including count of errata processed and files modified.
+```
+
+Wait for the agent. Extract:
+- `{ERRATA_COUNT}` — number of errata entries processed (0 if none)
+
+If the agent fails → log a warning but continue (wiki maintenance is non-blocking):
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|fail|Agent failed — continuing" >> {LOG_FILE}
+```
+
+On success:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|done|{ERRATA_COUNT} errata incorporated" >> {LOG_FILE}
+```
+
+Non-blocking: wiki maintenance failure does not stop the pipeline. The errata remain unresolved and will be picked up by the next ticket's maintenance run.
+
+---
+
+## Step 5 — PR Review + Iteration Loop
+
+Initialize `{ITERATION}` = 0. The loop runs at most 3 times.
+
+### Step 5a — Run PR review
+
+Write the waiting log entry:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|waiting|Agent launched — reviewing PR for {TICKET-ID}" >> {LOG_FILE}
+```
+
+Write the phase context file so the token-tracker hook knows where to log:
+
+```bash
+echo "PR-REVIEW|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+```
+
+Spawn a `general-purpose` agent:
+
+```
+Run /ticket-pr-review {TICKET-ID} --from-auto{if {PR_REVIEW_FROM} is non-empty: ` --from-step {PR_REVIEW_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}". Follow the skill exactly. Validate the PR diff against the ticket requirements. Post findings. If all requirements addressed (verdict ✅), merge via squash. Report the final output.
+
+After this agent returns, clear `{PR_REVIEW_FROM}` — subsequent iterations start fresh.
+```
+
+Wait for the agent. Extract:
+- `{VERDICT}` — ✅ all addressed, or ⚠️ gaps found
+- `{MERGED}` — yes, no, or skipped
+
+If the agent fails → write fail log and stop:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|fail|Agent failed" >> {LOG_FILE}
+```
+
+On success:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|done|Verdict: {VERDICT}, merged: {MERGED}" >> {LOG_FILE}
+```
+
+**Verdict-line integrity gate** — before any branching, count parseable verdict lines in the pr-review output:
+```bash
+VERDICT_COUNT=$(echo "{PR_REVIEW_OUTPUT}" | grep -cP '^\*\*Verdict:\*\* [✅⚠️]' || true)
+```
+
+If `VERDICT_COUNT` ≠ 1:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|PR_REVIEW_VERDICT_UNPARSEABLE — found ${VERDICT_COUNT} Verdict lines" >> {LOG_FILE}
+```
+Stop. Report: `{TICKET-ID} pipeline halted: expected 1 **Verdict:** ✅/⚠️ line, found ${VERDICT_COUNT}. PR review output may be malformed.`
+
+On `VERDICT_COUNT` = 1, extract `{VERDICT}` from that line and proceed.
+
+### Step 5b — Decision
+
+- **Verdict ✅** → check auto-merge conditions:
+  - If `{AUTONOMY}` = `semi-auto` AND `{COMPLEXITY}` = `simple` AND `{OUTCOME}` = `Smooth`:
+    ```bash
+    gh pr merge --squash --auto {PR_URL}
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|done|Verdict: ✅, merged: auto-merged (semi-auto, simple+Smooth)" >> {LOG_FILE}
+    ```
+    Set `{MERGED}` = `auto-merged`. Break out of loop. Go to Step 6 (Report).
+  - Otherwise (wrong flag, complex ticket, or outcome ≠ Smooth) → normal merge flow. The PR review agent already handles merge. Set `{MERGED}` = `yes`. Break out of loop. Go to Step 6 (Report).
+- **Verdict ⚠️** → auto-merge blocked regardless of flag. Increment `{ITERATION}`. If `{ITERATION} >= 3` → stop and report:
+  ```
+  ## {TICKET-ID} — max iterations reached
+
+  PR review found gaps after 3 implementation attempts. Manual intervention needed.
+  PR: {PR_URL}
+  ```
+  Otherwise proceed to Step 5c.
+
+### Step 5c — Iterate
+
+Write the phase context file so the token-tracker hook knows where to log:
+
+```bash
+echo "PR-REVIEW|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+```
+
+Spawn a `general-purpose` agent:
+
+```
+Run /ticket-pr-iterate {TICKET-ID} --from-auto{if {PR_ITERATE_FROM} is non-empty: ` --from-step {PR_ITERATE_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}". Follow the skill exactly. Parse the PR review findings, append a PR Review #{ITERATION} section to the plan, update Linear to Ready + approved. Report the final output.
+
+After this agent returns, clear `{PR_ITERATE_FROM}`.
+```
+
+Wait for the agent. If it fails → stop and report.
+
+### Step 5d — Re-implement
+
+**Re-approval gate** — live Linear check before re-spawning implement:
+
+```bash
+LIVE=$(mcp__linear-server__get_issue id="{TICKET-ID}")
+LIVE_STATE=$(echo "$LIVE" | jq -r '.state.name')
+LIVE_LABELS=$(echo "$LIVE" | jq -r '[.labels.nodes[].name]')
+```
+
+Assert both conditions:
+- `LIVE_STATE` = `Ready`
+- `approved` label present in `LIVE_LABELS`
+
+If either fails:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|APPROVAL_REVOKED — state={LIVE_STATE} approved={true|false}" >> {LOG_FILE}
+```
+Stop. Report: `{TICKET-ID} pipeline halted: approval revoked between pr-iterate and re-implement. State: {LIVE_STATE}. Labels: {LIVE_LABELS}. Re-approve the ticket to continue.`
+
+On pass proceed silently.
+
+Write the phase context file so the token-tracker hook knows where to log:
+
+```bash
+echo "IMPLEMENT|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+```
+
+Spawn a `general-purpose` agent:
+
+```
+Run /ticket-implement {TICKET-ID} --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}". Follow the skill exactly. Read the updated plan (including the PR Review #{ITERATION} section), implement the changes, write tests, commit, and push. Report the final output including branch name.
+```
+
+Wait for the agent. If it fails → stop and report.
+
+### Step 5d2 — Re-verify
+
+Reset `{VERIFY_RETRIES}` = 0 (fresh counter for this PR iteration).
+
+#### Step 5d2-verify
+
+Run `/ticket-verify {TICKET-ID} --env local --from-auto`.
+Extract `{VERDICT}`.
+
+- **PASS** → run Step 4.6 (Wiki Maintenance) to incorporate any new errata from re-implementation, then proceed to Step 5e.
+- **FAIL** → proceed to retry logic below.
+
+#### Step 5d2-retry
+
+Increment `{VERIFY_RETRIES}`.
+
+If `{VERIFY_RETRIES} >= 3`:
+  Stop. Report:
+  ```
+  ## {TICKET-ID} — max re-verify retries reached
+
+  PR iteration {ITERATION}: verification still failing after 3 re-attempts.
+  Manual intervention needed.
+  ```
+  Do NOT increment `{ITERATION}`.
+
+If `{VERIFY_RETRIES} < 3`:
+  Report "Re-verify retry {VERIFY_RETRIES}/3 (PR iteration {ITERATION})."
+  **Loop back to Step 5d** (re-spawn ticket-implement with `--from-auto`).
+  ticket-implement Step 2.5 detects the new Verification FAIL.
+  After re-implementation, go to Step 5d2-verify again.
+
+### Step 5e — Loop back
+
+Go back to Step 5a (re-run PR review on the updated PR).
+
+---
+
+## Step 6 — Report
+
+### Step 6a — Retro auto-trigger check
+
+Before writing the final outcome, check whether this run warrants a retrospection:
+
+```bash
+# Condition 1: did any gate-stop fire during this run?
+GATE_STOP_COUNT=$(grep -c '|META|gate-stop|fail|' {LOG_FILE} 2>/dev/null || echo 0)
+
+# Condition 2: did the ticket NOT reach a successful outcome?
+OUTCOME_LINE=$(grep '|IMPLEMENT|implement|done|' {LOG_FILE} 2>/dev/null | tail -1 || true)
+OUTCOME_LABEL=""
+if [ -n "$OUTCOME_LINE" ]; then
+  OUTCOME_MSG=$(echo "$OUTCOME_LINE" | cut -d'|' -f5)
+  OUTCOME_LABEL=$(echo "$OUTCOME_MSG" | cut -d',' -f1)
+fi
+```
+
+If either condition is true (`GATE_STOP_COUNT > 0` or `OUTCOME_LABEL` is not one of `Smooth`, `Rough`, `Hard`), invoke the retro skill. Otherwise skip.
+
+**Triggered:**
+```
+Pipeline outcome for {TICKET-ID} warrants retrospection.
+Gate-stops detected: {GATE_STOP_COUNT}
+Outcome label: {OUTCOME_LABEL:-none}
+Invoking /ticket-retro --window 1 {LOG_FILE}
+```
+
+Invoke via Claude's Skill tool — do NOT shell out via Bash, the AI reasoning step in the retro skill needs the orchestrator's model session:
+```
+Skill(skill="ticket-retro", args="--window 1 {LOG_FILE}")
+```
+
+If the retro invocation fails (skill not found, retro.sh error), log a warning but do NOT change the ticket outcome:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|retro-trigger|fail|/ticket-retro invocation failed — continuing" >> {LOG_FILE}
+```
+
+**Skipped (clean run):**
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|retro-trigger|skip|clean run, retro skipped" >> {LOG_FILE}
+```
+
+Do NOT block the pipeline on retro failure — the ticket outcome is already determined.
+
+### Step 6b — Write outcome and report
+
+Write the pipeline outcome event:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|outcome|info|complete" >> {LOG_FILE}
+```
+
+```
+## {TICKET-ID} — pipeline complete
+
+| Phase | Result |
+|---|---|
+| Autonomy | {manual\|auto\|semi-auto} |
+| Appraise | {simple|complex}, {N} files traced |
+| Exec | {simple-fix | openspec: <name>} |
+| Gate | {auto-approved | held} |
+| Implement | {Smooth|Rough|Hard}, PRs: {URLs} |
+| Wiki Maintenance | {N} errata incorporated |
+| Verify | {✅ PASS ({VERIFY_ATTEMPTS} attempts)|❌ FAIL after {VERIFY_ATTEMPTS}|skipped} |
+| PR Review | {✅|⚠️}, merged: {yes\|auto-merged (semi-auto, simple+Smooth)\|no} |
+| PR iteration re-verify | {VERIFY_RETRIES} retries across iterations |
+| Iterations | {ITERATION} |
+| Retro | {triggered → ~/.claude/state/ticket-retro/proposals/{date}-retro.md \| skipped (clean run)} |
+
+**Local:** {ticket-dir}
+**Linear:** {ticket URL}
+
+{If merged: ✅ All done.}
+{If gaps after max iterations: ⚠️ PR still has unaddressed requirements after 3 rounds — check the PR comments and intervene manually.}
+{If mismatch: ⚡ Complexity prediction missed — appraisal gap recorded in claude-mem.}
+```
