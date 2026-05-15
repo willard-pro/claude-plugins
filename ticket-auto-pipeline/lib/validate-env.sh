@@ -70,7 +70,7 @@ fi
 if grep -q 'UAT_URL.*https\?://' "$CLAUDE_MD" 2>/dev/null; then
   pass "UAT_URL ($(grep 'UAT_URL' "$CLAUDE_MD" | head -1 | sed 's/.*`//;s/`.*//'))"
 else
-  fail "UAT_URL" "add 'UAT_URL = {UAT_URL}/' to CLAUDE.md"
+  fail "UAT_URL" "add 'UAT_URL = {UAT_URL}' to CLAUDE.md"
 fi
 
 # -- BE_TEST_CMD (optional) ---------------------------------------------------

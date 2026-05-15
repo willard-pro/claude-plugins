@@ -24,7 +24,7 @@ Roles are encoded in the JWT and decoded client-side by the Angular app. The UI 
 
 | Profile | Example User | Organisation type | Notes |
 |---|---|---|---|
-| Attorney | user@example.com | Law firm (e.g. SDT INCORPORATED) | Sees LEGAL state handovers as "Active"; limited action set |
+| Attorney | <!-- test user email from Linear ticket --> | Law firm | Sees LEGAL state handovers as "Active"; limited action set |
 | Collection Agency | — | Debt collection agency | Sees full handover lifecycle |
 
 ### Attorney-specific behaviour

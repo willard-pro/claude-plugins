@@ -60,7 +60,7 @@ If `--from-step` is not provided, proceed normally from Step 1.
 Read both knowledge sources before fetching the ticket:
 
 ```bash
-cat $HOME/.claude/skills/app-knowledge/SKILL.md
+cat "$HOME/.claude/skills/app-knowledge/SKILL.md"
 ```
 
 Then load the project nav hints:
@@ -93,7 +93,7 @@ Skip this step if `--env local` is set.
 
 If `--user` was provided, use it. If `--password` was provided, use it. Otherwise:
 
-1. Scan the ticket `description` for an email address matching typical test users (e.g. `user@example.com`, `user@domain.co.za`). The ticket description often contains a `**User:**` field or an inline mention like "Log in as X (email)".
+1. Scan the ticket `description` for an email address matching typical test users (e.g. `user@example.com`). The ticket description often contains a `**User:**` field or an inline mention like "Log in as X (email)".
 2. If found → `derived_user = email`, `derived_password = "admin"`.
 3. If an email is found but `--user` was also passed → `--user` takes precedence.
 4. If an email is found but `--password` was also passed → `--password` takes precedence.
@@ -109,7 +109,7 @@ If `--user` was provided, use it. If `--password` was provided, use it. Otherwis
 ### 1c — Load local workspace
 
 ```bash
-find $TICKETS_ROOT -type d -name "{TICKET-ID}*"
+find "$TICKETS_ROOT" -type d -name "{TICKET-ID}*"
 ```
 
 If found, read:
@@ -122,7 +122,7 @@ If not found, continue — the Linear description alone is sufficient.
 ### 1d — Load openspec change (if present)
 
 ```bash
-ls $TICKETS_ROOT/openspec/changes/ | grep -i "{ticket-id-lowercase}"
+ls "$TICKETS_ROOT/openspec/changes/" | grep -i "{ticket-id-lowercase}"
 ```
 
 If found, read `tasks.md` to understand what was implemented and any "Manually verify" tasks — these become your verification checklist.

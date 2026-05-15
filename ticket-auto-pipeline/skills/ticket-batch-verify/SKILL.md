@@ -30,7 +30,7 @@ Read `CLAUDE.md` and extract: `{UAT_URL}` (UAT environment URL), `{ISSUE_PREFIX}
 Create a TaskCreate for every remaining step (Steps 1 through 4). Each task subject = the step heading. Mark each step completed as soon as it finishes. At session end, write a trace file:
 
 ```bash
-cat > $TICKETS_ROOT/batch-verify-{timestamp}.md << 'TRACE'
+cat > "$TICKETS_ROOT/batch-verify-{timestamp}.md" << 'TRACE'
 # batch-verify session — {today}
 **Tickets:** {N} submitted, {P} passed, {F} failed
 
