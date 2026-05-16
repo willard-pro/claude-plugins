@@ -15,6 +15,21 @@ Run `basename "$(pwd)"`. If the result is NOT `tickets`, abort immediately and t
 
 ---
 
+## Linear access strategy
+
+When `$LINEAR_API_KEY` is set in the environment, use bash calls to `~/.claude/skills/lib/linear-api.sh` for **all** Linear operations. When `$LINEAR_API_KEY` is unset, fall back to MCP tools (`mcp__linear-server__*`).
+
+**Function mapping:**
+
+| Operation | linear-api.sh bash call | MCP fallback |
+|-----------|------------------------|--------------|
+| Post comment | `bash -c "source ~/.claude/skills/lib/linear-api.sh; save_comment '<id>' '<body>'"` | `mcp__linear-server__save_comment(issueId: "<id>", body: "<body>")` |
+| List issues | `bash -c "source ~/.claude/skills/lib/linear-api.sh; list_issues '<team_key>' '<state>'"` | (MCP equivalent if available) |
+
+Always check `$LINEAR_API_KEY` before each operation and use the appropriate method.
+
+---
+
 ## Step 0 — Clear context: Run `/clear`.
 
 ---
@@ -277,7 +292,7 @@ If no `## Re-appraisal` section exists (first run), or `**Changes detected:** ye
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|post-linear|start|Posting appraisal comment" >> "$LOG_FILE"
 
-Post a comment via `mcp__linear-server__save_comment` summarising the appraisal:
+Post a comment via the Linear access strategy (bash `save_comment` when `LINEAR_API_KEY` is set, MCP `save_comment` fallback otherwise) summarising the appraisal:
 
 ```
 **Ticket appraised** — local workspace created.

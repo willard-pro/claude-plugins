@@ -29,6 +29,21 @@ Run `basename "$(pwd)"`. If the result is NOT `tickets`, abort immediately and t
 
 ---
 
+## Linear access strategy
+
+When `$LINEAR_API_KEY` is set in the environment, use bash calls to `~/.claude/skills/lib/linear-api.sh` for **all** Linear operations. When `$LINEAR_API_KEY` is unset, fall back to MCP tools (`mcp__linear-server__*`).
+
+**Function mapping:**
+
+| Operation | linear-api.sh bash call | MCP fallback |
+|-----------|------------------------|--------------|
+| Fetch issue | `bash -c "source ~/.claude/skills/lib/linear-api.sh; get_issue '<id>'"` | `mcp__linear-server__get_issue(id: "<id>")` |
+| Post comment | `bash -c "source ~/.claude/skills/lib/linear-api.sh; save_comment '<id>' '<body>'"` | `mcp__linear-server__save_comment(issueId: "<id>", body: "<body>")` |
+
+Always check `$LINEAR_API_KEY` before each operation and use the appropriate method.
+
+---
+
 ## Logging (--from-auto)
 
 If `$LOG_FILE` is set (passed by the `ticket-auto` orchestrator): read `~/.claude/skills/pipeline-log-format.md`. Write progress entries at step boundaries. Phase is `VERIFY`. Step-level entries (in order): `load-context`, `build-plan`, `browser-session`, `navigate`, `execute-steps`.
@@ -75,7 +90,7 @@ Then load the project nav hints:
 
 ### 1b — Fetch from Linear
 
-Call `mcp__linear-server__get_issue` with the ticket ID.
+Call the Linear access strategy to fetch the ticket (bash `get_issue` when `LINEAR_API_KEY` is set, MCP `get_issue` fallback otherwise).
 
 Capture:
 - `title`, `description`, `status`, `labels`, `url`
@@ -461,7 +476,7 @@ Verification passed on localhost — the implementation is confirmed working. No
 
 ### Post findings to Linear (all environments, pass)
 
-Call `mcp__linear-server__save_comment` with the ticket ID and this body:
+Post via the Linear access strategy (bash `save_comment` when `LINEAR_API_KEY` is set, MCP `save_comment` fallback otherwise):
 
 ```
 ✅ ticket-verify PASS — {env}
@@ -656,7 +671,7 @@ Append to `{ticket-dir}/notes.md`:
 
 ### 7e — Post findings to Linear
 
-Call `mcp__linear-server__save_comment` with the ticket ID and this body:
+Post via the Linear access strategy (bash `save_comment` when `LINEAR_API_KEY` is set, MCP `save_comment` fallback otherwise):
 
 ```
 ❌ ticket-verify FAIL — {env}

@@ -21,6 +21,8 @@ Where `--data` supplies trigger-specific values (e.g. `complexity=simple`, `outc
 
 This skill is a thin wrapper around `flow.sh`. All state machine logic, label computation, and Linear API calls are handled deterministically by the script.
 
+`flow.sh` sources `lib/linear-api.sh` for all GraphQL operations. When `$LINEAR_API_KEY` is set, operations use direct GraphQL calls. When unset, `flow.sh` will fail with a clear error — set `$LINEAR_API_KEY` before invoking this skill.
+
 ```bash
 bash ~/.claude/skills/ticket-flow/flow.sh "<TICKET-ID>" "<TRIGGER>" [--data key=value] [--dry-run]
 ```

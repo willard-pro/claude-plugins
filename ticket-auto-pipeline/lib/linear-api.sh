@@ -253,3 +253,84 @@ get_me() {
   resp=$(linear_graphql "$query")
   echo "$resp" | jq '.data.viewer'
 }
+
+# Post a comment to an issue. Returns comment JSON: {id, body}
+save_comment() {
+  local issue_id="$1"
+  local body="$2"
+  local query
+  query=$(jq -n --arg issueId "$issue_id" --arg body "$body" '{
+    query: "mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id body } } }",
+    variables: {input: {issueId: $issueId, body: $body}}
+  }')
+  local resp
+  resp=$(linear_graphql "$query")
+  echo "$resp" | jq '.data.commentCreate.comment'
+}
+
+# List issues for a team with optional state filter. Returns JSON array.
+list_issues() {
+  local team_key="$1"
+  local state_filter="${2:-}"
+  local limit="${3:-50}"
+
+  local filter
+  filter=$(jq -n --arg key "$team_key" '{team: {key: {eq: $key}}}')
+  if [ -n "$state_filter" ]; then
+    filter=$(echo "$filter" | jq --arg s "$state_filter" '. + {state: {name: {eq: $s}}}')
+  fi
+
+  local query
+  query=$(jq -n --argjson filter "$filter" --argjson limit "$limit" '{
+    query: "query($filter: IssueFilter!, $limit: Int) { issues(filter: $filter, first: $limit) { nodes { id identifier title state { id name type } } } }",
+    variables: {filter: $filter, limit: $limit}
+  }')
+  local resp
+  resp=$(linear_graphql "$query")
+  echo "$resp" | jq '.data.issues.nodes'
+}
+
+# Resolve a team from an issue prefix (e.g., "WIL"). Returns JSON: {id, name, key}
+resolve_team_from_prefix() {
+  local prefix="$1"
+  local query
+  query=$(jq -n --arg key "$prefix" '{
+    query: "query($key: String!) { teams(filter: {key: {eq: $key}}) { nodes { id name key } } }",
+    variables: {key: $key}
+  }')
+  local resp
+  resp=$(linear_graphql "$query")
+  echo "$resp" | jq '.data.teams.nodes[0]'
+}
+
+# Get project by ID. Returns JSON with project metadata.
+get_project() {
+  local project_id="$1"
+  local query
+  query=$(jq -n --arg id "$project_id" '{
+    query: "query($id: String!) { project(id: $id) { id name description url state teams { nodes { id name key } } } }",
+    variables: {id: $id}
+  }')
+  local resp
+  resp=$(linear_graphql "$query")
+  echo "$resp" | jq '.data.project'
+}
+
+# Search issues by team key and text query. Returns JSON array.
+search_issues() {
+  local team_key="$1"
+  local query_string="$2"
+  local limit="${3:-50}"
+
+  local filter
+  filter=$(jq -n --arg key "$team_key" '{team: {key: {eq: $key}}}')
+
+  local query
+  query=$(jq -n --argjson filter "$filter" --arg search "$query_string" --argjson limit "$limit" '{
+    query: "query($filter: IssueFilter!, $search: String, $limit: Int) { issues(filter: $filter, search: $search, first: $limit) { nodes { id identifier title description state { id name type } } } }",
+    variables: {filter: $filter, search: $search, limit: $limit}
+  }')
+  local resp
+  resp=$(linear_graphql "$query")
+  echo "$resp" | jq '.data.issues.nodes'
+}
