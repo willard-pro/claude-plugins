@@ -15,6 +15,33 @@ Run `bash ~/.claude/skills/lib/validate-env.sh ./CLAUDE.md`. If it exits non-zer
 
 ---
 
+## Linear access strategy
+
+When `$LINEAR_API_KEY` is set in the environment, use bash calls to `~/.claude/skills/lib/linear-api.sh` for **all** Linear operations. When `$LINEAR_API_KEY` is unset, fall back to MCP tools (`mcp__linear-server__*`).
+
+**Check before each Linear operation:**
+```bash
+if [ -n "${LINEAR_API_KEY:-}" ]; then
+  # Use linear-api.sh
+  result=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; <function> <args>")
+else
+  # Use MCP fallback
+  mcp__linear-server__<tool>(...)
+fi
+```
+
+**Function mapping:**
+
+| Operation | linear-api.sh call | MCP fallback |
+|-----------|-------------------|--------------|
+| Fetch issue | `get_issue "<id>"` | `mcp__linear-server__get_issue(id: "<id>")` |
+| Fetch comments | `get_comments "<id>"` | `mcp__linear-server__list_comments(id: "<id>")` |
+| Post comment | `save_comment "<id>" "<body>"` | `mcp__linear-server__save_comment(issueId: "<id>", body: "<body>")` |
+
+The `get_issue` function returns JSON at `.data.issue` — use `jq` to extract fields. The `get_comments` function returns a JSON array of comment nodes.
+
+---
+
 ## Step 0 — Clear context: Run `/clear`.
 
 ---
@@ -89,7 +116,7 @@ me=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_me" 2>&1) || {
   echo "Preflight failed: Linear API key unset or rejected (exit 4). Set LINEAR_API_KEY." >&2
   exit 4
 }
-echo "Preflight: authenticated as $(echo "$me" | jq -r '.name // "unknown"')"
+echo "Linear: API key (direct GraphQL) — authenticated as $(echo "$me" | jq -r '.name // "unknown"')"
 ```
 
 Log preflight result after the pipeline log is initialized in Step 0.6:
@@ -244,7 +271,7 @@ Run /ticket-appraise {TICKET-ID} --from-auto{if {APPRAISE_FROM} is non-empty: ` 
 Wait for the agent. Extract from its result:
 - `{COMPLEXITY}` — `simple` or `complex`
 - `{TICKET_DIR}` — local workspace path (derive from the find command in Step 1 of appraise-exec pattern, or read from agent output)
-- `{TICKET_TITLE}` — the full ticket title. If not present in the agent's handoff, call `mcp__linear-server__get_issue` with `id: "{TICKET-ID}"` to get it before writing the META title line.
+- `{TICKET_TITLE}` — the full ticket title. If not present in the agent's handoff, fetch it via the Linear access strategy above (bash `get_issue` when key is set, MCP fallback otherwise) before writing the META title line.
 
 If the agent fails → write fail log and stop:
 ```bash
@@ -399,7 +426,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|start|Evaluating complexity gate"
 
 ## Step 4 — Implement
 
-Call `mcp__linear-server__get_issue` with `id: "{TICKET-ID}"` and verify the `approved` label is present. If missing (shouldn't happen given Step 3, but verify) — add it now for simple tickets, or stop for complex.
+Fetch the ticket via the Linear access strategy (bash `get_issue` when `LINEAR_API_KEY` is set, MCP fallback otherwise) and verify the `approved` label is present. If missing (shouldn't happen given Step 3, but verify) — add it now for simple tickets, or stop for complex.
 
 Write the waiting log entry:
 ```bash
@@ -436,7 +463,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|{OUTCOME}, branch:
 
 ### Step 4a — Verify outcome label
 
-Call `mcp__linear-server__get_issue` with `id: "{TICKET-ID}"`. Check that:
+Fetch the ticket via the Linear access strategy. Check that:
 
 **Outcome label is present:** The `Smooth`, `Rough`, or `Hard` label must be set. If missing, run `/ticket-flow {TICKET-ID} implement-outcome --data outcome={OUTCOME}`.
 
@@ -635,7 +662,11 @@ Wait for the agent. If it fails → stop and report.
 **Re-approval gate** — live Linear check before re-spawning implement:
 
 ```bash
-LIVE=$(mcp__linear-server__get_issue id="{TICKET-ID}")
+LIVE=$(if [ -n "${LINEAR_API_KEY:-}" ]; then
+  bash -c "source ~/.claude/skills/lib/linear-api.sh; get_issue '{TICKET-ID}'"
+else
+  mcp__linear-server__get_issue id="{TICKET-ID}"
+fi)
 LIVE_STATE=$(echo "$LIVE" | jq -r '.state.name')
 LIVE_LABELS=$(echo "$LIVE" | jq -r '[.labels.nodes[].name]')
 ```

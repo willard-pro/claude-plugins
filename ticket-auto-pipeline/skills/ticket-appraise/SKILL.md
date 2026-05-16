@@ -15,6 +15,21 @@ Run `basename "$(pwd)"`. If the result is NOT `tickets`, abort immediately and t
 
 ---
 
+## Linear access strategy
+
+When `$LINEAR_API_KEY` is set in the environment, use bash calls to `~/.claude/skills/lib/linear-api.sh` for **all** Linear operations. When `$LINEAR_API_KEY` is unset, fall back to MCP tools (`mcp__linear-server__*`).
+
+**Function mapping:**
+
+| Operation | linear-api.sh bash call | MCP fallback |
+|-----------|------------------------|--------------|
+| Fetch issue | `bash -c "source ~/.claude/skills/lib/linear-api.sh; get_issue '<id>'"` | `mcp__linear-server__get_issue(id: "<id>")` |
+| Fetch comments | `bash -c "source ~/.claude/skills/lib/linear-api.sh; get_comments '<id>'"` | `mcp__linear-server__list_comments(id: "<id>")` |
+
+Always check `$LINEAR_API_KEY` before each operation and use the appropriate method.
+
+---
+
 ## Step 0 — Clear context: Run `/clear`.
 
 ---
@@ -442,7 +457,7 @@ This will create the change artifacts and update Linear.
 If ticket-setup reported workspace already exists in Step 1:
 
 1. Read `context.md` and `notes.md` from the existing directory.
-2. Fetch the current state from Linear: `mcp__linear-server__get_issue` + `mcp__linear-server__list_comments` for this ticket.
+2. Fetch the current state from Linear using the Linear access strategy above (bash `get_issue` + `get_comments` when `LINEAR_API_KEY` is set, MCP fallback otherwise).
 3. **Diff comments** — compare Linear's current comments against the Comments section in `context.md`:
    - Count comments in `context.md` (count `**` bold author lines under `## Comments`). If Linear has more, or if any comment body/timestamp differs materially — new activity exists.
    - **If no new comments:** tell the user current status and last session notes. Ask: "Want to continue where you left off, or re-investigate?" Skip the rest of this section.
