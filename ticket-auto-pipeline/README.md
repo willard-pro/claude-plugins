@@ -6,11 +6,19 @@ Fully autonomous Linear ticket pipeline as a Claude Code plugin. Appraise, imple
 
 ```bash
 # Add the marketplace first (one-time)
-claude plugin marketplace add willard-pro-claude-plugins https://github.com/willard-pro/claude-plugins.git
+claude plugin marketplace add willard-pro/claude-plugins
 
 # Install the plugin
 claude plugin install ticket-auto-pipeline@willard-pro-claude-plugins
 ```
+
+Verify everything is wired up — from within Claude Code:
+
+```
+/ticket-env-check
+```
+
+This validates all required env vars (`LINEAR_API_KEY`, `GITHUB_PERSONAL_ACCESS_TOKEN`/`GH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`) and CLAUDE.md fields. Fix any failures before running pipeline commands.
 
 ## Required Environment
 
