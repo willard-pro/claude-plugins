@@ -36,7 +36,7 @@ GIT_NAME="$(cd "$PROJECT_DIR" && git config user.name 2>/dev/null || true)"
 GIT_EMAIL="$(cd "$PROJECT_DIR" && git config user.email 2>/dev/null || true)"
 
 echo ""
-echo "=== ticket-auto-pipeline v0.2.3 ==="
+echo "=== ticket-auto-pipeline v0.3.0 ==="
 echo ""
 
 # ── API keys ────────────────────────────────────────────────────────────────
@@ -105,22 +105,14 @@ else
   fi
 fi
 
-# UAT_URL
+# UAT_URL — required by ticket-verify (aborts if absent), no derivation
 if [ -n "${UAT_URL:-}" ]; then
   found "UAT_URL" "set in env"
+elif grep -qi 'UAT_URL.*https\?://' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
+  UAT_CLAUDE=$(grep -oP '^UAT_URL[=:]\s*\K.*' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ' || true)
+  found "UAT_URL" "$UAT_CLAUDE (from CLAUDE.md)"
 else
-  UAT_CLAUDE=$(grep -oP '^UAT_URL[=:]\s*\K.*' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null | head -1 | tr -d ' ' || true)
-  if [ -n "$UAT_CLAUDE" ]; then
-    found "UAT_URL" "$UAT_CLAUDE (from CLAUDE.md)"
-  else
-    UAT_GIT=$(cd "$PROJECT_DIR" && git remote get-url origin 2>/dev/null | sed 's|git@github.com:|https://github.com/|' | sed 's|\.git$||' || true)
-    if [ -n "$UAT_GIT" ]; then
-      warn "UAT_URL" "not set, propose: $UAT_GIT (from git remote)"
-      PROPOSED["UAT_URL"]="$UAT_GIT"
-    else
-      miss "UAT_URL" "not set - required for verify phase"
-    fi
-  fi
+  miss "UAT_URL" "not set — required by ticket-verify for UAT environment checks"
 fi
 
 # ── CLAUDE.md fields ────────────────────────────────────────────────────────
@@ -163,12 +155,14 @@ else
     issues=$((issues + 1))
   fi
 
-  # LOCAL_URL
-  if grep -qi 'LOCAL_URL.*https\?://' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
+  # LOCAL_URL — required by ticket-verify (aborts if absent)
+  if [ -n "${LOCAL_URL:-}" ]; then
+    found "LOCAL_URL" "$LOCAL_URL (from env)"
+  elif grep -qi 'LOCAL_URL.*https\?://' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
     VAL=$(grep -oP 'LOCAL_URL[=:]\s*\K.*' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ')
     found "LOCAL_URL" "$VAL"
   else
-    warn "LOCAL_URL" "not in CLAUDE.md - needed for local dev server checks"
+    miss "LOCAL_URL" "not set — required by ticket-verify for local dev server checks"
   fi
 
   # BE_TEST_CMD

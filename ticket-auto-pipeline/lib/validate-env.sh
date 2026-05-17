@@ -81,19 +81,23 @@ else
 fi
 
 # -- LOCAL_URL ----------------------------------------------------------------
-if grep -qi 'LOCAL_URL.*https\?://' "$CLAUDE_MD" 2>/dev/null; then
+if [ -n "${LOCAL_URL:-}" ]; then
+  pass "LOCAL_URL ($LOCAL_URL via env)"
+elif grep -qi 'LOCAL_URL.*https\?://' "$CLAUDE_MD" 2>/dev/null; then
   val=$(grep -oP 'LOCAL_URL[=:]\s*\K.*' "$CLAUDE_MD" | head -1 | tr -d ' ')
   pass "LOCAL_URL ($val)"
 else
-  fail "LOCAL_URL" "CLAUDE.md missing LOCAL_URL = http://... — needed for local dev server checks"
+  fail "LOCAL_URL" "required by ticket-verify — add to env or CLAUDE.md"
 fi
 
 # -- UAT_URL ------------------------------------------------------------------
-if grep -qi 'UAT_URL.*https\?://' "$CLAUDE_MD" 2>/dev/null; then
+if [ -n "${UAT_URL:-}" ]; then
+  pass "UAT_URL ($UAT_URL via env)"
+elif grep -qi 'UAT_URL.*https\?://' "$CLAUDE_MD" 2>/dev/null; then
   val=$(grep -oP 'UAT_URL[=:]\s*\K.*' "$CLAUDE_MD" | head -1 | tr -d ' ')
   pass "UAT_URL ($val)"
 else
-  fail "UAT_URL" "CLAUDE.md missing UAT_URL = http://... — required for verify phase"
+  fail "UAT_URL" "required by ticket-verify — add to env or CLAUDE.md"
 fi
 
 # -- BE_TEST_CMD (optional) ---------------------------------------------------
