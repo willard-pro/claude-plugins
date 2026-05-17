@@ -53,36 +53,39 @@ if [ ! -f "$CLAUDE_MD" ]; then
 fi
 
 # -- REPOS_ROOT ---------------------------------------------------------------
-if grep -q 'microservices/gateway/' "$CLAUDE_MD" && grep -q 'Codebase Projects' "$CLAUDE_MD"; then
-  pass "REPOS_ROOT (codebase table present)"
+if grep -q '^REPOS_ROOT[=:]\s*.' "$CLAUDE_MD" 2>/dev/null; then
+  val=$(grep -oP '^REPOS_ROOT[=:]\s*\K.*' "$CLAUDE_MD" | head -1 | tr -d ' ')
+  pass "REPOS_ROOT ($val)"
 else
-  fail "REPOS_ROOT" "CLAUDE.md missing Codebase Projects table — skills can't resolve repo paths"
+  fail "REPOS_ROOT" "CLAUDE.md missing REPOS_ROOT = /path/to/repos — skills can't resolve repo paths"
 fi
 
 # -- LOCAL_URL ----------------------------------------------------------------
-if grep -q 'LOCAL_URL.*http' "$CLAUDE_MD" 2>/dev/null; then
-  pass "LOCAL_URL ($(grep 'LOCAL_URL' "$CLAUDE_MD" | head -1 | sed 's/.*`//;s/`.*//'))"
+if grep -qi 'LOCAL_URL.*https\?://' "$CLAUDE_MD" 2>/dev/null; then
+  val=$(grep -oP 'LOCAL_URL[=:]\s*\K.*' "$CLAUDE_MD" | head -1 | tr -d ' ')
+  pass "LOCAL_URL ($val)"
 else
-  fail "LOCAL_URL" "add 'LOCAL_URL = {LOCAL_URL}' to CLAUDE.md"
+  fail "LOCAL_URL" "CLAUDE.md missing LOCAL_URL = http://... — needed for local dev server checks"
 fi
 
 # -- UAT_URL ------------------------------------------------------------------
-if grep -q 'UAT_URL.*https\?://' "$CLAUDE_MD" 2>/dev/null; then
-  pass "UAT_URL ($(grep 'UAT_URL' "$CLAUDE_MD" | head -1 | sed 's/.*`//;s/`.*//'))"
+if grep -qi 'UAT_URL.*https\?://' "$CLAUDE_MD" 2>/dev/null; then
+  val=$(grep -oP 'UAT_URL[=:]\s*\K.*' "$CLAUDE_MD" | head -1 | tr -d ' ')
+  pass "UAT_URL ($val)"
 else
-  fail "UAT_URL" "add 'UAT_URL = {UAT_URL}' to CLAUDE.md"
+  fail "UAT_URL" "CLAUDE.md missing UAT_URL = http://... — required for verify phase"
 fi
 
 # -- BE_TEST_CMD (optional) ---------------------------------------------------
 if grep -q 'BE_TEST_CMD' "$CLAUDE_MD" 2>/dev/null; then
-  pass "BE_TEST_CMD ($(grep 'BE_TEST_CMD' "$CLAUDE_MD" | head -1 | sed 's/.*`//;s/`.*//'))"
+  pass "BE_TEST_CMD (present)"
 else
   warn "BE_TEST_CMD" "missing — ticket-implement will skip BE tests"
 fi
 
 # -- SLACK_CHANNEL (optional) -------------------------------------------------
 if grep -q 'SLACK_CHANNEL' "$CLAUDE_MD" 2>/dev/null; then
-  pass "SLACK_CHANNEL ($(grep 'SLACK_CHANNEL' "$CLAUDE_MD" | head -1 | sed 's/.*`//;s/`.*//'))"
+  pass "SLACK_CHANNEL (present)"
 else
   warn "SLACK_CHANNEL" "missing — ticket-overseer will print to stdout only"
 fi

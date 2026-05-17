@@ -17,7 +17,7 @@ No arguments. Run from the project directory containing `CLAUDE.md`.
 
 ## Execution
 
-Runs `env-check.sh`, which checks additional env vars then delegates to `validate-env.sh` for core validation. Tries the synced `~/.claude/skills/lib/` path first (available after the plugin's SessionStart hook fires), falling back to the plugin cache.
+Runs `env-check.sh`, a self-contained script that validates all env vars and CLAUDE.md fields with auto-derived proposals. Tries the synced `~/.claude/skills/lib/` path first (available after the plugin's SessionStart hook fires), falling back to the plugin cache.
 
 ```bash
 ENV_CHECK=""
