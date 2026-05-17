@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "ticket-auto-pipeline",
-      "version": "0.2.1",
+      "version": "0.2.2",
       "source": "./ticket-auto-pipeline",
       "description": "Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. Bundles 20+ skills, state machine config, pipeline safety gates, and retrospective analysis."
     }

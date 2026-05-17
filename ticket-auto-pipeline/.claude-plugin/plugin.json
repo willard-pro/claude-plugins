@@ -1,6 +1,6 @@
 {
   "name": "ticket-auto-pipeline",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Fully autonomous Linear ticket pipeline — appraise, verify, implement, and merge with zero user input. Includes 20+ slash commands, state-machine-driven flow control, safety gates, and retrospective analysis.",
   "author": {
     "name": "John Willard"
@@ -13,5 +13,19 @@
     "pipeline",
     "automation",
     "project-management"
-  ]
+  ],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'mkdir -p ~/.claude/skills/lib && cp \"${CLAUDE_PLUGIN_ROOT}/lib/\"*.sh ~/.claude/skills/lib/'",
+            "timeout": 10,
+            "statusMessage": "Syncing ticket-auto-pipeline lib scripts..."
+          }
+        ]
+      }
+    ]
+  }
 }
