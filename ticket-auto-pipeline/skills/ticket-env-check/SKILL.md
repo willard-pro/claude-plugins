@@ -35,51 +35,54 @@ else
 fi
 ```
 
-### Phase 2 — Summarize findings
+### Phase 2 — Parse structured output
 
-Parse the output and present a clear summary to the user. Group findings into three categories:
+Extract the `---BEGIN_VARS---` / `---END_VARS---` block from the script output. Each line is pipe-delimited:
 
-**✅ Present** — already configured, nothing to do.
+```
+STATUS|NAME|VALUE|DERIVABLE|LOCATION|MESSAGE
+```
 
-**🔧 Derivable** — missing but a sensible value was found by the filesystem walk. These can be written automatically:
-- `REPOS_ROOT` — derived by walking up from the project directory to find the parent containing multiple git repos. The proposed value is shown in the output (`propose: /path/to/repos`).
+Fields:
+- `STATUS`: `ok` (present), `miss` (required, missing), `warn` (optional, missing)
+- `NAME`: variable name
+- `VALUE`: current or proposed value (empty if none)
+- `DERIVABLE`: `yes` if the script found/proposes a value, `no` if user must provide
+- `LOCATION`: `env` (goes in `~/.claude/settings.local.json`), `claude` (goes in `./CLAUDE.md`), `either` (works in both)
+- `MESSAGE`: human-readable hint (what it's for, example value)
 
-**❌ Required (user must provide)** — these cannot be derived and the user must tell you:
-- `LINEAR_API_KEY` — Linear API key (from Linear → Settings → API)
-- `ANTHROPIC_AUTH_TOKEN` — Anthropic API key
-- `GITHUB_PERSONAL_ACCESS_TOKEN` — GitHub personal access token
-- `LOCAL_URL` — local dev server URL (e.g. `http://localhost:3000`)
-- `UAT_URL` — UAT environment URL (e.g. `https://uat.example.com`)
+Parse every line and group into four categories:
 
-**⚠️ Optional (user may provide)** — missing but not required to start:
-- `BE_TEST_CMD` — backend test command (e.g. `npm test`)
-- `SLACK_CHANNEL` — Slack channel for overseer notifications
-- `WIKI_ROOT` — wiki path for documentation bootstrapping
-- `GIT_AUTHOR_NAME` / `GIT_AUTHOR_EMAIL` — for commits
-- `TICKET_AUTONOMY` — autonomy mode: `auto` / `semi-auto` / `manual`
+1. **✅ Present** — `STATUS=ok`. List the value next to each name.
+2. **🔧 Can derive** — `(STATUS=miss OR STATUS=warn) AND DERIVABLE=yes`. Script found a value — offer to write it.
+3. **❌ Required** — `STATUS=miss AND DERIVABLE=no`. Must ask the user.
+4. **⚠️ Optional** — `STATUS=warn AND DERIVABLE=no`. Ask, but allow skip.
 
-### Phase 3 — Ask the user
+### Phase 3 — Present summary
 
-Present the summary and ask:
+Build the summary from the parsed groups. Include EVERY variable — do not omit any.
 
 > Here's what I found:
 >
-> **✅ Present:** (list what's OK)
+> **✅ Present (N):** (list all ok vars with values)
+> - NAME — value
 >
-> **🔧 Can derive:**
-> - REPOS_ROOT → (proposed value) — I can write this to CLAUDE.md now. OK?
+> **🔧 Can derive (N):** (list all derivable vars with proposed values)
+> - NAME → proposed-value — MESSAGE
+>   → I can write this to [LOCATION]. OK?
 >
-> **❌ Needs you:**
-> - (list each missing required field)
+> **❌ Needs you (N):** (list all miss+not-derivable vars with hints)
+> - NAME — MESSAGE
 >
-> **⚠️ Optional (missing):**
-> - (list optional fields that are missing)
+> **⚠️ Optional missing (N):** (list all warn+not-derivable vars with hints)
+> - NAME — MESSAGE
 >
-> I can place everything in the right spot:
-> - API keys → `~/.claude/settings.local.json` (env block)
-> - Project fields → `./CLAUDE.md`
+> Where to place each:
+> - API keys/tokens (LOCATION=env) → `~/.claude/settings.local.json` env block
+> - Project config (LOCATION=claude) → `./CLAUDE.md`
+> - LOCATION=either → ask user preference
 >
-> What are the values for the missing fields? (Or say "skip" for optional ones.)
+> What are the values for the required fields? (Or "skip" for optional ones.)
 
 ### Phase 4 — Place values
 
