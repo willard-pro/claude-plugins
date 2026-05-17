@@ -35,31 +35,12 @@ else
 fi
 ```
 
-### Step 2 — Build checklist from structured output
+### Step 2 — Display the generated summary
 
-Extract every line between `---BEGIN_VARS---` and `---END_VARS---`. Format:
-
-```
-STATUS|NAME|VALUE|DERIVABLE|LOCATION|MESSAGE
-```
-
-Create a task for each variable. Sort by STATUS (miss first, then warn, then ok). For each task, present the finding to the user:
-
-| If | Present as |
-|----|------------|
-| `STATUS=ok` | ✅ NAME — VALUE |
-| `DERIVABLE=yes` | 🔧 NAME — missing, but can derive: VALUE — MESSAGE |
-| `STATUS=miss, DERIVABLE=no` | ❌ NAME — missing, required — MESSAGE |
-| `STATUS=warn, DERIVABLE=no` | ⚠️ NAME — missing, optional — MESSAGE |
-
-After presenting ALL findings, tell the user where to put each value:
-
-- `LOCATION=env` → add to `~/.claude/settings.local.json` under `"env"` block
-- `LOCATION=claude` → add to `./CLAUDE.md` as `NAME = value`
-- `LOCATION=either` → either location works
+Extract the block between `---BEGIN_SUMMARY---` and `---END_SUMMARY---` from the script output. Display it verbatim to the user — no edits, no filtering, no "helpful" trimming. The script has already generated the complete inventory correctly.
 
 **DO NOT write any files.** This skill is read-only. The user decides what to set and where. If the user asks you to write values, only then proceed.
 
 ### Step 3 — Done
 
-The check is complete. The user now has a full inventory of what's configured, what's missing, what can be derived, and where to put each value.
+The check is complete. Every variable is listed — nothing can be missed because the script generated it, not the AI.
