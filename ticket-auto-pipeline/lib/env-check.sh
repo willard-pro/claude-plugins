@@ -7,11 +7,26 @@
 #   ---BEGIN_VARS--- / ---END_VARS--- block (for skill consumption)
 #   Format: STATUS|NAME|VALUE|DERIVABLE|LOCATION|MESSAGE
 #
-# Usage: env-check.sh [PROJECT_DIR]
+# Usage: env-check.sh [PROJECT_DIR] [--summary-file PATH]
+#   --summary-file PATH  Write summary to PATH and exit (silent, no stdout)
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PROJECT_DIR="${1:-$(pwd)}"
+SUMMARY_FILE=""
+PROJECT_DIR=""
+for arg in "${@}"; do
+  case "$arg" in
+    --summary-file) SUMMARY_FILE="1" ;;  # placeholder, next arg is path
+    --summary-file=*) SUMMARY_FILE="${arg#*=}" ;;
+    *)
+      if [ "$SUMMARY_FILE" = "1" ]; then
+        SUMMARY_FILE="$arg"
+      elif [ -z "$PROJECT_DIR" ]; then
+        PROJECT_DIR="$arg"
+      fi
+      ;;
+  esac
+done
+PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
 cd "$PROJECT_DIR"
 
 issues=0
@@ -21,6 +36,12 @@ ENV_FIXES=""
 CMD_FIXES=""
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+
+# In summary-file mode, suppress all stdout — only the file matters
+if [ -n "${SUMMARY_FILE:-}" ]; then
+  exec 3>&1  # save original stdout
+  exec 1>/dev/null
+fi
 
 found() { printf "  ✅ %-35s %s\n" "$1" "$2"; }
 miss()  {
@@ -45,7 +66,7 @@ GIT_NAME="$(cd "$PROJECT_DIR" && git config user.name 2>/dev/null || true)"
 GIT_EMAIL="$(cd "$PROJECT_DIR" && git config user.email 2>/dev/null || true)"
 
 echo ""
-echo "=== ticket-auto-pipeline v0.3.6 ==="
+echo "=== ticket-auto-pipeline v0.3.7 ==="
 echo ""
 
 # ── API keys ────────────────────────────────────────────────────────────────
@@ -293,114 +314,127 @@ for line in "${VAR_LINES[@]}"; do
 done
 echo "---END_VARS---"
 
-# ── Generated summary (skill displays this verbatim — no AI parsing) ───────
+# ── Generated summary ───────────────────────────────────────────────────────
 
-echo ""
-echo "---BEGIN_SUMMARY---"
-echo ""
+build_summary() {
+  local out=""
 
-# ✅ Present
-ok_count=0
-ok_lines=""
-for line in "${VAR_LINES[@]}"; do
-  IFS='|' read -r status name value derivable location message <<< "$line"
-  if [ "$status" = "ok" ]; then
-    ok_count=$((ok_count + 1))
-    ok_lines+="  - ${name} — ${value}"$'\n'
+  # ✅ Present
+  local ok_count=0 ok_lines=""
+  for line in "${VAR_LINES[@]}"; do
+    IFS='|' read -r status name value derivable location message <<< "$line"
+    if [ "$status" = "ok" ]; then
+      ok_count=$((ok_count + 1))
+      ok_lines+="  - ${name} — ${value}"$'\n'
+    fi
+  done
+  out+="## ✅ Present (${ok_count})"$'\n'
+  if [ $ok_count -gt 0 ]; then
+    out+="${ok_lines}"
+  else
+    out+="  (none)"$'\n'
   fi
-done
-echo "## ✅ Present (${ok_count})"
-if [ $ok_count -gt 0 ]; then
-  printf '%s' "$ok_lines"
-else
-  echo "  (none)"
-fi
-echo ""
+  out+=$'\n'
 
-# 🔧 Can derive
-derive_count=0
-derive_lines=""
-for line in "${VAR_LINES[@]}"; do
-  IFS='|' read -r status name value derivable location message <<< "$line"
-  if { [ "$status" = "miss" ] || [ "$status" = "warn" ]; } && [ "$derivable" = "yes" ]; then
-    derive_count=$((derive_count + 1))
-    loc_str=""
-    [ "$location" = "env" ] && loc_str=" → ~/.claude/settings.local.json"
-    [ "$location" = "claude" ] && loc_str=" → ./CLAUDE.md"
-    [ "$location" = "either" ] && loc_str=" → env or CLAUDE.md"
-    derive_lines+="  - ${name} → ${value} — ${message}${loc_str}"$'\n'
+  # 🔧 Can derive
+  local derive_count=0 derive_lines=""
+  for line in "${VAR_LINES[@]}"; do
+    IFS='|' read -r status name value derivable location message <<< "$line"
+    if { [ "$status" = "miss" ] || [ "$status" = "warn" ]; } && [ "$derivable" = "yes" ]; then
+      derive_count=$((derive_count + 1))
+      local loc_str=""
+      [ "$location" = "env" ] && loc_str=" → ~/.claude/settings.local.json"
+      [ "$location" = "claude" ] && loc_str=" → ./CLAUDE.md"
+      [ "$location" = "either" ] && loc_str=" → env or CLAUDE.md"
+      derive_lines+="  - ${name} → ${value} — ${message}${loc_str}"$'\n'
+    fi
+  done
+  out+="## 🔧 Can derive (${derive_count})"$'\n'
+  if [ $derive_count -gt 0 ]; then
+    out+="${derive_lines}"
+  else
+    out+="  (none)"$'\n'
   fi
-done
-echo "## 🔧 Can derive (${derive_count})"
-if [ $derive_count -gt 0 ]; then
-  printf '%s' "$derive_lines"
-else
-  echo "  (none)"
-fi
-echo ""
+  out+=$'\n'
 
-# ❌ Required
-req_count=0
-req_lines=""
-for line in "${VAR_LINES[@]}"; do
-  IFS='|' read -r status name value derivable location message <<< "$line"
-  if [ "$status" = "miss" ] && [ "$derivable" != "yes" ]; then
-    req_count=$((req_count + 1))
-    loc_str=""
-    [ "$location" = "env" ] && loc_str=" → ~/.claude/settings.local.json"
-    [ "$location" = "claude" ] && loc_str=" → ./CLAUDE.md"
-    [ "$location" = "either" ] && loc_str=" → env or CLAUDE.md"
-    req_lines+="  - ${name} — ${message}${loc_str}"$'\n'
+  # ❌ Required
+  local req_count=0 req_lines=""
+  for line in "${VAR_LINES[@]}"; do
+    IFS='|' read -r status name value derivable location message <<< "$line"
+    if [ "$status" = "miss" ] && [ "$derivable" != "yes" ]; then
+      req_count=$((req_count + 1))
+      local loc_str=""
+      [ "$location" = "env" ] && loc_str=" → ~/.claude/settings.local.json"
+      [ "$location" = "claude" ] && loc_str=" → ./CLAUDE.md"
+      [ "$location" = "either" ] && loc_str=" → env or CLAUDE.md"
+      req_lines+="  - ${name} — ${message}${loc_str}"$'\n'
+    fi
+  done
+  out+="## ❌ Required — needs your input (${req_count})"$'\n'
+  if [ $req_count -gt 0 ]; then
+    out+="${req_lines}"
+  else
+    out+="  (none)"$'\n'
   fi
-done
-echo "## ❌ Required — needs your input (${req_count})"
-if [ $req_count -gt 0 ]; then
-  printf '%s' "$req_lines"
-else
-  echo "  (none)"
-fi
-echo ""
+  out+=$'\n'
 
-# ⚠️ Optional
-opt_count=0
-opt_lines=""
-for line in "${VAR_LINES[@]}"; do
-  IFS='|' read -r status name value derivable location message <<< "$line"
-  if [ "$status" = "warn" ] && [ "$derivable" != "yes" ]; then
-    opt_count=$((opt_count + 1))
-    loc_str=""
-    [ "$location" = "env" ] && loc_str=" → ~/.claude/settings.local.json"
-    [ "$location" = "claude" ] && loc_str=" → ./CLAUDE.md"
-    [ "$location" = "either" ] && loc_str=" → env or CLAUDE.md"
-    opt_lines+="  - ${name} — ${message}${loc_str}"$'\n'
+  # ⚠️ Optional
+  local opt_count=0 opt_lines=""
+  for line in "${VAR_LINES[@]}"; do
+    IFS='|' read -r status name value derivable location message <<< "$line"
+    if [ "$status" = "warn" ] && [ "$derivable" != "yes" ]; then
+      opt_count=$((opt_count + 1))
+      local loc_str=""
+      [ "$location" = "env" ] && loc_str=" → ~/.claude/settings.local.json"
+      [ "$location" = "claude" ] && loc_str=" → ./CLAUDE.md"
+      [ "$location" = "either" ] && loc_str=" → env or CLAUDE.md"
+      opt_lines+="  - ${name} — ${message}${loc_str}"$'\n'
+    fi
+  done
+  out+="## ⚠️ Optional (${opt_count})"$'\n'
+  if [ $opt_count -gt 0 ]; then
+    out+="${opt_lines}"
+  else
+    out+="  (none)"$'\n'
   fi
-done
-echo "## ⚠️ Optional (${opt_count})"
-if [ $opt_count -gt 0 ]; then
-  printf '%s' "$opt_lines"
+  out+=$'\n'
+
+  out+="## Where to place"$'\n'
+  out+="  - API keys/tokens → ~/.claude/settings.local.json under \"env\" block"$'\n'
+  out+="  - Project config   → ./CLAUDE.md as KEY = value"$'\n'
+  out+=$'\n'
+  out+="---"$'\n'
+  if [ $issues -eq 0 ] && [ $warns -eq 0 ]; then
+    out+="All checks passed."$'\n'
+  elif [ $issues -gt 0 ]; then
+    out+="${issues} required, ${warns} warnings. Fixes proposed above."$'\n'
+  else
+    out+="All required values present (${warns} warnings)."$'\n'
+  fi
+
+  printf '%s' "$out"
+}
+
+if [ -n "${SUMMARY_FILE:-}" ]; then
+  build_summary > "$SUMMARY_FILE"
+  exec 1>&3  # restore stdout
+  echo "Summary written to ${SUMMARY_FILE}"
 else
-  echo "  (none)"
-fi
-echo ""
+  echo ""
+  echo "---BEGIN_SUMMARY---"
+  echo ""
+  build_summary
+  echo "---END_SUMMARY---"
 
-# Placement guidance
-echo "## Where to place"
-echo "  - API keys/tokens → ~/.claude/settings.local.json under \"env\" block"
-echo "  - Project config   → ./CLAUDE.md as KEY = value"
-echo ""
-
-echo "---END_SUMMARY---"
-
-# ── Final status ───────────────────────────────────────────────────────────
-
-echo ""
-echo "---"
-if [ $issues -eq 0 ] && [ $warns -eq 0 ]; then
-  echo "All checks passed."
-elif [ $issues -gt 0 ]; then
-  echo "$issues required, $warns warnings. Fixes proposed above."
-else
-  echo "All required values present ($warns warnings)."
+  echo ""
+  echo "---"
+  if [ $issues -eq 0 ] && [ $warns -eq 0 ]; then
+    echo "All checks passed."
+  elif [ $issues -gt 0 ]; then
+    echo "$issues required, $warns warnings. Fixes proposed above."
+  else
+    echo "All required values present ($warns warnings)."
+  fi
 fi
 
 exit $issues
