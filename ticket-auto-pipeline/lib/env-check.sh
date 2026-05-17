@@ -69,7 +69,7 @@ GIT_NAME="$(cd "$PROJECT_DIR" && git config user.name 2>/dev/null || true)"
 GIT_EMAIL="$(cd "$PROJECT_DIR" && git config user.email 2>/dev/null || true)"
 
 echo ""
-echo "=== ticket-auto-pipeline v0.3.9 ==="
+echo "=== ticket-auto-pipeline v0.3.10 ==="
 echo ""
 
 # ── API keys ────────────────────────────────────────────────────────────────
@@ -188,8 +188,8 @@ fi
 if [ -n "${UAT_URL:-}" ]; then
   found "UAT_URL" "set in env"
   _var "ok" "UAT_URL" "$UAT_URL" "no" "either" ""
-elif grep -qi 'UAT_URL.*https\?://' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
-  UAT_CLAUDE=$(grep -oP '^UAT_URL[=:]\s*\K.*' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ' || true)
+elif grep -qiE '`?UAT_URL`?\s*[=:]\s*`?https?://' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
+  UAT_CLAUDE=$(grep -oP '^`?UAT_URL`?\s*[=:]\s*`?\K[^`\s]+' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ' || true)
   found "UAT_URL" "$UAT_CLAUDE (from CLAUDE.md)"
   _var "ok" "UAT_URL" "$UAT_CLAUDE" "no" "claude" ""
 else
@@ -208,8 +208,8 @@ if [ ! -f "$PROJECT_DIR/CLAUDE.md" ]; then
   issues=$((issues + 1))
 else
   # REPOS_ROOT — walk up looking for directory with multiple repos (git dirs or CLAUDE.md files)
-  if grep -q '^REPOS_ROOT[=:]\s*.' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
-    VAL=$(grep -oP '^REPOS_ROOT[=:]\s*\K.*' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ')
+  if grep -qE '^`?REPOS_ROOT`?\s*[=:]\s*.' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
+    VAL=$(grep -oP '^`?REPOS_ROOT`?\s*[=:]\s*`?\K[^`\s]+' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ' || true)
     found "REPOS_ROOT" "$VAL"
     _var "ok" "REPOS_ROOT" "$VAL" "no" "claude" ""
   else
@@ -245,8 +245,8 @@ else
   if [ -n "${LOCAL_URL:-}" ]; then
     found "LOCAL_URL" "$LOCAL_URL (from env)"
     _var "ok" "LOCAL_URL" "$LOCAL_URL" "no" "either" ""
-  elif grep -qi 'LOCAL_URL.*https\?://' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
-    VAL=$(grep -oP 'LOCAL_URL[=:]\s*\K.*' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ')
+  elif grep -qiE '`?LOCAL_URL`?\s*[=:]\s*`?https?://' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
+    VAL=$(grep -oP '^`?LOCAL_URL`?\s*[=:]\s*`?\K[^`\s]+' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ' || true)
     found "LOCAL_URL" "$VAL"
     _var "ok" "LOCAL_URL" "$VAL" "no" "claude" ""
   else
