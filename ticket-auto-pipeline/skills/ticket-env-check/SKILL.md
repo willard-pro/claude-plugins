@@ -43,24 +43,23 @@ Extract every line between `---BEGIN_VARS---` and `---END_VARS---`. Format:
 STATUS|NAME|VALUE|DERIVABLE|LOCATION|MESSAGE
 ```
 
-Create a task for each variable. The task action depends on STATUS and DERIVABLE:
+Create a task for each variable. Sort by STATUS (miss first, then warn, then ok). For each task, present the finding to the user:
 
-| If | Action |
-|----|--------|
-| `STATUS=ok` | Mark done immediately |
-| `DERIVABLE=yes` | Write VALUE to LOCATION (`env` → `~/.claude/settings.local.json`, `claude` → `./CLAUDE.md`). Ask user to confirm, then mark done. |
-| `STATUS=miss, DERIVABLE=no` | Ask user for the value. MESSAGE explains what it is. Write to LOCATION. Mark done when provided. |
-| `STATUS=warn, DERIVABLE=no` | Tell user what's missing (MESSAGE). Ask: "Provide a value or skip?" Write if given, skip if not. Mark done either way. |
+| If | Present as |
+|----|------------|
+| `STATUS=ok` | ✅ NAME — VALUE |
+| `DERIVABLE=yes` | 🔧 NAME — missing, but can derive: VALUE — MESSAGE |
+| `STATUS=miss, DERIVABLE=no` | ❌ NAME — missing, required — MESSAGE |
+| `STATUS=warn, DERIVABLE=no` | ⚠️ NAME — missing, optional — MESSAGE |
 
-Process tasks one at a time. After each task completes, move to the next.
+After presenting ALL findings, tell the user where to put each value:
 
-### Step 3 — Verify
+- `LOCATION=env` → add to `~/.claude/settings.local.json` under `"env"` block
+- `LOCATION=claude` → add to `./CLAUDE.md` as `NAME = value`
+- `LOCATION=either` → either location works
 
-After all tasks are done, re-run Step 1. All variables should now be `STATUS=ok`. If any are still `miss` or `warn`, loop back to Step 2 for those remaining.
+**DO NOT write any files.** This skill is read-only. The user decides what to set and where. If the user asks you to write values, only then proceed.
 
-### Placement reference
+### Step 3 — Done
 
-- `~/.claude/settings.local.json` → `"env"` block for API keys/tokens
-- `./CLAUDE.md` → key-value lines for project config
-
-**⚠️ WARNING**: `~/.claude/settings.local.json` is a security-sensitive file. Never display its contents. Confirm writes with "API keys written."
+The check is complete. The user now has a full inventory of what's configured, what's missing, what can be derived, and where to put each value.
