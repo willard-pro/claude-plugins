@@ -8,12 +8,12 @@ A marketplace of installable Claude Code plugins. Add this marketplace to Claude
 
 | Plugin | Version | Description |
 |--------|---------|-------------|
-| `ticket-auto-pipeline` | 0.1.0 | Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. 20+ slash commands, state-machine-driven flow control, pipeline safety gates, and retrospective analysis. |
+| `ticket-auto-pipeline` | 0.2.0 | Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. 20+ slash commands, state-machine-driven flow control, pipeline safety gates, and retrospective analysis. |
 
 ## Add This Marketplace
 
 ```bash
-claude plugin marketplace add willard-pro-claude-plugins https://github.com/willard-pro/claude-plugins.git
+claude plugin marketplace add willard-pro/claude-plugins
 ```
 
 Then install any plugin:
@@ -21,6 +21,16 @@ Then install any plugin:
 ```bash
 claude plugin install ticket-auto-pipeline@willard-pro-claude-plugins
 ```
+
+### Verify Environment
+
+From within Claude Code, run the env check slash command:
+
+```
+/ticket-env-check
+```
+
+This validates all required env vars (`LINEAR_API_KEY`, `GITHUB_PERSONAL_ACCESS_TOKEN`/`GH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`) plus CLAUDE.md fields (`REPOS_ROOT`, `LOCAL_URL`, `UAT_URL`). Fix any failures before running pipeline commands.
 
 ## Plugin Structure
 
@@ -52,20 +62,3 @@ Set in `~/.claude/settings.local.json` under `env`.
 
 The `validate-linear-config.sh` script also checks for project-specific values in the working directory's `CLAUDE.md`: `REPOS_ROOT`, `LOCAL_URL`, `UAT_URL`, and optional `BE_TEST_CMD`, `SLACK_CHANNEL`, `WIKI_ROOT`.
 
-## For Plugin Developers
-
-To add a new plugin to this marketplace:
-
-1. Create a directory for your plugin at the repo root.
-2. Add a `.claude-plugin/plugin.json`:
-   ```json
-   {
-     "name": "your-plugin-name",
-     "version": "0.1.0",
-     "description": "What it does.",
-     "author": { "name": "Your Name" }
-   }
-   ```
-3. Add `skills/` with at least one `SKILL.md` file (YAML frontmatter + body).
-4. Register the plugin in `.claude-plugin/marketplace.json` under `plugins`.
-5. Commit and push. Existing marketplace users will see the new plugin on the next `claude plugin marketplace update`.
