@@ -45,7 +45,7 @@ GIT_NAME="$(cd "$PROJECT_DIR" && git config user.name 2>/dev/null || true)"
 GIT_EMAIL="$(cd "$PROJECT_DIR" && git config user.email 2>/dev/null || true)"
 
 echo ""
-echo "=== ticket-auto-pipeline v0.3.5 ==="
+echo "=== ticket-auto-pipeline v0.3.6 ==="
 echo ""
 
 # ── API keys ────────────────────────────────────────────────────────────────
@@ -293,7 +293,105 @@ for line in "${VAR_LINES[@]}"; do
 done
 echo "---END_VARS---"
 
-# ── Summary ────────────────────────────────────────────────────────────────
+# ── Generated summary (skill displays this verbatim — no AI parsing) ───────
+
+echo ""
+echo "---BEGIN_SUMMARY---"
+echo ""
+
+# ✅ Present
+ok_count=0
+ok_lines=""
+for line in "${VAR_LINES[@]}"; do
+  IFS='|' read -r status name value derivable location message <<< "$line"
+  if [ "$status" = "ok" ]; then
+    ok_count=$((ok_count + 1))
+    ok_lines+="  - ${name} — ${value}"$'\n'
+  fi
+done
+echo "## ✅ Present (${ok_count})"
+if [ $ok_count -gt 0 ]; then
+  printf '%s' "$ok_lines"
+else
+  echo "  (none)"
+fi
+echo ""
+
+# 🔧 Can derive
+derive_count=0
+derive_lines=""
+for line in "${VAR_LINES[@]}"; do
+  IFS='|' read -r status name value derivable location message <<< "$line"
+  if { [ "$status" = "miss" ] || [ "$status" = "warn" ]; } && [ "$derivable" = "yes" ]; then
+    derive_count=$((derive_count + 1))
+    loc_str=""
+    [ "$location" = "env" ] && loc_str=" → ~/.claude/settings.local.json"
+    [ "$location" = "claude" ] && loc_str=" → ./CLAUDE.md"
+    [ "$location" = "either" ] && loc_str=" → env or CLAUDE.md"
+    derive_lines+="  - ${name} → ${value} — ${message}${loc_str}"$'\n'
+  fi
+done
+echo "## 🔧 Can derive (${derive_count})"
+if [ $derive_count -gt 0 ]; then
+  printf '%s' "$derive_lines"
+else
+  echo "  (none)"
+fi
+echo ""
+
+# ❌ Required
+req_count=0
+req_lines=""
+for line in "${VAR_LINES[@]}"; do
+  IFS='|' read -r status name value derivable location message <<< "$line"
+  if [ "$status" = "miss" ] && [ "$derivable" != "yes" ]; then
+    req_count=$((req_count + 1))
+    loc_str=""
+    [ "$location" = "env" ] && loc_str=" → ~/.claude/settings.local.json"
+    [ "$location" = "claude" ] && loc_str=" → ./CLAUDE.md"
+    [ "$location" = "either" ] && loc_str=" → env or CLAUDE.md"
+    req_lines+="  - ${name} — ${message}${loc_str}"$'\n'
+  fi
+done
+echo "## ❌ Required — needs your input (${req_count})"
+if [ $req_count -gt 0 ]; then
+  printf '%s' "$req_lines"
+else
+  echo "  (none)"
+fi
+echo ""
+
+# ⚠️ Optional
+opt_count=0
+opt_lines=""
+for line in "${VAR_LINES[@]}"; do
+  IFS='|' read -r status name value derivable location message <<< "$line"
+  if [ "$status" = "warn" ] && [ "$derivable" != "yes" ]; then
+    opt_count=$((opt_count + 1))
+    loc_str=""
+    [ "$location" = "env" ] && loc_str=" → ~/.claude/settings.local.json"
+    [ "$location" = "claude" ] && loc_str=" → ./CLAUDE.md"
+    [ "$location" = "either" ] && loc_str=" → env or CLAUDE.md"
+    opt_lines+="  - ${name} — ${message}${loc_str}"$'\n'
+  fi
+done
+echo "## ⚠️ Optional (${opt_count})"
+if [ $opt_count -gt 0 ]; then
+  printf '%s' "$opt_lines"
+else
+  echo "  (none)"
+fi
+echo ""
+
+# Placement guidance
+echo "## Where to place"
+echo "  - API keys/tokens → ~/.claude/settings.local.json under \"env\" block"
+echo "  - Project config   → ./CLAUDE.md as KEY = value"
+echo ""
+
+echo "---END_SUMMARY---"
+
+# ── Final status ───────────────────────────────────────────────────────────
 
 echo ""
 echo "---"
