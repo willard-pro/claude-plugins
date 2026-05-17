@@ -17,9 +17,9 @@ No arguments. Run from the project directory containing `CLAUDE.md`.
 
 ## Execution
 
-### Step 1 — Run the check and write summary to file
+### Step 1 — Run the check
 
-Run `env-check.sh` with `--summary-file /tmp/ticket-env-summary.md`. Tries the synced `~/.claude/skills/lib/` path first, falling back to the plugin cache. The script writes a complete inventory to the file — no human-readable stdout, just a single confirmation line.
+Run `env-check.sh` and capture output. Tries the synced `~/.claude/skills/lib/` path first, falling back to the plugin cache.
 
 ```bash
 ENV_CHECK=""
@@ -29,18 +29,14 @@ else
   ENV_CHECK="$(ls ~/.claude/plugins/cache/willard-pro-claude-plugins/ticket-auto-pipeline/*/lib/env-check.sh 2>/dev/null | sort -V | tail -1)"
 fi
 if [ -n "$ENV_CHECK" ]; then
-  bash "$ENV_CHECK" --summary-file /tmp/ticket-env-summary.md
+  bash "$ENV_CHECK"
 else
   echo "env-check.sh not found — reinstall the plugin"
 fi
 ```
 
-### Step 2 — Display the results
+### Step 2 — Display as table
 
-Read the summary file using the `Read` tool. It will be shown to the user verbatim — every variable, every count, no filtering possible.
+Parse the `---BEGIN_VARS---` / `---END_VARS---` block from the output. Skip the header row. Render the rows as a markdown table with columns: **Name**, **Status**, **Value**, **Location**, **Note**.
 
-```
-Read /tmp/ticket-env-summary.md
-```
-
-**DO NOT write any files.** This skill is read-only. The user decides what to set and where. If the user asks you to write values, only then proceed.
+**DO NOT write any files.** This skill is read-only. The user decides what to set and where.

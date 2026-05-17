@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
-# ticket-env-check — validates all env vars and config required by ticket-auto-pipeline.
-# Derives sensible defaults where possible (git config, filesystem walk for REPOS_ROOT).
+# ticket-env-check — validates env vars and config required by ticket-auto-pipeline.
 #
-# Output:
-#   Human-readable section (for standalone use)
-#   ---BEGIN_VARS--- / ---END_VARS--- block (for skill consumption)
-#   Format: STATUS|NAME|VALUE|DERIVABLE|LOCATION|MESSAGE
+# Output: pipe-delimited rows between ---BEGIN_VARS--- / ---END_VARS---
+# Format: NAME|STATUS|VALUE|LOCATION|NOTE
+#   STATUS  ok=present  missing=required+absent  auto=derivable  warn=optional+absent
+#   LOCATION  settings.local.json | CLAUDE.md | either
 #
 # Usage: env-check.sh [PROJECT_DIR] [--summary-file PATH] [--show]
-#   --summary-file PATH  Write summary to PATH (silent stdout except --show)
-#   --show               Print raw findings table to stdout (works with --summary-file)
+#   --summary-file PATH  Write delimited block to PATH; print only "Written to PATH"
+#   --show               Also print a human-readable table to stdout
 set -euo pipefail
 
 SUMMARY_FILE=""
@@ -33,185 +32,143 @@ PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
 cd "$PROJECT_DIR"
 
 issues=0
-warns=0
-declare -A PROPOSED
-ENV_FIXES=""
-CMD_FIXES=""
-
-# ── Helpers ────────────────────────────────────────────────────────────────
-
-# In summary-file mode, suppress all stdout — only the file matters
-if [ -n "${SUMMARY_FILE:-}" ]; then
-  exec 3>&1  # save original stdout
-  exec 1>/dev/null
-fi
-
-found() { printf "  ✅ %-35s %s\n" "$1" "$2"; }
-miss()  {
-  local var="$1" detail="$2" proposed="${3:-}"
-  printf "  ❌ %-35s %s\n" "$var" "$detail"
-  if [ -n "$proposed" ]; then
-    PROPOSED["$var"]="$proposed"
-    ENV_FIXES+="    \"$var\": \"$proposed\","$'\n'
-  else
-    ENV_FIXES+="    \"$var\": \"<your-value>\","$'\n'
-  fi
-  issues=$((issues + 1))
-}
-warn()  { printf "  ⚠️  %-35s %s\n" "$1" "$2"; warns=$((warns + 1)); }
-
-# Structured output for skill consumption: STATUS|NAME|VALUE|DERIVABLE|LOCATION|MESSAGE
 declare -a VAR_LINES
-_var() { VAR_LINES+=("$1|$2|$3|$4|$5|$6"); }
+_var() { VAR_LINES+=("$1|$2|$3|$4|$5"); }
 
-# Derive git config values from the project directory
-GIT_NAME="$(cd "$PROJECT_DIR" && git config user.name 2>/dev/null || true)"
-GIT_EMAIL="$(cd "$PROJECT_DIR" && git config user.email 2>/dev/null || true)"
+# Returns "filepath:value" if varname found in env block of either settings.local.json.
+# Checks project-local first, then global ~/.claude.
+find_in_settings() {
+  local varname="$1"
+  local files=(
+    "$PROJECT_DIR/.claude/settings.local.json"
+    "$HOME/.claude/settings.local.json"
+  )
+  for f in "${files[@]}"; do
+    [ -f "$f" ] || continue
+    local val=""
+    if command -v jq &>/dev/null; then
+      val=$(jq -r --arg k "$varname" '.env[$k] // empty' "$f" 2>/dev/null || true)
+    else
+      val=$(grep -oP "\"$varname\"\s*:\s*\"\K[^\"]+" "$f" 2>/dev/null | head -1 || true)
+    fi
+    [ -n "$val" ] && echo "${f}:${val}" && return 0
+  done
+  return 1
+}
 
-echo ""
-echo "=== ticket-auto-pipeline v0.3.10 ==="
-echo ""
+# Returns value if varname found as KEY = value or KEY: value in CLAUDE.md.
+find_in_claude_md() {
+  local varname="$1"
+  local pat='^`?'"$varname"'`?\s*[=:]\s*`?\K[^`\s]+'
+  grep -oP "$pat" "$PROJECT_DIR/CLAUDE.md" 2>/dev/null | head -1 | tr -d ' ' || true
+}
+
+GIT_NAME="$(git config user.name 2>/dev/null || true)"
+GIT_EMAIL="$(git config user.email 2>/dev/null || true)"
 
 # ── API keys ────────────────────────────────────────────────────────────────
 
-echo "API keys:"
-
-# LINEAR_API_KEY
 if [ -n "${LINEAR_API_KEY:-}" ]; then
-  found "LINEAR_API_KEY" "set"
-  _var "ok" "LINEAR_API_KEY" "set" "no" "env" ""
+  _var "LINEAR_API_KEY" "ok" "${LINEAR_API_KEY}" "settings.local.json" ""
+elif result=$(find_in_settings "LINEAR_API_KEY"); then
+  _var "LINEAR_API_KEY" "warn" "(in ${result%%:*} — restart session)" "settings.local.json" "found in file but not loaded"
 else
-  miss "LINEAR_API_KEY" "required - add to ~/.claude/settings.local.json env"
-  _var "miss" "LINEAR_API_KEY" "" "no" "env" "Linear API key (from Linear → Settings → API)"
+  _var "LINEAR_API_KEY" "missing" "" "settings.local.json" "Linear API key (Linear → Settings → API)"
+  issues=$((issues + 1))
 fi
 
-# ANTHROPIC_AUTH_TOKEN
 if [ -n "${ANTHROPIC_AUTH_TOKEN:-}" ]; then
-  found "ANTHROPIC_AUTH_TOKEN" "set"
-  _var "ok" "ANTHROPIC_AUTH_TOKEN" "set" "no" "env" ""
+  _var "ANTHROPIC_AUTH_TOKEN" "ok" "${ANTHROPIC_AUTH_TOKEN}" "settings.local.json" ""
+elif result=$(find_in_settings "ANTHROPIC_AUTH_TOKEN"); then
+  _var "ANTHROPIC_AUTH_TOKEN" "warn" "(in ${result%%:*} — restart session)" "settings.local.json" "found in file but not loaded"
 else
-  miss "ANTHROPIC_AUTH_TOKEN" "required - add to ~/.claude/settings.local.json env"
-  _var "miss" "ANTHROPIC_AUTH_TOKEN" "" "no" "env" "Anthropic API key"
+  _var "ANTHROPIC_AUTH_TOKEN" "missing" "" "settings.local.json" "Anthropic API key"
+  issues=$((issues + 1))
 fi
 
-# GitHub token
 if [ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]; then
-  found "GITHUB_PERSONAL_ACCESS_TOKEN" "set"
-  _var "ok" "GITHUB_PERSONAL_ACCESS_TOKEN" "set" "no" "env" ""
+  _var "GITHUB_PERSONAL_ACCESS_TOKEN" "ok" "${GITHUB_PERSONAL_ACCESS_TOKEN}" "settings.local.json" ""
   if [ -z "${GH_TOKEN:-}" ]; then
-    warn "GH_TOKEN" "not set - add to env as copy of GITHUB_PERSONAL_ACCESS_TOKEN"
-    PROPOSED["GH_TOKEN"]="(same as GITHUB_PERSONAL_ACCESS_TOKEN)"
-    _var "warn" "GH_TOKEN" "(copy of GITHUB_PERSONAL_ACCESS_TOKEN)" "yes" "env" "avoids gh auth issues"
+    _var "GH_TOKEN" "auto" "(copy of GITHUB_PERSONAL_ACCESS_TOKEN)" "settings.local.json" "set same as GITHUB_PERSONAL_ACCESS_TOKEN"
   else
-    found "GH_TOKEN" "set"
-    _var "ok" "GH_TOKEN" "set" "no" "env" ""
+    _var "GH_TOKEN" "ok" "${GH_TOKEN}" "settings.local.json" ""
   fi
+elif result=$(find_in_settings "GITHUB_PERSONAL_ACCESS_TOKEN"); then
+  _var "GITHUB_PERSONAL_ACCESS_TOKEN" "warn" "(in ${result%%:*} — restart session)" "settings.local.json" "found in file but not loaded"
+  issues=$((issues + 1))
 else
-  miss "GITHUB_PERSONAL_ACCESS_TOKEN" "required - add to ~/.claude/settings.local.json env"
-  _var "miss" "GITHUB_PERSONAL_ACCESS_TOKEN" "" "no" "env" "GitHub personal access token"
+  _var "GITHUB_PERSONAL_ACCESS_TOKEN" "missing" "" "settings.local.json" "GitHub personal access token"
+  issues=$((issues + 1))
   if [ -z "${GH_TOKEN:-}" ]; then
-    warn "GH_TOKEN" "also not set"
-    _var "warn" "GH_TOKEN" "" "no" "env" "also not set"
+    _var "GH_TOKEN" "missing" "" "settings.local.json" "set same as GITHUB_PERSONAL_ACCESS_TOKEN"
+    issues=$((issues + 1))
   fi
 fi
 
 # ── Optional env ────────────────────────────────────────────────────────────
 
-echo ""
-echo "Optional env:"
-
-# ANTHROPIC_BASE_URL
 if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
-  found "ANTHROPIC_BASE_URL" "set"
-  _var "ok" "ANTHROPIC_BASE_URL" "set" "no" "env" ""
+  _var "ANTHROPIC_BASE_URL" "ok" "${ANTHROPIC_BASE_URL}" "settings.local.json" ""
+elif result=$(find_in_settings "ANTHROPIC_BASE_URL"); then
+  _var "ANTHROPIC_BASE_URL" "warn" "(in ${result%%:*} — restart session)" "settings.local.json" "found in file but not loaded"
 else
-  warn "ANTHROPIC_BASE_URL" "not set (using default)"
-  _var "warn" "ANTHROPIC_BASE_URL" "" "no" "env" "override Anthropic API base URL"
+  _var "ANTHROPIC_BASE_URL" "warn" "" "settings.local.json" "override Anthropic API base URL"
 fi
 
-# ANTHROPIC_MODEL
 if [ -n "${ANTHROPIC_MODEL:-}" ]; then
-  found "ANTHROPIC_MODEL" "set"
-  _var "ok" "ANTHROPIC_MODEL" "set" "no" "env" ""
+  _var "ANTHROPIC_MODEL" "ok" "${ANTHROPIC_MODEL}" "settings.local.json" ""
+elif result=$(find_in_settings "ANTHROPIC_MODEL"); then
+  _var "ANTHROPIC_MODEL" "warn" "(in ${result%%:*} — restart session)" "settings.local.json" "found in file but not loaded"
 else
-  warn "ANTHROPIC_MODEL" "not set (using default)"
-  _var "warn" "ANTHROPIC_MODEL" "" "no" "env" "override default model"
+  _var "ANTHROPIC_MODEL" "warn" "" "settings.local.json" "override default model"
 fi
 
-# GIT_AUTHOR_NAME
 if [ -n "${GIT_AUTHOR_NAME:-}" ]; then
-  found "GIT_AUTHOR_NAME" "set"
-  _var "ok" "GIT_AUTHOR_NAME" "set" "no" "env" ""
+  _var "GIT_AUTHOR_NAME" "ok" "${GIT_AUTHOR_NAME}" "settings.local.json" ""
+elif [ -n "$GIT_NAME" ]; then
+  _var "GIT_AUTHOR_NAME" "auto" "$GIT_NAME" "settings.local.json" "from git config user.name"
 else
-  if [ -n "$GIT_NAME" ]; then
-    warn "GIT_AUTHOR_NAME" "not set, propose: $GIT_NAME"
-    PROPOSED["GIT_AUTHOR_NAME"]="$GIT_NAME"
-    _var "warn" "GIT_AUTHOR_NAME" "$GIT_NAME" "yes" "env" "git config user.name"
-  else
-    warn "GIT_AUTHOR_NAME" "not set - run: git config user.name"
-    _var "warn" "GIT_AUTHOR_NAME" "" "no" "env" "run: git config user.name"
-  fi
+  _var "GIT_AUTHOR_NAME" "warn" "" "settings.local.json" "run: git config user.name"
 fi
 
-# GIT_AUTHOR_EMAIL
 if [ -n "${GIT_AUTHOR_EMAIL:-}" ]; then
-  found "GIT_AUTHOR_EMAIL" "set"
-  _var "ok" "GIT_AUTHOR_EMAIL" "set" "no" "env" ""
+  _var "GIT_AUTHOR_EMAIL" "ok" "${GIT_AUTHOR_EMAIL}" "settings.local.json" ""
+elif [ -n "$GIT_EMAIL" ]; then
+  _var "GIT_AUTHOR_EMAIL" "auto" "$GIT_EMAIL" "settings.local.json" "from git config user.email"
 else
-  if [ -n "$GIT_EMAIL" ]; then
-    warn "GIT_AUTHOR_EMAIL" "not set, propose: $GIT_EMAIL"
-    PROPOSED["GIT_AUTHOR_EMAIL"]="$GIT_EMAIL"
-    _var "warn" "GIT_AUTHOR_EMAIL" "$GIT_EMAIL" "yes" "env" "git config user.email"
-  else
-    warn "GIT_AUTHOR_EMAIL" "not set - run: git config user.email"
-    _var "warn" "GIT_AUTHOR_EMAIL" "" "no" "env" "run: git config user.email"
-  fi
+  _var "GIT_AUTHOR_EMAIL" "warn" "" "settings.local.json" "run: git config user.email"
 fi
 
-# TICKET_AUTONOMY
 if [ -n "${TICKET_AUTONOMY:-}" ]; then
-  found "TICKET_AUTONOMY" "set to '$TICKET_AUTONOMY'"
-  _var "ok" "TICKET_AUTONOMY" "$TICKET_AUTONOMY" "no" "env" ""
+  _var "TICKET_AUTONOMY" "ok" "${TICKET_AUTONOMY}" "settings.local.json" ""
 else
   DOTENV_VAL=$(grep -oP '^TICKET_AUTONOMY=\K.*' "$PROJECT_DIR/.env" 2>/dev/null || true)
   if [ -n "$DOTENV_VAL" ]; then
-    warn "TICKET_AUTONOMY" "not in env (found in .env: $DOTENV_VAL) - copy to settings.local.json env"
-    PROPOSED["TICKET_AUTONOMY"]="$DOTENV_VAL"
-    _var "warn" "TICKET_AUTONOMY" "$DOTENV_VAL" "yes" "env" "found in .env, copy to settings.local.json"
+    _var "TICKET_AUTONOMY" "auto" "$DOTENV_VAL" "settings.local.json" "found in .env — copy to settings.local.json"
+  elif result=$(find_in_settings "TICKET_AUTONOMY"); then
+    _var "TICKET_AUTONOMY" "warn" "(in ${result%%:*} — restart session)" "settings.local.json" "found in file but not loaded"
   else
-    warn "TICKET_AUTONOMY" "not set (defaults to manual)"
-    _var "warn" "TICKET_AUTONOMY" "manual" "no" "env" "auto | semi-auto | manual (default)"
+    _var "TICKET_AUTONOMY" "warn" "manual" "settings.local.json" "auto | semi-auto | manual (default)"
   fi
 fi
 
-# UAT_URL — required by ticket-verify (aborts if absent), no derivation
-if [ -n "${UAT_URL:-}" ]; then
-  found "UAT_URL" "set in env"
-  _var "ok" "UAT_URL" "$UAT_URL" "no" "either" ""
-elif grep -qiE '`?UAT_URL`?\s*[=:]\s*`?https?://' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
+if grep -qiE '`?UAT_URL`?\s*[=:]\s*`?https?://' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
   UAT_CLAUDE=$(grep -oP '^`?UAT_URL`?\s*[=:]\s*`?\K[^`\s]+' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ' || true)
-  found "UAT_URL" "$UAT_CLAUDE (from CLAUDE.md)"
-  _var "ok" "UAT_URL" "$UAT_CLAUDE" "no" "claude" ""
+  _var "UAT_URL" "ok" "$UAT_CLAUDE" "CLAUDE.md" ""
 else
-  miss "UAT_URL" "not set — required by ticket-verify for UAT environment checks"
-  _var "miss" "UAT_URL" "" "no" "either" "UAT environment URL (e.g. https://uat.example.com)"
+  _var "UAT_URL" "missing" "" "CLAUDE.md" "UAT environment URL (e.g. https://uat.example.com)"
+  issues=$((issues + 1))
 fi
 
 # ── CLAUDE.md fields ────────────────────────────────────────────────────────
 
-echo ""
-echo "CLAUDE.md:"
-
 if [ ! -f "$PROJECT_DIR/CLAUDE.md" ]; then
-  printf "  ❌ %-35s %s\n" "CLAUDE.md" "not found at $PROJECT_DIR/CLAUDE.md"
-  _var "miss" "CLAUDE.md" "" "no" "claude" "file not found"
+  _var "CLAUDE.md" "missing" "" "CLAUDE.md" "file not found at $PROJECT_DIR/CLAUDE.md"
   issues=$((issues + 1))
 else
-  # REPOS_ROOT — walk up looking for directory with multiple repos (git dirs or CLAUDE.md files)
   if grep -qE '^`?REPOS_ROOT`?\s*[=:]\s*.' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
     VAL=$(grep -oP '^`?REPOS_ROOT`?\s*[=:]\s*`?\K[^`\s]+' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ' || true)
-    found "REPOS_ROOT" "$VAL"
-    _var "ok" "REPOS_ROOT" "$VAL" "no" "claude" ""
+    _var "REPOS_ROOT" "ok" "$VAL" "CLAUDE.md" ""
   else
     DERIVED=""
     WALK_DIR="$PROJECT_DIR"
@@ -223,248 +180,74 @@ else
           COUNT=$((COUNT + 1))
         fi
       done
-      if [ "$COUNT" -ge 2 ]; then
-        DERIVED="$WALK_DIR"
-        break
-      fi
+      if [ "$COUNT" -ge 2 ]; then DERIVED="$WALK_DIR"; break; fi
       WALK_DIR="$(dirname "$WALK_DIR")"
     done
     if [ -n "$DERIVED" ]; then
-      printf "  ❌ %-35s %s\n" "REPOS_ROOT" "not in CLAUDE.md, propose: $DERIVED"
-      CMD_FIXES+="  REPOS_ROOT = $DERIVED"$'\n'
-      _var "miss" "REPOS_ROOT" "$DERIVED" "yes" "claude" "parent directory of all project repos"
+      _var "REPOS_ROOT" "auto" "$DERIVED" "CLAUDE.md" "add REPOS_ROOT = $DERIVED to CLAUDE.md"
     else
-      printf "  ❌ %-35s %s\n" "REPOS_ROOT" "not in CLAUDE.md — add REPOS_ROOT = /path/to/repos"
-      CMD_FIXES+="  REPOS_ROOT = /path/to/your/repos"$'\n'
-      _var "miss" "REPOS_ROOT" "" "no" "claude" "parent directory of all project repos"
+      _var "REPOS_ROOT" "missing" "" "CLAUDE.md" "parent directory of all project repos"
     fi
     issues=$((issues + 1))
   fi
 
-  # LOCAL_URL — required by ticket-verify (aborts if absent)
   if [ -n "${LOCAL_URL:-}" ]; then
-    found "LOCAL_URL" "$LOCAL_URL (from env)"
-    _var "ok" "LOCAL_URL" "$LOCAL_URL" "no" "either" ""
+    _var "LOCAL_URL" "ok" "$LOCAL_URL" "settings.local.json" ""
   elif grep -qiE '`?LOCAL_URL`?\s*[=:]\s*`?https?://' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
     VAL=$(grep -oP '^`?LOCAL_URL`?\s*[=:]\s*`?\K[^`\s]+' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ' || true)
-    found "LOCAL_URL" "$VAL"
-    _var "ok" "LOCAL_URL" "$VAL" "no" "claude" ""
+    _var "LOCAL_URL" "ok" "$VAL" "CLAUDE.md" ""
+  elif result=$(find_in_settings "LOCAL_URL"); then
+    _var "LOCAL_URL" "warn" "(in ${result%%:*} — restart session)" "settings.local.json" "found in file but not loaded"
   else
-    miss "LOCAL_URL" "not set — required by ticket-verify for local dev server checks"
-    _var "miss" "LOCAL_URL" "" "no" "either" "local dev server URL (e.g. http://localhost:3000)"
+    _var "LOCAL_URL" "missing" "" "settings.local.json or CLAUDE.md" "local dev server URL (e.g. http://localhost:3000)"
+    issues=$((issues + 1))
   fi
 
-  # BE_TEST_CMD
   if grep -q 'BE_TEST_CMD' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
-    found "BE_TEST_CMD" "present"
-    _var "ok" "BE_TEST_CMD" "present" "no" "claude" ""
+    _var "BE_TEST_CMD" "ok" "present" "CLAUDE.md" ""
   else
-    warn "BE_TEST_CMD" "not in CLAUDE.md - ticket-implement skips BE tests"
-    _var "warn" "BE_TEST_CMD" "" "no" "claude" "backend test command (e.g. npm test)"
+    _var "BE_TEST_CMD" "warn" "" "CLAUDE.md" "backend test command — ticket-implement skips BE tests if absent"
   fi
 
-  # SLACK_CHANNEL
   if grep -q 'SLACK_CHANNEL' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
-    found "SLACK_CHANNEL" "present"
-    _var "ok" "SLACK_CHANNEL" "present" "no" "claude" ""
+    _var "SLACK_CHANNEL" "ok" "present" "CLAUDE.md" ""
   else
-    warn "SLACK_CHANNEL" "not in CLAUDE.md - ticket-overseer prints to stdout only"
-    _var "warn" "SLACK_CHANNEL" "" "no" "claude" "Slack channel for notifications (e.g. #tickets)"
+    _var "SLACK_CHANNEL" "warn" "" "CLAUDE.md" "Slack channel — ticket-overseer prints to stdout only if absent"
   fi
 
-  # WIKI_ROOT
   if grep -qi 'WIKI_ROOT\|wiki/' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
-    found "WIKI_ROOT" "present"
-    _var "ok" "WIKI_ROOT" "present" "no" "claude" ""
+    _var "WIKI_ROOT" "ok" "present" "CLAUDE.md" ""
   else
-    warn "WIKI_ROOT" "not in CLAUDE.md - appraise skips wiki bootstrapping"
-    _var "warn" "WIKI_ROOT" "" "no" "claude" "wiki directory path for documentation"
+    _var "WIKI_ROOT" "warn" "" "CLAUDE.md" "wiki directory path — appraise skips wiki bootstrapping if absent"
   fi
 fi
 
-# ── Proposed fixes ─────────────────────────────────────────────────────────
+# ── Emit ────────────────────────────────────────────────────────────────────
 
-if [ -n "$ENV_FIXES" ]; then
-  echo ""
-  echo "--- Missing env vars: add to ~/.claude/settings.local.json ---"
-  echo '{'
-  echo '  "env": {'
-  printf '%s' "$ENV_FIXES"
-  echo '  }'
-  echo '}'
-fi
-
-if [ -n "$CMD_FIXES" ]; then
-  echo ""
-  echo "--- Missing CLAUDE.md fields ---"
-  printf '%s' "$CMD_FIXES"
-fi
-
-if [ ${#PROPOSED[@]} -gt 0 ]; then
-  echo ""
-  echo "--- Suggested values for optional vars ---"
-  for var in "${!PROPOSED[@]}"; do
-    printf "  %-30s = %s\n" "$var" "${PROPOSED[$var]}"
-  done
-fi
-
-# ── Structured output for skill consumption ─────────────────────────────────
-
-echo ""
-echo "---BEGIN_VARS---"
-for line in "${VAR_LINES[@]}"; do
-  echo "$line"
-done
-echo "---END_VARS---"
-
-# ── Show raw findings table ─────────────────────────────────────────────────
-
-show_table() {
-  printf '%-30s %-8s %-50s %s\n' "NAME" "STATUS" "VALUE" "SOURCE"
-  printf '%-30s %-8s %-50s %s\n' "----" "------" "-----" "------"
-  for line in "${VAR_LINES[@]}"; do
-    IFS='|' read -r status name value derivable location message <<< "$line"
-    local src=""
-    [ "$derivable" = "yes" ] && src="derived"
-    [ "$status" = "ok" ] && src="$location"
-    # Resolve actual value from env for vars stored as "set" or "present"
-    if [ "$value" = "set" ] && [ -n "${!name:-}" ]; then
-      value="${!name}"
-    fi
-    [ -z "$value" ] && value="-"
-    printf '%-30s %-8s %-50s %s\n' "$name" "$status" "$value" "$src"
-  done
+emit_vars() {
+  echo "---BEGIN_VARS---"
+  printf 'NAME|STATUS|VALUE|LOCATION|NOTE\n'
+  for line in "${VAR_LINES[@]}"; do echo "$line"; done
+  echo "---END_VARS---"
 }
 
-# ── Generated summary ───────────────────────────────────────────────────────
-
-build_summary() {
-  local out=""
-
-  # ✅ Present
-  local ok_count=0 ok_lines=""
+show_table() {
+  printf '%-35s %-8s %-45s %-22s %s\n' "NAME" "STATUS" "VALUE" "LOCATION" "NOTE"
+  printf '%-35s %-8s %-45s %-22s %s\n' "----" "------" "-----" "--------" "----"
   for line in "${VAR_LINES[@]}"; do
-    IFS='|' read -r status name value derivable location message <<< "$line"
-    if [ "$status" = "ok" ]; then
-      ok_count=$((ok_count + 1))
-      ok_lines+="  - ${name} — ${value}"$'\n'
-    fi
+    IFS='|' read -r name status value location note <<< "$line"
+    [ -z "$value" ] && value="-"
+    printf '%-35s %-8s %-45s %-22s %s\n' "$name" "$status" "$value" "$location" "$note"
   done
-  out+="## ✅ Present (${ok_count})"$'\n'
-  if [ $ok_count -gt 0 ]; then
-    out+="${ok_lines}"
-  else
-    out+="  (none)"$'\n'
-  fi
-  out+=$'\n'
-
-  # 🔧 Can derive
-  local derive_count=0 derive_lines=""
-  for line in "${VAR_LINES[@]}"; do
-    IFS='|' read -r status name value derivable location message <<< "$line"
-    if { [ "$status" = "miss" ] || [ "$status" = "warn" ]; } && [ "$derivable" = "yes" ]; then
-      derive_count=$((derive_count + 1))
-      local loc_str=""
-      [ "$location" = "env" ] && loc_str=" → ~/.claude/settings.local.json"
-      [ "$location" = "claude" ] && loc_str=" → ./CLAUDE.md"
-      [ "$location" = "either" ] && loc_str=" → env or CLAUDE.md"
-      derive_lines+="  - ${name} → ${value} — ${message}${loc_str}"$'\n'
-    fi
-  done
-  out+="## 🔧 Can derive (${derive_count})"$'\n'
-  if [ $derive_count -gt 0 ]; then
-    out+="${derive_lines}"
-  else
-    out+="  (none)"$'\n'
-  fi
-  out+=$'\n'
-
-  # ❌ Required
-  local req_count=0 req_lines=""
-  for line in "${VAR_LINES[@]}"; do
-    IFS='|' read -r status name value derivable location message <<< "$line"
-    if [ "$status" = "miss" ] && [ "$derivable" != "yes" ]; then
-      req_count=$((req_count + 1))
-      local loc_str=""
-      [ "$location" = "env" ] && loc_str=" → ~/.claude/settings.local.json"
-      [ "$location" = "claude" ] && loc_str=" → ./CLAUDE.md"
-      [ "$location" = "either" ] && loc_str=" → env or CLAUDE.md"
-      req_lines+="  - ${name} — ${message}${loc_str}"$'\n'
-    fi
-  done
-  out+="## ❌ Required — needs your input (${req_count})"$'\n'
-  if [ $req_count -gt 0 ]; then
-    out+="${req_lines}"
-  else
-    out+="  (none)"$'\n'
-  fi
-  out+=$'\n'
-
-  # ⚠️ Optional
-  local opt_count=0 opt_lines=""
-  for line in "${VAR_LINES[@]}"; do
-    IFS='|' read -r status name value derivable location message <<< "$line"
-    if [ "$status" = "warn" ] && [ "$derivable" != "yes" ]; then
-      opt_count=$((opt_count + 1))
-      local loc_str=""
-      [ "$location" = "env" ] && loc_str=" → ~/.claude/settings.local.json"
-      [ "$location" = "claude" ] && loc_str=" → ./CLAUDE.md"
-      [ "$location" = "either" ] && loc_str=" → env or CLAUDE.md"
-      opt_lines+="  - ${name} — ${message}${loc_str}"$'\n'
-    fi
-  done
-  out+="## ⚠️ Optional (${opt_count})"$'\n'
-  if [ $opt_count -gt 0 ]; then
-    out+="${opt_lines}"
-  else
-    out+="  (none)"$'\n'
-  fi
-  out+=$'\n'
-
-  out+="## Where to place"$'\n'
-  out+="  - API keys/tokens → ~/.claude/settings.local.json under \"env\" block"$'\n'
-  out+="  - Project config   → ./CLAUDE.md as KEY = value"$'\n'
-  out+=$'\n'
-  out+="---"$'\n'
-  if [ $issues -eq 0 ] && [ $warns -eq 0 ]; then
-    out+="All checks passed."$'\n'
-  elif [ $issues -gt 0 ]; then
-    out+="${issues} required, ${warns} warnings. Fixes proposed above."$'\n'
-  else
-    out+="All required values present (${warns} warnings)."$'\n'
-  fi
-
-  printf '%s' "$out"
 }
 
 if [ -n "${SUMMARY_FILE:-}" ]; then
-  build_summary > "$SUMMARY_FILE"
-  exec 1>&3  # restore stdout
+  emit_vars > "$SUMMARY_FILE"
   echo "Summary written to ${SUMMARY_FILE}"
-  if [ -n "${SHOW:-}" ]; then
-    show_table
-  fi
+  [ -n "${SHOW:-}" ] && show_table
 else
-  echo ""
-  echo "---BEGIN_SUMMARY---"
-  echo ""
-  build_summary
-  echo "---END_SUMMARY---"
-
-  echo ""
-  echo "---"
-  if [ $issues -eq 0 ] && [ $warns -eq 0 ]; then
-    echo "All checks passed."
-  elif [ $issues -gt 0 ]; then
-    echo "$issues required, $warns warnings. Fixes proposed above."
-  else
-    echo "All required values present ($warns warnings)."
-  fi
-
-  if [ -n "${SHOW:-}" ]; then
-    echo ""
-    show_table
-  fi
+  emit_vars
+  [ -n "${SHOW:-}" ] && echo "" && show_table
 fi
 
 exit $issues
