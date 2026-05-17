@@ -163,12 +163,14 @@ else
     issues=$((issues + 1))
   fi
 
-  # LOCAL_URL
-  if grep -qi 'LOCAL_URL.*https\?://' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
+  # LOCAL_URL — required by ticket-verify (aborts if absent)
+  if [ -n "${LOCAL_URL:-}" ]; then
+    found "LOCAL_URL" "$LOCAL_URL (from env)"
+  elif grep -qi 'LOCAL_URL.*https\?://' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
     VAL=$(grep -oP 'LOCAL_URL[=:]\s*\K.*' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ')
     found "LOCAL_URL" "$VAL"
   else
-    warn "LOCAL_URL" "not in CLAUDE.md - needed for local dev server checks"
+    miss "LOCAL_URL" "not set — required by ticket-verify for local dev server checks"
   fi
 
   # BE_TEST_CMD
