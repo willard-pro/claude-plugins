@@ -132,14 +132,34 @@ if [ ! -f "$PROJECT_DIR/CLAUDE.md" ]; then
   printf "  ❌ %-35s %s\n" "CLAUDE.md" "not found at $PROJECT_DIR/CLAUDE.md"
   issues=$((issues + 1))
 else
-  # REPOS_ROOT
+  # REPOS_ROOT — walk up looking for directory with multiple repos (git dirs or CLAUDE.md files)
   if grep -q '^REPOS_ROOT[=:]\s*.' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
     VAL=$(grep -oP '^REPOS_ROOT[=:]\s*\K.*' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ')
     found "REPOS_ROOT" "$VAL"
   else
-    DERIVED="$(echo "$PROJECT_DIR" | sed 's|/git/.*|/git|')"
-    printf "  ❌ %-35s %s\n" "REPOS_ROOT" "not in CLAUDE.md, propose: $DERIVED"
-    CMD_FIXES+="  REPOS_ROOT = $DERIVED"$'\n'
+    DERIVED=""
+    WALK_DIR="$PROJECT_DIR"
+    while [ "$WALK_DIR" != "/" ] && [ "$WALK_DIR" != "." ]; do
+      COUNT=0
+      for child in "$WALK_DIR"/*/; do
+        [ -d "$child" ] || continue
+        if [ -d "$child/.git" ] || [ -f "$child/CLAUDE.md" ]; then
+          COUNT=$((COUNT + 1))
+        fi
+      done
+      if [ "$COUNT" -ge 2 ]; then
+        DERIVED="$WALK_DIR"
+        break
+      fi
+      WALK_DIR="$(dirname "$WALK_DIR")"
+    done
+    if [ -n "$DERIVED" ]; then
+      printf "  ❌ %-35s %s\n" "REPOS_ROOT" "not in CLAUDE.md, propose: $DERIVED"
+      CMD_FIXES+="  REPOS_ROOT = $DERIVED"$'\n'
+    else
+      printf "  ❌ %-35s %s\n" "REPOS_ROOT" "not in CLAUDE.md — add REPOS_ROOT = /path/to/repos"
+      CMD_FIXES+="  REPOS_ROOT = /path/to/your/repos"$'\n'
+    fi
     issues=$((issues + 1))
   fi
 
