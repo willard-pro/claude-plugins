@@ -7,16 +7,19 @@
 #   ---BEGIN_VARS--- / ---END_VARS--- block (for skill consumption)
 #   Format: STATUS|NAME|VALUE|DERIVABLE|LOCATION|MESSAGE
 #
-# Usage: env-check.sh [PROJECT_DIR] [--summary-file PATH]
-#   --summary-file PATH  Write summary to PATH and exit (silent, no stdout)
+# Usage: env-check.sh [PROJECT_DIR] [--summary-file PATH] [--show]
+#   --summary-file PATH  Write summary to PATH (silent stdout except --show)
+#   --show               Print raw findings table to stdout (works with --summary-file)
 set -euo pipefail
 
 SUMMARY_FILE=""
+SHOW=""
 PROJECT_DIR=""
 for arg in "${@}"; do
   case "$arg" in
-    --summary-file) SUMMARY_FILE="1" ;;  # placeholder, next arg is path
+    --summary-file) SUMMARY_FILE="1" ;;
     --summary-file=*) SUMMARY_FILE="${arg#*=}" ;;
+    --show) SHOW="1" ;;
     *)
       if [ "$SUMMARY_FILE" = "1" ]; then
         SUMMARY_FILE="$arg"
@@ -66,7 +69,7 @@ GIT_NAME="$(cd "$PROJECT_DIR" && git config user.name 2>/dev/null || true)"
 GIT_EMAIL="$(cd "$PROJECT_DIR" && git config user.email 2>/dev/null || true)"
 
 echo ""
-echo "=== ticket-auto-pipeline v0.3.7 ==="
+echo "=== ticket-auto-pipeline v0.3.8 ==="
 echo ""
 
 # ── API keys ────────────────────────────────────────────────────────────────
@@ -314,6 +317,21 @@ for line in "${VAR_LINES[@]}"; do
 done
 echo "---END_VARS---"
 
+# ── Show raw findings table ─────────────────────────────────────────────────
+
+show_table() {
+  printf '%-30s %-8s %-35s %s\n' "NAME" "STATUS" "VALUE" "SOURCE"
+  printf '%-30s %-8s %-35s %s\n' "----" "------" "-----" "------"
+  for line in "${VAR_LINES[@]}"; do
+    IFS='|' read -r status name value derivable location message <<< "$line"
+    local src=""
+    [ "$derivable" = "yes" ] && src="derived"
+    [ "$status" = "ok" ] && src="$location"
+    [ -z "$value" ] && value="-"
+    printf '%-30s %-8s %-35s %s\n' "$name" "$status" "$value" "$src"
+  done
+}
+
 # ── Generated summary ───────────────────────────────────────────────────────
 
 build_summary() {
@@ -419,6 +437,9 @@ if [ -n "${SUMMARY_FILE:-}" ]; then
   build_summary > "$SUMMARY_FILE"
   exec 1>&3  # restore stdout
   echo "Summary written to ${SUMMARY_FILE}"
+  if [ -n "${SHOW:-}" ]; then
+    show_table
+  fi
 else
   echo ""
   echo "---BEGIN_SUMMARY---"
@@ -434,6 +455,11 @@ else
     echo "$issues required, $warns warnings. Fixes proposed above."
   else
     echo "All required values present ($warns warnings)."
+  fi
+
+  if [ -n "${SHOW:-}" ]; then
+    echo ""
+    show_table
   fi
 fi
 
