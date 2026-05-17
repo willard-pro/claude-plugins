@@ -1,64 +1,214 @@
 #!/usr/bin/env bash
 # ticket-env-check — validates all env vars and config required by ticket-auto-pipeline.
-# Delegates core checks to validate-env.sh, adds extras it doesn't cover.
+# Derives sensible defaults where possible (git config, GH_TOKEN = GITHUB_PERSONAL_ACCESS_TOKEN).
 #
 # Usage: env-check.sh [PROJECT_DIR]
-#   PROJECT_DIR  Path to project directory containing CLAUDE.md (default: current directory)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="${1:-$(pwd)}"
-cd "$SCRIPT_DIR"
-
-echo ""
-echo "=== ticket-auto-pipeline Environment Check ==="
-
-# ── Extra env vars validate-env.sh doesn't check ───────────────────────────
-
-extra_fail=0
-check_var() {
-  local name="$1" purpose="$2"
-  if [ -n "${!name:-}" ]; then
-    printf "  ✅ %-35s set (%s)\n" "$name" "$purpose"
-  else
-    printf "  ❌ %-35s MISSING (%s)\n" "$name" "$purpose"
-    extra_fail=1
-  fi
-}
-
-echo ""
-echo "Additional env vars:"
-check_var "ANTHROPIC_AUTH_TOKEN"   "Claude API key"
-check_var "GH_TOKEN"               "GitHub CLI (fallback for GITHUB_PERSONAL_ACCESS_TOKEN)"
-
-echo ""
-echo "Optional:"
-check_var "ANTHROPIC_BASE_URL"     "Custom API endpoint"
-check_var "ANTHROPIC_MODEL"        "Model override"
-check_var "GIT_AUTHOR_NAME"        "Commit authorship"
-check_var "GIT_AUTHOR_EMAIL"       "Commit email"
-check_var "TICKET_AUTONOMY"        "Autonomy mode (manual/auto/semi-auto)"
-
-# ── Delegate core checks (from project dir, where CLAUDE.md lives) ─────────
-
 cd "$PROJECT_DIR"
-bash "$SCRIPT_DIR/validate-env.sh" "./CLAUDE.md"
-core_exit=$?
+
+issues=0
+warns=0
+declare -A PROPOSED
+ENV_FIXES=""
+CMD_FIXES=""
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+found() { printf "  ✅ %-35s %s\n" "$1" "$2"; }
+miss()  {
+  local var="$1" detail="$2" proposed="${3:-}"
+  printf "  ❌ %-35s %s\n" "$var" "$detail"
+  if [ -n "$proposed" ]; then
+    PROPOSED["$var"]="$proposed"
+    ENV_FIXES+="    \"$var\": \"$proposed\","$'\n'
+  else
+    ENV_FIXES+="    \"$var\": \"<your-value>\","$'\n'
+  fi
+  issues=$((issues + 1))
+}
+warn()  { printf "  ⚠️  %-35s %s\n" "$1" "$2"; warns=$((warns + 1)); }
+
+# Derive git config values from the project directory
+GIT_NAME="$(cd "$PROJECT_DIR" && git config user.name 2>/dev/null || true)"
+GIT_EMAIL="$(cd "$PROJECT_DIR" && git config user.email 2>/dev/null || true)"
+
+echo ""
+echo "=== ticket-auto-pipeline v0.2.3 ==="
+echo ""
+
+# ── API keys ────────────────────────────────────────────────────────────────
+
+echo "API keys:"
+[ -n "${LINEAR_API_KEY:-}" ]       && found "LINEAR_API_KEY" "set" \
+                                   || miss "LINEAR_API_KEY" "required - add to ~/.claude/settings.local.json env"
+[ -n "${ANTHROPIC_AUTH_TOKEN:-}" ] && found "ANTHROPIC_AUTH_TOKEN" "set" \
+                                   || miss "ANTHROPIC_AUTH_TOKEN" "required - add to ~/.claude/settings.local.json env"
+
+# GitHub token
+if [ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]; then
+  found "GITHUB_PERSONAL_ACCESS_TOKEN" "set"
+  if [ -z "${GH_TOKEN:-}" ]; then
+    warn "GH_TOKEN" "not set - add to env as copy of GITHUB_PERSONAL_ACCESS_TOKEN"; PROPOSED["GH_TOKEN"]="(same as GITHUB_PERSONAL_ACCESS_TOKEN)"
+  else
+    found "GH_TOKEN" "set"
+  fi
+else
+  miss "GITHUB_PERSONAL_ACCESS_TOKEN" "required - add to ~/.claude/settings.local.json env"
+  [ -z "${GH_TOKEN:-}" ] && warn "GH_TOKEN" "also not set"
+fi
+
+# ── Optional env ────────────────────────────────────────────────────────────
+
+echo ""
+echo "Optional env:"
+[ -n "${ANTHROPIC_BASE_URL:-}" ]   && found "ANTHROPIC_BASE_URL" "set" \
+                                   || warn "ANTHROPIC_BASE_URL" "not set (using default)"
+[ -n "${ANTHROPIC_MODEL:-}" ]      && found "ANTHROPIC_MODEL" "set" \
+                                   || warn "ANTHROPIC_MODEL" "not set (using default)"
+
+# Git author
+if [ -n "${GIT_AUTHOR_NAME:-}" ]; then
+  found "GIT_AUTHOR_NAME" "set"
+else
+  if [ -n "$GIT_NAME" ]; then
+    warn "GIT_AUTHOR_NAME" "not set, propose: $GIT_NAME"
+    PROPOSED["GIT_AUTHOR_NAME"]="$GIT_NAME"
+  else
+    warn "GIT_AUTHOR_NAME" "not set - run: git config user.name"
+  fi
+fi
+
+if [ -n "${GIT_AUTHOR_EMAIL:-}" ]; then
+  found "GIT_AUTHOR_EMAIL" "set"
+else
+  if [ -n "$GIT_EMAIL" ]; then
+    warn "GIT_AUTHOR_EMAIL" "not set, propose: $GIT_EMAIL"
+    PROPOSED["GIT_AUTHOR_EMAIL"]="$GIT_EMAIL"
+  else
+    warn "GIT_AUTHOR_EMAIL" "not set - run: git config user.email"
+  fi
+fi
+
+# TICKET_AUTONOMY
+if [ -n "${TICKET_AUTONOMY:-}" ]; then
+  found "TICKET_AUTONOMY" "set to '$TICKET_AUTONOMY'"
+else
+  DOTENV_VAL=$(grep -oP '^TICKET_AUTONOMY=\K.*' "$PROJECT_DIR/.env" 2>/dev/null || true)
+  if [ -n "$DOTENV_VAL" ]; then
+    warn "TICKET_AUTONOMY" "not in env (found in .env: $DOTENV_VAL) - copy to settings.local.json env"
+    PROPOSED["TICKET_AUTONOMY"]="$DOTENV_VAL"
+  else
+    warn "TICKET_AUTONOMY" "not set (defaults to manual)"
+  fi
+fi
+
+# UAT_URL
+if [ -n "${UAT_URL:-}" ]; then
+  found "UAT_URL" "set in env"
+else
+  UAT_CLAUDE=$(grep -oP '^UAT_URL[=:]\s*\K.*' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null | head -1 | tr -d ' ' || true)
+  if [ -n "$UAT_CLAUDE" ]; then
+    found "UAT_URL" "$UAT_CLAUDE (from CLAUDE.md)"
+  else
+    UAT_GIT=$(cd "$PROJECT_DIR" && git remote get-url origin 2>/dev/null | sed 's|git@github.com:|https://github.com/|' | sed 's|\.git$||' || true)
+    if [ -n "$UAT_GIT" ]; then
+      warn "UAT_URL" "not set, propose: $UAT_GIT (from git remote)"
+      PROPOSED["UAT_URL"]="$UAT_GIT"
+    else
+      miss "UAT_URL" "not set - required for verify phase"
+    fi
+  fi
+fi
+
+# ── CLAUDE.md fields ────────────────────────────────────────────────────────
+
+echo ""
+echo "CLAUDE.md:"
+
+if [ ! -f "$PROJECT_DIR/CLAUDE.md" ]; then
+  printf "  ❌ %-35s %s\n" "CLAUDE.md" "not found at $PROJECT_DIR/CLAUDE.md"
+  issues=$((issues + 1))
+else
+  # REPOS_ROOT
+  if grep -q '^REPOS_ROOT[=:]\s*.' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
+    VAL=$(grep -oP '^REPOS_ROOT[=:]\s*\K.*' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ')
+    found "REPOS_ROOT" "$VAL"
+  else
+    DERIVED="$(echo "$PROJECT_DIR" | sed 's|/git/.*|/git|')"
+    printf "  ❌ %-35s %s\n" "REPOS_ROOT" "not in CLAUDE.md, propose: $DERIVED"
+    CMD_FIXES+="  REPOS_ROOT = $DERIVED"$'\n'
+    issues=$((issues + 1))
+  fi
+
+  # LOCAL_URL
+  if grep -qi 'LOCAL_URL.*https\?://' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
+    VAL=$(grep -oP 'LOCAL_URL[=:]\s*\K.*' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ')
+    found "LOCAL_URL" "$VAL"
+  else
+    warn "LOCAL_URL" "not in CLAUDE.md - needed for local dev server checks"
+  fi
+
+  # BE_TEST_CMD
+  if grep -q 'BE_TEST_CMD' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
+    found "BE_TEST_CMD" "present"
+  else
+    warn "BE_TEST_CMD" "not in CLAUDE.md - ticket-implement skips BE tests"
+  fi
+
+  # SLACK_CHANNEL
+  if grep -q 'SLACK_CHANNEL' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
+    found "SLACK_CHANNEL" "present"
+  else
+    warn "SLACK_CHANNEL" "not in CLAUDE.md - ticket-overseer prints to stdout only"
+  fi
+
+  # WIKI_ROOT
+  if grep -qi 'WIKI_ROOT\|wiki/' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
+    found "WIKI_ROOT" "present"
+  else
+    warn "WIKI_ROOT" "not in CLAUDE.md - appraise skips wiki bootstrapping"
+  fi
+fi
+
+# ── Proposed fixes ─────────────────────────────────────────────────────────
+
+if [ -n "$ENV_FIXES" ]; then
+  echo ""
+  echo "--- Missing env vars: add to ~/.claude/settings.local.json ---"
+  echo '{'
+  echo '  "env": {'
+  printf '%s' "$ENV_FIXES"
+  echo '  }'
+  echo '}'
+fi
+
+if [ -n "$CMD_FIXES" ]; then
+  echo ""
+  echo "--- Missing CLAUDE.md fields ---"
+  printf '%s' "$CMD_FIXES"
+fi
+
+if [ ${#PROPOSED[@]} -gt 0 ]; then
+  echo ""
+  echo "--- Suggested values for optional vars ---"
+  for var in "${!PROPOSED[@]}"; do
+    printf "  %-30s = %s\n" "$var" "${PROPOSED[$var]}"
+  done
+fi
 
 # ── Summary ────────────────────────────────────────────────────────────────
 
 echo ""
-if [ $extra_fail -eq 0 ] && [ $core_exit -eq 0 ]; then
+echo "---"
+if [ $issues -eq 0 ] && [ $warns -eq 0 ]; then
   echo "All checks passed."
-elif [ $extra_fail -ne 0 ]; then
-  echo "Additional env vars: missing — add to ~/.claude/settings.local.json under env:"
-  echo ""
-  echo '  {'
-  echo '    "env": {'
-  echo '      "ANTHROPIC_AUTH_TOKEN": "sk-ant-...",'
-  echo '      "GH_TOKEN": "ghp_..."'
-  echo '    }'
-  echo '  }'
+elif [ $issues -gt 0 ]; then
+  echo "$issues required, $warns warnings. Fixes proposed above."
+else
+  echo "All required values present ($warns warnings)."
 fi
 
-exit $(( extra_fail + core_exit ))
+exit $issues
