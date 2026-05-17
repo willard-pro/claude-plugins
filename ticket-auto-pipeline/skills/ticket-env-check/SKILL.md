@@ -17,10 +17,20 @@ No arguments. Run from the project directory containing `CLAUDE.md`.
 
 ## Execution
 
-Runs `env-check.sh` (synced to `~/.claude/skills/lib/` by the plugin startup hook), which checks additional env vars then delegates to `validate-env.sh` for core validation.
+Runs `env-check.sh`, which checks additional env vars then delegates to `validate-env.sh` for core validation. Tries the synced `~/.claude/skills/lib/` path first (available after the plugin's SessionStart hook fires), falling back to the plugin cache.
 
 ```bash
-bash ~/.claude/skills/lib/env-check.sh
+ENV_CHECK=""
+if [ -f ~/.claude/skills/lib/env-check.sh ]; then
+  ENV_CHECK=~/.claude/skills/lib/env-check.sh
+else
+  ENV_CHECK="$(ls ~/.claude/plugins/cache/willard-pro-claude-plugins/ticket-auto-pipeline/*/lib/env-check.sh 2>/dev/null | sort -V | tail -1)"
+fi
+if [ -n "$ENV_CHECK" ]; then
+  bash "$ENV_CHECK"
+else
+  echo "env-check.sh not found — reinstall the plugin"
+fi
 ```
 
 Checks performed:

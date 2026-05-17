@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # ticket-env-check — validates all env vars and config required by ticket-auto-pipeline.
-# Delegates to validate-env.sh for core checks, adds extras it doesn't cover.
+# Delegates core checks to validate-env.sh, adds extras it doesn't cover.
+#
+# Usage: env-check.sh [PROJECT_DIR]
+#   PROJECT_DIR  Path to project directory containing CLAUDE.md (default: current directory)
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="${1:-$(pwd)}"
 cd "$SCRIPT_DIR"
 
 echo ""
@@ -35,16 +39,18 @@ check_var "GIT_AUTHOR_NAME"        "Commit authorship"
 check_var "GIT_AUTHOR_EMAIL"       "Commit email"
 check_var "TICKET_AUTONOMY"        "Autonomy mode (manual/auto/semi-auto)"
 
-# ── Delegate core checks ───────────────────────────────────────────────────
+# ── Delegate core checks (from project dir, where CLAUDE.md lives) ─────────
 
-bash "$SCRIPT_DIR/validate-env.sh"
+cd "$PROJECT_DIR"
+bash "$SCRIPT_DIR/validate-env.sh" "./CLAUDE.md"
+core_exit=$?
 
 # ── Summary ────────────────────────────────────────────────────────────────
 
 echo ""
-if [ $extra_fail -eq 0 ]; then
-  echo "Additional env vars: all present"
-else
+if [ $extra_fail -eq 0 ] && [ $core_exit -eq 0 ]; then
+  echo "All checks passed."
+elif [ $extra_fail -ne 0 ]; then
   echo "Additional env vars: missing — add to ~/.claude/settings.local.json under env:"
   echo ""
   echo '  {'
@@ -54,3 +60,5 @@ else
   echo '    }'
   echo '  }'
 fi
+
+exit $(( extra_fail + core_exit ))

@@ -13,5 +13,19 @@
     "pipeline",
     "automation",
     "project-management"
-  ]
+  ],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'mkdir -p ~/.claude/skills/lib && cp \"${CLAUDE_PLUGIN_ROOT}/lib/\"*.sh ~/.claude/skills/lib/'",
+            "timeout": 10,
+            "statusMessage": "Syncing ticket-auto-pipeline lib scripts..."
+          }
+        ]
+      }
+    ]
+  }
 }
