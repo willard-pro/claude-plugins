@@ -69,7 +69,7 @@ GIT_NAME="$(cd "$PROJECT_DIR" && git config user.name 2>/dev/null || true)"
 GIT_EMAIL="$(cd "$PROJECT_DIR" && git config user.email 2>/dev/null || true)"
 
 echo ""
-echo "=== ticket-auto-pipeline v0.3.8 ==="
+echo "=== ticket-auto-pipeline v0.3.9 ==="
 echo ""
 
 # ── API keys ────────────────────────────────────────────────────────────────
@@ -320,15 +320,19 @@ echo "---END_VARS---"
 # ── Show raw findings table ─────────────────────────────────────────────────
 
 show_table() {
-  printf '%-30s %-8s %-35s %s\n' "NAME" "STATUS" "VALUE" "SOURCE"
-  printf '%-30s %-8s %-35s %s\n' "----" "------" "-----" "------"
+  printf '%-30s %-8s %-50s %s\n' "NAME" "STATUS" "VALUE" "SOURCE"
+  printf '%-30s %-8s %-50s %s\n' "----" "------" "-----" "------"
   for line in "${VAR_LINES[@]}"; do
     IFS='|' read -r status name value derivable location message <<< "$line"
     local src=""
     [ "$derivable" = "yes" ] && src="derived"
     [ "$status" = "ok" ] && src="$location"
+    # Resolve actual value from env for vars stored as "set" or "present"
+    if [ "$value" = "set" ] && [ -n "${!name:-}" ]; then
+      value="${!name}"
+    fi
     [ -z "$value" ] && value="-"
-    printf '%-30s %-8s %-35s %s\n' "$name" "$status" "$value" "$src"
+    printf '%-30s %-8s %-50s %s\n' "$name" "$status" "$value" "$src"
   done
 }
 
