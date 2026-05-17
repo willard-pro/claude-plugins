@@ -105,22 +105,14 @@ else
   fi
 fi
 
-# UAT_URL
+# UAT_URL — required by ticket-verify (aborts if absent), no derivation
 if [ -n "${UAT_URL:-}" ]; then
   found "UAT_URL" "set in env"
+elif grep -qi 'UAT_URL.*https\?://' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
+  UAT_CLAUDE=$(grep -oP '^UAT_URL[=:]\s*\K.*' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ' || true)
+  found "UAT_URL" "$UAT_CLAUDE (from CLAUDE.md)"
 else
-  UAT_CLAUDE=$(grep -oP '^UAT_URL[=:]\s*\K.*' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null | head -1 | tr -d ' ' || true)
-  if [ -n "$UAT_CLAUDE" ]; then
-    found "UAT_URL" "$UAT_CLAUDE (from CLAUDE.md)"
-  else
-    UAT_GIT=$(cd "$PROJECT_DIR" && git remote get-url origin 2>/dev/null | sed 's|git@github.com:|https://github.com/|' | sed 's|\.git$||' || true)
-    if [ -n "$UAT_GIT" ]; then
-      warn "UAT_URL" "not set, propose: $UAT_GIT (from git remote)"
-      PROPOSED["UAT_URL"]="$UAT_GIT"
-    else
-      miss "UAT_URL" "not set - required for verify phase"
-    fi
-  fi
+  miss "UAT_URL" "not set — required by ticket-verify for UAT environment checks"
 fi
 
 # ── CLAUDE.md fields ────────────────────────────────────────────────────────
