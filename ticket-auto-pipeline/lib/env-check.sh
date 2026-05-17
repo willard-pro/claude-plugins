@@ -45,7 +45,7 @@ GIT_NAME="$(cd "$PROJECT_DIR" && git config user.name 2>/dev/null || true)"
 GIT_EMAIL="$(cd "$PROJECT_DIR" && git config user.email 2>/dev/null || true)"
 
 echo ""
-echo "=== ticket-auto-pipeline v0.3.2 ==="
+echo "=== ticket-auto-pipeline v0.3.4 ==="
 echo ""
 
 # ── API keys ────────────────────────────────────────────────────────────────
