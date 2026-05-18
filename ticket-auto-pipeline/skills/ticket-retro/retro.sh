@@ -142,6 +142,65 @@ done
 
 PREDICTIONS_JSON+="]"
 
+# ── Heartbeat log parsing ──────────────────────────────────────────────────
+
+declare -A HB_FALLBACK_COUNT=()
+declare -A HB_DECISION_COUNT=()
+declare -A HB_RETRY_COUNT=()
+HB_LOGS_SCANNED=0
+HB_LOGS_WITH_DATA=0
+
+for log_file in "${LOG_FILES[@]}"; do
+  stem=$(basename "$log_file" .log)
+  ticket_id="${stem%-pipeline}"
+  hb_file="$(dirname "$log_file")/${ticket_id}-heartbeat.log"
+
+  if [ ! -f "$hb_file" ]; then
+    continue
+  fi
+  HB_LOGS_SCANNED=$((HB_LOGS_SCANNED + 1))
+  local_has_hb=0
+
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    local category event status
+    category=$(echo "$line" | cut -d'|' -f2)
+    event=$(echo "$line" | cut -d'|' -f3)
+    status=$(echo "$line" | cut -d'|' -f4)
+
+    [ "$category" = "META" ] && continue
+
+    if [ "$category" = "fallback" ] && [ "$status" = "fired" ]; then
+      HB_FALLBACK_COUNT["$event"]=$((${HB_FALLBACK_COUNT["$event"]:-0} + 1))
+      local_has_hb=1
+    elif [ "$category" = "decision" ] && [ "$status" = "fired" ]; then
+      HB_DECISION_COUNT["$event"]=$((${HB_DECISION_COUNT["$event"]:-0} + 1))
+      local_has_hb=1
+    elif [ "$category" = "retry" ]; then
+      HB_RETRY_COUNT["$event"]=$((${HB_RETRY_COUNT["$event"]:-0} + 1))
+      local_has_hb=1
+    fi
+  done < "$hb_file"
+
+  [ "$local_has_hb" -eq 1 ] && HB_LOGS_WITH_DATA=$((HB_LOGS_WITH_DATA + 1))
+done
+
+# Build heartbeat-derived JSON
+_HB_BUILD_OBJ() {
+  local -n _counts=$1
+  local first=1
+  echo -n "{"
+  for key in "${!_counts[@]}"; do
+    [ "$first" -eq 1 ] && first=0 || echo -n ", "
+    echo -n "\"$key\": ${_counts[$key]}"
+  done
+  echo -n "}"
+}
+
+HB_FALLBACK_JSON=$(_HB_BUILD_OBJ HB_FALLBACK_COUNT)
+HB_DECISION_JSON=$(_HB_BUILD_OBJ HB_DECISION_COUNT)
+HB_RETRY_JSON=$(_HB_BUILD_OBJ HB_RETRY_COUNT)
+
 # ── Build failure histogram JSON (sorted descending by count) ────────────
 
 HISTOGRAM_JSON="{"
@@ -181,6 +240,11 @@ jq -n \
   --argjson complexity_accuracy "$ACCURACY" \
   --arg histogram_str "$HISTOGRAM_JSON" \
   --arg predictions_str "$PREDICTIONS_JSON" \
+  --argjson hb_logs_scanned "$HB_LOGS_SCANNED" \
+  --argjson hb_logs_with_data "$HB_LOGS_WITH_DATA" \
+  --arg hb_fallback_str "$HB_FALLBACK_JSON" \
+  --arg hb_decision_str "$HB_DECISION_JSON" \
+  --arg hb_retry_str "$HB_RETRY_JSON" \
   '{
     window_days: $window_days,
     logs_scanned: $logs_scanned,
@@ -188,5 +252,12 @@ jq -n \
     failure_histogram: ($histogram_str | fromjson),
     gate_stop_total: $gate_stop_total,
     complexity_predictions: ($predictions_str | fromjson),
-    complexity_accuracy: $complexity_accuracy
+    complexity_accuracy: $complexity_accuracy,
+    heartbeat: {
+      logs_scanned: $hb_logs_scanned,
+      logs_with_data: $hb_logs_with_data,
+      fallback_frequency: ($hb_fallback_str | fromjson),
+      decision_patterns: ($hb_decision_str | fromjson),
+      retry_distribution: ($hb_retry_str | fromjson)
+    }
   }'

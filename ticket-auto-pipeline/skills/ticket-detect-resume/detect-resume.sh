@@ -3,9 +3,10 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../lib/linear-api.sh"
-source "$SCRIPT_DIR/../lib/ticket-dir.sh"
-source "$SCRIPT_DIR/../lib/notes-parse.sh"
+source "$SCRIPT_DIR/../../lib/heartbeat.sh"
+source "$SCRIPT_DIR/../../lib/linear-api.sh"
+source "$SCRIPT_DIR/../../lib/ticket-dir.sh"
+source "$SCRIPT_DIR/../../lib/notes-parse.sh"
 
 CURRENT_SCHEMA_VERSION=1
 
@@ -20,6 +21,16 @@ TICKET_ID="${1:-}"
 [ -z "$TICKET_ID" ] && usage
 
 LOG_FILE="$PWD/logs/${TICKET_ID}-pipeline.log"
+HB_LOG_FILE="$PWD/logs/${TICKET_ID}-heartbeat.log"
+
+# ── Heartbeat log validation ─────────────────────────────────────────────────
+if [ -f "$HB_LOG_FILE" ]; then
+  if ! hb_validate_file "$HB_LOG_FILE" 2>/dev/null; then
+    hb_gate "schema-check" "fail" "heartbeat log validation failed" "{\"file\":\"$HB_LOG_FILE\"}"
+  else
+    hb_gate "schema-check" "ok" "heartbeat log valid" "{\"file\":\"$HB_LOG_FILE\"}"
+  fi
+fi
 
 # ── Schema version check ─────────────────────────────────────────────────────
 # Must happen before any resume logic so a mismatch aborts cleanly.
@@ -45,6 +56,7 @@ EOF
     if grep -qP '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\|[A-Z-]+\|[^|]+\|[^|]+\|' "$LOG_FILE" 2>/dev/null; then
       echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >> "$LOG_FILE"
       echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|migration|info|v0-grace-applied" >> "$LOG_FILE"
+      hb_gate "schema-check" "ok" "v0-grace applied — no schema header, entries look valid"
     else
       cat <<EOF
 DETECT_RESUME_RESULT
@@ -95,8 +107,10 @@ if [ "$RESUME_STEP" = "GATE_HELD" ]; then
   ISSUE_JSON=$(get_issue "$TICKET_ID" 2>/dev/null || echo 'null')
   if echo "$ISSUE_JSON" | jq -e '.labels.nodes[] | select(.name | ascii_downcase == "approved")' > /dev/null 2>&1; then
     RESUME_STEP="STEP_4"
+    hb_gate "resume-point" "ok" "gate was held but approved label found — resuming at STEP_4"
   else
     RESUME_STEP="GATE_STILL_HELD"
+    hb_gate "resume-point" "fail" "gate still held — requires approval"
   fi
 fi
 

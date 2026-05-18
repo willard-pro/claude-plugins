@@ -44,6 +44,13 @@ Read `CLAUDE.md` and extract: `{ISSUE_PREFIX}` (issue ID prefix, e.g. `CRE`), `{
 
 If `$LOG_FILE` is set (passed by the `ticket-auto` orchestrator): read `~/.claude/skills/pipeline-log-format.md`. After each major step below, write progress entries to `$LOG_FILE` using the format defined there. Phase is `PR-REVIEW`.
 
+## Heartbeat (--from-auto)
+
+If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/skills/lib/heartbeat.sh` then write heartbeat entries at these points:
+- **Requirement extraction**: after extracting requirements from the ticket, write `hb_decision "requirement-extraction" "ok" "extracted N requirements" '{"count":"N"}'`
+- **CI checks**: after checking CI status, write `hb_gate "ci-checks" "ok|fail" "CI status: <state>" '{"state":"<passing|failing>"}'`
+- **Merge decision**: after rendering verdict, write `hb_decision "merge-decision" "fired" "verdict" '{"verdict":"<✅|⚠️|❌>"}'`
+
 ---
 
 ## Step dispatch (--from-step)

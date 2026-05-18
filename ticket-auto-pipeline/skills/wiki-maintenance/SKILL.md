@@ -7,6 +7,21 @@ description: Incorporates unresolved errata entries from ticket-implement feedba
 
 You are maintaining pre-traced call-chain wiki files. Your input is errata entries appended by `ticket-implement` Step 4c — each entry describes a gap found during actual ticket work. Your job is to incorporate those fixes into the flow content and mark them resolved.
 
+## Logging (--from-auto)
+
+If `$LOG_FILE` is set (passed by the `ticket-auto` orchestrator): read `~/.claude/skills/pipeline-log-format.md`. Write progress entries at step boundaries. Phase is `MAINTENANCE`.
+
+## Heartbeat (--from-auto)
+
+If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/skills/lib/heartbeat.sh` then write heartbeat entries at these points:
+- **Wiki bootstrap**: if WIKI_ROOT not found in CLAUDE.md, write `hb_fallback "wiki-bootstrap" "fail" "WIKI_ROOT not in CLAUDE.md" '{"reason":"no WIKI_ROOT configured"}'`
+- **Errata discovered**: after scanning all wiki files, write `hb_decision "errata-count" "info" "{N} unresolved entries found" '{"count":"{N}"}'`; if none found, write `hb_decision "errata-count" "info" "all errata resolved"`
+- **New file created**: if a fix requires creating a new wiki file, write `hb_decision "wiki-file-created" "fired" "created {filename}" '{"file":"{filename}"}'`
+- **Unclear entry**: if an errata entry is unclear and skipped, write `hb_decision "errata-skipped" "warn" "unclear entry skipped" '{"ticket":"{TICKET-ID}"}'`
+- **Maintenance complete**: after all entries processed, write `hb_decision "maintenance-complete" "fired" "{N} errata processed, {M} files modified" '{"processed":"{N}","modified":"{M}"}'`
+
+---
+
 ## Step 0 — Detect project context
 
 Read `CLAUDE.md` from the current working directory and extract `{WIKI_ROOT}`. Stop here if no `WIKI_ROOT` line is found — no wiki exists for this project.

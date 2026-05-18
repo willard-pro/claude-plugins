@@ -103,6 +103,47 @@ def parse_pipeline_log(path: str) -> list[LogEvent]:
     return events
 
 
+def parse_heartbeat_line(line: str) -> Optional[tuple]:
+    """Parse a heartbeat log line into (category, event, status, ts, msg, detail).
+    Returns None for meta/schema lines or malformed lines."""
+    parts = line.strip().split("|", 5)
+    if len(parts) < 5:
+        return None
+    if parts[1] == "META":
+        return None
+    return (parts[1], parts[2], parts[3], parse_ts(parts[0]), parts[4],
+            parts[5] if len(parts) > 5 else "")
+
+
+def collect_heartbeat_data(workspace: str) -> dict[str, datetime]:
+    """Map ticket_id → timestamp of last orchestrator-waiting heartbeat."""
+    last_hb: dict[str, datetime] = {}
+    logs_dir = os.path.join(workspace, "logs")
+    if not os.path.isdir(logs_dir):
+        return last_hb
+
+    for fname in os.listdir(logs_dir):
+        if not fname.endswith("-heartbeat.log"):
+            continue
+        m = re.match(r"^((?:[A-Z]+-)?\d+)", fname)
+        if not m:
+            continue
+        tid = m.group(1)
+        path = os.path.join(logs_dir, fname)
+        try:
+            with open(path) as f:
+                latest = None
+                for line in f:
+                    hb = parse_heartbeat_line(line)
+                    if hb and hb[0] == "heartbeat" and hb[1] == "orchestrator-waiting":
+                        latest = hb[3]
+                if latest:
+                    last_hb[tid] = latest
+        except OSError:
+            pass
+    return last_hb
+
+
 def parse_auto_session(path: str) -> Optional[SessionTrace]:
     """Parse an auto-session.md file into a SessionTrace."""
     try:
@@ -404,7 +445,8 @@ def generate_standup(workspace: str, ref_date: datetime) -> str:
     return "\n".join(lines)
 
 
-def generate_status(workspace: str, stale_minutes: int = 30) -> str:
+def generate_status(workspace: str, stale_minutes: int = 30,
+                    last_heartbeats: Optional[dict] = None) -> str:
     summaries = build_summaries(workspace)
     now = datetime.now(timezone.utc)
 
@@ -418,10 +460,17 @@ def generate_status(workspace: str, stale_minutes: int = 30) -> str:
             if was_today(ts, now) and (is_completed(ts) or is_stopped(ts)):
                 recent.append(ts)
 
-    # Check for stalled tickets — active but no recent events
+    # Check for stalled tickets — prefer heartbeat-based detection,
+    # fall back to started_at if no heartbeat data available
     stalled_threshold = now - timedelta(minutes=stale_minutes)
-    stalled = [ts for ts in active
-               if ts.started_at and ts.started_at < stalled_threshold]
+    stalled = []
+    for ts in active:
+        if last_heartbeats and ts.ticket_id in last_heartbeats:
+            # Heartbeat-based: check if last orchestrator-waiting is stale
+            if last_heartbeats[ts.ticket_id] < stalled_threshold:
+                stalled.append(ts)
+        elif ts.started_at and ts.started_at < stalled_threshold:
+            stalled.append(ts)
 
     lines = []
     lines.append(f"# Bot Status — {now.strftime('%Y-%m-%d %H:%M UTC')}")
@@ -441,8 +490,12 @@ def generate_status(workspace: str, stale_minutes: int = 30) -> str:
             lines.append(f"- Phases: {_fmt_phases(ts)}")
             # Stale warning
             if ts in stalled:
-                stale_mins = int((now - ts.started_at).total_seconds() // 60)
-                lines.append(f"- ⚠️ **No progress in {stale_mins} minutes — may be stalled**")
+                if last_heartbeats and ts.ticket_id in last_heartbeats:
+                    stale_mins = int((now - last_heartbeats[ts.ticket_id]).total_seconds() // 60)
+                    lines.append(f"- ⚠️ **Last heartbeat {stale_mins}m ago — pipeline may be hung**")
+                else:
+                    stale_mins = int((now - ts.started_at).total_seconds() // 60)
+                    lines.append(f"- ⚠️ **No progress in {stale_mins} minutes — may be stalled**")
             lines.append("")
     else:
         lines.append("_No active tickets._")
@@ -467,7 +520,11 @@ def generate_status(workspace: str, stale_minutes: int = 30) -> str:
     alerts = []
     if stalled:
         for ts in stalled:
-            alerts.append(f"- ⚠️ **{ts.ticket_id}** stalled at `{ts.active_phase}` — {ts.elapsed} elapsed")
+            if last_heartbeats and ts.ticket_id in last_heartbeats:
+                stale_mins = int((now - last_heartbeats[ts.ticket_id]).total_seconds() // 60)
+                alerts.append(f"- ⚠️ **{ts.ticket_id}** hung at `{ts.active_phase}` — last heartbeat {stale_mins}m ago")
+            else:
+                alerts.append(f"- ⚠️ **{ts.ticket_id}** stalled at `{ts.active_phase}` — {ts.elapsed} elapsed")
 
     held_tickets = [ts for ts in summaries.values()
                     if "held" in ts.gate_result.lower() and not is_completed(ts)]
@@ -561,7 +618,9 @@ def main():
             f.write(report)
 
     elif args.mode == "status":
-        report = generate_status(workspace, stale_minutes=args.stale_minutes)
+        last_hb = collect_heartbeat_data(workspace)
+        report = generate_status(workspace, stale_minutes=args.stale_minutes,
+                                 last_heartbeats=last_hb)
         print(report)
         ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%MZ")
         out_path = os.path.join(reports_dir, f"status-{ts}.md")

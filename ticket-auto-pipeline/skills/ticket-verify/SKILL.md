@@ -48,6 +48,14 @@ Always check `$LINEAR_API_KEY` before each operation and use the appropriate met
 
 If `$LOG_FILE` is set (passed by the `ticket-auto` orchestrator): read `~/.claude/skills/pipeline-log-format.md`. Write progress entries at step boundaries. Phase is `VERIFY`. Step-level entries (in order): `load-context`, `build-plan`, `browser-session`, `navigate`, `execute-steps`.
 
+## Heartbeat (--from-auto)
+
+If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/skills/lib/heartbeat.sh` then write heartbeat entries at these points:
+- **Browser session**: after starting Playwright, write `hb_api "browser-session" "ok" "browser session established"`; if session fails, write `hb_api "browser-session" "fail" "browser session failed"`
+- **Navigation**: after each page navigation, write `hb_api "browser-navigate" "ok" "navigated to <url>" '{"url":"...","title":"..."}'`
+- **Session resume**: if browser session was lost and resumed, write `hb_fallback "browser-resume" "fired" "session lost, rebuilding plan" '{"reason":"Playwright session lost"}'`
+- **Verdict**: after the final pass/fail determination, write `hb_decision "verification-verdict" "fired" "PASS|FAIL" '{"verdict":"PASS|FAIL","criteria_met":"N","criteria_total":"M"}'`
+
 ---
 
 ## Step dispatch (--from-step)
