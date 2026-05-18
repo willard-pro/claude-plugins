@@ -228,6 +228,7 @@ emit_vars() {
   echo "---BEGIN_VARS---"
   printf 'NAME|STATUS|VALUE|LOCATION|NOTE\n'
   for line in "${VAR_LINES[@]}"; do echo "$line"; done
+  echo "ROWCOUNT=${#VAR_LINES[@]}"
   echo "---END_VARS---"
 }
 
