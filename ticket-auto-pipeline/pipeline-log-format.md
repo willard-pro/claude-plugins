@@ -98,3 +98,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|<CODE>" >> "$LOG_FILE"
 2. Only write steps you actually execute — don't pre-declare future steps.
 3. `MSG` should be brief (under 60 chars). Put details in trace.md, not here.
 4. If `$LOG_FILE` is unset, skip logging — don't create a file in the wrong place.
+
+## Heartbeat log
+
+A companion heartbeat log captures decisions, fallbacks, retries, and liveness signals at fine granularity. See [`pipeline-heartbeat-format.md`](pipeline-heartbeat-format.md) for the format specification.

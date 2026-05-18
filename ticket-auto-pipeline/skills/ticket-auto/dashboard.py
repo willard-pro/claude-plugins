@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
 ticket-auto pipeline dashboard
-Usage: python3 dashboard.py <log-file>
+Usage: python3 dashboard.py <log-file> [--heartbeat]
 Log format: {ISO}|{PHASE}|{STEP}|{STATUS}|{MSG}
+Heartbeat format: {ISO}|{CATEGORY}|{EVENT}|{STATUS}|{MSG}|{DETAIL}
 """
 
 import sys
 import time
 import argparse
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
@@ -16,6 +18,8 @@ from collections import deque
 from rich.live import Live
 from rich.text import Text
 from rich.panel import Panel
+from rich.layout import Layout
+from rich.console import Group
 
 PHASE_ORDER = ["APPRAISE", "EXEC", "GATE", "IMPLEMENT", "VERIFY", "MAINTENANCE", "PR-REVIEW"]
 
@@ -30,6 +34,16 @@ PHASE_STEPS = {
 }
 
 SPINNERS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+
+HB_CATEGORY_COLORS = {
+    "decision": "bold cyan",
+    "fallback": "bold yellow",
+    "heartbeat": "green",
+    "api": "blue",
+    "gate": "bold magenta",
+    "retry": "yellow",
+    "source": "dim white",
+}
 
 
 @dataclass
@@ -76,6 +90,7 @@ class PipelineState:
     outcome: Optional[str] = None
     artifacts: list = field(default_factory=list)  # list of (label, path)
     log_lines: deque = field(default_factory=lambda: deque(maxlen=5))
+    hb_lines: deque = field(default_factory=lambda: deque(maxlen=5))
     tick: int = 0
 
     def elapsed(self) -> str:
@@ -139,12 +154,10 @@ class StateBuilder:
             elif step == "outcome":
                 self.state.outcome = msg
             elif step == "artifact":
-                # MSG format: label:path
                 if ":" in msg:
                     label, path = msg.split(":", 1)
                     self.state.artifacts.append((label.strip(), path.strip()))
             elif step == "tokens":
-                # MSG format: PHASE:input/output/cache
                 if ":" in msg:
                     phase_name, counts = msg.split(":", 1)
                     parts = counts.split("/")
@@ -183,13 +196,28 @@ class StateBuilder:
             ss.end_ts = ts
             if msg:
                 ss.msg = msg
-            # Mark phase done when its terminal step finishes
             terminal = PHASE_STEPS.get(phase, [""])[- 1]
             if step in ("handoff", terminal):
                 ps.status = "fail" if status == "fail" else ("skip" if status == "skip" else "done")
                 ps.end_ts = ts
                 if self.state.active_phase == phase:
                     self.state.active_phase = None
+
+    def apply_heartbeat(self, line: str):
+        """Parse a heartbeat log line into the hb_lines deque."""
+        parts = line.split("|")
+        if len(parts) < 5:
+            return
+        if parts[1] == "META":
+            return  # skip schema header
+        ts_str, category, event, status, msg = parts[0], parts[1], parts[2], parts[3], parts[4]
+        try:
+            ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        except Exception:
+            return
+        self.state.hb_lines.append(
+            f"{ts.strftime('%H:%M:%S')}  {category:<8}  {event:<18}  {status:<5}  {msg[:30]}"
+        )
 
 
 class Renderer:
@@ -198,6 +226,22 @@ class Renderer:
 
     def _spinner(self) -> str:
         return SPINNERS[self._tick % len(SPINNERS)]
+
+    def render_heartbeat_panel(self, state: PipelineState) -> Panel:
+        t = Text()
+        t.append("heartbeat — last 5 events\n", style="bold magenta")
+        t.append("  " + "─" * 68 + "\n", style="dim magenta")
+
+        if not state.hb_lines:
+            t.append("  waiting for heartbeat data...\n", style="dim")
+        else:
+            for entry in list(state.hb_lines):
+                # Color by category
+                category = entry[9:17].strip()  # field at position 10-17 in formatted line
+                color = HB_CATEGORY_COLORS.get(category, "dim")
+                t.append(f"  {entry}\n", style=color)
+
+        return Panel(t, border_style="magenta", padding=(0, 1))
 
     def render(self, state: PipelineState) -> Panel:
         self._tick += 1
@@ -236,7 +280,6 @@ class Renderer:
             elif ps.status == "skip":
                 t.append("— ", style="dim")
                 t.append(name, style="dim italic")
-            # Token count for completed/active phases
             if ps and ps.tokens:
                 inp, out, cache = ps.tokens
                 total = inp + out + cache
@@ -299,7 +342,7 @@ class Renderer:
                     t.append("  ○  ", style="dim")
                     t.append(f"{ss.name:<22}\n", style="dim")
 
-        # Token summary (after all phases, before log tail)
+        # Token summary
         phases_with_tokens = [(n, p) for n, p in state.phases.items() if p and p.tokens]
         if phases_with_tokens:
             total_in = sum(p.tokens[0] for _, p in phases_with_tokens)
@@ -333,18 +376,40 @@ class Renderer:
 def main():
     parser = argparse.ArgumentParser(description="ticket-auto pipeline dashboard")
     parser.add_argument("log_file", help="Path to pipeline log file")
+    parser.add_argument("--heartbeat", action="store_true", help="Also render heartbeat log panel")
     args = parser.parse_args()
 
     reader = LogReader(args.log_file)
     builder = StateBuilder()
     renderer = Renderer()
 
+    # Heartbeat log reader
+    hb_reader = None
+    if args.heartbeat:
+        hb_path = args.log_file.replace("-pipeline.log", "-heartbeat.log")
+        if os.path.exists(hb_path):
+            hb_reader = LogReader(hb_path)
+
     with Live(refresh_per_second=4, screen=True) as live:
         while True:
             for line in reader.read_new_lines():
                 builder.apply(line)
+            if hb_reader:
+                for line in hb_reader.read_new_lines():
+                    builder.apply_heartbeat(line)
             builder.state.tick += 1
-            live.update(renderer.render(builder.state))
+
+            if args.heartbeat:
+                # Two-panel layout
+                layout = Layout()
+                layout.split_column(
+                    Layout(renderer.render(builder.state), name="pipeline"),
+                    Layout(renderer.render_heartbeat_panel(builder.state), name="heartbeat"),
+                )
+                live.update(layout)
+            else:
+                live.update(renderer.render(builder.state))
+
             if builder.state.outcome is not None:
                 time.sleep(3)
                 break
