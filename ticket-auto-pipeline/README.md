@@ -120,6 +120,7 @@ Skills plan, reason, and navigate code. `flow.sh` executes mutations with idempo
 | `ticket-dir.sh` | `resolve_ticket_dir <ID>` finds workspace directories matching `{ID}--slug` pattern. |
 | `validate-env.sh` | Validates env vars and CLAUDE.md fields required for the pipeline. |
 | `notes-parse.sh` | Extracts complexity score from `notes.md`. |
+| `heartbeat.sh` | Fine-grained operational log library. 7 helpers (`hb_init`, `hb_decision`, `hb_fallback`, `hb_heartbeat`, `hb_api`, `hb_gate`, `hb_retry`, `hb_source`) validate and write 6-field entries. All helpers are no-ops when `HB_LOG_FILE` is unset. |
 
 ### Pipeline Log Format
 
@@ -135,9 +136,25 @@ Pipe-delimited: `ISO|PHASE|STEP|STATUS|MSG`. Used by the orchestrator and all su
 
 Phases: `APPRAISE` → `EXEC` → `GATE` → `IMPLEMENT` → `VERIFY` → `PR-REVIEW` → `MAINTENANCE`. `META` is a pseudo-phase for schema version, gate results, outcomes, and artifact paths.
 
+### Heartbeat Log Format
+
+Pipe-delimited: `ISO|CATEGORY|EVENT|STATUS|MSG|DETAIL`. Records decisions, fallbacks, retries, liveness signals, API timing, gate evaluations, and configuration provenance. Complements the pipeline log — pipeline tracks _what_, heartbeat tracks _why_.
+
+| Category | Meaning | Typical status |
+|----------|---------|----------------|
+| `decision` | Complexity scoring, merge verdicts, autonomy resolution | `fired` |
+| `fallback` | Primary path unavailable, fallback activated | `fired` |
+| `heartbeat` | Periodic liveness signal during long operations | `ok` |
+| `api` | External API call (Linear, GitHub, Playwright) | `ok`, `fail` |
+| `gate` | Gate evaluation, trigger dispatch, idempotency checks | `ok`, `fail` |
+| `retry` | Error classification and retry decision | `info`, `fired` |
+| `source` | Configuration value provenance (UAT_URL resolution, etc.) | `info` |
+
+`DETAIL` is a flat JSON object with string values (`{"key":"value"}`) or `{}`. Schema version **1** — declared as first line: `ISO|META|schema|info|1|{}`. All writes via `lib/heartbeat.sh` helpers; agents supply values, the library enforces format. Consumers: `dashboard.py` (dual-panel view), `report.py` (stall detection), `retro.sh` (trend aggregation).
+
 ### Crash Recovery
 
-`/ticket-detect-resume` reads the pipeline log to find the last completed step. The orchestrator resumes from that point — the log is the checkpoint. Schema versioning (currently v1) protects against log format drift.
+`/ticket-detect-resume` reads the pipeline log to find the last completed step. The orchestrator resumes from that point — the log is the checkpoint. Schema versioning (currently v1) protects against log format drift. Heartbeat log entries provide additional operational context for diagnosing failures during recovery.
 
 ## Ticket Auto — Autonomy Modes
 
