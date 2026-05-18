@@ -19,15 +19,13 @@ No arguments. Run from the project directory containing `CLAUDE.md`.
 
 ### Step 1 — Run the check
 
-Write `env-check.sh` output to a temp file (avoids bash stdout truncation). Tries the synced `~/.claude/skills/lib/` path first, falling back to the plugin cache.
+Write `env-check.sh` output to a temp file (avoids bash stdout truncation). Tries the plugin cache first (picks latest by version), falling back to the synced `~/.claude/skills/lib/` path.
 
 ```bash
 rm -f /tmp/env-check-output.txt
-ENV_CHECK=""
-if [ -f ~/.claude/skills/lib/env-check.sh ]; then
+ENV_CHECK="$(ls ~/.claude/plugins/cache/willard-pro-claude-plugins/ticket-auto-pipeline/*/lib/env-check.sh 2>/dev/null | sort -V | tail -1)"
+if [ -z "$ENV_CHECK" ] && [ -f ~/.claude/skills/lib/env-check.sh ]; then
   ENV_CHECK=~/.claude/skills/lib/env-check.sh
-else
-  ENV_CHECK="$(ls ~/.claude/plugins/cache/willard-pro-claude-plugins/ticket-auto-pipeline/*/lib/env-check.sh 2>/dev/null | sort -V | tail -1)"
 fi
 if [ -n "$ENV_CHECK" ]; then
   bash "$ENV_CHECK" --summary-file /tmp/env-check-output.txt || true
