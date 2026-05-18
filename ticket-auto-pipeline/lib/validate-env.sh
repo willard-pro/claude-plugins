@@ -53,36 +53,63 @@ if [ ! -f "$CLAUDE_MD" ]; then
 fi
 
 # -- REPOS_ROOT ---------------------------------------------------------------
-if grep -q 'microservices/gateway/' "$CLAUDE_MD" && grep -q 'Codebase Projects' "$CLAUDE_MD"; then
-  pass "REPOS_ROOT (codebase table present)"
+if grep -q '^REPOS_ROOT[=:]\s*.' "$CLAUDE_MD" 2>/dev/null; then
+  val=$(grep -oP '^REPOS_ROOT[=:]\s*\K.*' "$CLAUDE_MD" | head -1 | tr -d ' ')
+  pass "REPOS_ROOT ($val)"
 else
-  fail "REPOS_ROOT" "CLAUDE.md missing Codebase Projects table — skills can't resolve repo paths"
+  DERIVED=""
+  WALK_DIR="$(dirname "$CLAUDE_MD")"
+  while [ "$WALK_DIR" != "/" ] && [ "$WALK_DIR" != "." ]; do
+    COUNT=0
+    for child in "$WALK_DIR"/*/; do
+      [ -d "$child" ] || continue
+      if [ -d "$child/.git" ] || [ -f "$child/CLAUDE.md" ]; then
+        COUNT=$((COUNT + 1))
+      fi
+    done
+    if [ "$COUNT" -ge 2 ]; then
+      DERIVED="$WALK_DIR"
+      break
+    fi
+    WALK_DIR="$(dirname "$WALK_DIR")"
+  done
+  if [ -n "$DERIVED" ]; then
+    fail "REPOS_ROOT" "not in CLAUDE.md — propose: REPOS_ROOT = $DERIVED"
+  else
+    fail "REPOS_ROOT" "CLAUDE.md missing REPOS_ROOT = /path/to/repos — skills can't resolve repo paths"
+  fi
 fi
 
 # -- LOCAL_URL ----------------------------------------------------------------
-if grep -q 'LOCAL_URL.*http' "$CLAUDE_MD" 2>/dev/null; then
-  pass "LOCAL_URL ($(grep 'LOCAL_URL' "$CLAUDE_MD" | head -1 | sed 's/.*`//;s/`.*//'))"
+if [ -n "${LOCAL_URL:-}" ]; then
+  pass "LOCAL_URL ($LOCAL_URL via env)"
+elif grep -qi 'LOCAL_URL.*https\?://' "$CLAUDE_MD" 2>/dev/null; then
+  val=$(grep -oP 'LOCAL_URL[=:]\s*\K.*' "$CLAUDE_MD" | head -1 | tr -d ' ')
+  pass "LOCAL_URL ($val)"
 else
-  fail "LOCAL_URL" "add 'LOCAL_URL = {LOCAL_URL}' to CLAUDE.md"
+  fail "LOCAL_URL" "required by ticket-verify — add to env or CLAUDE.md"
 fi
 
 # -- UAT_URL ------------------------------------------------------------------
-if grep -q 'UAT_URL.*https\?://' "$CLAUDE_MD" 2>/dev/null; then
-  pass "UAT_URL ($(grep 'UAT_URL' "$CLAUDE_MD" | head -1 | sed 's/.*`//;s/`.*//'))"
+if [ -n "${UAT_URL:-}" ]; then
+  pass "UAT_URL ($UAT_URL via env)"
+elif grep -qi 'UAT_URL.*https\?://' "$CLAUDE_MD" 2>/dev/null; then
+  val=$(grep -oP 'UAT_URL[=:]\s*\K.*' "$CLAUDE_MD" | head -1 | tr -d ' ')
+  pass "UAT_URL ($val)"
 else
-  fail "UAT_URL" "add 'UAT_URL = {UAT_URL}' to CLAUDE.md"
+  fail "UAT_URL" "required by ticket-verify — add to env or CLAUDE.md"
 fi
 
 # -- BE_TEST_CMD (optional) ---------------------------------------------------
 if grep -q 'BE_TEST_CMD' "$CLAUDE_MD" 2>/dev/null; then
-  pass "BE_TEST_CMD ($(grep 'BE_TEST_CMD' "$CLAUDE_MD" | head -1 | sed 's/.*`//;s/`.*//'))"
+  pass "BE_TEST_CMD (present)"
 else
   warn "BE_TEST_CMD" "missing — ticket-implement will skip BE tests"
 fi
 
 # -- SLACK_CHANNEL (optional) -------------------------------------------------
 if grep -q 'SLACK_CHANNEL' "$CLAUDE_MD" 2>/dev/null; then
-  pass "SLACK_CHANNEL ($(grep 'SLACK_CHANNEL' "$CLAUDE_MD" | head -1 | sed 's/.*`//;s/`.*//'))"
+  pass "SLACK_CHANNEL (present)"
 else
   warn "SLACK_CHANNEL" "missing — ticket-overseer will print to stdout only"
 fi
