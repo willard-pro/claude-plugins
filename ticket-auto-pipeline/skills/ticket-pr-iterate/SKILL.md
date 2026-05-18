@@ -29,6 +29,16 @@ Read `CLAUDE.md` and extract: `{REPOS_ROOT}` (parent path of all service dirs), 
 
 If `$LOG_FILE` is set (passed by the `ticket-auto` orchestrator): read `~/.claude/skills/pipeline-log-format.md`. Write progress entries at step boundaries. Phase is `PR-REVIEW`. Step-level entries (in order): `iterate-load`, `iterate-findings`, `iterate-plan`, `iterate-notes`, `iterate-linear`.
 
+## Heartbeat (--from-auto)
+
+If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/skills/lib/heartbeat.sh` then write heartbeat entries at these points:
+- **Findings source**: after locating review findings, write `hb_decision "findings-source" "info" "findings from {PR|session-file}" '{"source":"{pr|session-file}"}'`
+- **Session fallback**: if no PR found and falling back to pr-review-session.md, write `hb_fallback "pr-review-data" "fired" "no PR found, using session file" '{"reason":"gh pr view returned no results"}'
+- **Verdict already passing**: if verdict is ✅ (no gaps), write `hb_decision "iteration-skip" "info" "PR review already passed, no iteration needed"`
+- **Iteration guard**: if N > 3 (too many iterations), write `hb_gate "iteration-limit" "fail" "iteration #{N} exceeds limit" '{"iterations":"{N}"}'`
+- **Gap count**: after parsing gaps, write `hb_decision "gap-count" "fired" "{N} gaps to address" '{"count":"{N}"}'`
+- **Artifact updated**: after updating the plan artifact, write `hb_decision "plan-updated" "fired" "appended PR Review #{N} to {ARTIFACT}" '{"artifact":"{ARTIFACT}","iteration":"{N}"}'`
+
 ---
 
 ## Step dispatch (--from-step)

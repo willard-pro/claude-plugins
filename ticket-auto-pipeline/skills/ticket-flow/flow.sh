@@ -3,7 +3,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../lib/linear-api.sh"
+source "$SCRIPT_DIR/../../lib/heartbeat.sh"
+source "$SCRIPT_DIR/../../lib/linear-api.sh"
 
 SM="$SCRIPT_DIR/state-machine.json"
 
@@ -95,6 +96,7 @@ fi
 # Emit trigger-def to pipeline log
 _emit_schema_header
 _log "META|trigger-def|info|${TRIGGER}:$(echo "$def" | jq -c '.')"
+hb_gate "trigger-dispatch" "fired" "trigger ${TRIGGER} dispatched" '{"trigger":"'"$TRIGGER"'"}'
 
 # ── Derive state machine variables from trigger def ─────────────────────────
 
@@ -217,6 +219,7 @@ fi
 IDEMPOTENT=false
 if ! $STATE_CHANGED && ! $LABELS_CHANGED && [ "$SET_ASSIGNEE_ME" = "false" ]; then
   IDEMPOTENT=true
+  hb_gate "idempotent-skip" "ok" "no mutation needed, desired state matches current" '{"trigger":"'"$TRIGGER"'"}'
   exit 0
 fi
 
@@ -287,7 +290,10 @@ if ! $IDEMPOTENT; then
     local_details="trigger=${TRIGGER} expected_state=${NEW_STATE_NAME:-none} actual_state=${LIVE_STATE} ${assert_details}"
     echo "STATE_ASSERTION_FAILED: $local_details" >&2
     _log "META|assert|fail|${local_details}"
+    hb_gate "assertion" "fail" "post-trigger assertion failed" "{\"trigger\":\"$TRIGGER\",\"detail\":\"${assert_details:0:60}\"}"
     exit 7
+  else
+    hb_gate "assertion" "ok" "post-trigger assertion passed" "{\"trigger\":\"$TRIGGER\"}"
   fi
 fi
 

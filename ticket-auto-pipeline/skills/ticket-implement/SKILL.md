@@ -46,6 +46,13 @@ Read `CLAUDE.md` and extract: `{REPOS_ROOT}` (parent path of all service dirs), 
 
 If `$LOG_FILE` is set (passed by the `ticket-auto` orchestrator): read `~/.claude/skills/pipeline-log-format.md`. After each major step below, write progress entries to `$LOG_FILE` using the format defined there. Phase is `IMPLEMENT`.
 
+## Heartbeat (--from-auto)
+
+If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/skills/lib/heartbeat.sh` then write heartbeat entries at these points:
+- **Test command**: if BE_TEST_CMD found, write `hb_heartbeat "test-command" "BE_TEST_CMD configured" '{"cmd":"<cmd>"}'`; if absent, write `hb_heartbeat "test-command" "skip" "no BE_TEST_CMD"`
+- **Artifact path**: after detecting the plan artifact, write `hb_decision "artifact-path" "info" "artifact detected" '{"type":"simple-fix|openspec"}'`
+- **Implementation mode**: after detect-path, write `hb_decision "implementation-mode" "fired" "simple|openspec" '{"mode":"..."}'`
+
 ---
 
 ## Step dispatch (--from-step)

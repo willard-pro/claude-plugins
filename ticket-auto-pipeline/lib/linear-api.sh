@@ -2,6 +2,10 @@
 # Shared Linear GraphQL API helpers. Source this file from skill scripts.
 set -euo pipefail
 
+# Source heartbeat library if available
+_HB_LIB="$(dirname "${BASH_SOURCE[0]}")/heartbeat.sh"
+[ -f "$_HB_LIB" ] && source "$_HB_LIB"
+
 LINEAR_API_URL="${LINEAR_API_URL:-https://api.linear.app/graphql}"
 
 # Check LINEAR_API_KEY is set
@@ -50,10 +54,21 @@ linear_graphql() {
   while true; do
     http_code=""
     curl_exit=0
+
+    local api_start
+    api_start=$(date +%s%3N 2>/dev/null || echo 0)
+
     resp=$(curl -s -w '\n%{http_code}' -X POST "$LINEAR_API_URL" \
       -H "Authorization: ${LINEAR_API_KEY}" \
       -H "Content-Type: application/json" \
       -d "$payload" 2>&1) || curl_exit=$?
+
+    local api_elapsed
+    if [ "$api_start" -ne 0 ]; then
+      api_elapsed=$(($(date +%s%3N 2>/dev/null || echo 0) - api_start))
+    else
+      api_elapsed=0
+    fi
 
     if [ "$curl_exit" -eq 0 ]; then
       http_code=$(echo "$resp" | tail -1)
@@ -62,6 +77,18 @@ linear_graphql() {
 
     local class
     class=$(_retry_classify "$curl_exit" "${http_code:-0}" "$resp")
+
+    # Heartbeat: retry classification
+    if [ "$class" = "transient" ]; then
+      hb_retry "classify" "info" "transient: HTTP ${http_code:-curl-err}" "{\"http_code\":\"${http_code:-curl-err}\",\"attempt\":\"$((attempt+1))\"}"
+    fi
+
+    # Heartbeat: API call result
+    if [ "$curl_exit" -eq 0 ] && [ "$class" = "permanent" ]; then
+      hb_api "linear-request" "ok" "GraphQL call succeeded" "{\"elapsed_ms\":\"$api_elapsed\",\"http_code\":\"$http_code\"}"
+    elif [ "$curl_exit" -ne 0 ] || { [ "$class" = "transient" ] && [ "$attempt" -ge 3 ]; }; then
+      hb_api "linear-request" "fail" "GraphQL call failed" "{\"elapsed_ms\":\"$api_elapsed\",\"http_code\":\"${http_code:-curl-err}\"}"
+    fi
 
     if [ "$class" = "transient" ] && [ "$attempt" -lt 3 ]; then
       echo "linear_graphql: transient error (attempt $((attempt+1))/3, http=${http_code:-curl-err}), retrying in ${delays[$attempt]}s" >&2
@@ -230,6 +257,22 @@ get_project_config() {
         fi
       fi
     done
+  fi
+
+  # Heartbeat: UAT_URL source resolution
+  if [ -n "$uat_url" ]; then
+    local tier
+    case "$source" in
+      env:*) tier="env" ;;
+      repos-root:*) tier="claude-md" ;;
+      workspace:*) tier="workspace" ;;
+      git-root:*) tier="git-root" ;;
+      ancestor:*) tier="ancestor" ;;
+      *) tier="unknown" ;;
+    esac
+    hb_source "uat-url" "info" "resolved from $source" "{\"tier\":\"$tier\"}"
+  else
+    hb_source "uat-url" "warn" "UAT_URL not resolved" "{\"tier\":\"none\"}"
   fi
 
   # Emit pipeline log if LOG_FILE is set
