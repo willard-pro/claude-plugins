@@ -44,6 +44,16 @@ Read `CLAUDE.md` and extract: `{REPOS_ROOT}` (parent path of all service dirs), 
 
 If `$LOG_FILE` is set (passed by the `ticket-auto` orchestrator): read `~/.claude/skills/pipeline-log-format.md`. After each major step below, write progress entries to `$LOG_FILE` using the format defined there. Phase is `APPRAISE`.
 
+## Heartbeat (--from-auto)
+
+If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/skills/lib/heartbeat.sh` then write heartbeat entries at these decision points:
+- **Complexity axes**: after complexity sweep, write `hb_decision "complexity-score" "fired" "...score..." '{"axes":"...","score":"..."}'`
+- **Blast radius**: after codebase investigation, write `hb_decision "blast-radius" "fired" "...N files..." '{"file_count":"N"}'`
+- **Prior art**: if prior art found, write `hb_decision "prior-art" "fired" "...N matches..."`; if none found, write `hb_decision "prior-art" "info" "no prior art found"`
+- **Wiki bootstrap**: if WIKI_ROOT not found in CLAUDE.md and fallback path used, write `hb_fallback "wiki-bootstrap" "fired" "using default wiki path" '{"reason":"WIKI_ROOT not in CLAUDE.md"}'`
+- **Regression verdict**: after the regression check, write `hb_decision "regression-verdict" "fired" "risky|clean" '{"verdict":"risky|clean"}'`
+- **Impact data fallback**: if gitnexus impact unavailable, write `hb_fallback "impact-data" "fired" "using local grep" '{"reason":"MCP tool unavailable"}'`
+
 ---
 
 ## Step dispatch (--from-step)

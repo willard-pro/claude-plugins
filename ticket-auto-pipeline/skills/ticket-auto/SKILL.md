@@ -72,6 +72,20 @@ TICKET_ID=$(echo "{TICKET_ARG}" | sed 's/--semi-auto//;s/--auto//;s/--manual//' 
 
 Set `{AUTONOMY}` and `{TICKET_ID}` — used throughout the pipeline.
 
+### Initialize heartbeat log early
+
+The heartbeat log must exist before preflight (Step 0.4) so failures leave a trace. The pipeline log stays at Step 0.6 (dashboard needs it).
+
+```bash
+mkdir -p ./logs
+HB_LOG_FILE="$PWD/logs/{TICKET-ID}-heartbeat.log"
+source ~/.claude/skills/lib/heartbeat.sh
+export HB_LOG_FILE="$HB_LOG_FILE"
+hb_init
+hb_heartbeat "pipeline-start" "pipeline starting — autonomy={AUTONOMY}, ticket={TICKET-ID}"
+hb_decision "autonomy-resolution" "fired" "autonomy set to {AUTONOMY}" '{"mode":"{AUTONOMY}"}'
+```
+
 ---
 
 ## Step 0.4 — Preflight: Linear config + API key check
@@ -100,13 +114,16 @@ SENTINEL="$SENTINEL_DIR/validated-${TEAM_ID}"
 ```bash
 if [ -f "$SENTINEL" ] && grep -q "^sm_hash=${SM_HASH}$" "$SENTINEL" 2>/dev/null; then
   echo "Preflight: sentinel valid — skipping Linear config check"
+  hb_gate "preflight" "ok" "sentinel valid, skipping config check"
   # Log after pipeline log is initialized (Step 0.6 logs META|preflight|skip|sentinel-valid)
 else
   # Cold run — run full validation
   bash ~/.claude/skills/ticket-flow/validate-linear-config.sh "$TEAM_ID" || {
     echo "Preflight failed: Linear config validation error. Fix the team config and retry." >&2
+    hb_gate "preflight" "fail" "Linear config validation failed" "{\"team_id\":\"$TEAM_ID\"}"
     exit 1
   }
+  hb_gate "preflight" "ok" "Linear config validated" "{\"team_id\":\"$TEAM_ID\"}"
 fi
 ```
 
@@ -114,9 +131,11 @@ fi
 ```bash
 me=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_me" 2>&1) || {
   echo "Preflight failed: Linear API key unset or rejected (exit 4). Set LINEAR_API_KEY." >&2
+  hb_gate "preflight" "fail" "Linear API key rejected" "{\"exit_code\":\"4\"}"
   exit 4
 }
 echo "Linear: API key (direct GraphQL) — authenticated as $(echo "$me" | jq -r '.name // "unknown"')"
+hb_source "linear-auth" "ok" "authenticated as $(echo "$me" | jq -r '.name // "unknown"')"
 ```
 
 Log preflight result after the pipeline log is initialized in Step 0.6:
@@ -139,7 +158,7 @@ Initialize retry counters:
 
 Create a TaskCreate for every remaining step (Steps 1 through 6). Each task subject = the step heading. Mark each step completed as soon as it finishes — do not batch.
 
-Initialize the pipeline log and launch the dashboard:
+Initialize the pipeline log and launch the dashboard (heartbeat log already initialized after Step 0.1):
 
 ```bash
 mkdir -p ./logs
@@ -254,6 +273,7 @@ Based on `{RESUME_STEP}`, jump directly to the corresponding step. Steps before 
 Write the waiting log entry:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|waiting|Agent launched — investigating {TICKET-ID}" >> {LOG_FILE}
+hb_heartbeat "orchestrator-waiting" "agent appraise launched"
 ```
 
 Write the phase context file so the token-tracker hook knows where to log:
@@ -265,7 +285,7 @@ echo "APPRAISE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 Spawn a `general-purpose` agent to investigate the ticket:
 
 ```
-Run /ticket-appraise {TICKET-ID} --from-auto{if {APPRAISE_FROM} is non-empty: ` --from-step {APPRAISE_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}". Follow the skill exactly. When you hit Resume mode and the workspace already exists, if asked "continue or re-investigate?", choose "continue" — do not prompt. Report only the final handoff output.
+Run /ticket-appraise {TICKET-ID} --from-auto{if {APPRAISE_FROM} is non-empty: ` --from-step {APPRAISE_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. When you hit Resume mode and the workspace already exists, if asked "continue or re-investigate?", choose "continue" — do not prompt. Report only the final handoff output.
 ```
 
 Wait for the agent. Extract from its result:
@@ -276,6 +296,7 @@ Wait for the agent. Extract from its result:
 If the agent fails → write fail log and stop:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|fail|Agent failed" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "appraise agent failed"
 ```
 
 On success, write the done log entry and META title:
@@ -283,6 +304,8 @@ On success, write the done log entry and META title:
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|{COMPLEXITY}, {N} files traced" >> {LOG_FILE}
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|title|info|{TICKET-ID}: {TICKET_TITLE}" >> {LOG_FILE}
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|notes:{TICKET_DIR}/notes.md" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "appraise agent done — {COMPLEXITY}"
+hb_heartbeat "phase-transition" "APPRAISE → EXEC"
 ```
 
 ---
@@ -292,6 +315,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|notes:{TICKET_DIR}/notes
 Write the waiting log entry:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|waiting|Agent launched — creating artifacts for {TICKET-ID}" >> {LOG_FILE}
+hb_heartbeat "orchestrator-waiting" "agent exec launched"
 ```
 
 Write the phase context file so the token-tracker hook knows where to log:
@@ -303,7 +327,7 @@ echo "EXEC|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 Spawn a `general-purpose` agent to create artifacts:
 
 ```
-Run /ticket-appraise-exec {TICKET-ID} --from-auto{if {EXEC_FROM} is non-empty: ` --from-step {EXEC_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}". Follow the skill exactly. Report only the final handoff output.
+Run /ticket-appraise-exec {TICKET-ID} --from-auto{if {EXEC_FROM} is non-empty: ` --from-step {EXEC_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Report only the final handoff output.
 ```
 
 Wait for the agent. Extract:
@@ -312,11 +336,14 @@ Wait for the agent. Extract:
 If the agent fails → write fail log and stop:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|fail|Agent failed" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "exec agent failed"
 ```
 
 On success:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|{ARTIFACT_TYPE}" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "exec agent done — {ARTIFACT_TYPE}"
+hb_heartbeat "phase-transition" "EXEC → GATE"
 ```
 
 Resolve and log the plan artifact path so the dashboard can display it:
@@ -357,10 +384,18 @@ fi
 If `PLAN_PATH` is still empty, or the file does not exist on disk:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|EXEC_NO_ARTIFACT — expected: ${PLAN_PATH:-unknown}" >> {LOG_FILE}
+hb_gate "artifact-detect" "fail" "artifact file not found" "{\"expected\":\"${PLAN_PATH:-unknown}\"}"
+```
+```bash
+hb_decision "pipeline-outcome" "fired" "stopped: artifact not found" '{"reason":"exec-no-artifact","expected":"${PLAN_PATH:-unknown}"}'
 ```
 Stop. Report: `{TICKET-ID} pipeline halted: artifact file not found at '${PLAN_PATH}'. Re-run Step 2 or check ticket-appraise-exec output.`
 
-On success proceed silently to Step 3.
+On success:
+```bash
+hb_gate "artifact-detect" "ok" "artifact file confirmed" "{\"path\":\"$PLAN_PATH\"}"
+```
+Proceed to Step 3.
 
 ---
 
@@ -377,6 +412,7 @@ Read `{ticket-dir}/notes.md` and extract the `## Complexity` section.
 Write the gate start event:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|start|Evaluating complexity gate" >> {LOG_FILE}
+hb_gate "preflight" "fired" "gate evaluation started" '{"complexity":"{COMPLEXITY}","autonomy":"{AUTONOMY}"}'
 ```
 
 - **`complex`** → held regardless of flag. Write log events, then stop:
@@ -384,6 +420,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|start|Evaluating complexity gate"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-result|info|complex — held ({AUTONOMY})" >> {LOG_FILE}
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|fail|held: complex ticket" >> {LOG_FILE}
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|outcome|info|stopped: complex" >> {LOG_FILE}
+  hb_decision "gate-result" "fired" "held: complex ticket" '{"reason":"complex"}'
   ```
   Report:
 
@@ -395,13 +432,18 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|start|Evaluating complexity gate"
 **To proceed:** Review the plan, then add the `approved` label and re-run `/ticket-auto {TICKET-ID} --auto`.
 ```
 
-  Mark remaining tasks as deleted (they won't run this session). Stop here.
+  Mark remaining tasks as deleted (they won't run this session).
+  ```bash
+  hb_decision "pipeline-outcome" "fired" "stopped: complex ticket held" '{"reason":"complex"}'
+  ```
+  Stop here.
 
 - **`simple` + `{AUTONOMY}` = `manual`** → held. Write log events, then stop:
   ```bash
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-result|info|simple — held (manual mode)" >> {LOG_FILE}
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|fail|held: manual mode" >> {LOG_FILE}
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|outcome|info|stopped: manual" >> {LOG_FILE}
+  hb_decision "gate-result" "fired" "held: manual mode" '{"reason":"manual-mode"}'
   ```
   Report:
 
@@ -413,12 +455,18 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|start|Evaluating complexity gate"
 **To proceed:** Run `/ticket-flow {TICKET-ID} human-approve`, then re-run `/ticket-auto {TICKET-ID} --auto`.
 ```
 
-  Mark remaining tasks as deleted. Stop here.
+  Mark remaining tasks as deleted.
+  ```bash
+  hb_decision "pipeline-outcome" "fired" "stopped: manual mode" '{"reason":"manual-mode"}'
+  ```
+  Stop here.
 
 - **`simple` + `{AUTONOMY}` = `auto` or `semi-auto`** → auto-approve. Run `/ticket-flow {TICKET-ID} human-approve`. Write log events:
   ```bash
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-result|info|simple — auto-approved ({AUTONOMY})" >> {LOG_FILE}
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >> {LOG_FILE}
+  hb_decision "gate-result" "fired" "auto-approved: simple" '{"reason":"simple","autonomy":"{AUTONOMY}"}'
+  hb_heartbeat "phase-transition" "GATE → IMPLEMENT"
   ```
   Proceed to Step 4.
 
@@ -431,6 +479,7 @@ Fetch the ticket via the Linear access strategy (bash `get_issue` when `LINEAR_A
 Write the waiting log entry:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|waiting|Agent launched — implementing {TICKET-ID}" >> {LOG_FILE}
+hb_heartbeat "orchestrator-waiting" "agent implement launched"
 ```
 
 Write the phase context file so the token-tracker hook knows where to log:
@@ -442,7 +491,7 @@ echo "IMPLEMENT|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 Spawn a `general-purpose` agent:
 
 ```
-Run /ticket-implement {TICKET-ID} --from-auto{if {IMPLEMENT_FROM} is non-empty: ` --from-step {IMPLEMENT_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}". Follow the skill exactly. Use Serena for all code navigation — mandatory. Commit and push. Report the final output including branch name.
+Run /ticket-implement {TICKET-ID} --from-auto{if {IMPLEMENT_FROM} is non-empty: ` --from-step {IMPLEMENT_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Use Serena for all code navigation — mandatory. Commit and push. Report the final output including branch name.
 
 After this agent returns, clear `{IMPLEMENT_FROM}` (set to empty) — loop re-invocations in Step 5d always start fresh.
 ```
@@ -454,11 +503,14 @@ Wait for the agent. Extract:
 If the agent fails → write fail log and stop:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|fail|Agent failed" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "implement agent failed"
 ```
 
 On success:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|{OUTCOME}, branch: {branch}" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "implement agent done — {OUTCOME}"
+hb_heartbeat "phase-transition" "IMPLEMENT → VERIFY"
 ```
 
 ### Step 4a — Verify outcome label
@@ -473,13 +525,19 @@ This is critical for training data (predicted-vs-actual complexity pairs). State
 
 ## Step 4.5 — Verify on localhost
 
-Only if the ticket has a UI surface. Otherwise note "skipped: no UI" and proceed to Step 4.6 (Wiki Maintenance).
+Only if the ticket has a UI surface. Otherwise:
+```bash
+hb_decision "verification-verdict" "skip" "no UI surface — verification skipped"
+hb_heartbeat "phase-transition" "IMPLEMENT → MAINTENANCE (verify skipped)"
+```
+Proceed to Step 4.6 (Wiki Maintenance).
 
 ### Step 4.5a — Verification attempt
 
 Write log start event:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|start|Attempt {VERIFY_ATTEMPTS}/3 — running Playwright UAT" >> {LOG_FILE}
+hb_heartbeat "orchestrator-waiting" "verify attempt $(({VERIFY_ATTEMPTS}+1))/3"
 ```
 
 Write the phase context file so the token-tracker hook knows where to log:
@@ -496,8 +554,11 @@ Write log result event:
 ```bash
 # PASS:
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|done|PASS" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "verify agent done — PASS"
+hb_heartbeat "phase-transition" "VERIFY → MAINTENANCE"
 # FAIL:
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|fail|FAIL — criteria not met" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "verify agent done — FAIL"
 ```
 
 - **PASS** → proceed to Step 4.6 (Wiki Maintenance).
@@ -508,6 +569,10 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|fail|FAIL — criteria not me
 Increment `{VERIFY_ATTEMPTS}`.
 
 If `{VERIFY_ATTEMPTS} >= 3`:
+  ```bash
+  hb_gate "verify-exhausted" "fail" "max verify attempts (3) reached" "{\"attempts\":\"{VERIFY_ATTEMPTS}\"}"
+  hb_decision "pipeline-outcome" "fired" "stopped: verify exhausted" '{"reason":"verify-exhausted","attempts":"{VERIFY_ATTEMPTS}"}'
+  ```
   Stop. Report:
   ```
   ## {TICKET-ID} — max verify attempts reached
@@ -518,6 +583,9 @@ If `{VERIFY_ATTEMPTS} >= 3`:
   ```
 
 If `{VERIFY_ATTEMPTS} < 3`:
+  ```bash
+  hb_decision "loop-back" "fired" "verify fail → re-implement" "{\"attempt\":\"{VERIFY_ATTEMPTS}\",\"max\":\"3\"}"
+  ```
   Report "Verification attempt {VERIFY_ATTEMPTS}/3 failed. Re-implementing."
   **Loop back to Step 4** (re-spawn the implement agent with `--from-auto`).
   ticket-implement Step 2.5 detects the Verification FAIL in notes.md,
@@ -537,6 +605,7 @@ Incorporate any errata discovered during implementation into the project wiki so
 Write the waiting log entry:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|waiting|Agent launched — wiki maintenance for {TICKET-ID}" >> {LOG_FILE}
+hb_heartbeat "orchestrator-waiting" "agent wiki-maintenance launched"
 ```
 
 Write the phase context file so the token-tracker hook knows where to log:
@@ -548,7 +617,7 @@ echo "MAINTENANCE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 Spawn a `general-purpose` agent:
 
 ```
-Run /wiki-maintenance. Before starting, run: export LOG_FILE="{LOG_FILE}". Process any unresolved errata entries that were appended by ticket-implement Step 4c. Edit only wiki files — do not modify source code. Report the final output including count of errata processed and files modified.
+Run /wiki-maintenance. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Process any unresolved errata entries that were appended by ticket-implement Step 4c. Edit only wiki files — do not modify source code. Report the final output including count of errata processed and files modified.
 ```
 
 Wait for the agent. Extract:
@@ -557,11 +626,14 @@ Wait for the agent. Extract:
 If the agent fails → log a warning but continue (wiki maintenance is non-blocking):
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|fail|Agent failed — continuing" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "wiki-maintenance agent failed — continuing (non-blocking)"
 ```
 
 On success:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|done|{ERRATA_COUNT} errata incorporated" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "wiki-maintenance agent done — {ERRATA_COUNT} errata"
+hb_heartbeat "phase-transition" "MAINTENANCE → PR-REVIEW"
 ```
 
 Non-blocking: wiki maintenance failure does not stop the pipeline. The errata remain unresolved and will be picked up by the next ticket's maintenance run.
@@ -577,6 +649,7 @@ Initialize `{ITERATION}` = 0. The loop runs at most 3 times.
 Write the waiting log entry:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|waiting|Agent launched — reviewing PR for {TICKET-ID}" >> {LOG_FILE}
+hb_heartbeat "orchestrator-waiting" "agent pr-review launched (iteration {ITERATION})"
 ```
 
 Write the phase context file so the token-tracker hook knows where to log:
@@ -588,7 +661,7 @@ echo "PR-REVIEW|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 Spawn a `general-purpose` agent:
 
 ```
-Run /ticket-pr-review {TICKET-ID} --from-auto{if {PR_REVIEW_FROM} is non-empty: ` --from-step {PR_REVIEW_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}". Follow the skill exactly. Validate the PR diff against the ticket requirements. Post findings. If all requirements addressed (verdict ✅), merge via squash. Report the final output.
+Run /ticket-pr-review {TICKET-ID} --from-auto{if {PR_REVIEW_FROM} is non-empty: ` --from-step {PR_REVIEW_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Validate the PR diff against the ticket requirements. Post findings. If all requirements addressed (verdict ✅), merge via squash. Report the final output.
 
 After this agent returns, clear `{PR_REVIEW_FROM}` — subsequent iterations start fresh.
 ```
@@ -600,11 +673,13 @@ Wait for the agent. Extract:
 If the agent fails → write fail log and stop:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|fail|Agent failed" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "pr-review agent failed"
 ```
 
 On success:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|done|Verdict: {VERDICT}, merged: {MERGED}" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "pr-review agent done — verdict {VERDICT}"
 ```
 
 **Verdict-line integrity gate** — before any branching, count parseable verdict lines in the pr-review output:
@@ -615,10 +690,18 @@ VERDICT_COUNT=$(echo "{PR_REVIEW_OUTPUT}" | grep -cP '^\*\*Verdict:\*\* [✅⚠�
 If `VERDICT_COUNT` ≠ 1:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|PR_REVIEW_VERDICT_UNPARSEABLE — found ${VERDICT_COUNT} Verdict lines" >> {LOG_FILE}
+hb_gate "verdict-parse" "fail" "unparseable verdict in PR review output" "{\"count\":\"${VERDICT_COUNT}\"}"
+```
+```bash
+hb_decision "pipeline-outcome" "fired" "stopped: verdict unparseable" '{"reason":"verdict-unparseable","count":"${VERDICT_COUNT}"}'
 ```
 Stop. Report: `{TICKET-ID} pipeline halted: expected 1 **Verdict:** ✅/⚠️ line, found ${VERDICT_COUNT}. PR review output may be malformed.`
 
-On `VERDICT_COUNT` = 1, extract `{VERDICT}` from that line and proceed.
+On `VERDICT_COUNT` = 1:
+```bash
+hb_gate "verdict-parse" "ok" "verdict line parseable" "{\"verdict\":\"{VERDICT}\"}"
+```
+Extract `{VERDICT}` from that line and proceed.
 
 ### Step 5b — Decision
 
@@ -627,9 +710,19 @@ On `VERDICT_COUNT` = 1, extract `{VERDICT}` from that line and proceed.
     ```bash
     gh pr merge --squash --auto {PR_URL}
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|done|Verdict: ✅, merged: auto-merged (semi-auto, simple+Smooth)" >> {LOG_FILE}
+    hb_decision "merge-decision" "fired" "auto-merged" '{"reason":"semi-auto+simple+Smooth","verdict":"✅"}'
     ```
-    Set `{MERGED}` = `auto-merged`. Break out of loop. Go to Step 6 (Report).
-  - Otherwise (wrong flag, complex ticket, or outcome ≠ Smooth) → normal merge flow. The PR review agent already handles merge. Set `{MERGED}` = `yes`. Break out of loop. Go to Step 6 (Report).
+    Set `{MERGED}` = `auto-merged`.
+    ```bash
+    hb_heartbeat "phase-transition" "PR-REVIEW → REPORT"
+    ```
+    Break out of loop. Go to Step 6 (Report).
+  - Otherwise (wrong flag, complex ticket, or outcome ≠ Smooth) → normal merge flow. The PR review agent already handles merge.
+    ```bash
+    hb_decision "merge-decision" "fired" "merged via PR review agent" '{"verdict":"✅","autonomy":"{AUTONOMY}","complexity":"{COMPLEXITY}"}'
+    hb_heartbeat "phase-transition" "PR-REVIEW → REPORT"
+    ```
+    Set `{MERGED}` = `yes`. Break out of loop. Go to Step 6 (Report).
 - **Verdict ⚠️** → auto-merge blocked regardless of flag. Increment `{ITERATION}`. If `{ITERATION} >= 3` → stop and report:
   ```
   ## {TICKET-ID} — max iterations reached
@@ -637,9 +730,17 @@ On `VERDICT_COUNT` = 1, extract `{VERDICT}` from that line and proceed.
   PR review found gaps after 3 implementation attempts. Manual intervention needed.
   PR: {PR_URL}
   ```
+  ```bash
+  hb_gate "iteration-exhausted" "fail" "max iterations (3) reached — manual intervention needed" "{\"iterations\":\"{ITERATION}\"}"
+  hb_decision "pipeline-outcome" "fired" "stopped: max iterations reached" '{"reason":"iteration-exhausted","iterations":"{ITERATION}"}'
+  ```
   Otherwise proceed to Step 5c.
 
 ### Step 5c — Iterate
+
+```bash
+hb_decision "loop-back" "fired" "pr-review gaps → pr-iterate" "{\"iteration\":\"{ITERATION}\"}"
+```
 
 Write the phase context file so the token-tracker hook knows where to log:
 
@@ -650,7 +751,7 @@ echo "PR-REVIEW|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 Spawn a `general-purpose` agent:
 
 ```
-Run /ticket-pr-iterate {TICKET-ID} --from-auto{if {PR_ITERATE_FROM} is non-empty: ` --from-step {PR_ITERATE_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}". Follow the skill exactly. Parse the PR review findings, append a PR Review #{ITERATION} section to the plan, update Linear to Ready + approved. Report the final output.
+Run /ticket-pr-iterate {TICKET-ID} --from-auto{if {PR_ITERATE_FROM} is non-empty: ` --from-step {PR_ITERATE_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Parse the PR review findings, append a PR Review #{ITERATION} section to the plan, update Linear to Ready + approved. Report the final output.
 
 After this agent returns, clear `{PR_ITERATE_FROM}`.
 ```
@@ -658,6 +759,10 @@ After this agent returns, clear `{PR_ITERATE_FROM}`.
 Wait for the agent. If it fails → stop and report.
 
 ### Step 5d — Re-implement
+
+```bash
+hb_decision "loop-back" "fired" "pr-iterate → re-implement" "{\"iteration\":\"{ITERATION}\"}"
+```
 
 **Re-approval gate** — live Linear check before re-spawning implement:
 
@@ -678,10 +783,17 @@ Assert both conditions:
 If either fails:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|APPROVAL_REVOKED — state={LIVE_STATE} approved={true|false}" >> {LOG_FILE}
+hb_gate "preflight" "fail" "approval revoked before re-implement" "{\"state\":\"{LIVE_STATE}\"}"
+```
+```bash
+hb_decision "pipeline-outcome" "fired" "stopped: approval revoked" '{"reason":"approval-revoked","state":"{LIVE_STATE}"}'
 ```
 Stop. Report: `{TICKET-ID} pipeline halted: approval revoked between pr-iterate and re-implement. State: {LIVE_STATE}. Labels: {LIVE_LABELS}. Re-approve the ticket to continue.`
 
-On pass proceed silently.
+On pass:
+```bash
+hb_gate "preflight" "ok" "re-approval confirmed — state={LIVE_STATE}" "{\"state\":\"{LIVE_STATE}\"}"
+```
 
 Write the phase context file so the token-tracker hook knows where to log:
 
@@ -692,10 +804,13 @@ echo "IMPLEMENT|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 Spawn a `general-purpose` agent:
 
 ```
-Run /ticket-implement {TICKET-ID} --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}". Follow the skill exactly. Read the updated plan (including the PR Review #{ITERATION} section), implement the changes, write tests, commit, and push. Report the final output including branch name.
+Run /ticket-implement {TICKET-ID} --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Read the updated plan (including the PR Review #{ITERATION} section), implement the changes, write tests, commit, and push. Report the final output including branch name.
 ```
 
 Wait for the agent. If it fails → stop and report.
+```bash
+hb_heartbeat "agent-returned" "re-implement agent done"
+```
 
 ### Step 5d2 — Re-verify
 
@@ -714,6 +829,10 @@ Extract `{VERDICT}`.
 Increment `{VERIFY_RETRIES}`.
 
 If `{VERIFY_RETRIES} >= 3`:
+  ```bash
+  hb_gate "reverify-exhausted" "fail" "max re-verify retries (3) reached" "{\"retries\":\"{VERIFY_RETRIES}\",\"iteration\":\"{ITERATION}\"}"
+  hb_decision "pipeline-outcome" "fired" "stopped: reverify exhausted" '{"reason":"reverify-exhausted","retries":"{VERIFY_RETRIES}","iteration":"{ITERATION}"}'
+  ```
   Stop. Report:
   ```
   ## {TICKET-ID} — max re-verify retries reached
@@ -724,6 +843,9 @@ If `{VERIFY_RETRIES} >= 3`:
   Do NOT increment `{ITERATION}`.
 
 If `{VERIFY_RETRIES} < 3`:
+  ```bash
+  hb_decision "loop-back" "fired" "re-verify fail → re-implement" "{\"retry\":\"{VERIFY_RETRIES}\",\"max\":\"3\",\"iteration\":\"{ITERATION}\"}"
+  ```
   Report "Re-verify retry {VERIFY_RETRIES}/3 (PR iteration {ITERATION})."
   **Loop back to Step 5d** (re-spawn ticket-implement with `--from-auto`).
   ticket-implement Step 2.5 detects the new Verification FAIL.
@@ -731,6 +853,9 @@ If `{VERIFY_RETRIES} < 3`:
 
 ### Step 5e — Loop back
 
+```bash
+hb_decision "loop-back" "fired" "re-implement+verify done → re-review" "{\"iteration\":\"{ITERATION}\"}"
+```
 Go back to Step 5a (re-run PR review on the updated PR).
 
 ---
@@ -757,6 +882,9 @@ fi
 If either condition is true (`GATE_STOP_COUNT > 0` or `OUTCOME_LABEL` is not one of `Smooth`, `Rough`, `Hard`), invoke the retro skill. Otherwise skip.
 
 **Triggered:**
+```bash
+hb_decision "retro-trigger" "fired" "pipeline warrants retrospection" "{\"gate_stops\":\"${GATE_STOP_COUNT}\",\"outcome\":\"${OUTCOME_LABEL:-none}\"}"
+```
 ```
 Pipeline outcome for {TICKET-ID} warrants retrospection.
 Gate-stops detected: {GATE_STOP_COUNT}
@@ -777,6 +905,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|retro-trigger|fail|/ticket-retro invoc
 **Skipped (clean run):**
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|retro-trigger|skip|clean run, retro skipped" >> {LOG_FILE}
+hb_decision "retro-trigger" "skip" "clean run, retro skipped"
 ```
 
 Do NOT block the pipeline on retro failure — the ticket outcome is already determined.
@@ -786,6 +915,7 @@ Do NOT block the pipeline on retro failure — the ticket outcome is already det
 Write the pipeline outcome event:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|outcome|info|complete" >> {LOG_FILE}
+hb_decision "pipeline-outcome" "fired" "pipeline complete" '{"outcome":"complete","iterations":"{ITERATION}","merged":"{MERGED}"}'
 ```
 
 ```
