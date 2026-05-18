@@ -56,4 +56,31 @@ After rendering, count the data rows you rendered:
 
 If `ROWCOUNT=` line is absent from the file, treat this as truncation and print the raw file content verbatim.
 
+### Step 3 — Offer discovery for missing/warn values
+
+Count vars with status `missing` or `warn` from the parsed table. If none, skip this step.
+
+If any exist, tell the user: **"N variable(s) need attention. I can try to discover values for some of them. Attempt discovery?"**
+
+Vars that are **discoverable** (can search for candidate values):
+
+| Status | Var | Discovery method |
+|--------|-----|------------------|
+| missing | `UAT_URL` | Search sibling CLAUDE.md files under `$REPOS_ROOT` for `UAT_URL` |
+| missing/warn | `LOCAL_URL` | Check common dev ports (`ss -tlnp` for :3000, :5173, :8080, :4200) and `package.json` dev/start scripts |
+| warn | `SLACK_CHANNEL` | Search sibling CLAUDE.md files under `$REPOS_ROOT` for `SLACK_CHANNEL` |
+| warn | `WIKI_ROOT` | Find directories named `wiki` under `$REPOS_ROOT` and search CLAUDE.md files for `WIKI_ROOT` |
+| warn | `BE_TEST_CMD` | Check `package.json` test script and `Makefile`/`justfile` test targets |
+
+Vars that require **manual setup** (secrets — cannot discover):
+
+| Status | Var | Where to get it |
+|--------|-----|-----------------|
+| missing | `LINEAR_API_KEY` | Linear → Settings → API → Create personal API key |
+| missing | `ANTHROPIC_AUTH_TOKEN` | Your LLM provider's API key page |
+| missing | `GITHUB_PERSONAL_ACCESS_TOKEN` | GitHub → Settings → Developer settings → Personal access tokens |
+| warn | `TICKET_AUTONOMY` | Set to `auto`, `semi-auto`, or `manual` in `settings.local.json` |
+
+If the user agrees to discovery, run the relevant discovery commands for each discoverable var. Present each candidate value and ask the user to confirm before applying. **Do NOT write to files** — the user handles the actual edits.
+
 **DO NOT write any files.** This skill is read-only. The user decides what to set and where.
