@@ -144,6 +144,19 @@ get_comments() {
   echo "$resp" | jq '.data.issue.comments.nodes'
 }
 
+# Normalize comments JSON from bash get_comments or MCP fallback to a flat array.
+# Reads JSON from stdin, outputs normalized array to stdout.
+# Handles: raw array, .data.issue.comments.nodes, .data.issue.comments,
+#          .data.comments, .comments
+normalize_comments() {
+  jq 'if type == "array" then .
+      elif .data?.issue?.comments?.nodes then .data.issue.comments.nodes
+      elif .data?.issue?.comments then .data.issue.comments
+      elif .data?.comments then .data.comments
+      elif .comments then .comments
+      else . end'
+}
+
 # Fetch team states and labels. Returns JSON: {states: [...], labels: [...]}
 get_team() {
   local team_id="$1"
