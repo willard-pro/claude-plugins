@@ -100,6 +100,13 @@
       "adds": [],
       "removes": ["needs-info"],
       "description": "Unblock ticket — information received"
+    },
+    "re-claim": {
+      "from": null,
+      "to": null,
+      "adds": [],
+      "removes": ["approved"],
+      "description": "Remove approval label to restart gate hold cycle"
     }
   }
 }

@@ -260,6 +260,7 @@ Based on `{RESUME_STEP}`, jump directly to the corresponding step. Steps before 
 | STEP_1 | Step 1 (Appraise) |
 | STEP_2 | Step 2 (Exec) |
 | STEP_3 | Step 3 (Gate) |
+| STEP_3_5 | Step 3.5 (Comment Reconciliation) |
 | STEP_4 | Step 4 (Implement) |
 | STEP_4_5 | Step 4.5 (Verify) |
 | STEP_4_6 | Step 4.6 (Wiki Maintenance) |
@@ -365,20 +366,12 @@ fi
 
 ## Step 2.5 — Artifact-existence gate
 
-**Skip this step when `RESUME_STEP >= STEP_4`** — the artifact was already validated in the prior run.
+**Skip this step when `RESUME_STEP >= STEP_3_5`** — the artifact was already validated in the prior run.
 
 Resolve the plan artifact path:
 ```bash
-PLAN_PATH=$(grep '|META|artifact|info|plan:' {LOG_FILE} | tail -1 | cut -d'|' -f5 | sed 's/^plan://')
-```
-
-If `PLAN_PATH` is empty (Step 2 failed before logging it), fall back:
-```bash
-PLAN_PATH=$(find {TICKET_DIR} -name "simple-fix.md" -print -quit 2>/dev/null)
-if [ -z "$PLAN_PATH" ]; then
-  CHANGE_DIR=$(ls -d openspec/changes/*/ 2>/dev/null | grep -i "{ticket-id-lowercase}" | head -1)
-  [ -n "$CHANGE_DIR" ] && PLAN_PATH="${CHANGE_DIR}tasks.md"
-fi
+source ~/.claude/skills/lib/ticket-dir.sh
+PLAN_PATH=$(resolve_plan_path "{LOG_FILE}" "{TICKET_DIR}" "{ticket-id-lowercase}")
 ```
 
 If `PLAN_PATH` is still empty, or the file does not exist on disk:
@@ -472,9 +465,172 @@ hb_gate "preflight" "fired" "gate evaluation started" '{"complexity":"{COMPLEXIT
 
 ---
 
+## Step 3.5 — Comment Reconciliation
+
+**Only entered when `{RESUME_STEP}` = `STEP_3_5`** (gate was held, `approved` label is now present). This step acts as a post-gate quality gate: it re-fetches Linear comments, checks for unanswered open questions, incorporates new user guidance into the plan, and loops with re-approval until clean.
+
+Initialize the cycle counter:
+```bash
+RECONCILE_N=$(({RECONCILE_CYCLE} + 1))
+```
+
+### Step 3.5a — Fetch all comments
+
+Fetch comments using the Linear access strategy, then normalize via `normalize_comments` from `linear-api.sh`:
+
+```bash
+if [ -n "${LINEAR_API_KEY:-}" ]; then
+  COMMENTS_JSON=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_comments '{TICKET-ID}'")
+else
+  COMMENTS_JSON=$(mcp__linear-server__list_comments id="{TICKET-ID}")
+fi
+
+# Normalize to a flat array of {createdAt, body, user: {name}} objects
+# normalize_comments handles all known response wrappers (array, .data.issue.comments.nodes, .data.issue.comments, .data.comments, .comments)
+COMMENTS_JSON=$(echo "$COMMENTS_JSON" | bash -c "source ~/.claude/skills/lib/linear-api.sh; normalize_comments")
+```
+
+### Step 3.5b — Identify boundary comments
+
+Run `reconcile-comments.sh` to find appraisal/amendment boundaries and extract unprocessed user comments:
+
+```bash
+RECONCILE_OUTPUT=$(echo "$COMMENTS_JSON" | bash ~/.claude/skills/lib/reconcile-comments.sh "{TICKET-ID}" "{LOG_FILE}")
+echo "$RECONCILE_OUTPUT"
+```
+
+Parse the output to set `{LAST_RECONCILE_AT}`, `{APPRAISAL_COMMENT_AT}`, and `{UNPROCESSED_COMMENTS}`.
+
+**How it works:** The script identifies the appraisal comment by `**Ticket appraised**` prefix and amendment comments by `**Amendment cycle #` prefix. `LAST_RECONCILE_AT` is the later of the two — everything after it is from the current hold window. Pipeline-authored comments are excluded, so `UNPROCESSED_COMMENTS` contains only user-authored comments in `timestamp|user|body` format.
+
+### Step 3.5c — Read open questions
+
+Read the `## Open Questions` section from notes.md:
+
+```bash
+NOTES_PATH="{TICKET_DIR}/notes.md"
+# sed range prints from Open Questions to next ## heading, or to EOF if last section.
+# grep '^\-' limits to bullet lines, but a trailing bullet list after Open Questions
+# could leak in. Guard: if sed output contains another ## heading, truncate at it.
+RAW_SECTION=$(sed -n '/^## Open Questions/,/^## /p' "$NOTES_PATH")
+if echo "$RAW_SECTION" | grep -q '^## '; then
+  RAW_SECTION=$(echo "$RAW_SECTION" | sed '/^## Open Questions$/!{/^## /q}')
+fi
+OPEN_QUESTIONS_LIST=$(echo "$RAW_SECTION" | grep '^\-' || true)
+```
+
+If `{OPEN_QUESTIONS_LIST}` is empty or contains only placeholder text ("None", "—"), skip the unanswered-questions check in Step 3.5d.
+
+### Step 3.5d — Evaluate hold conditions
+
+Two independent conditions. If either triggers, the pipeline holds (proceed to Step 3.5e).
+
+**Condition 1 — Unanswered open questions:**
+
+For each bullet in `{OPEN_QUESTIONS_LIST}`, scan `{UNPROCESSED_COMMENTS}` and all post-appraisal comments for a concrete answer. Use semantic judgment:
+- A concrete answer resolves, decides, or explicitly dismisses the question
+- Vague replies ("we'll see", "TBD", "maybe", "I'll think about it") do NOT count as answers
+- If ANY question lacks a concrete answer → set `HOLD_REASON=unanswered_questions`
+
+**Condition 2 — Unprocessed user comments:**
+
+If `{UNPROCESSED_COMMENTS}` is non-empty → set `HOLD_REASON=unprocessed_comments` (combine with condition 1 if both apply: `HOLD_REASON=unanswered_questions+unprocessed_comments`).
+
+**If neither condition triggers** → skip to Step 3.5g (clean pass).
+
+### Step 3.5e — Amendment logic
+
+When a hold condition is active, incorporate user feedback into the plan artifact before re-claiming.
+
+Resolve the plan path:
+```bash
+source ~/.claude/skills/lib/ticket-dir.sh
+PLAN_PATH=$(resolve_plan_path "{LOG_FILE}" "{TICKET_DIR}" "{ticket-id-lowercase}")
+```
+
+Read the current plan artifact (simple-fix.md or openspec tasks.md). Append an `## Amendment #N` section (where N = `{RECONCILE_N}`) that:
+1. Summarizes the user comments being incorporated
+2. Lists concrete changes to the plan required by the feedback
+3. Notes any design decisions made during reconciliation
+
+Update `## Open Questions` in notes.md:
+- Mark resolved questions with `~~strikethrough~~` (do NOT delete them — preserve history)
+- If new unresolvable questions arise from amendment, append them as new bullets
+
+### Step 3.5f — Post amendment, re-claim, hold
+
+Post an amendment comment to Linear summarizing what changed and what's still open:
+
+```bash
+AMENDMENT_BODY="**Amendment cycle #${RECONCILE_N}**
+
+## Changes incorporated
+{summary of incorporated user comments and plan changes}
+
+## Open questions remaining
+{list of still-unanswered questions, or 'None — all questions resolved'}
+
+## New questions raised by this cycle
+{list of new questions, or 'None'}"
+```
+
+Use the Linear access strategy to post the comment (bash `save_comment` when `LINEAR_API_KEY` is set, MCP fallback otherwise).
+
+Call `re-claim` to remove the `approved` label without changing the ticket's Linear state:
+
+```bash
+bash ~/.claude/skills/ticket-flow/flow.sh "{TICKET-ID}" "re-claim"
+```
+
+Write the held log entry:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|reconcile|done|cycle#${RECONCILE_N}|held: ${HOLD_REASON}" >> {LOG_FILE}
+hb_decision "reconcile-result" "fired" "held: ${HOLD_REASON}" "{\"cycle\":\"${RECONCILE_N}\",\"reason\":\"${HOLD_REASON}\"}"
+```
+
+Stop with a user-facing report:
+
+```
+## {TICKET-ID} — amendment cycle #{RECONCILE_N}
+
+**Hold reason:** {HOLD_REASON}
+
+### Incorporated
+{summary of what was incorporated into the plan}
+
+### Open questions
+{list of still-unanswered questions}
+
+### Next step
+Review the amendment comment in Linear, then add the `approved` label and re-run `/ticket-auto {TICKET-ID} --auto`.
+```
+
+Mark remaining tasks as deleted (they won't run this session).
+
+```bash
+hb_decision "pipeline-outcome" "fired" "stopped: amendment cycle #${RECONCILE_N}" "{\"reason\":\"${HOLD_REASON}\",\"cycle\":\"${RECONCILE_N}\"}"
+```
+
+Stop here.
+
+### Step 3.5g — Clean pass
+
+No hold conditions active. All open questions are answered and no unprocessed user comments exist. Write the clean log entry and continue:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|reconcile|done|clean" >> {LOG_FILE}
+hb_decision "reconcile-result" "fired" "clean pass — no unprocessed comments or unanswered questions" "{\"cycle\":\"${RECONCILE_N}\"}"
+hb_gate "reconcile" "ok" "clean pass — proceeding to implement"
+hb_heartbeat "phase-transition" "GATE → IMPLEMENT"
+```
+
+Proceed to Step 4.
+
+---
 ## Step 4 — Implement
 
-Fetch the ticket via the Linear access strategy (bash `get_issue` when `LINEAR_API_KEY` is set, MCP fallback otherwise) and verify the `approved` label is present. If missing (shouldn't happen given Step 3, but verify) — add it now for simple tickets, or stop for complex.
+Fetch the ticket via the Linear access strategy (bash `get_issue` when `LINEAR_API_KEY` is set, MCP fallback otherwise) and verify the `approved` label is present. If missing (shouldn't happen given Step 3 or Step 3.5, but verify) — add it now for simple tickets, or stop for complex.
 
 Write the waiting log entry:
 ```bash
