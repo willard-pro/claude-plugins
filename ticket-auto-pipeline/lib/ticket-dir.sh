@@ -22,3 +22,39 @@ resolve_ticket_dir() {
     return 2
   fi
 }
+
+# Resolve the plan artifact path with full fallback chain.
+# Args: <log_file> <ticket_dir> [ticket_id_lowercase]
+#   1. Pipeline log META|artifact|info|plan: entry
+#   2. simple-fix.md in ticket directory
+#   3. openspec/changes/*/tasks.md matching the ticket ID
+# Emits the resolved path on stdout, or empty string if not found.
+resolve_plan_path() {
+  local log_file="$1"
+  local ticket_dir="$2"
+  local ticket_id_lc="${3:-}"
+  local plan_path
+
+  plan_path=$(grep '|META|artifact|info|plan:' "$log_file" 2>/dev/null | tail -1 | cut -d'|' -f5 | sed 's/^plan://' || true)
+  if [ -n "$plan_path" ] && [ -f "$plan_path" ]; then
+    echo "$plan_path"
+    return 0
+  fi
+
+  plan_path=$(find "$ticket_dir" -maxdepth 1 -name "simple-fix.md" -print -quit 2>/dev/null || true)
+  if [ -n "$plan_path" ]; then
+    echo "$plan_path"
+    return 0
+  fi
+
+  if [ -n "$ticket_id_lc" ]; then
+    local change_dir
+    change_dir=$(ls -d openspec/changes/*/ 2>/dev/null | grep -i "$ticket_id_lc" | head -1 || true)
+    if [ -n "$change_dir" ]; then
+      echo "${change_dir}tasks.md"
+      return 0
+    fi
+  fi
+
+  return 1
+}

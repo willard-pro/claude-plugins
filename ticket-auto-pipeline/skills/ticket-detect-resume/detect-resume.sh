@@ -106,8 +106,8 @@ fi
 if [ "$RESUME_STEP" = "GATE_HELD" ]; then
   ISSUE_JSON=$(get_issue "$TICKET_ID" 2>/dev/null || echo 'null')
   if echo "$ISSUE_JSON" | jq -e '.labels.nodes[] | select(.name | ascii_downcase == "approved")' > /dev/null 2>&1; then
-    RESUME_STEP="STEP_4"
-    hb_gate "resume-point" "ok" "gate was held but approved label found — resuming at STEP_4"
+    RESUME_STEP="STEP_3_5"
+    hb_gate "resume-point" "ok" "gate was held but approved label found — resuming at STEP_3_5 (comment reconciliation)"
   else
     RESUME_STEP="GATE_STILL_HELD"
     hb_gate "resume-point" "fail" "gate still held — requires approval"
@@ -153,6 +153,11 @@ if [ -s "$LOG_FILE" ]; then
   PR_ITERATE_FROM=$(grep '^[^|]*|PR-REVIEW|iterate-[^|]*|done|' "$LOG_FILE" 2>/dev/null \
     | tail -1 | cut -d'|' -f3 || true)
 fi
+
+# ── Reconcile cycle extraction ──────────────────────────────────────────────
+
+RECONCILE_CYCLE=$(grep -c '^[^|]*|GATE|reconcile|done|cycle#' "$LOG_FILE" 2>/dev/null || true)
+RECONCILE_CYCLE=${RECONCILE_CYCLE:-0}
 
 # ── Browser-state correction ────────────────────────────────────────────────
 
@@ -214,5 +219,6 @@ DETECT_RESUME_RESULT
   TICKET_TITLE:       ${TICKET_TITLE:-}
   VERIFY_ATTEMPTS:    ${VERIFY_ATTEMPTS}
   ITERATION:          ${ITERATION}
+  RECONCILE_CYCLE:    ${RECONCILE_CYCLE}
 END_DETECT_RESUME_RESULT
 EOF
