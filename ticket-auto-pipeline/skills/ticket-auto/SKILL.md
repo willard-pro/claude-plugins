@@ -40,6 +40,65 @@ fi
 
 The `get_issue` function returns JSON at `.data.issue` — use `jq` to extract fields. The `get_comments` function returns a JSON array of comment nodes.
 
+### API error capture convention
+
+After every Linear API call (`get_issue`, `get_comments`, `save_comment`, `get_me`), capture failures in the heartbeat log using `hb_retry`. This is mandatory — never silently discard API errors.
+
+**get_issue failure pattern:**
+```bash
+_raw=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_issue '{TICKET-ID}'" 2>&1)
+_rc=$?
+if [ $_rc -ne 0 ] || ! echo "$_raw" | jq -e '.data.issue' >/dev/null 2>&1; then
+  _snippet=$(echo "$_raw" | head -c 200)
+  hb_retry "get-issue" "fail" "get_issue failed (exit ${_rc})" \
+    "{\"command\":\"get_issue\",\"ticket\":\"{TICKET-ID}\",\"exit_code\":\"${_rc}\",\"error_snippet\":\"$(echo "$_snippet" | tr '"' "'"  | tr '\n' ' ')\"}"
+  # Handle failure per-step (report or stop as appropriate)
+fi
+```
+
+**get_comments failure pattern:**
+```bash
+_raw=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_comments '{TICKET-ID}'" 2>&1)
+_rc=$?
+if [ $_rc -ne 0 ]; then
+  hb_retry "get-comments" "fail" "get_comments failed (exit ${_rc})" \
+    "{\"command\":\"get_comments\",\"ticket\":\"{TICKET-ID}\",\"exit_code\":\"${_rc}\"}"
+fi
+```
+
+**jq extraction failure pattern:** When `jq` fails to extract a field from a Linear API response, capture it before stopping:
+```bash
+_field=$(echo "$_raw" | jq -r '.data.issue.fieldName' 2>&1)
+if [ $? -ne 0 ] || [ "$_field" = "null" ]; then
+  hb_retry "jq-parse" "fail" "jq extraction failed for fieldName" \
+    "{\"error_type\":\"jq_parse\",\"command\":\"get_issue\",\"field\":\"fieldName\"}"
+fi
+```
+
+**flow.sh failure pattern:** After every `flow.sh` invocation, capture non-zero exits:
+```bash
+bash ~/.claude/skills/ticket-flow/flow.sh "{TICKET-ID}" "{trigger}" 2>&1
+_rc=$?
+if [ $_rc -ne 0 ]; then
+  _error_type=$( [ $_rc -eq 7 ] && echo "state_assertion" || echo "flow_error" )
+  hb_retry "flow-sh" "fail" "flow.sh {trigger} failed (exit ${_rc})" \
+    "{\"trigger\":\"{trigger}\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\",\"error_type\":\"${_error_type}\"}"
+fi
+```
+
+**API telemetry pattern:** For read operations where elapsed time matters, wrap with `hb_api`:
+```bash
+_t0=$(date +%s)
+_raw=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_issue '{TICKET-ID}'" 2>&1)
+_rc=$?
+_elapsed=$(( $(date +%s) - _t0 ))
+hb_api "get-issue" "$( [ $_rc -eq 0 ] && echo ok || echo fail )" \
+  "get_issue {TICKET-ID} (${_elapsed}s)" \
+  "{\"command\":\"get_issue\",\"ticket\":\"{TICKET-ID}\",\"elapsed_s\":\"${_elapsed}\",\"exit_code\":\"${_rc}\"}"
+```
+
+Apply the API telemetry pattern to `get_issue` and `get_comments` calls at each step.
+
 ---
 
 ## Step 0 — Clear context: Run `/clear`.
@@ -80,6 +139,7 @@ The heartbeat log must exist before preflight (Step 0.4) so failures leave a tra
 mkdir -p ./logs
 HB_LOG_FILE="$PWD/logs/{TICKET-ID}-heartbeat.log"
 source ~/.claude/skills/lib/heartbeat.sh
+source ~/.claude/skills/lib/capture-transcript.sh
 export HB_LOG_FILE="$HB_LOG_FILE"
 hb_init
 hb_heartbeat "pipeline-start" "pipeline starting — autonomy={AUTONOMY}, ticket={TICKET-ID}"
@@ -289,7 +349,12 @@ Spawn a `general-purpose` agent to investigate the ticket:
 Run /ticket-appraise {TICKET-ID} --from-auto{if {APPRAISE_FROM} is non-empty: ` --from-step {APPRAISE_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. When you hit Resume mode and the workspace already exists, if asked "continue or re-investigate?", choose "continue" — do not prompt. Report only the final handoff output.
 ```
 
-Wait for the agent. Extract from its result:
+Wait for the agent. Persist the raw output immediately before extracting any fields:
+```bash
+capture_agent_result "{TICKET-ID}" "appraise" "$AGENT_RESULT"
+```
+
+Extract from its result:
 - `{COMPLEXITY}` — `simple` or `complex`
 - `{TICKET_DIR}` — local workspace path (derive from the find command in Step 1 of appraise-exec pattern, or read from agent output)
 - `{TICKET_TITLE}` — the full ticket title. If not present in the agent's handoff, fetch it via the Linear access strategy above (bash `get_issue` when key is set, MCP fallback otherwise) before writing the META title line.
@@ -331,7 +396,12 @@ Spawn a `general-purpose` agent to create artifacts:
 Run /ticket-appraise-exec {TICKET-ID} --from-auto{if {EXEC_FROM} is non-empty: ` --from-step {EXEC_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Report only the final handoff output.
 ```
 
-Wait for the agent. Extract:
+Wait for the agent. Persist the raw output immediately before extracting any fields:
+```bash
+capture_agent_result "{TICKET-ID}" "exec" "$AGENT_RESULT"
+```
+
+Extract:
 - `{ARTIFACT_TYPE}` — `simple-fix` or `openspec:<name>`
 
 If the agent fails → write fail log and stop:
@@ -377,7 +447,9 @@ PLAN_PATH=$(resolve_plan_path "{LOG_FILE}" "{TICKET_DIR}" "{ticket-id-lowercase}
 If `PLAN_PATH` is still empty, or the file does not exist on disk:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|EXEC_NO_ARTIFACT — expected: ${PLAN_PATH:-unknown}" >> {LOG_FILE}
-hb_gate "artifact-detect" "fail" "artifact file not found" "{\"expected\":\"${PLAN_PATH:-unknown}\"}"
+_artifact_type="{ARTIFACT_TYPE:-unknown}"
+hb_gate "artifact-detect" "fail" "artifact file not found" \
+  "{\"expected\":\"${PLAN_PATH:-unknown}\",\"artifact_type\":\"${_artifact_type}\",\"ticket_dir\":\"{TICKET_DIR:-unknown}\"}"
 ```
 ```bash
 hb_decision "pipeline-outcome" "fired" "stopped: artifact not found" '{"reason":"exec-no-artifact","expected":"${PLAN_PATH:-unknown}"}'
@@ -652,7 +724,12 @@ Run /ticket-implement {TICKET-ID} --from-auto{if {IMPLEMENT_FROM} is non-empty: 
 After this agent returns, clear `{IMPLEMENT_FROM}` (set to empty) — loop re-invocations in Step 5d always start fresh.
 ```
 
-Wait for the agent. Extract:
+Wait for the agent. Persist the raw output immediately before extracting any fields:
+```bash
+capture_agent_result "{TICKET-ID}" "implement" "$AGENT_RESULT"
+```
+
+Extract:
 - `{OUTCOME}` — `Smooth`, `Rough`, or `Hard`
 - `{MISMATCH}` — whether a complexity mismatch was reported (look for "Complexity mismatch" in the output)
 
@@ -703,6 +780,10 @@ echo "VERIFY|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 ```
 
 Run `/ticket-verify {TICKET-ID} --env local --from-auto{if {VERIFY_FROM} is non-empty: ` --from-step {VERIFY_FROM}`}`.
+After the agent returns, persist the raw output using append mode (attempt number tracks retries):
+```bash
+capture_agent_result "{TICKET-ID}" "verify" "$AGENT_RESULT" "$(({VERIFY_ATTEMPTS}+1))"
+```
 Extract `{VERDICT}` (PASS or FAIL).
 After this call, clear `{VERIFY_FROM}` (set to empty) — retry re-invocations always start fresh.
 
@@ -776,7 +857,12 @@ Spawn a `general-purpose` agent:
 Run /wiki-maintenance. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Process any unresolved errata entries that were appended by ticket-implement Step 4c. Edit only wiki files — do not modify source code. Report the final output including count of errata processed and files modified.
 ```
 
-Wait for the agent. Extract:
+Wait for the agent. Persist the raw output immediately before extracting any fields:
+```bash
+capture_agent_result "{TICKET-ID}" "maintenance" "$AGENT_RESULT"
+```
+
+Extract:
 - `{ERRATA_COUNT}` — number of errata entries processed (0 if none)
 
 If the agent fails → log a warning but continue (wiki maintenance is non-blocking):
@@ -822,7 +908,12 @@ Run /ticket-pr-review {TICKET-ID} --from-auto{if {PR_REVIEW_FROM} is non-empty: 
 After this agent returns, clear `{PR_REVIEW_FROM}` — subsequent iterations start fresh.
 ```
 
-Wait for the agent. Extract:
+Wait for the agent. Persist the raw output immediately before extracting any fields:
+```bash
+capture_agent_result "{TICKET-ID}" "pr-review" "$AGENT_RESULT"
+```
+
+Extract:
 - `{VERDICT}` — ✅ all addressed, or ⚠️ gaps found
 - `{MERGED}` — yes, no, or skipped
 
@@ -846,7 +937,9 @@ VERDICT_COUNT=$(echo "{PR_REVIEW_OUTPUT}" | grep -cP '^\*\*Verdict:\*\* [✅⚠�
 If `VERDICT_COUNT` ≠ 1:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|PR_REVIEW_VERDICT_UNPARSEABLE — found ${VERDICT_COUNT} Verdict lines" >> {LOG_FILE}
-hb_gate "verdict-parse" "fail" "unparseable verdict in PR review output" "{\"count\":\"${VERDICT_COUNT}\"}"
+_output_len=$(echo "{PR_REVIEW_OUTPUT}" | wc -c | tr -d ' ')
+hb_gate "verdict-parse" "fail" "unparseable verdict in PR review output" \
+  "{\"count\":\"${VERDICT_COUNT}\",\"expected\":\"1\",\"output_chars\":\"${_output_len}\"}"
 ```
 ```bash
 hb_decision "pipeline-outcome" "fired" "stopped: verdict unparseable" '{"reason":"verdict-unparseable","count":"${VERDICT_COUNT}"}'
@@ -939,7 +1032,9 @@ Assert both conditions:
 If either fails:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|APPROVAL_REVOKED — state={LIVE_STATE} approved={true|false}" >> {LOG_FILE}
-hb_gate "preflight" "fail" "approval revoked before re-implement" "{\"state\":\"{LIVE_STATE}\"}"
+_approved_present=$(echo "$LIVE_LABELS" | jq -r 'any(. == "approved")' 2>/dev/null || echo "unknown")
+hb_gate "approval-revoked" "fail" "approval revoked before re-implement" \
+  "{\"state\":\"${LIVE_STATE}\",\"approved_present\":\"${_approved_present}\",\"expected_state\":\"Ready\",\"expected_approved\":\"true\"}"
 ```
 ```bash
 hb_decision "pipeline-outcome" "fired" "stopped: approval revoked" '{"reason":"approval-revoked","state":"{LIVE_STATE}"}'
