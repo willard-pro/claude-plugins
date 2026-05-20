@@ -8,7 +8,7 @@ resolve_ticket_dir() {
   local root="${2:-.}"
   local matches
   matches=$(find "$root" -maxdepth 2 -type d \
-    -regex ".*/${ticket_id}--[a-z0-9-]+$" 2>/dev/null || true)
+    -iregex ".*/${ticket_id}--[a-z0-9-]+$" 2>/dev/null || true)
   local count
   count=$(echo "$matches" | grep -c . 2>/dev/null || true)
   if [ -z "$matches" ] || [ "$count" -eq 0 ]; then
