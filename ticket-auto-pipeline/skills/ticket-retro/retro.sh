@@ -150,6 +150,12 @@ declare -A HB_RETRY_COUNT=()
 HB_LOGS_SCANNED=0
 HB_LOGS_WITH_DATA=0
 
+# Error diagnostics state — populated from retry/api/gate fail events
+# errors_by_ticket: JSON fragment built as an object string
+declare -A TICKET_ERROR_EVENTS=()   # ticket_id -> newline-delimited JSON event objects
+TOTAL_ERROR_COUNT=0
+declare -A ERROR_CATEGORY_HIST=()   # event_name -> count
+
 for log_file in "${LOG_FILES[@]}"; do
   stem=$(basename "$log_file" .log)
   ticket_id="${stem%-pipeline}"
@@ -163,10 +169,13 @@ for log_file in "${LOG_FILES[@]}"; do
 
   while IFS= read -r line; do
     [ -z "$line" ] && continue
-    local category event status
+    local category event status msg detail ts
+    ts=$(echo "$line" | cut -d'|' -f1)
     category=$(echo "$line" | cut -d'|' -f2)
     event=$(echo "$line" | cut -d'|' -f3)
     status=$(echo "$line" | cut -d'|' -f4)
+    msg=$(echo "$line" | cut -d'|' -f5)
+    detail=$(echo "$line" | cut -d'|' -f6)
 
     [ "$category" = "META" ] && continue
 
@@ -179,11 +188,82 @@ for log_file in "${LOG_FILES[@]}"; do
     elif [ "$category" = "retry" ]; then
       HB_RETRY_COUNT["$event"]=$((${HB_RETRY_COUNT["$event"]:-0} + 1))
       local_has_hb=1
+
+      # Capture retry errors for diagnostics (task 4.1)
+      if [ "$status" = "fail" ]; then
+        _detail_obj="{}"
+        if [ -n "$detail" ] && [ "$detail" != "{}" ]; then
+          _detail_obj=$(echo "$detail" | jq -c '.' 2>/dev/null || echo "{}")
+        fi
+        _safe_msg=$(echo "$msg" | sed 's/"/\\"/g')
+        _safe_ts=$(echo "$ts" | sed 's/"/\\"/g')
+        _event_obj="{\"category\":\"retry\",\"event\":\"$event\",\"message\":\"$_safe_msg\",\"timestamp\":\"$_safe_ts\",\"detail\":$_detail_obj}"
+        TICKET_ERROR_EVENTS["$ticket_id"]+="$_event_obj"$'\n'
+        TOTAL_ERROR_COUNT=$((TOTAL_ERROR_COUNT + 1))
+        ERROR_CATEGORY_HIST["$event"]=$((${ERROR_CATEGORY_HIST["$event"]:-0} + 1))
+      fi
+
+    # Capture api errors for diagnostics (task 4.2)
+    elif [ "$category" = "api" ] && [ "$status" = "fail" ]; then
+      local_has_hb=1
+      _detail_obj="{}"
+      if [ -n "$detail" ] && [ "$detail" != "{}" ]; then
+        _detail_obj=$(echo "$detail" | jq -c '.' 2>/dev/null || echo "{}")
+      fi
+      _safe_msg=$(echo "$msg" | sed 's/"/\\"/g')
+      _safe_ts=$(echo "$ts" | sed 's/"/\\"/g')
+      _event_obj="{\"category\":\"api\",\"event\":\"$event\",\"message\":\"$_safe_msg\",\"timestamp\":\"$_safe_ts\",\"detail\":$_detail_obj}"
+      TICKET_ERROR_EVENTS["$ticket_id"]+="$_event_obj"$'\n'
+      TOTAL_ERROR_COUNT=$((TOTAL_ERROR_COUNT + 1))
+      ERROR_CATEGORY_HIST["$event"]=$((${ERROR_CATEGORY_HIST["$event"]:-0} + 1))
+
+    # Capture gate errors for diagnostics (task 4.2, gate events with fail status)
+    elif [ "$category" = "gate" ] && [ "$status" = "fail" ]; then
+      local_has_hb=1
+      _detail_obj="{}"
+      if [ -n "$detail" ] && [ "$detail" != "{}" ]; then
+        _detail_obj=$(echo "$detail" | jq -c '.' 2>/dev/null || echo "{}")
+      fi
+      _safe_msg=$(echo "$msg" | sed 's/"/\\"/g')
+      _safe_ts=$(echo "$ts" | sed 's/"/\\"/g')
+      _event_obj="{\"category\":\"gate\",\"event\":\"$event\",\"message\":\"$_safe_msg\",\"timestamp\":\"$_safe_ts\",\"detail\":$_detail_obj}"
+      TICKET_ERROR_EVENTS["$ticket_id"]+="$_event_obj"$'\n'
+      TOTAL_ERROR_COUNT=$((TOTAL_ERROR_COUNT + 1))
+      ERROR_CATEGORY_HIST["$event"]=$((${ERROR_CATEGORY_HIST["$event"]:-0} + 1))
     fi
   done < "$hb_file"
 
   [ "$local_has_hb" -eq 1 ] && HB_LOGS_WITH_DATA=$((HB_LOGS_WITH_DATA + 1))
 done
+
+# ── Build error diagnostics JSON (tasks 4.3–4.4) ────────────────────────────
+
+# Build errors_by_ticket JSON object: { "CRE-47": [{...}, ...], ... }
+ERRORS_BY_TICKET_JSON="{"
+_EBT_FIRST=1
+for ticket_id in "${!TICKET_ERROR_EVENTS[@]}"; do
+  [ "$_EBT_FIRST" -eq 1 ] && _EBT_FIRST=0 || ERRORS_BY_TICKET_JSON+=","
+  # Each value in TICKET_ERROR_EVENTS is newline-delimited JSON objects
+  _events_arr="["
+  _evt_first=1
+  while IFS= read -r evt_line; do
+    [ -z "$evt_line" ] && continue
+    [ "$_evt_first" -eq 1 ] && _evt_first=0 || _events_arr+=","
+    _events_arr+="$evt_line"
+  done <<< "${TICKET_ERROR_EVENTS[$ticket_id]}"
+  _events_arr+="]"
+  ERRORS_BY_TICKET_JSON+="\"$ticket_id\":$_events_arr"
+done
+ERRORS_BY_TICKET_JSON+="}"
+
+# Build error_category_histogram: { "get-issue": 3, "flow-sh": 1, ... }
+ERROR_HIST_JSON="{"
+_EH_FIRST=1
+for evt_name in "${!ERROR_CATEGORY_HIST[@]}"; do
+  [ "$_EH_FIRST" -eq 1 ] && _EH_FIRST=0 || ERROR_HIST_JSON+=","
+  ERROR_HIST_JSON+="\"$evt_name\":${ERROR_CATEGORY_HIST[$evt_name]}"
+done
+ERROR_HIST_JSON+="}"
 
 # Build heartbeat-derived JSON
 _HB_BUILD_OBJ() {
@@ -245,6 +325,9 @@ jq -n \
   --arg hb_fallback_str "$HB_FALLBACK_JSON" \
   --arg hb_decision_str "$HB_DECISION_JSON" \
   --arg hb_retry_str "$HB_RETRY_JSON" \
+  --argjson total_errors "$TOTAL_ERROR_COUNT" \
+  --arg errors_by_ticket_str "$ERRORS_BY_TICKET_JSON" \
+  --arg error_hist_str "$ERROR_HIST_JSON" \
   '{
     window_days: $window_days,
     logs_scanned: $logs_scanned,
@@ -259,5 +342,10 @@ jq -n \
       fallback_frequency: ($hb_fallback_str | fromjson),
       decision_patterns: ($hb_decision_str | fromjson),
       retry_distribution: ($hb_retry_str | fromjson)
+    },
+    error_diagnostics: {
+      total_errors: $total_errors,
+      errors_by_ticket: ($errors_by_ticket_str | fromjson),
+      error_category_histogram: ($error_hist_str | fromjson)
     }
   }'
