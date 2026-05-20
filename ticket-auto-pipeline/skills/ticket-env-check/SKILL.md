@@ -69,6 +69,7 @@ Vars that are **discoverable** (can search for candidate values):
 | warn | `SLACK_CHANNEL` | Search sibling CLAUDE.md files under `$REPOS_ROOT` for `SLACK_CHANNEL` |
 | warn | `WIKI_ROOT` | Find directories named `wiki` under `$REPOS_ROOT` and search CLAUDE.md files for `WIKI_ROOT` |
 | warn | `BE_TEST_CMD` | Check `package.json` test script and `Makefile`/`justfile` test targets |
+| missing/warn | `HOOKS_CONFIGURED` | Use `update-config` to add `token-tracker-start.sh` to SubagentStart and `token-tracker.sh` to SubagentStop in **project** `.claude/settings.json` (scoped — only fires in this repo). If status is `warn`, hooks exist at user level — move them to project level. Run: `/update-config "add token-tracker-start.sh to SubagentStart and token-tracker.sh to SubagentStop in project .claude/settings.json"` |
 
 Vars that require **manual setup** (secrets — cannot discover):
 
