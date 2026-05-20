@@ -7,31 +7,11 @@ description: Incorporates PR review findings back into the implementation plan. 
 
 You have been given a ticket ID as the argument (e.g. `WIL-42`). Execute the steps below in order. This skill reads PR review findings and updates the implementation plan so the gaps can be addressed in a new implementation round.
 
-## Guard — Verify working directory
+## Pipeline Preamble
 
-If the arguments contain `--from-auto`, skip this guard — `ticket-auto` already verified the working directory.
+Follow the pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=PR-REVIEW, FROM_FLAG=--from-auto, HAS_LINEAR_ACCESS=false, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=REPOS_ROOT,ISSUE_PREFIX, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
 
-Run `basename "$(pwd)"`. If the result is NOT `tickets`, abort immediately and tell the user to `cd` to the tickets workspace and re-run.
-
----
-
-## Step 0 — Clear context: Run `/clear`.
-
----
-
-## Step 0.5 — Detect project context
-
-Read `CLAUDE.md` and extract: `{REPOS_ROOT}` (parent path of all service dirs), `{ISSUE_PREFIX}` (issue ID prefix, e.g. `CRE`).
-
----
-
-## Logging (--from-auto)
-
-If `$LOG_FILE` is set (passed by the `ticket-auto` orchestrator): read `~/.claude/skills/pipeline-log-format.md`. Write progress entries at step boundaries. Phase is `PR-REVIEW`. Step-level entries (in order): `iterate-load`, `iterate-findings`, `iterate-plan`, `iterate-notes`, `iterate-linear`.
-
-## Heartbeat (--from-auto)
-
-If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/skills/lib/heartbeat.sh` then write heartbeat entries at these points:
+### Heartbeat points
 - **Findings source**: after locating review findings, write `hb_decision "findings-source" "info" "findings from {PR|session-file}" '{"source":"{pr|session-file}"}'`
 - **Session fallback**: if no PR found and falling back to pr-review-session.md, write `hb_fallback "pr-review-data" "fired" "no PR found, using session file" '{"reason":"gh pr view returned no results"}'
 - **Verdict already passing**: if verdict is ✅ (no gaps), write `hb_decision "iteration-skip" "info" "PR review already passed, no iteration needed"`
@@ -39,12 +19,7 @@ If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/sk
 - **Gap count**: after parsing gaps, write `hb_decision "gap-count" "fired" "{N} gaps to address" '{"count":"{N}"}'`
 - **Artifact updated**: after updating the plan artifact, write `hb_decision "plan-updated" "fired" "appended PR Review #{N} to {ARTIFACT}" '{"artifact":"{ARTIFACT}","iteration":"{N}"}'`
 
----
-
-## Step dispatch (--from-step)
-
-If `--from-step {step-name}` is in the arguments, this is a crash-recovery resume. Skip all steps up to and including the named step. Do not re-run them. Proceed directly to the first step after the named step.
-
+### Step dispatch
 | `--from-step` value | Skip to | Restore from |
 |---------------------|---------|--------------|
 | `iterate-load` | Step 2 (find findings) | workspace already loaded; notes.md and context.md available |
@@ -52,8 +27,6 @@ If `--from-step {step-name}` is in the arguments, this is a crash-recovery resum
 | `iterate-plan` | Step 5 (update notes) | plan artifact already updated |
 | `iterate-notes` | Step 6 (update Linear) | notes.md already updated |
 | `iterate-linear` | End — skill already complete | — |
-
-If `--from-step` is not provided, proceed normally from Step 1.
 
 ---
 
