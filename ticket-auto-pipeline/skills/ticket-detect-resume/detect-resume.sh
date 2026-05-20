@@ -94,6 +94,8 @@ else
     RESUME_STEP="GATE_HELD"
   elif grep -q '^[^|]*|EXEC|exec|done|' "$LOG_FILE"; then
     RESUME_STEP="STEP_3"
+  elif grep -q '^[^|]*|REPRODUCE|reproduce|' "$LOG_FILE" && ! grep -q '^[^|]*|REPRODUCE|reproduce|done|' "$LOG_FILE"; then
+    RESUME_STEP="STEP_1_5"
   elif grep -q '^[^|]*|APPRAISE|appraise|done|' "$LOG_FILE"; then
     RESUME_STEP="STEP_2"
   else
@@ -117,6 +119,7 @@ fi
 # ── Level 2: per-sub-skill _FROM extraction ─────────────────────────────────
 
 APPRAISE_FROM=""
+REPRODUCE_FROM=""
 EXEC_FROM=""
 IMPLEMENT_FROM=""
 MAINTENANCE_FROM=""
@@ -127,6 +130,10 @@ PR_ITERATE_FROM=""
 if [ -s "$LOG_FILE" ]; then
   APPRAISE_FROM=$(grep '^[^|]*|APPRAISE|[^|]*|done|' "$LOG_FILE" 2>/dev/null \
     | grep -v '|APPRAISE|appraise|done|' \
+    | tail -1 | cut -d'|' -f3 || true)
+
+  REPRODUCE_FROM=$(grep '^[^|]*|REPRODUCE|[^|]*|done|' "$LOG_FILE" 2>/dev/null \
+    | grep -v '|REPRODUCE|reproduce|done|' \
     | tail -1 | cut -d'|' -f3 || true)
 
   EXEC_FROM=$(grep '^[^|]*|EXEC|[^|]*|done|' "$LOG_FILE" 2>/dev/null \
@@ -206,6 +213,7 @@ cat <<EOF
 DETECT_RESUME_RESULT
   RESUME_STEP:        ${RESUME_STEP}
   APPRAISE_FROM:      ${APPRAISE_FROM:-}
+  REPRODUCE_FROM:     ${REPRODUCE_FROM:-}
   EXEC_FROM:          ${EXEC_FROM:-}
   IMPLEMENT_FROM:     ${IMPLEMENT_FROM:-}
   MAINTENANCE_FROM:   ${MAINTENANCE_FROM:-}

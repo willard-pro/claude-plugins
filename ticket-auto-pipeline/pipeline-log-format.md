@@ -35,6 +35,9 @@ Never use `>>` without a trailing newline on the echo string. Always quote `$LOG
 ### APPRAISE
 `setup-workspace` `complexity-sweep` `prior-art` `codebase-investigation` `handoff`
 
+### REPRODUCE
+`reproduce` `setup` `plan` `execute`
+
 ### EXEC
 `load-workspace` `create-artifact` `post-linear` `handoff`
 
@@ -91,6 +94,8 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|<CODE>" >> "$LOG_FILE"
 | `APPROVAL_REVOKED` | `approved` label was removed before implement phase started (Phase 2) |
 | `REMEDIATION_BRIEF_TRUNCATED` | REMEDIATION_BRIEF from verify exceeded length limit (Phase 2) |
 | `PR_REVIEW_VERDICT_UNPARSEABLE` | PR review returned no parseable ✅/⚠️/❌ verdict line (Phase 2) |
+| `REPRO_NOT_CONFIRMED` | Reproduce skill determined bug does not manifest on UAT (Step 1.5) |
+| `REPRO_BLOCKED` | Reproduce skill blocked — insufficient detail in ticket (Step 1.5) |
 
 ## Rules
 

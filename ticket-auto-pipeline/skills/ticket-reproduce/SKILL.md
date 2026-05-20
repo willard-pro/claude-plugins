@@ -1,15 +1,47 @@
 ---
 name: ticket-reproduce
-description: Derives a concrete browser reproduction plan from a Linear ticket, writes it to reproduce.md in the ticket directory, then navigates UAT step-by-step using playwright-cli to confirm the bug. Use when the user says "/ticket-reproduce <ID>", "reproduce ticket <ID>", or "verify bug <ID>".
+description: Derives a concrete browser reproduction plan from a Linear ticket, writes it to reproduce.md in the ticket directory, then navigates UAT step-by-step using playwright-cli to confirm the bug. Use when the user says "/ticket-reproduce <ID>", "reproduce ticket <ID>", or "verify bug <ID>". Accepts optional --from-auto and --from-step flags.
 ---
 
 # Ticket Reproduce
 
-You have been given a ticket ID as the argument (e.g. `CRE-45`). Execute the full sequence below in order.
+You have been given a ticket ID as the argument (e.g. `CRE-45`), with optional flags:
+- `--from-auto` — called by ticket-auto. Suppresses all user prompts. Missing credentials or nav failures produce a diagnostic BLOCKED instead of asking the user. Enables pipeline logging and heartbeat.
+- `--from-step <step>` — resume from a specific sub-step after a crash. See Step Dispatch below.
+
+Parse the arguments before proceeding. Set `FROM_AUTO=true` if `--from-auto` is present. Set `FROM_STEP` if `--from-step` is provided.
+
+## Pipeline Preamble
+
+Follow the pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=REPRODUCE, FROM_FLAG=auto, HAS_LINEAR_ACCESS=true, LINEAR_OPS=save_comment, HAS_GUARD=true, HAS_PROJECT_CONTEXT=false, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=false
+
+When `--from-auto` is set, source `~/.claude/skills/lib/heartbeat.sh` and write pipeline log entries.
+
+### Heartbeat points
+- **Reproduce start**: on skill entry with `--from-auto`, write `hb_heartbeat "reproduce-start" "start" "reproduction attempt begins"`
+- **Reproduce result**: after final determination, write `hb_heartbeat "reproduce-result" "{REPRODUCED|NOT_REPRODUCED|BLOCKED}" "reproduction complete" '{"result":"...","assertion_field":"...","blocker":"..."}'`
+- **Sufficiency fail**: if Step 3b blocks on missing info, write `hb_heartbeat "reproduce-blocked" "fail" "insufficient detail to reproduce" '{"gaps":["..."]}'`
+
+### Step dispatch
+| `--from-step` value | Skip to |
+|---------------------|---------|
+| `reproduce` | Step 2 (load app knowledge) |
+| `execute` | Step 6 (execute in browser) |
+| `record` | Step 7 (record result) |
+| *(empty)* | Step 1 (setup workspace) |
+
+---
 
 ## Guard — Verify working directory
 
 Run `basename "$(pwd)"`. If the result is NOT `tickets`, abort immediately and tell the user to `cd` to the tickets workspace and re-run.
+
+### Pipeline log entry (--from-auto)
+When `--from-auto` is set, write the start log entry before proceeding:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|start|" >> "$LOG_FILE"
+```
 
 ---
 
@@ -25,6 +57,11 @@ Run `/ticket-setup {TICKET-ID}` and wait for it to complete.
 
 - If ticket-setup reports **workspace created** → use the directory path and ticket data it outputs; continue to Step 2.
 - If ticket-setup reports **workspace already exists** → read `context.md` from the existing directory; continue to Step 2.
+
+### Sub-step log (--from-auto)
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|setup|done|" >> "$LOG_FILE"
+```
 
 ---
 
@@ -111,32 +148,40 @@ Before writing the plan, assess whether the ticket provides enough detail to act
 **If any required information is missing:**
 
 1. List every gap clearly.
-2. Post a comment on the Linear ticket via `mcp__linear-server__save_comment`:
+2. Post a comment on the Linear ticket. Use the standard Linear access strategy:
+   - If `$LINEAR_API_KEY` is set: `source ~/.claude/skills/lib/linear-api.sh && save_comment "{TICKET-ID}" "<comment body>"`
+   - Otherwise: `mcp__linear-server__save_comment` with `{ "issueId": "{TICKET-ID}", "body": "<comment body>" }`
 
-```
-**Reproduction blocked — additional information required**
+   Comment body:
+   ```
+   **Reproduction blocked — additional information required**
 
-To reproduce this issue I need the following details:
+   To reproduce this issue I need the following details:
 
-- {gap 1: e.g. "Which handover should I use? Please provide the reference number or debtor name."}
-- {gap 2: e.g. "Should I record a new payment or look at an existing one? If existing, which one?"}
-- {gap 3: etc.}
+   - {gap 1: e.g. "Which handover should I use? Please provide the reference number or debtor name."}
+   - {gap 2: e.g. "Should I record a new payment or look at an existing one? If existing, which one?"}
+   - {gap 3: etc.}
 
-Once these details are provided I can proceed with the reproduction.
-```
+   Once these details are provided I can proceed with the reproduction.
+   ```
 
-3. Report to the user:
-```
-## CRE-XX — Reproduction blocked
+3. When `--from-auto`:
+   - Write `echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|done|BLOCKED" >> "$LOG_FILE"`
+   - Fire `hb_heartbeat "reproduce-result" "BLOCKED" "insufficient detail" '{"gaps":["..."]}'`
+   - Output `REPRODUCE_RESULT=BLOCKED` and stop. Do NOT prompt the user.
 
-Insufficient detail to reproduce. Comment posted on Linear requesting:
-- {gap 1}
-- {gap 2}
+4. When interactive (no `--from-auto`), report to the user:
+   ```
+   ## CRE-XX — Reproduction blocked
 
-Waiting for reporter to respond before proceeding.
-```
+   Insufficient detail to reproduce. Comment posted on Linear requesting:
+   - {gap 1}
+   - {gap 2}
 
-4. **Stop. Do not proceed to Step 4.**
+   Waiting for reporter to respond before proceeding.
+   ```
+
+5. **Stop. Do not proceed to Step 4.**
 
 **If all required information is present:** proceed to Step 4.
 
@@ -189,9 +234,18 @@ Write the plan to `{ticket-dir}/reproduce.md`:
 **Screenshot:** —
 ```
 
+### Sub-step log (--from-auto)
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|plan|done|" >> "$LOG_FILE"
+```
+
 ---
 
 ## Step 5 — Present plan and confirm
+
+When `--from-auto`: auto-proceed without user confirmation. Log the plan summary and continue to Step 6.
+
+When interactive (no `--from-auto`):
 
 Show the user the reproduction plan in a concise summary:
 
@@ -256,6 +310,11 @@ playwright-cli screenshot --filename={ticket-id}-assertion.png
 
 Read the snapshot carefully. Compare the actual value shown against the expected value from the plan.
 
+### Sub-step log (--from-auto)
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|execute|done|" >> "$LOG_FILE"
+```
+
 ---
 
 ## Step 7 — Record result
@@ -280,7 +339,28 @@ Move the screenshot to `{ticket-dir}/attachments/` if captured.
 
 ---
 
-## Step 8 — Report to user
+## Step 8 — Report result and handoff
+
+When `--from-auto`, write pipeline log and heartbeat before the report:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|done|{REPRODUCED|NOT_REPRODUCED|BLOCKED}" >> "$LOG_FILE"
+hb_heartbeat "reproduce-result" "{result}" "reproduction complete" '{"result":"{REPRODUCED|NOT_REPRODUCED|BLOCKED}","assertion_field":"{field}","screenshot":"{path}"}'
+```
+
+Then output the orchestrator handoff block (both `--from-auto` and interactive):
+
+```
+REPRODUCE_RESULT={REPRODUCED|NOT_REPRODUCED|BLOCKED}
+REPRODUCE_ASSERTION_FIELD={field name}
+REPRODUCE_EXPECTED={expected value}
+REPRODUCE_OBSERVED={actual value}
+REPRODUCE_SCREENSHOT={path or "not captured"}
+```
+
+{If BLOCKED: also output `REPRODUCE_BLOCKER={reason}`}
+
+Then report to the user:
 
 ```
 ## {TICKET-ID} — Reproduction Result
