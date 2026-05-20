@@ -42,6 +42,7 @@ Parse the JSON output into the following variables:
 - `{COMPLEXITY_PREDICTIONS}` — array of `{ticket, declared, actual, actual_source}`
 - `{COMPLEXITY_ACCURACY}` — float 0–1
 - `{LOGS_SCANNED}`, `{LOGS_WITH_FAILURES}` — counts
+- `{ERROR_DIAGNOSTICS}` — object with `total_errors`, `errors_by_ticket`, `error_category_histogram` (from heartbeat structured error events)
 
 If `{FAILURE_HISTOGRAM}` is empty (no failures), skip to Step 4 to write a short "clean window" report.
 
@@ -75,6 +76,29 @@ TEMPLATE="~/.claude/skills/ticket-retro/templates/{CODE}.md"
 
 If the template file exists, read it. If not, use the generic fallback: "Investigate the skill file that produces or handles `{CODE}` events. Look for the log-write site and the decision logic that leads to this failure."
 
+### 3a.5 — Extract heartbeat error context for this failure code
+
+Before reading the implicated skill file, check `{ERROR_DIAGNOSTICS}` for structured error events related to this failure code:
+
+```bash
+# Find tickets in the failure histogram that also have heartbeat error events
+# Cross-reference by checking errors_by_ticket for tickets that produced this failure code
+```
+
+For each ticket that contributed to this failure code count, check `{ERROR_DIAGNOSTICS}.errors_by_ticket[ticket]` for error events. Extract:
+- `event` — error event name (e.g. `get-issue`, `flow-sh`, `jq-parse`)
+- `message` — human-readable failure description
+- `detail` — structured key-value pairs (command, ticket, exit_code, error_snippet, etc.)
+- `timestamp` — when the failure occurred
+
+Store as `{ERROR_CONTEXT}` for use in steps 3b and 3c.
+
+Also check if an agent transcript file exists on disk for any implicated ticket:
+```bash
+TRANSCRIPT_PATH="./logs/{TICKET-ID}-{phase}-agent.log"  # e.g. logs/CRE-47-exec-agent.log
+```
+Store the path as `{TRANSCRIPT_PATH}` if the file exists (used in Step 4 proposal — reference only, never grep the content).
+
 ### 3b — Read the implicated skill file
 
 The template identifies which skill file(s) to inspect. Read the relevant sections of that skill file. For gate-stop codes the mapping is:
@@ -95,6 +119,7 @@ Produce a minimal unified diff that would fix the recurring failure. The diff sh
 - Target the specific section of the skill file where the failure originates
 - Be minimal — one focused change, not a rewrite
 - Be presented in a fenced `diff` code block
+- Where `{ERROR_CONTEXT}` provides structured detail (e.g. `error_snippet`, `error_type`, `exit_code`), use those specific values to inform the proposed fix rather than making assumptions about the root cause
 
 If the same diff was proposed in `{PRIOR_PROPOSAL_CONTEXT}`, note "Previously proposed on {date} — verify if applied" instead of repeating the full diff.
 
@@ -146,6 +171,14 @@ One subsection per failure code with count ≥ 2:
 **Pattern:** <description from template>
 
 **Implicated:** `ticket-appraise-exec/SKILL.md`
+
+**Diagnostic context** (from heartbeat error events, if available):
+- Event: `<event name>` — `<message>`
+- Detail: `<key: value>` pairs from DETAIL JSON (e.g. `expected: ./tickets/CRE-47--slug/simple-fix.md`, `artifact_type: simple-fix`)
+- (If no heartbeat error events for this failure code: "No structured diagnostic data — error capture may predate this run.")
+
+**Transcript** (for manual investigation, if available):
+`./logs/{TICKET-ID}-{phase}-agent.log`
 
 **Proposed fix:**
 
