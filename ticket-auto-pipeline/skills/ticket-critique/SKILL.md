@@ -7,11 +7,9 @@ description: Validates a Linear ticket's requirements for completeness before im
 
 Given a ticket ID (e.g. `CRE-40`), validate that the ticket contains enough information to plan, implement, and verify it. This runs on the ticket text only — no codebase reads.
 
-## Guard — Verify working directory
+## Pipeline Preamble
 
-If the arguments contain `--from-appraise`, skip this guard — `ticket-appraise` already verified the working directory.
-
-Run `basename "$(pwd)"`. If the result is NOT `tickets`, abort immediately and tell the user to `cd` to the tickets workspace and re-run.
+Follow the pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=none, FROM_FLAG=--from-appraise, HAS_LINEAR_ACCESS=false, HAS_GUARD=true, HAS_PROJECT_CONTEXT=false, HAS_LOGGING=false, HAS_HEARTBEAT=false, HAS_STEP_DISPATCH=false, HAS_TASK_TRACKER=false
 
 ---
 
