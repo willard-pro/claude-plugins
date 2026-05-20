@@ -191,6 +191,36 @@ if [ "${_MODE:-full}" = "validate" ]; then
   fi
 
   echo ""
+  say "check" "token tracker hooks"
+
+  # Check project-level settings first (preferred — scoped to this repo), then user-level
+  HOOKS_FOUND=false
+  HOOKS_LEVEL=""
+  for SETTINGS_FILE in "$PROJECT_DIR/.claude/settings.json" "$HOME/.claude/settings.json"; do
+    [ -f "$SETTINGS_FILE" ] || continue
+    START_OK=false
+    STOP_OK=false
+    jq -e '.hooks.SubagentStart // [] | [.[].hooks[]? | select(.command | test("token-tracker-start"))] | length > 0' "$SETTINGS_FILE" >/dev/null 2>&1 && START_OK=true
+    jq -e '.hooks.SubagentStop // [] | [.[].hooks[]? | select(.command | test("token-tracker\\.sh"))] | length > 0' "$SETTINGS_FILE" >/dev/null 2>&1 && STOP_OK=true
+    if $START_OK && $STOP_OK; then
+      HOOKS_FOUND=true
+      HOOKS_LEVEL="$SETTINGS_FILE"
+      break
+    fi
+  done
+
+  if $HOOKS_FOUND; then
+    if [[ "$HOOKS_LEVEL" == "$PROJECT_DIR/.claude/settings.json" ]]; then
+      pass "SubagentStart → token-tracker-start.sh + SubagentStop → token-tracker.sh (project-level — scoped to this repo)"
+    else
+      warn "SubagentStart → token-tracker-start.sh + SubagentStop → token-tracker.sh (user-level — fires globally, consider moving to project .claude/settings.json)"
+    fi
+  else
+    fail "token tracker hooks not wired" "add SubagentStart→token-tracker-start.sh + SubagentStop→token-tracker.sh to project .claude/settings.json"
+    failures=$((failures + 1))
+  fi
+
+  echo ""
   if [ "$failures" -eq 0 ]; then
     echo "${GREEN}${BOLD}All required values present.${RESET}"
     exit 0
@@ -391,6 +421,38 @@ else
   else
     _var "WIKI_ROOT" "warn" "" "CLAUDE.md" "wiki directory path — appraise skips wiki bootstrapping if absent"
   fi
+fi
+
+# ── Hooks ───────────────────────────────────────────────────────────────────
+
+START_OK=false
+STOP_OK=false
+HOOKS_LEVEL=""
+for SETTINGS_FILE in "$PROJECT_DIR/.claude/settings.json" "$HOME/.claude/settings.json"; do
+  [ -f "$SETTINGS_FILE" ] || continue
+  jq -e '.hooks.SubagentStart // [] | [.[].hooks[]? | select(.command | test("token-tracker-start"))] | length > 0' "$SETTINGS_FILE" >/dev/null 2>&1 && START_OK=true
+  jq -e '.hooks.SubagentStop // [] | [.[].hooks[]? | select(.command | test("token-tracker\\.sh"))] | length > 0' "$SETTINGS_FILE" >/dev/null 2>&1 && STOP_OK=true
+  if $START_OK && $STOP_OK; then
+    HOOKS_LEVEL="$SETTINGS_FILE"
+    break
+  fi
+done
+
+if $START_OK && $STOP_OK; then
+  if [[ "$HOOKS_LEVEL" == "$PROJECT_DIR/.claude/settings.json" ]]; then
+    _var "HOOKS_CONFIGURED" "ok" "SubagentStart + SubagentStop" "project .claude/settings.json" "token tracker hooks scoped to this repo"
+  else
+    _var "HOOKS_CONFIGURED" "warn" "SubagentStart + SubagentStop" "~/.claude/settings.json" "hooks fire globally — consider moving to project .claude/settings.json"
+  fi
+elif $START_OK && ! $STOP_OK; then
+  _var "HOOKS_CONFIGURED" "warn" "SubagentStart only" "settings.json" "missing SubagentStop → token-tracker.sh"
+  issues=$((issues + 1))
+elif ! $START_OK && $STOP_OK; then
+  _var "HOOKS_CONFIGURED" "warn" "SubagentStop only" "settings.json" "missing SubagentStart → token-tracker-start.sh"
+  issues=$((issues + 1))
+else
+  _var "HOOKS_CONFIGURED" "missing" "" "project .claude/settings.json" "add SubagentStart→token-tracker-start.sh + SubagentStop→token-tracker.sh"
+  issues=$((issues + 1))
 fi
 
 # ── Emit ────────────────────────────────────────────────────────────────────
