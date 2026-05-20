@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository. For plugin-specific guidance, see [ticket-auto-pipeline/CLAUDE.md](ticket-auto-pipeline/CLAUDE.md). For maintainer documentation, see [ticket-auto-pipeline/plugin-overview.md](ticket-auto-pipeline/plugin-overview.md).
 
 ## Repository purpose
 
@@ -10,14 +10,19 @@ Claude Code plugin marketplace (`willard-pro-claude-plugins`). Currently ships o
 
 ```
 ticket-auto-pipeline/
-  .claude-plugin/plugin.json    # Plugin manifest (name, version, description)
-  skills/                       # 20+ slash-command skill .md files
-  lib/                          # Shared bash libraries
-  state-machine.json            # Linear state/label transition definitions
-  pipeline-log-format.md        # Shared log schema (ISO|PHASE|STEP|STATUS|MSG)
-  gen-mermaid.sh                # Generates stateDiagram-v2 from state-machine.json
-  install.sh                    # Post-install migration from host-side skills
-  validate-linear-config.sh     # Validates Linear team states/labels match the state machine
+  .claude-plugin/plugin.json       # Plugin manifest (name, version, description)
+  CLAUDE.md                        # Plugin-level guidance for Claude Code
+  plugin-overview.md               # Maintainer-facing architecture & design doc
+  README.md                        # User-facing plugin documentation
+  skills/                          # 20+ slash-command skill .md files
+  lib/                             # Shared bash libraries
+  docs/                            # Deep-dive reference docs & design notes
+  state-machine.json               # Linear state/label transition definitions
+  pipeline-log-format.md           # Shared log schema (ISO|PHASE|STEP|STATUS|MSG)
+  pipeline-heartbeat-format.md     # Heartbeat log schema
+  pipeline-diagram.html            # Interactive state diagram
+  validate-linear-config.sh        # Validates Linear team states/labels match state machine
+  install.sh                       # Post-install migration from host-side skills
 ```
 
 ## Skill architecture

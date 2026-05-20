@@ -8,49 +8,35 @@ A marketplace of installable Claude Code plugins. Add this marketplace to Claude
 
 | Plugin | Version | Description |
 |--------|---------|-------------|
-| `ticket-auto-pipeline` | 0.2.3 | Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. 20+ slash commands, state-machine-driven flow control, pipeline safety gates, and retrospective analysis. |
+| `ticket-auto-pipeline` | 0.3.16 | Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. 20+ slash commands, state-machine-driven flow control, pipeline safety gates, and retrospective analysis. |
 
-## Add This Marketplace
+See the [plugin README](ticket-auto-pipeline/README.md) for full documentation.
 
-```bash
-claude plugin marketplace add willard-pro/claude-plugins
+## How the Pipeline Works
+
+The ticket-auto-pipeline processes Linear tickets through six phases without human intervention:
+
+```
+APPRAISE → IMPLEMENT → VERIFY → PR-REVIEW → MAINTENANCE
 ```
 
-Then install any plugin:
+Each phase spawns an isolated agent. A state machine manages Linear state transitions (`Backlog → Todo → Approve → Ready → Review → Done`). Safety gates halt the pipeline on structural failures (missing artifacts, approval revocations, verdict parse errors). Crash recovery resumes from the last completed pipeline log entry.
+
+## Install
 
 ```bash
+# Add this marketplace (one-time)
+claude plugin marketplace add willard-pro/claude-plugins
+
+# Install the plugin
 claude plugin install ticket-auto-pipeline@willard-pro-claude-plugins
 ```
 
-### Verify Environment
+## Configure
 
-From within Claude Code, run the env check slash command:
+### 1. Environment Variables
 
-```
-/ticket-env-check
-```
-
-This validates all required env vars (`LINEAR_API_KEY`, `GITHUB_PERSONAL_ACCESS_TOKEN`/`GH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`) plus CLAUDE.md fields (`REPOS_ROOT`, `LOCAL_URL`, `UAT_URL`). Fix any failures before running pipeline commands.
-
-## Plugin Structure
-
-Each plugin is a directory at the repo root containing:
-
-```
-ticket-auto-pipeline/
-  .claude-plugin/plugin.json    # Plugin manifest (name, version, description)
-  skills/                       # Slash-command skill .md files
-  lib/                          # Shared bash libraries (sourced by skill scripts)
-  state-machine.json            # State/label transition definitions
-  pipeline-log-format.md        # Shared pipeline log schema
-  install.sh                    # Post-install migration from host-side skills
-```
-
-Plugins are discovered at marketplace add time — Claude Code reads each `.claude-plugin/plugin.json` under the repo root to build the catalog.
-
-## Environment
-
-Plugin skills that interact with Linear require these env vars:
+Set in `~/.claude/settings.local.json` under `env`:
 
 | Variable | Purpose |
 |----------|---------|
@@ -58,7 +44,66 @@ Plugin skills that interact with Linear require these env vars:
 | `GITHUB_PERSONAL_ACCESS_TOKEN` (or `GH_TOKEN`) | GitHub CLI + PR operations |
 | `ANTHROPIC_AUTH_TOKEN` | Claude API key |
 
-Set in `~/.claude/settings.local.json` under `env`.
+Optional env vars and CLAUDE.md fields (`REPOS_ROOT`, `LOCAL_URL`, `UAT_URL`) are documented in the [plugin README](ticket-auto-pipeline/README.md#required-environment).
 
-The `validate-linear-config.sh` script also checks for project-specific values in the working directory's `CLAUDE.md`: `REPOS_ROOT`, `LOCAL_URL`, `UAT_URL`, and optional `BE_TEST_CMD`, `SLACK_CHANNEL`, `WIKI_ROOT`.
+### 2. MCP Servers
+
+The pipeline requires three MCP servers in `~/.claude.json` (or `.claude.json` in your project):
+
+```json
+{
+  "mcpServers": {
+    "linear-server": {
+      "command": "npx",
+      "args": ["-y", "@linear/mcp-server"],
+      "env": {
+        "LINEAR_API_KEY": "${LINEAR_API_KEY}"
+      }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/mcp-server-playwright"]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/github-mcp-server"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+### 3. Validate
+
+From within Claude Code, verify everything is wired up:
+
+```
+/ticket-env-check
+```
+
+Then validate your Linear team's states and labels match the state machine:
+
+```bash
+bash ticket-auto-pipeline/validate-linear-config.sh
+```
+
+Fix any failures before running pipeline commands.
+
+## Plugin Structure
+
+```
+ticket-auto-pipeline/
+  .claude-plugin/plugin.json    # Plugin manifest
+  skills/                       # 20+ slash-command skill .md files
+  lib/                          # Shared bash libraries
+  state-machine.json            # State/label transition definitions
+  pipeline-log-format.md        # Pipeline log schema
+  pipeline-heartbeat-format.md  # Operational heartbeat log schema
+  validate-linear-config.sh     # Linear team config validator
+  install.sh                    # Migration from host-side skills
+```
+
+Plugins are discovered at marketplace add time — Claude Code reads each `.claude-plugin/plugin.json` under the repo root to build the catalog.
 
