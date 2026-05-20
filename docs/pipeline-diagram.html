@@ -148,8 +148,8 @@
   }
   svg.diagram {
     display: block;
-    min-width: 1800px;
-    width: 1800px;
+    min-width: 1960px;
+    width: 1960px;
     height: 540px;
   }
   /* SVG node styles */
@@ -712,7 +712,7 @@
     <div class="helptext">Click any <span class="mono" style="color:var(--auto)">phase chip</span> below the flow to drill into its steps, gates and stop codes. Hover an edge for trigger details.</div>
 
     <div class="diagram-wrap">
-      <svg class="diagram" id="diagram" viewBox="0 0 1800 540" preserveAspectRatio="xMinYMid meet">
+      <svg class="diagram" id="diagram" viewBox="0 0 1960 540" preserveAspectRatio="xMinYMid meet">
         <defs>
           <marker id="arrow-auto" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
             <path d="M0,0 L10,5 L0,10 Z" fill="var(--auto)"></path>
@@ -810,12 +810,12 @@ const DATA = {
     rowY: 170,
     cols: {
       backlog: 110,
-      todo:    380,
-      approve: 650,
-      ready:   920,
-      review:  1190,
-      uat:     1460,
-      done:    1730,
+      todo:    405,
+      approve: 700,
+      ready:   995,
+      review:  1290,
+      uat:     1585,
+      done:    1880,
     },
     // Each loopback transition gets an explicit vertical lane below the phase chips,
     // so loopback labels never collide with chips or with each other.
@@ -843,7 +843,7 @@ const DATA = {
   // Each chip is positioned between fromCol and toCol along the main flow
   phaseChips: [
     { phase: "APPRAISE",   between: ["backlog", "todo"],    side: "below" },
-    { phase: "REPRODUCE",  between: ["todo", "todo"],       side: "below", note: "bug only" },
+    { phase: "REPRODUCE",  between: ["backlog", "todo"],    side: "below", chipY: 340, tickFromY: 282, note: "bug only" },
     { phase: "EXEC",       between: ["todo", "approve"],    side: "below" },
     { phase: "GATE",       between: ["approve", "ready"],   side: "below" },
     { phase: "IMPLEMENT",  between: ["ready", "review"],    side: "below" },
@@ -1152,7 +1152,7 @@ function renderPhaseChips() {
     const a = nodeRect(ch.between[0]);
     const b = nodeRect(ch.between[1]);
     const cx = (a.cx + b.cx) / 2;
-    const cy = a.bottom + 58;  // below the main flow, above the loopback arcs
+    const cy = ch.chipY !== undefined ? ch.chipY : (a.bottom + 58);
     const w = 132, h = 44;
 
     const grp = svgEl("g", { class: "phase-badge", "data-phase": ch.phase, transform: `translate(${cx - w/2}, ${cy - h/2})` });
@@ -1160,11 +1160,12 @@ function renderPhaseChips() {
     const name = svgEl("text", { x: w/2, y: 17, class: "name" });
     name.textContent = ch.phase;
     const tag = svgEl("text", { x: w/2, y: 32, class: "tag" });
-    tag.textContent = "phase →";
+    tag.textContent = ch.note || "phase →";
     grp.appendChild(rect); grp.appendChild(name); grp.appendChild(tag);
 
-    // tick connecting state to phase
-    const tick = svgEl("path", { d: `M ${cx} ${a.bottom} L ${cx} ${cy - h/2}`, stroke: "var(--line-2)", "stroke-width": "1", "stroke-dasharray": "2 3", fill: "none" });
+    // tick: from node bottom by default, or tickFromY anchor (e.g. another chip's bottom)
+    const tickY1 = ch.tickFromY !== undefined ? ch.tickFromY : a.bottom;
+    const tick = svgEl("path", { d: `M ${cx} ${tickY1} L ${cx} ${cy - h/2}`, stroke: "var(--line-2)", "stroke-width": "1", "stroke-dasharray": "2 3", fill: "none" });
     g.appendChild(tick);
     g.appendChild(grp);
 
