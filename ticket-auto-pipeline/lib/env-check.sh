@@ -16,24 +16,40 @@ SUMMARY_FILE=""
 SHOW=""
 PROJECT_DIR=""
 _MODE="full"
+_EXPECTING_SUMMARY_PATH=false
 for arg in "${@}"; do
+  if $_EXPECTING_SUMMARY_PATH; then
+    if [[ "$arg" == --* ]]; then
+      echo "env-check: --summary-file requires a path argument (got flag: $arg)" >&2
+      exit 1
+    fi
+    SUMMARY_FILE="$arg"
+    _EXPECTING_SUMMARY_PATH=false
+    continue
+  fi
   case "$arg" in
     --mode) _MODE="" ;;
     --mode=*) _MODE="${arg#*=}" ;;
-    --summary-file) SUMMARY_FILE="1" ;;
+    --summary-file) _EXPECTING_SUMMARY_PATH=true ;;
     --summary-file=*) SUMMARY_FILE="${arg#*=}" ;;
     --show) SHOW="1" ;;
     *)
       if [ "$_MODE" = "" ]; then
         _MODE="$arg"
-      elif [ "$SUMMARY_FILE" = "1" ]; then
-        SUMMARY_FILE="$arg"
       elif [ -z "$PROJECT_DIR" ]; then
         PROJECT_DIR="$arg"
+      else
+        echo "env-check: unexpected argument: $arg" >&2
+        exit 1
       fi
       ;;
   esac
 done
+
+if $_EXPECTING_SUMMARY_PATH; then
+  echo "env-check: --summary-file requires a path argument" >&2
+  exit 1
+fi
 PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
 
 # Reject unknown --mode values
