@@ -7,46 +7,11 @@ description: Investigation planner for a Linear ticket. Fetches the issue, creat
 
 You have been given a ticket ID as the argument (e.g. `WIL-42`). Execute the investigation sequence below in order. This skill ends with notes.md fully populated. The executor skill (`/ticket-appraise-exec`) handles artifact creation and Linear updates.
 
-## Guard — Verify working directory
+## Pipeline Preamble
 
-If the arguments contain `--from-auto`, skip this guard — `ticket-auto` already verified the working directory.
+Follow the pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=APPRAISE, FROM_FLAG=--from-auto, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,get_comments, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=REPOS_ROOT,ISSUE_PREFIX,BE_SERVICES,WIKI_ROOT, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
 
-Run `basename "$(pwd)"`. If the result is NOT `tickets`, abort immediately and tell the user to `cd` to the tickets workspace and re-run.
-
----
-
-## Linear access strategy
-
-When `$LINEAR_API_KEY` is set in the environment, use bash calls to `~/.claude/skills/lib/linear-api.sh` for **all** Linear operations. When `$LINEAR_API_KEY` is unset, fall back to MCP tools (`mcp__linear-server__*`).
-
-**Function mapping:**
-
-| Operation | linear-api.sh bash call | MCP fallback |
-|-----------|------------------------|--------------|
-| Fetch issue | `bash -c "source ~/.claude/skills/lib/linear-api.sh; get_issue '<id>'"` | `mcp__linear-server__get_issue(id: "<id>")` |
-| Fetch comments | `bash -c "source ~/.claude/skills/lib/linear-api.sh; get_comments '<id>'"` | `mcp__linear-server__list_comments(id: "<id>")` |
-
-Always check `$LINEAR_API_KEY` before each operation and use the appropriate method.
-
----
-
-## Step 0 — Clear context: Run `/clear`.
-
----
-
-## Step 0.5 — Detect project context
-
-Read `CLAUDE.md` and extract: `{REPOS_ROOT}` (parent path of all service dirs), `{ISSUE_PREFIX}` (issue ID prefix, e.g. `CRE`), `{BE_SERVICES}` (BE service dir names). Also extract `{WIKI_ROOT}` — look for a `WIKI_ROOT = ...` line. If not found, set to empty. Stop if no codebase map — this skill requires one.
-
----
-
-## Logging (--from-auto)
-
-If `$LOG_FILE` is set (passed by the `ticket-auto` orchestrator): read `~/.claude/skills/pipeline-log-format.md`. After each major step below, write progress entries to `$LOG_FILE` using the format defined there. Phase is `APPRAISE`.
-
-## Heartbeat (--from-auto)
-
-If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/skills/lib/heartbeat.sh` then write heartbeat entries at these decision points:
+### Heartbeat points
 - **Complexity axes**: after complexity sweep, write `hb_decision "complexity-score" "fired" "...score..." '{"axes":"...","score":"..."}'`
 - **Blast radius**: after codebase investigation, write `hb_decision "blast-radius" "fired" "...N files..." '{"file_count":"N"}'`
 - **Prior art**: if prior art found, write `hb_decision "prior-art" "fired" "...N matches..."`; if none found, write `hb_decision "prior-art" "info" "no prior art found"`
@@ -54,12 +19,7 @@ If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/sk
 - **Regression verdict**: after the regression check, write `hb_decision "regression-verdict" "fired" "risky|clean" '{"verdict":"risky|clean"}'`
 - **Impact data fallback**: if gitnexus impact unavailable, write `hb_fallback "impact-data" "fired" "using local grep" '{"reason":"MCP tool unavailable"}'`
 
----
-
-## Step dispatch (--from-step)
-
-If `--from-step {step-name}` is in the arguments, this is a crash-recovery resume. Skip all steps up to and including the named step. Do not re-run skipped steps — restore any variables they would have set from existing files (notes.md, context.md, pipeline log). Proceed directly to the first step after the named step.
-
+### Step dispatch
 Also: if `--from-step` is set, **suppress Resume Mode** in Step 1 — the workspace exists by definition, and re-evaluation is not needed.
 
 | `--from-step` value | Skip to | Restore from |
@@ -69,8 +29,6 @@ Also: if `--from-step` is set, **suppress Resume Mode** in Step 1 — the worksp
 | `prior-art` | Step 3 (codebase investigation) | `## Prior Art` in notes.md |
 | `codebase-investigation` | Step 5 (report/handoff) | `## Initial Investigation` in notes.md |
 | `handoff` | End — skill already complete | — |
-
-If `--from-step` is not provided, proceed normally from Step 1.
 
 ---
 

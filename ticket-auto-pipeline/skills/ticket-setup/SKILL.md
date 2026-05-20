@@ -13,6 +13,10 @@ Creates the local workspace for a Linear ticket — fetches issue data, derives 
 /ticket-setup <TICKET-ID>
 ```
 
+## Pipeline Preamble
+
+Follow the pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=none, FROM_FLAG=none, HAS_LINEAR_ACCESS=false, HAS_GUARD=false, HAS_PROJECT_CONTEXT=false, HAS_LOGGING=false, HAS_HEARTBEAT=false, HAS_STEP_DISPATCH=false, HAS_TASK_TRACKER=false
+
 ## Execution
 
 This skill is a thin wrapper around `setup.sh`. All Linear API calls, directory creation, and file generation are handled deterministically by the script.

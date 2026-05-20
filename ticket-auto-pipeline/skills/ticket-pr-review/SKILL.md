@@ -7,56 +7,16 @@ description: Reviews a pull request by extracting requirements from its Linear t
 
 You have been given a ticket ID as the argument (e.g. `WIL-42`). Execute the full review sequence below in order.
 
-## Guard — Verify working directory
+## Pipeline Preamble
 
-If the arguments contain `--from-auto`, skip this guard — `ticket-auto` already verified the working directory.
+Follow the pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=PR-REVIEW, FROM_FLAG=--from-auto, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=ISSUE_PREFIX,REPOS_ROOT, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
 
-Run `basename "$(pwd)"`. If the result is NOT `tickets`, abort immediately and tell the user to `cd` to the tickets workspace and re-run.
-
----
-
-## Linear access strategy
-
-When `$LINEAR_API_KEY` is set in the environment, use bash calls to `~/.claude/skills/lib/linear-api.sh` for **all** Linear operations. When `$LINEAR_API_KEY` is unset, fall back to MCP tools (`mcp__linear-server__*`).
-
-**Function mapping:**
-
-| Operation | linear-api.sh bash call | MCP fallback |
-|-----------|------------------------|--------------|
-| Fetch issue | `bash -c "source ~/.claude/skills/lib/linear-api.sh; get_issue '<id>'"` | `mcp__linear-server__get_issue(id: "<id>")` |
-| Post comment | `bash -c "source ~/.claude/skills/lib/linear-api.sh; save_comment '<id>' '<body>'"` | `mcp__linear-server__save_comment(issueId: "<id>", body: "<body>")` |
-
-Always check `$LINEAR_API_KEY` before each operation and use the appropriate method.
-
----
-
-## Step 0 — Clear context: Run `/clear`.
-
----
-
-## Step 0.5 — Detect project context
-
-Read `CLAUDE.md` and extract: `{ISSUE_PREFIX}` (issue ID prefix, e.g. `CRE`), `{REPOS_ROOT}` (parent path of all service dirs).
-
----
-
-## Logging (--from-auto)
-
-If `$LOG_FILE` is set (passed by the `ticket-auto` orchestrator): read `~/.claude/skills/pipeline-log-format.md`. After each major step below, write progress entries to `$LOG_FILE` using the format defined there. Phase is `PR-REVIEW`.
-
-## Heartbeat (--from-auto)
-
-If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/skills/lib/heartbeat.sh` then write heartbeat entries at these points:
+### Heartbeat points
 - **Requirement extraction**: after extracting requirements from the ticket, write `hb_decision "requirement-extraction" "ok" "extracted N requirements" '{"count":"N"}'`
 - **CI checks**: after checking CI status, write `hb_gate "ci-checks" "ok|fail" "CI status: <state>" '{"state":"<passing|failing>"}'`
 - **Merge decision**: after rendering verdict, write `hb_decision "merge-decision" "fired" "verdict" '{"verdict":"<✅|⚠️|❌>"}'`
 
----
-
-## Step dispatch (--from-step)
-
-If `--from-step {step-name}` is in the arguments, this is a crash-recovery resume. Skip all steps up to and including the named step. Do not re-run them. Proceed directly to the first step after the named step.
-
+### Step dispatch
 | `--from-step` value | Skip to | Restore from |
 |---------------------|---------|--------------|
 | `fetch-ticket` | Step 2 (extract requirements) | ticket data already cached; re-fetch if needed |
@@ -65,8 +25,6 @@ If `--from-step {step-name}` is in the arguments, this is a crash-recovery resum
 | `validate-diff` | Step 6 (post findings) | validation results from notes or re-run |
 | `post-findings` | Step 6b (merge decision) | verdict from log `post-findings\|done` entry |
 | `merge-decision` | End — skill already complete | — |
-
-If `--from-step` is not provided, proceed normally from Step 1.
 
 ---
 
