@@ -20,6 +20,53 @@ Verify everything is wired up — from within Claude Code:
 
 This validates all required env vars (`LINEAR_API_KEY`, `GITHUB_PERSONAL_ACCESS_TOKEN`/`GH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`) and CLAUDE.md fields. Fix any failures before running pipeline commands.
 
+## Quickstart
+
+After install, get through these steps before running your first pipeline:
+
+**1. Set environment variables** in `~/.claude/settings.local.json`:
+
+```json
+{
+  "env": {
+    "LINEAR_API_KEY": "lin_api_...",
+    "GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_...",
+    "ANTHROPIC_AUTH_TOKEN": "sk-ant-..."
+  }
+}
+```
+
+**2. Configure MCP servers** in `~/.claude.json` (see [MCP Config](#required-mcp-servers) below for full examples).
+
+**3. Set project fields** in your working directory's `CLAUDE.md`:
+
+```markdown
+# CLAUDE.md
+REPOS_ROOT: /home/you/repos
+LOCAL_URL: http://localhost:5173
+UAT_URL: https://staging.example.com
+```
+
+**4. Validate the full setup** from within Claude Code:
+
+```
+/ticket-env-check
+```
+
+Then confirm your Linear team's states and labels match the state machine:
+
+```bash
+bash ticket-auto-pipeline/validate-linear-config.sh
+```
+
+**5. Run your first pipeline:**
+
+```
+/ticket-auto <ticket-id>
+```
+
+Use `--auto` or `--semi-auto` for reduced gating (see [Autonomy Modes](#ticket-auto--autonomy-modes)).
+
 ## Required Environment
 
 | Variable | Purpose |
@@ -41,11 +88,40 @@ Optional:
 
 ## Required MCP Servers
 
-The pipeline requires these MCP servers configured in `.claude.json`:
+The pipeline requires three MCP servers configured in `~/.claude.json` (or `.claude.json` in your project root):
 
-- **linear-server** — Linear ticket operations
-- **playwright** — Browser automation for UAT
-- **github** — PR management and code review
+```json
+{
+  "mcpServers": {
+    "linear-server": {
+      "command": "npx",
+      "args": ["-y", "@linear/mcp-server"],
+      "env": {
+        "LINEAR_API_KEY": "${LINEAR_API_KEY}"
+      }
+    },
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/mcp-server-playwright"]
+    },
+    "github": {
+      "command": "npx",
+      "args": ["-y", "@anthropic/github-mcp-server"],
+      "env": {
+        "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PERSONAL_ACCESS_TOKEN}"
+      }
+    }
+  }
+}
+```
+
+| Server | Purpose |
+|--------|---------|
+| `linear-server` | Linear ticket operations (issue reads, state/label mutations) |
+| `playwright` | Browser automation for UAT verification |
+| `github` | PR management, code review, and CI checks |
+
+Restart Claude Code after adding MCP servers.
 
 ## Slash Commands
 
@@ -182,6 +258,74 @@ During execution, `ticket-auto` checks structural invariants and halts if violat
 
 Each gate-stop emits a `|META|gate-stop|fail|<CODE>` line into the pipeline log. The retro skill reads these to classify failures and propose skill-file fixes.
 
+## Troubleshooting
+
+### Env check failures
+
+`/ticket-env-check` reports missing variables with a red FAIL marker. Common fixes:
+
+- **`LINEAR_API_KEY` missing**: Add to `~/.claude/settings.local.json` under `env`. Generate from Linear → Settings → API.
+- **`GITHUB_PERSONAL_ACCESS_TOKEN` missing**: Add to same `env` block. Generate from GitHub → Settings → Developer settings → Personal access tokens. Needs `repo` and `pull_requests` scopes.
+- **CLAUDE.md fields missing**: Add `REPOS_ROOT`, `LOCAL_URL`, `UAT_URL` to your project's `CLAUDE.md`. These are project-specific, not global.
+
+### State machine drift
+
+If `validate-linear-config.sh` reports states or labels missing from your Linear team:
+
+1. Check which workflow states/labels are missing in the script output
+2. Add missing items in Linear → Team Settings → Workflow
+3. Re-run the validator
+
+Use `--dry-run` to preview without failing:
+
+```bash
+bash ticket-auto-pipeline/validate-linear-config.sh --dry-run
+```
+
+### MCP auth errors
+
+- **"Linear API key not configured"**: The `linear-server` MCP config uses `${LINEAR_API_KEY}` — this must be set in the same `~/.claude.json` file under `env` for each server, OR be available in the shell environment. Restart Claude Code after changes.
+- **"GitHub token not configured"**: Same pattern — `github` MCP server needs `GITHUB_PERSONAL_ACCESS_TOKEN` in its env block.
+- **Playwright fails to launch**: Ensure `npx` is available. Install with `npm install -g npx` if missing.
+
+### Gate-stop codes
+
+When the pipeline halts with a gate-stop, check the pipeline log for the specific code:
+
+| Code | What went wrong | Fix |
+|------|----------------|-----|
+| `EXEC_NO_ARTIFACT` | Appraise-exec produced no artifact file | Re-run `/ticket-appraise-exec <id>`. Check `notes.md` has a `## Complexity` section. |
+| `COMPLEXITY_ARTIFACT_MISMATCH` | Artifact type doesn't match complexity score | Re-run `/ticket-appraise <id>` to re-evaluate complexity. |
+| `APPROVAL_REVOKED` | Approved label was removed after PR changes | Re-approve the ticket in Linear (add `approved` label). |
+| `REMEDIATION_BRIEF_TRUNCATED` | Remediation brief is incomplete or empty | Re-run `/ticket-appraise-exec <id>` with full remediation notes. |
+| `PR_REVIEW_VERDICT_UNPARSEABLE` | PR review comment format couldn't be parsed | Check the PR review comment follows the expected verdict format. Re-run `/ticket-pr-review <id>`. |
+
+For detailed failure analysis, run `/ticket-retro <id>` — it reads the pipeline log and heartbeat log to classify the failure and suggest fixes.
+
+### Crash recovery
+
+If a pipeline run is interrupted (session close, crash, timeout):
+
+1. Run `/ticket-detect-resume <id>` — it reads the pipeline log to find the last completed step
+2. Run `/ticket-auto <id>` again — it will detect the in-progress log and offer to resume
+3. If the log is corrupted, delete `tickets/{ID}--*/pipeline.log` and start fresh
+
+## Upgrading
+
+To upgrade to a newer version of the plugin:
+
+```bash
+# Remove the cached plugin
+rm -rf ~/.claude/plugins/cache/willard-pro-claude-plugins/ticket-auto-pipeline
+
+# Re-install (pulls latest from marketplace)
+claude plugin install ticket-auto-pipeline@willard-pro-claude-plugins
+```
+
+The SessionStart hook re-syncs `lib/*.sh` on next launch. Your Linear config, env vars, and state files are untouched.
+
+Check the [CHANGELOG](../CHANGELOG.md) for what changed between versions.
+
 ## State
 
 Pipeline state is stored at:
@@ -198,7 +342,7 @@ Ticket workspaces are created in the current working directory (expected: a `tic
 If you have existing `~/.claude/skills/ticket-*` directories from a pre-plugin setup, run:
 
 ```bash
-bash ~/.claude/plugins/cache/willard-pro-claude-plugins/ticket-auto-pipeline/*/install.sh
+bash $(find ~/.claude/plugins/cache/willard-pro-claude-plugins/ticket-auto-pipeline -name install.sh -type f | sort -V | tail -1)
 ```
 
 This detects old host-side skill directories and prompts to archive them. Non-destructive — moves to a timestamped archive, never deletes.
