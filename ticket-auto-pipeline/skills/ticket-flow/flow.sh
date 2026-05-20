@@ -8,12 +8,6 @@ source "$SCRIPT_DIR/../../lib/linear-api.sh"
 
 SM="$SCRIPT_DIR/state-machine.json"
 
-# Triggers that have been renamed — checked before the generic "unknown" error
-RENAMED_TRIGGERS='{
-  "pr-review-pass": "use pr-review-pass-done or pr-review-pass-uat",
-  "implement-start": "trigger removed — preflight + post-trigger assertion makes it redundant"
-}'
-
 usage() {
   echo "Usage: $0 <TICKET-ID> <TRIGGER> [--data key=value ...] [--dry-run]" >&2
   echo "" >&2
@@ -78,12 +72,6 @@ fi
 
 # ── Dispatch trigger via JSON ────────────────────────────────────────────────
 
-# Check renamed triggers first
-renamed_msg=$(echo "$RENAMED_TRIGGERS" | jq -r --arg t "$TRIGGER" '.[$t] // empty')
-if [ -n "$renamed_msg" ]; then
-  echo "renamed trigger '$TRIGGER': $renamed_msg" >&2
-  exit 3
-fi
 
 def=$(jq --arg t "$TRIGGER" '.triggers[$t] // empty' "$SM")
 if [ -z "$def" ]; then
@@ -274,17 +262,10 @@ if ! $IDEMPOTENT; then
     fi
   done
 
-  # Evaluate post_assert field if present
-  POST_ASSERT=$(echo "$def" | jq -r '.post_assert[]? // empty' 2>/dev/null || true)
-  if [ -n "$POST_ASSERT" ]; then
-    while IFS= read -r assertion; do
-      [ -z "$assertion" ] && continue
-      if ! eval "$assertion" > /dev/null 2>&1; then
-        assert_failed=true
-        assert_details="${assert_details:+$assert_details; }post_assert_failed=$(echo "$assertion" | head -c 80)"
-      fi
-    done <<< "$POST_ASSERT"
-  fi
+  # post_assert removed: latent RCE vector via eval on trigger-defined shell code.
+  # No trigger in state-machine.json currently uses post_assert.
+  # If future assertion support is needed, implement a safe DSL (e.g. predicate
+  # functions like assert_label_present) rather than eval.
 
   if $assert_failed; then
     local_details="trigger=${TRIGGER} expected_state=${NEW_STATE_NAME:-none} actual_state=${LIVE_STATE} ${assert_details}"

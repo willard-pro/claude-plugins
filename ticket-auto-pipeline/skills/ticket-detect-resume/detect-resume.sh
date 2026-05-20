@@ -104,7 +104,7 @@ fi
 # ── GATE_HELD handling ──────────────────────────────────────────────────────
 
 if [ "$RESUME_STEP" = "GATE_HELD" ]; then
-  ISSUE_JSON=$(get_issue "$TICKET_ID" 2>/dev/null || echo 'null')
+  ISSUE_JSON=$((get_issue "$TICKET_ID" 2>/dev/null) || echo 'null')
   if echo "$ISSUE_JSON" | jq -e '.labels.nodes[] | select(.name | ascii_downcase == "approved")' > /dev/null 2>&1; then
     RESUME_STEP="STEP_3_5"
     hb_gate "resume-point" "ok" "gate was held but approved label found — resuming at STEP_3_5 (comment reconciliation)"
@@ -179,7 +179,7 @@ if [ "$RESUME_STEP" != "STEP_1" ] && [ "$RESUME_STEP" != "GATE_STILL_HELD" ]; th
   TICKET_DIR=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || true)
 
   if [ -n "$TICKET_DIR" ]; then
-    COMPLEXITY=$(get_complexity "$TICKET_DIR")
+    COMPLEXITY=$(get_complexity "$TICKET_DIR" || true)
   fi
 
   if [ -s "$LOG_FILE" ]; then

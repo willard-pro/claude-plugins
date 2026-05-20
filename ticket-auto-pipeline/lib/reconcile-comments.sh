@@ -18,7 +18,7 @@ COMMENTS_JSON=$(cat | normalize_comments)
 
 # Find appraisal comment by content prefix
 APPRAISAL_COMMENT_AT=$(echo "$COMMENTS_JSON" | jq -r \
-  '.[] | select(.body | startswith("**Ticket appraised**")) | .createdAt' \
+  '.[] | select(.body // "" | startswith("**Ticket appraised**")) | .createdAt' \
   | sort | tail -1)
 
 # Fallback to pipeline log if no appraisal comment found (deleted, or pre-standardization)
@@ -29,7 +29,7 @@ fi
 
 # Find last amendment comment from a prior reconciliation cycle
 LAST_AMENDMENT_AT=$(echo "$COMMENTS_JSON" | jq -r \
-  '.[] | select(.body | startswith("**Amendment cycle #")) | .createdAt' \
+  '.[] | select(.body // "" | startswith("**Amendment cycle #")) | .createdAt' \
   | sort | tail -1)
 
 # LAST_RECONCILE_AT is the later of appraisal vs amendment boundary
@@ -41,7 +41,7 @@ fi
 
 # Extract comments strictly after boundary, excluding pipeline-authored comments
 UNPROCESSED_COMMENTS=$(echo "$COMMENTS_JSON" | jq -r --arg boundary "$LAST_RECONCILE_AT" \
-  '.[] | select(.createdAt > $boundary) | select(.body | startswith("**Ticket appraised**") or startswith("**Amendment cycle #") | not) | "\(.createdAt)|\(.user.name)|\(.body)"')
+  '.[] | select(.createdAt > $boundary) | select(.body // "" | startswith("**Ticket appraised**") or startswith("**Amendment cycle #") | not) | "\(.createdAt)|\(.user.name)|\(.body)"')
 
 echo "LAST_RECONCILE_AT: ${LAST_RECONCILE_AT}"
 echo "APPRAISAL_COMMENT_AT: ${APPRAISAL_COMMENT_AT}"

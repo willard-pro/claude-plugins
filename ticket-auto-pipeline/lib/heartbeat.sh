@@ -67,6 +67,12 @@ hb_write() {
     detail="{}"
   fi
 
+  # Reject pipe characters in free-text fields (would corrupt pipe-delimited format)
+  if [[ "$msg" == *"|"* ]]; then
+    echo "hb_write: MSG field contains pipe character — entry skipped" >&2
+    return 1
+  fi
+
   # Ensure directory exists
   local dir
   dir=$(dirname "$HB_LOG_FILE")
