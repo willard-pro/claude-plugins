@@ -12,6 +12,3 @@ Deep-dive reference documentation for maintainers and advanced users.
 - [LLM integration idea](llm-integration-idea.md) — Local LLM (ollama + qwen2.5) for pipeline classification tasks
 - [Documentation audit (2026-05-18)](documentation-audit-2026-05-18.md) — Prior doc gap analysis and remediation plan
 
-## External content
-
-- [LinkedIn post: pipeline log changes](linkedin-post-pipeline-log-changes.md) — Social post about log traceability improvements
