@@ -97,7 +97,13 @@ find {ticket-dir} -name "pr-review-session.md"
 ### Step 2b — Fetch the PR review comment
 
 ```bash
-gh pr view {PR_NUMBER} --json comments --jq '.comments[] | select(.body | startswith("## Ticket alignment review")) | .body'
+_review_body=$(gh pr view {PR_NUMBER} --json comments --jq '.comments[] | select(.body | startswith("## Ticket alignment review")) | .body')
+_rc=$?
+echo "$_review_body"
+if [ $_rc -ne 0 ] || [ -z "$_review_body" ]; then
+  hb_retry "jq-parse" "fail" "gh --jq extraction failed for PR review comment" \
+    "{\"error_type\":\"jq_parse\",\"command\":\"gh pr view\"}"
+fi
 ```
 
 If no matching comment is found → fall back to `pr-review-session.md` as in Step 2a. If that also doesn't exist → stop.
@@ -213,6 +219,12 @@ Delegate to the flow executor:
 
 ```
 /ticket-flow {TICKET-ID} pr-iterate
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+  hb_retry "flow-sh" "fail" "flow.sh pr-iterate failed (exit ${_rc})" \
+    "{\"trigger\":\"pr-iterate\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: pr-iterate" >> {LOG_FILE}
+fi
 ```
 
 This sets state → `Ready`, adds `approved`, and clears `reviewed`/`rejected`. All other labels (`simple`/`complex`, `Smooth`/`Rough`/`Hard`) are preserved.

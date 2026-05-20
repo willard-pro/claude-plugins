@@ -196,15 +196,40 @@ EOF
 
 Delegate to the flow executor:
 
-- **Verdict ⚠️** (gaps found) → `/ticket-flow {TICKET-ID} pr-review-fail`
+- **Verdict ⚠️** (gaps found):
+  ```bash
+  /ticket-flow {TICKET-ID} pr-review-fail
+  _rc=$?
+  if [ "$_rc" -ne 0 ]; then
+    hb_retry "flow-sh" "fail" "flow.sh pr-review-fail failed (exit ${_rc})" \
+      "{\"trigger\":\"pr-review-fail\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: pr-review-fail" >> {LOG_FILE}
+  fi
+  ```
 - **Verdict ✅** → check UAT_URL, then pick the right variant:
   ```bash
   config=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_project_config")
   uat_url=$(echo "$config" | jq -r '.UAT_URL // empty')
+  if [ $? -ne 0 ]; then
+    hb_retry "jq-parse" "fail" "jq extraction failed for UAT_URL" \
+      "{\"error_type\":\"jq_parse\",\"field\":\"UAT_URL\"}"
+  fi
   if [ -n "$uat_url" ]; then
     /ticket-flow {TICKET-ID} pr-review-pass-uat
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+      hb_retry "flow-sh" "fail" "flow.sh pr-review-pass-uat failed (exit ${_rc})" \
+        "{\"trigger\":\"pr-review-pass-uat\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: pr-review-pass-uat" >> {LOG_FILE}
+    fi
   else
     /ticket-flow {TICKET-ID} pr-review-pass-done
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+      hb_retry "flow-sh" "fail" "flow.sh pr-review-pass-done failed (exit ${_rc})" \
+        "{\"trigger\":\"pr-review-pass-done\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: pr-review-pass-done" >> {LOG_FILE}
+    fi
   fi
   ```
 
