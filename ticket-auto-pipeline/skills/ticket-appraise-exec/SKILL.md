@@ -285,6 +285,12 @@ Delegate to the flow executor:
 
 ```
 /ticket-flow {TICKET-ID} appraise-complete
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+  hb_retry "flow-sh" "fail" "flow.sh appraise-complete failed (exit ${_rc})" \
+    "{\"trigger\":\"appraise-complete\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: appraise-complete" >> {LOG_FILE}
+fi
 ```
 
 This sets state → `Approve`, keeping all existing labels.

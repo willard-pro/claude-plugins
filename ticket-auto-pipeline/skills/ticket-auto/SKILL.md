@@ -1095,9 +1095,25 @@ Spawn a `general-purpose` agent:
 Run /ticket-implement {TICKET-ID} --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Read the updated plan (including the PR Review #{ITERATION} section), implement the changes, write tests, commit, and push. Report the final output including branch name.
 ```
 
-Wait for the agent. If it fails → stop and report.
+Wait for the agent. Persist the raw output immediately before extracting any fields:
 ```bash
-hb_heartbeat "agent-returned" "re-implement agent done"
+capture_agent_result "{TICKET-ID}" "re-implement" "$AGENT_RESULT" "{ITERATION}"
+```
+
+Extract:
+- `{OUTCOME}` — `Smooth`, `Rough`, or `Hard`
+
+If the agent fails → write fail log and stop:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|re-implement|fail|Agent failed (iteration {ITERATION})" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "re-implement agent failed (iteration {ITERATION})"
+```
+
+On success:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|re-implement|done|{OUTCOME}, iteration {ITERATION}" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "re-implement agent done — {OUTCOME} (iteration {ITERATION})"
+hb_heartbeat "phase-transition" "IMPLEMENT → RE-VERIFY"
 ```
 
 ### Step 5d2 — Re-verify
@@ -1107,7 +1123,22 @@ Reset `{VERIFY_RETRIES}` = 0 (fresh counter for this PR iteration).
 #### Step 5d2-verify
 
 Run `/ticket-verify {TICKET-ID} --env local --from-auto`.
-Extract `{VERDICT}`.
+After the agent returns, persist the raw output:
+```bash
+capture_agent_result "{TICKET-ID}" "re-verify" "$AGENT_RESULT" "$(({VERIFY_RETRIES}+1))" "{ITERATION}"
+```
+Extract `{VERDICT}` (PASS or FAIL).
+
+Write log result event:
+```bash
+# PASS:
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|re-verify|done|PASS (iteration {ITERATION})" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "re-verify agent done — PASS (iteration {ITERATION})"
+hb_heartbeat "phase-transition" "RE-VERIFY → MAINTENANCE"
+# FAIL:
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|re-verify|fail|FAIL — criteria not met (iteration {ITERATION})" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "re-verify agent done — FAIL (iteration {ITERATION}, retry {VERIFY_RETRIES})"
+```
 
 - **PASS** → run Step 4.6 (Wiki Maintenance) to incorporate any new errata from re-implementation, then proceed to Step 5e.
 - **FAIL** → proceed to retry logic below.

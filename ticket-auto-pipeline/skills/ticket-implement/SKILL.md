@@ -367,6 +367,12 @@ Rate from `{DIFFICULTY_SUMMARY}` (openspec) or in-context history (simple-fix). 
 
 ```
 /ticket-flow {TICKET-ID} implement-outcome --data outcome={Smooth|Rough|Hard}
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+  hb_retry "flow-sh" "fail" "flow.sh implement-outcome failed (exit ${_rc})" \
+    "{\"trigger\":\"implement-outcome\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: implement-outcome" >> {LOG_FILE}
+fi
 ```
 
 This adds the outcome label while preserving all existing labels including `simple`/`complex`. The pairing of predicted complexity and actual outcome is preserved for training and history.
