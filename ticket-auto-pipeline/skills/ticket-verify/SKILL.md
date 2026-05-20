@@ -23,45 +23,17 @@ Parse the arguments before proceeding.
 
 **Credential derivation (UAT only):** If `--user` is not explicitly provided, extract it from the ticket description after Step 1b. If `--password` is not provided, use `admin` on UAT. On local, credentials are typically not needed.
 
-## Guard — Verify working directory
+## Pipeline Preamble
 
-Run `basename "$(pwd)"`. If the result is NOT `tickets`, abort immediately and tell the user to `cd` to the tickets workspace and re-run.
+Follow the pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=VERIFY, FROM_FLAG=none, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_GUARD=true, HAS_PROJECT_CONTEXT=false, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=false
 
----
-
-## Linear access strategy
-
-When `$LINEAR_API_KEY` is set in the environment, use bash calls to `~/.claude/skills/lib/linear-api.sh` for **all** Linear operations. When `$LINEAR_API_KEY` is unset, fall back to MCP tools (`mcp__linear-server__*`).
-
-**Function mapping:**
-
-| Operation | linear-api.sh bash call | MCP fallback |
-|-----------|------------------------|--------------|
-| Fetch issue | `bash -c "source ~/.claude/skills/lib/linear-api.sh; get_issue '<id>'"` | `mcp__linear-server__get_issue(id: "<id>")` |
-| Post comment | `bash -c "source ~/.claude/skills/lib/linear-api.sh; save_comment '<id>' '<body>'"` | `mcp__linear-server__save_comment(issueId: "<id>", body: "<body>")` |
-
-Always check `$LINEAR_API_KEY` before each operation and use the appropriate method.
-
----
-
-## Logging (--from-auto)
-
-If `$LOG_FILE` is set (passed by the `ticket-auto` orchestrator): read `~/.claude/skills/pipeline-log-format.md`. Write progress entries at step boundaries. Phase is `VERIFY`. Step-level entries (in order): `load-context`, `build-plan`, `browser-session`, `navigate`, `execute-steps`.
-
-## Heartbeat (--from-auto)
-
-If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/skills/lib/heartbeat.sh` then write heartbeat entries at these points:
+### Heartbeat points
 - **Browser session**: after starting Playwright, write `hb_api "browser-session" "ok" "browser session established"`; if session fails, write `hb_api "browser-session" "fail" "browser session failed"`
 - **Navigation**: after each page navigation, write `hb_api "browser-navigate" "ok" "navigated to <url>" '{"url":"...","title":"..."}'`
 - **Session resume**: if browser session was lost and resumed, write `hb_fallback "browser-resume" "fired" "session lost, rebuilding plan" '{"reason":"Playwright session lost"}'`
 - **Verdict**: after the final pass/fail determination, write `hb_decision "verification-verdict" "fired" "PASS|FAIL" '{"verdict":"PASS|FAIL","criteria_met":"N","criteria_total":"M"}'`
 
----
-
-## Step dispatch (--from-step)
-
-If `--from-step {step-name}` is in the arguments, this is a crash-recovery resume. Skip all steps up to and including the named step. Do not re-run them.
-
+### Step dispatch
 **Important:** Steps `browser-session`, `navigate`, and `execute-steps` depend on a live Playwright session that is lost when the server crashes. If `--from-step` is one of these values, fall back to `build-plan` instead — always re-run browser steps from scratch.
 
 | `--from-step` value | Effective skip to | Restore from |
@@ -71,8 +43,6 @@ If `--from-step {step-name}` is in the arguments, this is a crash-recovery resum
 | `browser-session` | **falls back to `build-plan`** | browser state lost on crash |
 | `navigate` | **falls back to `build-plan`** | browser state lost on crash |
 | `execute-steps` | **falls back to `build-plan`** | browser state lost on crash |
-
-If `--from-step` is not provided, proceed normally from Step 1.
 
 ---
 

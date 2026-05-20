@@ -7,11 +7,9 @@ description: Fully autonomous ticket pipeline — appraise, exec, implement, PR 
 
 You have been given a ticket ID as the argument (e.g. `WIL-42`). Execute the full pipeline below — no user interaction beyond reporting results.
 
-## Guard — Verify working directory + environment
+## Pipeline Preamble
 
-Run `basename "$(pwd)"`. If the result is NOT `tickets`, abort immediately and tell the user to `cd` to the tickets workspace and re-run.
-
-Run `bash ~/.claude/skills/lib/validate-env.sh ./CLAUDE.md`. If it exits non-zero, report the failures and stop — do not proceed until all required values are configured.
+Follow the pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=none, FROM_FLAG=none, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,get_comments,save_comment, HAS_GUARD=true, EXTRA_GUARD=validate-env, HAS_PROJECT_CONTEXT=false, HAS_LOGGING=false, HAS_HEARTBEAT=false, HAS_STEP_DISPATCH=false, HAS_TASK_TRACKER=false
 
 ---
 
@@ -243,16 +241,66 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|autonomy|info|{AUTONOMY}" >> {LOG_FILE
 
 The orchestrator owns the pipeline log file. Sub-agents write their own step-level progress directly to `$LOG_FILE` using the format from `~/.claude/skills/pipeline-log-format.md`. Each sub-agent skill has a `## Logging (--from-auto)` section that handles this.
 
-Pattern for every agent-spawn step:
-```bash
-# Before spawn — write one waiting entry for the whole phase:
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|{PHASE}|{phase}|waiting|Agent launched — {what it does}" >> {LOG_FILE}
-# ... spawn agent (with LOG_FILE export in prompt), wait for result ...
-# After agent returns — write the phase-level done/fail:
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|{PHASE}|{phase}|done|{result summary}" >> {LOG_FILE}
+### Agent spawn template
+
+Every agent spawn follows this pattern with 8 slots. Fill all slots explicitly — no implicit defaults.
+
+```
+## {PHASE} spawn
+Follow the agent spawn template with: PHASE={PHASE}, SKILL={SKILL}, DESCRIPTION={DESCRIPTION}, EXTRA_FLAGS={EXTRA_FLAGS}, SKILL_INSTRUCTIONS={SKILL_INSTRUCTIONS}, EXTRACT={EXTRACT}, FAIL_ACTION={FAIL_ACTION}, NEXT_PHASE={NEXT_PHASE}
 ```
 
-The waiting/done pair gives the dashboard phase-level progress. The sub-agent's own `|start|`/`|done|` entries fill in step-level detail live.
+**Slots:**
+
+| Slot | Description |
+|------|-------------|
+| `{PHASE}` | Uppercase phase: APPRAISE, EXEC, IMPLEMENT, VERIFY, MAINTENANCE, PR-REVIEW |
+| `{SKILL}` | Slash command: `/ticket-appraise`, `/ticket-appraise-exec`, `/ticket-implement`, `/ticket-verify`, `/wiki-maintenance`, `/ticket-pr-review`, `/ticket-pr-iterate` |
+| `{DESCRIPTION}` | What the agent does (for the waiting log entry) |
+| `{EXTRA_FLAGS}` | Flags like `--from-auto`, `--env local`, `--from-step {FROM}` |
+| `{SKILL_INSTRUCTIONS}` | Additional instructions after the exports (e.g., "Follow the skill exactly.", "Use Serena for all code navigation.") |
+| `{EXTRACT}` | Fields to extract from agent output |
+| `{FAIL_ACTION}` | `stop` or `warn-continue` (maintenance is non-blocking) |
+| `{NEXT_PHASE}` | Next phase for the transition heartbeat |
+
+**Execution sequence:**
+
+1. Write waiting log entry:
+   ```bash
+   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|{PHASE}|{phase}|waiting|Agent launched — {DESCRIPTION}" >> {LOG_FILE}
+   hb_heartbeat "orchestrator-waiting" "agent {phase} launched"
+   ```
+
+2. Write phase context file:
+   ```bash
+   echo "{PHASE}|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+   ```
+
+3. Spawn `general-purpose` agent:
+   ```
+   Run {SKILL} {TICKET-ID} {EXTRA_FLAGS}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. {SKILL_INSTRUCTIONS}
+   ```
+
+4. Wait for agent. Persist output:
+   ```bash
+   capture_agent_result "{TICKET-ID}" "{phase}" "$AGENT_RESULT"
+   ```
+
+5. Extract `{EXTRACT}` from result.
+
+6. On failure:
+   ```bash
+   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|{PHASE}|{phase}|fail|Agent failed{if FAIL_ACTION=warn-continue: ` — continuing`}" >> {LOG_FILE}
+   hb_heartbeat "agent-returned" "{phase} agent failed"
+   ```
+   → `{FAIL_ACTION}`
+
+7. On success:
+   ```bash
+   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|{PHASE}|{phase}|done|{result}" >> {LOG_FILE}
+   hb_heartbeat "agent-returned" "{phase} agent done — {result}"
+   hb_heartbeat "phase-transition" "{PHASE} → {NEXT_PHASE}"
+   ```
 
 At session end, write a trace file:
 
@@ -331,6 +379,9 @@ Based on `{RESUME_STEP}`, jump directly to the corresponding step. Steps before 
 
 ## Step 1 — Appraise
 
+### Appraise spawn
+Follow the agent spawn template with: PHASE=APPRAISE, SKILL=/ticket-appraise, DESCRIPTION=investigating {TICKET-ID}, EXTRA_FLAGS=--from-auto{if {APPRAISE_FROM} is non-empty: ` --from-step {APPRAISE_FROM}`}, SKILL_INSTRUCTIONS=Follow the skill exactly. When you hit Resume mode and the workspace already exists, if asked "continue or re-investigate?", choose "continue" — do not prompt. Report only the final handoff output., EXTRACT=COMPLEXITY, TICKET_DIR, TICKET_TITLE, FAIL_ACTION=stop, NEXT_PHASE=EXEC
+
 Write the waiting log entry:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|waiting|Agent launched — investigating {TICKET-ID}" >> {LOG_FILE}
@@ -378,11 +429,10 @@ hb_heartbeat "phase-transition" "APPRAISE → EXEC"
 
 ## Step 2 — Exec
 
+### Exec spawn
+Follow the agent spawn template with: PHASE=EXEC, SKILL=/ticket-appraise-exec, DESCRIPTION=creating artifacts for {TICKET-ID}, EXTRA_FLAGS=--from-auto{if {EXEC_FROM} is non-empty: ` --from-step {EXEC_FROM}`}, SKILL_INSTRUCTIONS=Follow the skill exactly. Report only the final handoff output., EXTRACT=ARTIFACT_TYPE, FAIL_ACTION=stop, NEXT_PHASE=GATE
+
 Write the waiting log entry:
-```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|waiting|Agent launched — creating artifacts for {TICKET-ID}" >> {LOG_FILE}
-hb_heartbeat "orchestrator-waiting" "agent exec launched"
-```
 
 Write the phase context file so the token-tracker hook knows where to log:
 
@@ -704,11 +754,10 @@ Proceed to Step 4.
 
 Fetch the ticket via the Linear access strategy (bash `get_issue` when `LINEAR_API_KEY` is set, MCP fallback otherwise) and verify the `approved` label is present. If missing (shouldn't happen given Step 3 or Step 3.5, but verify) — add it now for simple tickets, or stop for complex.
 
+### Implement spawn
+Follow the agent spawn template with: PHASE=IMPLEMENT, SKILL=/ticket-implement, DESCRIPTION=implementing {TICKET-ID}, EXTRA_FLAGS=--from-auto{if {IMPLEMENT_FROM} is non-empty: ` --from-step {IMPLEMENT_FROM}`}, SKILL_INSTRUCTIONS=Follow the skill exactly. Use Serena for all code navigation — mandatory. Commit and push. Report the final output including branch name. After this agent returns, clear `{IMPLEMENT_FROM}` (set to empty) — loop re-invocations in Step 5d always start fresh., EXTRACT=OUTCOME, MISMATCH, FAIL_ACTION=stop, NEXT_PHASE=VERIFY
+
 Write the waiting log entry:
-```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|waiting|Agent launched — implementing {TICKET-ID}" >> {LOG_FILE}
-hb_heartbeat "orchestrator-waiting" "agent implement launched"
-```
 
 Write the phase context file so the token-tracker hook knows where to log:
 
@@ -839,11 +888,10 @@ Pass `--from-auto` to the ticket-implement agent spawn in Step 4 — add `--from
 
 Incorporate any errata discovered during implementation into the project wiki so downstream tickets benefit from corrected call chains.
 
+### Maintenance spawn
+Follow the agent spawn template with: PHASE=MAINTENANCE, SKILL=/wiki-maintenance, DESCRIPTION=wiki maintenance for {TICKET-ID}, EXTRA_FLAGS=, SKILL_INSTRUCTIONS=Process any unresolved errata entries that were appended by ticket-implement Step 4c. Edit only wiki files — do not modify source code. Report the final output including count of errata processed and files modified., EXTRACT=ERRATA_COUNT, FAIL_ACTION=warn-continue, NEXT_PHASE=PR-REVIEW
+
 Write the waiting log entry:
-```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|waiting|Agent launched — wiki maintenance for {TICKET-ID}" >> {LOG_FILE}
-hb_heartbeat "orchestrator-waiting" "agent wiki-maintenance launched"
-```
 
 Write the phase context file so the token-tracker hook knows where to log:
 
@@ -888,11 +936,10 @@ Initialize `{ITERATION}` = 0. The loop runs at most 3 times.
 
 ### Step 5a — Run PR review
 
+### PR Review spawn
+Follow the agent spawn template with: PHASE=PR-REVIEW, SKILL=/ticket-pr-review, DESCRIPTION=reviewing PR for {TICKET-ID}, EXTRA_FLAGS=--from-auto{if {PR_REVIEW_FROM} is non-empty: ` --from-step {PR_REVIEW_FROM}`}, SKILL_INSTRUCTIONS=Follow the skill exactly. Validate the PR diff against the ticket requirements. Post findings. If all requirements addressed (verdict ✅), merge via squash. Report the final output. After this agent returns, clear `{PR_REVIEW_FROM}` — subsequent iterations start fresh., EXTRACT=VERDICT, MERGED, FAIL_ACTION=stop, NEXT_PHASE=REPORT
+
 Write the waiting log entry:
-```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|waiting|Agent launched — reviewing PR for {TICKET-ID}" >> {LOG_FILE}
-hb_heartbeat "orchestrator-waiting" "agent pr-review launched (iteration {ITERATION})"
-```
 
 Write the phase context file so the token-tracker hook knows where to log:
 
@@ -991,18 +1038,10 @@ Extract `{VERDICT}` from that line and proceed.
 hb_decision "loop-back" "fired" "pr-review gaps → pr-iterate" "{\"iteration\":\"{ITERATION}\"}"
 ```
 
-Write the phase context file so the token-tracker hook knows where to log:
+### PR Iterate spawn
+Follow the agent spawn template with: PHASE=PR-REVIEW, SKILL=/ticket-pr-iterate, DESCRIPTION=iterating on PR feedback for {TICKET-ID}, EXTRA_FLAGS=--from-auto{if {PR_ITERATE_FROM} is non-empty: ` --from-step {PR_ITERATE_FROM}`}, SKILL_INSTRUCTIONS=Follow the skill exactly. Parse the PR review findings, append a PR Review #{ITERATION} section to the plan, update Linear to Ready + approved. Report the final output. After this agent returns, clear `{PR_ITERATE_FROM}`., EXTRACT=none, FAIL_ACTION=stop, NEXT_PHASE=RE-IMPLEMENT
 
-```bash
-echo "PR-REVIEW|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
-```
-
-Spawn a `general-purpose` agent:
-
-```
-Run /ticket-pr-iterate {TICKET-ID} --from-auto{if {PR_ITERATE_FROM} is non-empty: ` --from-step {PR_ITERATE_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Parse the PR review findings, append a PR Review #{ITERATION} section to the plan, update Linear to Ready + approved. Report the final output.
-
-After this agent returns, clear `{PR_ITERATE_FROM}`.
+Write the phase context file:
 ```
 
 Wait for the agent. If it fails → stop and report.
@@ -1051,6 +1090,9 @@ Write the phase context file so the token-tracker hook knows where to log:
 ```bash
 echo "IMPLEMENT|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 ```
+
+### Re-implement spawn
+Follow the agent spawn template with: PHASE=IMPLEMENT, SKILL=/ticket-implement, DESCRIPTION=re-implementing {TICKET-ID} (iteration {ITERATION}), EXTRA_FLAGS=--from-auto, SKILL_INSTRUCTIONS=Follow the skill exactly. Read the updated plan (including the PR Review #{ITERATION} section), implement the changes, write tests, commit, and push. Report the final output including branch name., EXTRACT=OUTCOME, FAIL_ACTION=stop, NEXT_PHASE=RE-VERIFY
 
 Spawn a `general-purpose` agent:
 

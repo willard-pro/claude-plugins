@@ -7,46 +7,11 @@ description: Artifact executor for a Linear ticket that has already been investi
 
 You have been given a ticket ID as the argument (e.g. `WIL-42`). The investigation phase (`/ticket-appraise`) must already be complete — notes.md must contain a `## Complexity` section and a populated `## Initial Investigation` section. Execute the steps below in order.
 
-## Guard — Verify working directory
+## Pipeline Preamble
 
-If the arguments contain `--from-auto`, skip this guard — `ticket-auto` already verified the working directory.
+Follow the pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=EXEC, FROM_FLAG=--from-auto, HAS_LINEAR_ACCESS=true, LINEAR_OPS=save_comment,list_issues, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=REPOS_ROOT,ISSUE_PREFIX,BE_SERVICES,BE_TEST_CMD, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
 
-Run `basename "$(pwd)"`. If the result is NOT `tickets`, abort immediately and tell the user to `cd` to the tickets workspace and re-run.
-
----
-
-## Linear access strategy
-
-When `$LINEAR_API_KEY` is set in the environment, use bash calls to `~/.claude/skills/lib/linear-api.sh` for **all** Linear operations. When `$LINEAR_API_KEY` is unset, fall back to MCP tools (`mcp__linear-server__*`).
-
-**Function mapping:**
-
-| Operation | linear-api.sh bash call | MCP fallback |
-|-----------|------------------------|--------------|
-| Post comment | `bash -c "source ~/.claude/skills/lib/linear-api.sh; save_comment '<id>' '<body>'"` | `mcp__linear-server__save_comment(issueId: "<id>", body: "<body>")` |
-| List issues | `bash -c "source ~/.claude/skills/lib/linear-api.sh; list_issues '<team_key>' '<state>'"` | (MCP equivalent if available) |
-
-Always check `$LINEAR_API_KEY` before each operation and use the appropriate method.
-
----
-
-## Step 0 — Clear context: Run `/clear`.
-
----
-
-## Step 0.5 — Detect project context
-
-Read `CLAUDE.md` and extract: `{REPOS_ROOT}` (parent path of all service dirs), `{ISSUE_PREFIX}` (issue ID prefix, e.g. `CRE`), `{BE_SERVICES}` (dirs with `Layer = BE`), `{BE_TEST_CMD}` (backend test command from Build & Test section).
-
----
-
-## Logging (--from-auto)
-
-If `$LOG_FILE` is set (passed by the `ticket-auto` orchestrator): read `~/.claude/skills/pipeline-log-format.md`. After each major step below, write progress entries to `$LOG_FILE` using the format defined there. Phase is `EXEC`.
-
-## Heartbeat (--from-auto)
-
-If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/skills/lib/heartbeat.sh` then write heartbeat entries at these points:
+### Heartbeat points
 - **Complexity read**: after extracting complexity from notes.md, write `hb_decision "complexity-read" "info" "complexity: {simple|complex}" '{"score":"{COMPLEXITY}"}'`
 - **Artifact created**: after writing simple-fix.md or openspec change, write `hb_decision "artifact-created" "fired" "created {simple-fix|openspec}" '{"type":"{simple-fix|openspec}"}'`
 - **Coherence gate**: after complexity-coherence check, write `hb_gate "coherence-check" "ok|fail" "complexity-artifact match|mismatch" '{"declared":"{COMPLEXITY}","artifact":"{simple-fix|openspec}"}'`
@@ -54,20 +19,13 @@ If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/sk
 - **Linear fallback**: if LINEAR_API_KEY is unset and MCP fallback is used for posting the comment, write `hb_fallback "linear-api" "fired" "using MCP Linear tools" '{"reason":"LINEAR_API_KEY unset"}'`
 - **Re-appraisal skip**: if re-appraisal detected no changes and steps 5-6 are skipped, write `hb_decision "re-appraisal-skip" "info" "no changes detected, skipping Linear post"`
 
----
-
-## Step dispatch (--from-step)
-
-If `--from-step {step-name}` is in the arguments, this is a crash-recovery resume. Skip all steps up to and including the named step. Do not re-run skipped steps. Proceed directly to the first step after the named step.
-
+### Step dispatch
 | `--from-step` value | Skip to | Restore from |
 |---------------------|---------|--------------|
 | `load-workspace` | Step 3 (create artifact) | notes.md `## Complexity` for COMPLEXITY; context.md for ticket metadata |
 | `create-artifact` | Step 3.5 (regression guard) | simple-fix.md or openspec change already exists |
 | `regression-guard` | Step 4 (re-appraisal check) | `## ⚠️ Regression Risk` in notes.md if present |
 | `post-linear` | End — skill already complete | — |
-
-If `--from-step` is not provided, proceed normally from Step 1.
 
 ---
 
