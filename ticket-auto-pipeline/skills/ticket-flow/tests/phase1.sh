@@ -198,21 +198,6 @@ test_ticket_dir_disambiguation() {
   [ "$exit_code" -eq 2 ]
 }
 
-# ── test_uat_url_provenance ───────────────────────────────────────────────────
-
-test_uat_url_provenance() {
-  local tmpdir
-  tmpdir=$(mktemp -d)
-  mkdir -p "$tmpdir/myproject/subdir"
-  echo "UAT_URL=http://staging.example.com" >> "$tmpdir/myproject/CLAUDE.md"
-
-  local result
-  result=$(cd "$tmpdir/myproject/subdir" && \
-    REPOS_ROOT="$tmpdir" \
-    bash -c "source $SKILLS_DIR/lib/linear-api.sh; get_project_config myproject")
-  rm -rf "$tmpdir"
-  echo "$result" | jq -e '.UAT_URL' | grep -q "staging.example.com"
-}
 
 # ── test_gen_mermaid_roundtrip ────────────────────────────────────────────────
 
@@ -246,7 +231,6 @@ for fn in \
   test_linear_api_retry_on_503 \
   test_detect_resume_schema_mismatch \
   test_ticket_dir_disambiguation \
-  test_uat_url_provenance \
   test_gen_mermaid_roundtrip; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"

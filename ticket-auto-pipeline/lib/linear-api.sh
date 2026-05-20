@@ -6,6 +6,10 @@ set -euo pipefail
 _HB_LIB="$(dirname "${BASH_SOURCE[0]}")/heartbeat.sh"
 [ -f "$_HB_LIB" ] && source "$_HB_LIB"
 
+# Source config for centralized constants
+_CONFIG_LIB="$(dirname "${BASH_SOURCE[0]}")/config.sh"
+[ -f "$_CONFIG_LIB" ] && source "$_CONFIG_LIB"
+
 LINEAR_API_URL="${LINEAR_API_URL:-https://api.linear.app/graphql}"
 
 # Check LINEAR_API_KEY is set
@@ -48,7 +52,8 @@ linear_graphql() {
   check_api_key
 
   local attempt=0
-  local delays=(1 2 4)
+  read -ra delays <<< "${LINEAR_RETRY_DELAYS:-1 2 4}"
+  local max_retries="${LINEAR_MAX_RETRIES:-3}"
   local resp http_code curl_exit
 
   while true; do
@@ -61,7 +66,7 @@ linear_graphql() {
     resp=$(curl -s -w '\n%{http_code}' -X POST "$LINEAR_API_URL" \
       -H "Authorization: ${LINEAR_API_KEY}" \
       -H "Content-Type: application/json" \
-      -d "$payload" 2>&1) || curl_exit=$?
+      -d "$payload" 2>/dev/null) || curl_exit=$?
 
     local api_elapsed
     if [ "$api_start" -ne 0 ]; then
@@ -86,12 +91,12 @@ linear_graphql() {
     # Heartbeat: API call result
     if [ "$curl_exit" -eq 0 ] && [ "$class" = "permanent" ]; then
       hb_api "linear-request" "ok" "GraphQL call succeeded" "{\"elapsed_ms\":\"$api_elapsed\",\"http_code\":\"$http_code\"}"
-    elif [ "$curl_exit" -ne 0 ] || { [ "$class" = "transient" ] && [ "$attempt" -ge 3 ]; }; then
+    elif [ "$curl_exit" -ne 0 ] || { [ "$class" = "transient" ] && [ "$attempt" -ge "$max_retries" ]; }; then
       hb_api "linear-request" "fail" "GraphQL call failed" "{\"elapsed_ms\":\"$api_elapsed\",\"http_code\":\"${http_code:-curl-err}\"}"
     fi
 
-    if [ "$class" = "transient" ] && [ "$attempt" -lt 3 ]; then
-      echo "linear_graphql: transient error (attempt $((attempt+1))/3, http=${http_code:-curl-err}), retrying in ${delays[$attempt]}s" >&2
+    if [ "$class" = "transient" ] && [ "$attempt" -lt "$max_retries" ]; then
+      echo "linear_graphql: transient error (attempt $((attempt+1))/$max_retries, http=${http_code:-curl-err}), retrying in ${delays[$attempt]}s" >&2
       sleep "${delays[$attempt]}"
       ((attempt++)) || true
       continue
@@ -103,7 +108,7 @@ linear_graphql() {
     fi
 
     if [ "$class" = "transient" ]; then
-      echo "linear_graphql: transient error persisted after 3 attempts (http=$http_code)" >&2
+      echo "linear_graphql: transient error persisted after $max_retries attempts (http=$http_code)" >&2
       exit 2
     fi
 
@@ -193,113 +198,6 @@ update_issue() {
   echo "$resp" | jq '.data.issueUpdate'
 }
 
-# Get project-level config (currently searches for UAT_URL).
-# Returns JSON: {"UAT_URL": "<url>", "source": "<description>"}
-# Resolution order:
-#   1. $UAT_URL env var
-#   2. $REPOS_ROOT children CLAUDE.md files
-#   3. git rev-parse --show-toplevel CLAUDE.md
-#   4. Ancestor walk up to 5 levels above CWD
-get_project_config() {
-  local project_name="${1:-}"
-  local uat_url=""
-  local source=""
-
-  # 1. Environment variable
-  if [ -n "${UAT_URL:-}" ]; then
-    uat_url="$UAT_URL"
-    source="env:UAT_URL"
-  fi
-
-  # 2. REPOS_ROOT children
-  if [ -z "$uat_url" ] && [ -n "${REPOS_ROOT:-}" ] && [ -d "${REPOS_ROOT:-}" ]; then
-    for claude_md in "$REPOS_ROOT"/*/CLAUDE.md; do
-      [ -f "$claude_md" ] || continue
-      local found
-      found=$(grep -hoP 'UAT_URL[=:]\s*\K\S+' "$claude_md" 2>/dev/null | head -1 || true)
-      if [ -n "$found" ]; then
-        uat_url="$found"
-        source="repos-root:$claude_md"
-        break
-      fi
-    done
-  fi
-
-  # 3. Legacy workspace roots (container and host paths)
-  if [ -z "$uat_url" ]; then
-    for ws in "$HOME/repos" "$HOME/workspace/workbench"; do
-      [ -d "$ws" ] || continue
-      local found
-      found=$(grep -rhoP 'UAT_URL[=:]\s*\K\S+' "$ws"/*/CLAUDE.md 2>/dev/null | head -1 || true)
-      if [ -n "$found" ]; then
-        uat_url="$found"
-        source="workspace:$ws"
-        break
-      fi
-    done
-  fi
-
-  # 4. Git repo root CLAUDE.md
-  if [ -z "$uat_url" ]; then
-    local git_root
-    git_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
-    if [ -n "$git_root" ] && [ -f "$git_root/CLAUDE.md" ]; then
-      local found
-      found=$(grep -hoP 'UAT_URL[=:]\s*\K\S+' "$git_root/CLAUDE.md" 2>/dev/null || true)
-      if [ -n "$found" ]; then
-        uat_url="$found"
-        source="git-root:$git_root/CLAUDE.md"
-      fi
-    fi
-  fi
-
-  # 5. Ancestor walk (bounded to 5 levels above CWD)
-  if [ -z "$uat_url" ]; then
-    local dir="$PWD"
-    local level=0
-    while [ "$level" -lt 5 ] && [ "$dir" != "/" ]; do
-      dir="$(dirname "$dir")"
-      ((level++)) || true
-      if [ -f "$dir/CLAUDE.md" ]; then
-        local found
-        found=$(grep -hoP 'UAT_URL[=:]\s*\K\S+' "$dir/CLAUDE.md" 2>/dev/null || true)
-        if [ -n "$found" ]; then
-          uat_url="$found"
-          source="ancestor:$dir/CLAUDE.md"
-          break
-        fi
-      fi
-    done
-  fi
-
-  # Heartbeat: UAT_URL source resolution
-  if [ -n "$uat_url" ]; then
-    local tier
-    case "$source" in
-      env:*) tier="env" ;;
-      repos-root:*) tier="claude-md" ;;
-      workspace:*) tier="workspace" ;;
-      git-root:*) tier="git-root" ;;
-      ancestor:*) tier="ancestor" ;;
-      *) tier="unknown" ;;
-    esac
-    hb_source "uat-url" "info" "resolved from $source" "{\"tier\":\"$tier\"}"
-  else
-    hb_source "uat-url" "warn" "UAT_URL not resolved" "{\"tier\":\"none\"}"
-  fi
-
-  # Emit pipeline log if LOG_FILE is set
-  if [ -n "${LOG_FILE:-}" ]; then
-    if [ -n "$uat_url" ]; then
-      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|uat-url|info|${source}:${uat_url}" >> "$LOG_FILE"
-    else
-      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|uat-url|warn|missing" >> "$LOG_FILE"
-      echo "WARN: no UAT_URL found in env, workspace, git root, or ancestor CLAUDE.md files" >&2
-    fi
-  fi
-
-  echo "{\"UAT_URL\": \"${uat_url:-}\", \"source\": \"${source:-}\"}"
-}
 
 # Get current user (me) info from Linear
 get_me() {
@@ -324,69 +222,6 @@ save_comment() {
   echo "$resp" | jq '.data.commentCreate.comment'
 }
 
-# List issues for a team with optional state filter. Returns JSON array.
-list_issues() {
-  local team_key="$1"
-  local state_filter="${2:-}"
-  local limit="${3:-50}"
 
-  local filter
-  filter=$(jq -n --arg key "$team_key" '{team: {key: {eq: $key}}}')
-  if [ -n "$state_filter" ]; then
-    filter=$(echo "$filter" | jq --arg s "$state_filter" '. + {state: {name: {eq: $s}}}')
-  fi
 
-  local query
-  query=$(jq -n --argjson filter "$filter" --argjson limit "$limit" '{
-    query: "query($filter: IssueFilter!, $limit: Int) { issues(filter: $filter, first: $limit) { nodes { id identifier title state { id name type } } } }",
-    variables: {filter: $filter, limit: $limit}
-  }')
-  local resp
-  resp=$(linear_graphql "$query")
-  echo "$resp" | jq '.data.issues.nodes'
-}
 
-# Resolve a team from an issue prefix (e.g., "WIL"). Returns JSON: {id, name, key}
-resolve_team_from_prefix() {
-  local prefix="$1"
-  local query
-  query=$(jq -n --arg key "$prefix" '{
-    query: "query($key: String!) { teams(filter: {key: {eq: $key}}) { nodes { id name key } } }",
-    variables: {key: $key}
-  }')
-  local resp
-  resp=$(linear_graphql "$query")
-  echo "$resp" | jq '.data.teams.nodes[0]'
-}
-
-# Get project by ID. Returns JSON with project metadata.
-get_project() {
-  local project_id="$1"
-  local query
-  query=$(jq -n --arg id "$project_id" '{
-    query: "query($id: String!) { project(id: $id) { id name description url state teams { nodes { id name key } } } }",
-    variables: {id: $id}
-  }')
-  local resp
-  resp=$(linear_graphql "$query")
-  echo "$resp" | jq '.data.project'
-}
-
-# Search issues by team key and text query. Returns JSON array.
-search_issues() {
-  local team_key="$1"
-  local query_string="$2"
-  local limit="${3:-50}"
-
-  local filter
-  filter=$(jq -n --arg key "$team_key" '{team: {key: {eq: $key}}}')
-
-  local query
-  query=$(jq -n --argjson filter "$filter" --arg search "$query_string" --argjson limit "$limit" '{
-    query: "query($filter: IssueFilter!, $search: String, $limit: Int) { issues(filter: $filter, search: $search, first: $limit) { nodes { id identifier title description state { id name type } } } }",
-    variables: {filter: $filter, search: $search, limit: $limit}
-  }')
-  local resp
-  resp=$(linear_graphql "$query")
-  echo "$resp" | jq '.data.issues.nodes'
-}
