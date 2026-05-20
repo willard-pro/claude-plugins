@@ -20,7 +20,7 @@ ticket-auto-pipeline/
   state-machine.json               # Linear state/label transition definitions
   pipeline-log-format.md           # Shared log schema (ISO|PHASE|STEP|STATUS|MSG)
   pipeline-heartbeat-format.md     # Heartbeat log schema
-  pipeline-diagram.html            # Interactive state diagram
+  docs/pipeline-diagram.html       # Interactive state diagram (GitHub Pages)
   validate-linear-config.sh        # Validates Linear team states/labels match state machine
   install.sh                       # Post-install migration from host-side skills
 ```
