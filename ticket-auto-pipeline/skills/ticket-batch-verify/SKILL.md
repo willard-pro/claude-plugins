@@ -115,7 +115,16 @@ If any agent fails (error, timeout, no result) — mark it as `FAILED` and conti
 
 ### For each PASS:
 
-Call `/ticket-flow {TICKET-ID} uat-pass` to move to Done.
+Call `/ticket-flow {TICKET-ID} uat-pass` to move to Done:
+```bash
+/ticket-flow {TICKET-ID} uat-pass
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+  hb_retry "flow-sh" "fail" "flow.sh uat-pass failed (exit ${_rc})" \
+    "{\"trigger\":\"uat-pass\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: uat-pass" >> {LOG_FILE}
+fi
+```
 
 ### For each FAIL:
 
@@ -132,7 +141,16 @@ Post the agent's findings to Linear as a comment on the ticket. Use the agent's 
 **Next step:** Run `/ticket-verify --env uat {TICKET-ID}` interactively to diagnose.
 ```
 
-Then call `/ticket-flow {TICKET-ID} uat-fail` to move back to Ready.
+Then call `/ticket-flow {TICKET-ID} uat-fail` to move back to Ready:
+```bash
+/ticket-flow {TICKET-ID} uat-fail
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+  hb_retry "flow-sh" "fail" "flow.sh uat-fail failed (exit ${_rc})" \
+    "{\"trigger\":\"uat-fail\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: uat-fail" >> {LOG_FILE}
+fi
+```
 
 ---
 

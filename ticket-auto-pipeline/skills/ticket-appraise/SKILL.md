@@ -385,6 +385,12 @@ Delegate to the flow executor:
 
 ```
 /ticket-flow {TICKET-ID} appraise-start --data complexity={simple|complex}
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+  hb_retry "flow-sh" "fail" "flow.sh appraise-start failed (exit ${_rc})" \
+    "{\"trigger\":\"appraise-start\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: appraise-start" >> {LOG_FILE}
+fi
 ```
 
 This sets state → `Todo`, assignee → `me`, and adds `claimed` + the complexity label in a single atomic call.

@@ -443,6 +443,12 @@ Verification passed on localhost — the implementation is confirmed working. No
 4. Delegate to the flow executor:
    ```
    /ticket-flow {TICKET-ID} implement-complete
+   _rc=$?
+   if [ "$_rc" -ne 0 ]; then
+     hb_retry "flow-sh" "fail" "flow.sh implement-complete failed (exit ${_rc})" \
+       "{\"trigger\":\"implement-complete\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
+     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: implement-complete" >> {LOG_FILE}
+   fi
    ```
    This moves state → `Review` and removes `approved`.
 
@@ -475,6 +481,12 @@ No PR creation. Delegate the state transition:
 
 ```
 /ticket-flow {TICKET-ID} uat-pass
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+  hb_retry "flow-sh" "fail" "flow.sh uat-pass failed (exit ${_rc})" \
+    "{\"trigger\":\"uat-pass\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: uat-pass" >> {LOG_FILE}
+fi
 ```
 
 This moves state → `Done` and removes `claimed` + `reviewed`.
@@ -675,6 +687,12 @@ If `--env uat`:
 
 ```
 /ticket-flow {TICKET-ID} uat-fail
+_rc=$?
+if [ "$_rc" -ne 0 ]; then
+  hb_retry "flow-sh" "fail" "flow.sh uat-fail failed (exit ${_rc})" \
+    "{\"trigger\":\"uat-fail\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: uat-fail" >> {LOG_FILE}
+fi
 ```
 
 This moves state → `Ready`, adds `rejected`, removes `reviewed`. A human must run `/ticket-flow {TICKET-ID} human-approve` before the next implementation cycle can start.
