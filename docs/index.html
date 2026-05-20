@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>willard-pro · claude-plugins</title>
+<style>
+  :root {
+    --bg:      #0b0d10;
+    --bg-1:    #11151a;
+    --bg-2:    #161b22;
+    --line:    #2a323d;
+    --fg:      #e6edf3;
+    --fg-mute: #9aa6b2;
+    --fg-dim:  #6b7682;
+    --teal:    #5cc7d1;
+    --amber:   #f2a23c;
+    --green:   #8ecf6c;
+    --info:    #8aa6ff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+    min-height: 100vh;
+  }
+  header {
+    border-bottom: 1px solid var(--line);
+    padding: 2rem 2.5rem 1.5rem;
+  }
+  header h1 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    letter-spacing: .04em;
+    color: var(--teal);
+  }
+  header p {
+    margin-top: .4rem;
+    font-size: .82rem;
+    color: var(--fg-mute);
+  }
+  main {
+    max-width: 760px;
+    margin: 3rem auto;
+    padding: 0 2.5rem;
+  }
+  h2 {
+    font-size: .72rem;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--fg-dim);
+    margin-bottom: 1.2rem;
+  }
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 1rem;
+  }
+  .card {
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 1.25rem 1.5rem;
+    text-decoration: none;
+    color: inherit;
+    transition: border-color .15s, background .15s;
+    display: flex;
+    flex-direction: column;
+    gap: .4rem;
+  }
+  .card:hover {
+    border-color: var(--teal);
+    background: var(--bg-2);
+  }
+  .card-label {
+    font-size: .68rem;
+    letter-spacing: .1em;
+    text-transform: uppercase;
+    color: var(--fg-dim);
+  }
+  .card-title {
+    font-size: .95rem;
+    font-weight: 600;
+    color: var(--fg);
+  }
+  .card-desc {
+    font-size: .78rem;
+    color: var(--fg-mute);
+    line-height: 1.5;
+    margin-top: .2rem;
+  }
+  .tag {
+    display: inline-block;
+    font-size: .65rem;
+    padding: .15em .5em;
+    border-radius: 4px;
+    background: #1c2a2c;
+    color: var(--teal);
+    border: 1px solid var(--teal);
+    margin-top: .4rem;
+    width: fit-content;
+  }
+  footer {
+    border-top: 1px solid var(--line);
+    margin-top: 4rem;
+    padding: 1.5rem 2.5rem;
+    font-size: .72rem;
+    color: var(--fg-dim);
+    text-align: center;
+  }
+  footer a { color: var(--fg-mute); text-decoration: none; }
+  footer a:hover { color: var(--fg); }
+</style>
+</head>
+<body>
+<header>
+  <h1>willard-pro / claude-plugins</h1>
+  <p>Claude Code plugin marketplace — autonomous Linear ticket automation</p>
+</header>
+<main>
+  <h2>ticket-auto-pipeline</h2>
+  <div class="card-grid">
+    <a class="card" href="pipeline-diagram.html">
+      <span class="card-label">visualization</span>
+      <span class="card-title">Pipeline State Diagram</span>
+      <span class="card-desc">Interactive state machine with phase drill-down. Shows autonomous transitions, human gates, and gate-stop conditions.</span>
+      <span class="tag">interactive</span>
+    </a>
+  </div>
+</main>
+<footer>
+  <a href="https://github.com/willard-pro/claude-plugins">github.com/willard-pro/claude-plugins</a>
+</footer>
+</body>
+</html>
