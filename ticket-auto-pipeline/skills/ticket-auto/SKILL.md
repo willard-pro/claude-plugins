@@ -254,8 +254,8 @@ Follow the agent spawn template with: PHASE={PHASE}, SKILL={SKILL}, DESCRIPTION=
 
 | Slot | Description |
 |------|-------------|
-| `{PHASE}` | Uppercase phase: APPRAISE, EXEC, IMPLEMENT, VERIFY, MAINTENANCE, PR-REVIEW |
-| `{SKILL}` | Slash command: `/ticket-appraise`, `/ticket-appraise-exec`, `/ticket-implement`, `/ticket-verify`, `/wiki-maintenance`, `/ticket-pr-review`, `/ticket-pr-iterate` |
+| `{PHASE}` | Uppercase phase: APPRAISE, REPRODUCE, EXEC, IMPLEMENT, VERIFY, MAINTENANCE, PR-REVIEW |
+| `{SKILL}` | Slash command: `/ticket-appraise`, `/ticket-reproduce`, `/ticket-appraise-exec`, `/ticket-implement`, `/ticket-verify`, `/wiki-maintenance`, `/ticket-pr-review`, `/ticket-pr-iterate` |
 | `{DESCRIPTION}` | What the agent does (for the waiting log entry) |
 | `{EXTRA_FLAGS}` | Flags like `--from-auto`, `--env local`, `--from-step {FROM}` |
 | `{SKILL_INSTRUCTIONS}` | Additional instructions after the exports (e.g., "Follow the skill exactly.", "Use Serena for all code navigation.") |
@@ -312,6 +312,7 @@ cat > {ticket-dir}/auto-session.md << 'TRACE'
 
 ## Step trace
 - [x] Step 1: Appraise — {simple|complex}, {N} files traced
+- [x] Step 1.5: Reproduce — {REPRODUCED|NOT_REPRODUCED|BLOCKED|skipped: not bug}
 - [x] Step 2: Exec — {simple-fix|openspec: <name>}
 - [x] Step 3: Gate — {auto-approved|stopped: complex}
 - [x] Step 4: Implement — {Smooth|Rough|Hard}
@@ -328,7 +329,7 @@ TRACE
 
 Run `/ticket-detect-resume {TICKET-ID}` inline (execute the skill logic directly — no agent spawn needed). Parse the `DETECT_RESUME_RESULT` block and set all variables:
 
-`{RESUME_STEP}`, `{APPRAISE_FROM}`, `{EXEC_FROM}`, `{IMPLEMENT_FROM}`, `{MAINTENANCE_FROM}`, `{VERIFY_FROM}`, `{PR_REVIEW_FROM}`, `{PR_ITERATE_FROM}`, `{TICKET_DIR}`, `{COMPLEXITY}`, `{ARTIFACT_TYPE}`, `{BRANCH}`, `{TICKET_TITLE}`, `{VERIFY_ATTEMPTS}`, `{ITERATION}`, `{AUTONOMY}` (read from `META|autonomy|info|` log line).
+`{RESUME_STEP}`, `{APPRAISE_FROM}`, `{REPRODUCE_FROM}`, `{EXEC_FROM}`, `{IMPLEMENT_FROM}`, `{MAINTENANCE_FROM}`, `{VERIFY_FROM}`, `{PR_REVIEW_FROM}`, `{PR_ITERATE_FROM}`, `{TICKET_DIR}`, `{COMPLEXITY}`, `{ARTIFACT_TYPE}`, `{BRANCH}`, `{TICKET_TITLE}`, `{VERIFY_ATTEMPTS}`, `{ITERATION}`, `{AUTONOMY}` (read from `META|autonomy|info|` log line).
 
 **If `RESUME_STEP = SCHEMA_MISMATCH`:**
 Report:
@@ -366,6 +367,7 @@ Based on `{RESUME_STEP}`, jump directly to the corresponding step. Steps before 
 | RESUME_STEP | Jump to |
 |-------------|---------|
 | STEP_1 | Step 1 (Appraise) |
+| STEP_1_5 | Step 1.5 (Reproduce) |
 | STEP_2 | Step 2 (Exec) |
 | STEP_3 | Step 3 (Gate) |
 | STEP_3_5 | Step 3.5 (Comment Reconciliation) |
@@ -424,6 +426,94 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|notes:{TICKET_DIR}/notes
 hb_heartbeat "agent-returned" "appraise agent done — {COMPLEXITY}"
 hb_heartbeat "phase-transition" "APPRAISE → EXEC"
 ```
+
+---
+
+## Step 1.5 — Reproduce (bug tickets only)
+
+### Bug label detection
+
+Extract labels from `$ISSUE_JSON` (already fetched during appraise):
+
+```bash
+_bug_labels=$(echo "$ISSUE_JSON" | jq -r '.data.issue.labels.nodes[].name // empty' 2>/dev/null | grep -c "bug" || echo "0")
+```
+
+If `_bug_labels` is 0 → skip Step 1.5. Write a skip log entry and proceed to Step 2:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|skip|not a bug ticket" >> {LOG_FILE}
+```
+
+Then jump to **Step 2 — Exec**.
+
+If `_bug_labels` is > 0 → proceed with the reproduce spawn below.
+
+### Reproduce spawn
+Follow the agent spawn template with: PHASE=REPRODUCE, SKILL=/ticket-reproduce, DESCRIPTION=reproducing bug for {TICKET-ID}, EXTRA_FLAGS=--from-auto{if {REPRODUCE_FROM} is non-empty: ` --from-step {REPRODUCE_FROM}`}, SKILL_INSTRUCTIONS=Follow the skill exactly. Report only the final handoff output., EXTRACT=REPRODUCE_RESULT, FAIL_ACTION=stop, NEXT_PHASE=EXEC
+
+Write the waiting log entry:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|waiting|Agent launched — reproducing bug for {TICKET-ID}" >> {LOG_FILE}
+hb_heartbeat "orchestrator-waiting" "agent reproduce launched"
+```
+
+Write the phase context file:
+```bash
+echo "REPRODUCE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+```
+
+Spawn a `general-purpose` agent to reproduce the bug:
+
+```
+Run /ticket-reproduce {TICKET-ID} --from-auto{if {REPRODUCE_FROM} is non-empty: ` --from-step {REPRODUCE_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Report only the final handoff output.
+```
+
+Wait for the agent. Persist the raw output immediately before extracting any fields:
+```bash
+capture_agent_result "{TICKET-ID}" "reproduce" "$AGENT_RESULT"
+```
+
+Extract:
+- `{REPRODUCE_RESULT}` — `REPRODUCED`, `NOT_REPRODUCED`, or `BLOCKED`
+
+If the agent fails → write fail log and stop:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|fail|Agent failed" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "reproduce agent failed"
+```
+
+On success, branch on `{REPRODUCE_RESULT}`:
+
+**REPRODUCED** — bug confirmed, proceed to Exec:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|done|REPRODUCED" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "reproduce agent done — REPRODUCED"
+hb_heartbeat "phase-transition" "REPRODUCE → EXEC"
+```
+Continue to **Step 2 — Exec**.
+
+**NOT_REPRODUCED** — bug doesn't manifest, gate-stop:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|REPRO_NOT_CONFIRMED" >> {LOG_FILE}
+hb_heartbeat "gate-stop" "fail" "REPRO_NOT_CONFIRMED — bug not reproducible on UAT"
+```
+Stop. The reproduce skill already posted findings to Linear. No code changes were made.
+
+**BLOCKED** — insufficient info, add needs-info label and gate-stop:
+```bash
+bash ~/.claude/skills/ticket-flow/flow.sh "{TICKET-ID}" "needs-info" 2>&1
+_rc=$?
+if [ $_rc -ne 0 ]; then
+  _error_type=$( [ $_rc -eq 7 ] && echo "state_assertion" || echo "flow_error" )
+  hb_retry "flow-sh" "fail" "flow.sh needs-info failed (exit ${_rc})" \
+    "{\"error_type\":\"${_error_type}\",\"exit_code\":${_rc},\"trigger\":\"needs-info\"}"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|needs-info trigger failed (exit ${_rc})" >> {LOG_FILE}
+fi
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|REPRO_BLOCKED" >> {LOG_FILE}
+hb_heartbeat "gate-stop" "fail" "REPRO_BLOCKED — insufficient detail to reproduce"
+```
+Stop. The reproduce skill already posted a Linear comment requesting details. The `needs-info` label has been added.
 
 ---
 
@@ -1244,6 +1334,7 @@ hb_decision "pipeline-outcome" "fired" "pipeline complete" '{"outcome":"complete
 |---|---|
 | Autonomy | {manual\|auto\|semi-auto} |
 | Appraise | {simple|complex}, {N} files traced |
+| Reproduce | {REPRODUCED\|NOT_REPRODUCED\|BLOCKED\|skipped: not bug} |
 | Exec | {simple-fix | openspec: <name>} |
 | Gate | {auto-approved | held} |
 | Implement | {Smooth|Rough|Hard}, PRs: {URLs} |
