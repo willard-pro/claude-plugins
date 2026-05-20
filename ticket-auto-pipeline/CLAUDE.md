@@ -16,7 +16,7 @@ ticket-auto-pipeline/
   state-machine.json              # Linear state/label transition definitions
   pipeline-log-format.md          # Pipeline log schema (ISO|PHASE|STEP|STATUS|MSG)
   pipeline-heartbeat-format.md    # Heartbeat log schema (ISO|CATEGORY|EVENT|STATUS|MSG|DETAIL)
-  pipeline-diagram.html           # Interactive state diagram visualization
+  docs/pipeline-diagram.html      # Interactive state diagram (served via GitHub Pages)
   validate-linear-config.sh       # Validates Linear team config matches state machine
   install.sh                      # Migration from host-side skills
 ```
@@ -113,5 +113,5 @@ Consumers: `skills/ticket-auto/dashboard.py` (dual-panel), `skills/ticket-overse
 - [Pipeline log format](pipeline-log-format.md)
 - [Heartbeat log format](pipeline-heartbeat-format.md)
 - [State machine](state-machine.json)
-- [Interactive diagram](pipeline-diagram.html)
+- [Interactive diagram](../docs/pipeline-diagram.html)
 - [Root CLAUDE.md](../CLAUDE.md)
