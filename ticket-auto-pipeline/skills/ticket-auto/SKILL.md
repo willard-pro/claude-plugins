@@ -329,7 +329,7 @@ TRACE
 
 Run `/ticket-detect-resume {TICKET-ID}` inline (execute the skill logic directly — no agent spawn needed). Parse the `DETECT_RESUME_RESULT` block and set all variables:
 
-`{RESUME_STEP}`, `{APPRAISE_FROM}`, `{REPRODUCE_FROM}`, `{EXEC_FROM}`, `{IMPLEMENT_FROM}`, `{MAINTENANCE_FROM}`, `{VERIFY_FROM}`, `{PR_REVIEW_FROM}`, `{PR_ITERATE_FROM}`, `{TICKET_DIR}`, `{COMPLEXITY}`, `{ARTIFACT_TYPE}`, `{BRANCH}`, `{TICKET_TITLE}`, `{VERIFY_ATTEMPTS}`, `{ITERATION}`, `{AUTONOMY}` (read from `META|autonomy|info|` log line).
+`{RESUME_STEP}`, `{APPRAISE_FROM}`, `{REPRODUCE_FROM}`, `{EXEC_FROM}`, `{IMPLEMENT_FROM}`, `{MAINTENANCE_FROM}`, `{VERIFY_FROM}`, `{PR_REVIEW_FROM}`, `{PR_ITERATE_FROM}`, `{TICKET_DIR}`, `{COMPLEXITY}`, `{ARTIFACT_TYPE}`, `{BRANCH}`, `{TICKET_TITLE}`, `{VERIFY_ATTEMPTS}`, `{ITERATION}`, `{PR_FEEDBACK_CYCLE}`, `{AUTONOMY}` (read from `META|autonomy|info|` log line).
 
 **If `RESUME_STEP = SCHEMA_MISMATCH`:**
 Report:
@@ -375,6 +375,7 @@ Based on `{RESUME_STEP}`, jump directly to the corresponding step. Steps before 
 | STEP_4_5 | Step 4.5 (Verify) |
 | STEP_4_6 | Step 4.6 (Wiki Maintenance) |
 | STEP_5 | Step 5 (PR Review loop) |
+| STEP_5_5 | Step 5.5 (PR Comment Reconciliation) |
 | STEP_6 | Step 6 (Report) |
 
 ---
@@ -1104,11 +1105,11 @@ Extract `{VERDICT}` from that line and proceed.
     hb_heartbeat "phase-transition" "PR-REVIEW → REPORT"
     ```
     Set `{MERGED}` = `yes`. Break out of loop. Go to Step 6 (Report).
-- **Verdict ⚠️** → auto-merge blocked regardless of flag. Increment `{ITERATION}`. If `{ITERATION} >= 3` → stop and report:
+- **Verdict ⚠️** → auto-merge blocked regardless of flag. Increment `{ITERATION}`. If `{ITERATION} + {PR_FEEDBACK_CYCLE} >= 3` → stop and report:
   ```
-  ## {TICKET-ID} — max iterations reached
+  ## {TICKET-ID} — max re-implement rounds reached
 
-  PR review found gaps after 3 implementation attempts. Manual intervention needed.
+  PR review found gaps after {ITERATION} bot iterations + {PR_FEEDBACK_CYCLE} human feedback cycles (combined cap of 3). Manual intervention needed.
   PR: {PR_URL}
   ```
   ```bash
@@ -1266,6 +1267,366 @@ If `{VERIFY_RETRIES} < 3`:
 hb_decision "loop-back" "fired" "re-implement+verify done → re-review" "{\"iteration\":\"{ITERATION}\"}"
 ```
 Go back to Step 5a (re-run PR review on the updated PR).
+
+---
+
+## Step 5.5 — PR Comment Reconciliation
+
+**Only entered when `{RESUME_STEP}` = `STEP_5_5`** (PR review posted, PR is open, human comments detected). This step fetches human-authored PR comments, classifies change requests, amends the plan for in-scope changes, and pushes back on out-of-scope or ambiguous requests.
+
+### Step 5.5 header and cycle initialization
+
+```bash
+PR_FEEDBACK_N=$(({PR_FEEDBACK_CYCLE} + 1))
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-reconcile|start|cycle#${PR_FEEDBACK_N} — scanning human PR comments" >> {LOG_FILE}
+hb_heartbeat "pr-reconcile-start" "cycle#${PR_FEEDBACK_N} — PR comment reconciliation started"
+```
+
+**Combined loop cap check:**
+
+```bash
+COMBINED_ROUNDS=$(({ITERATION} + {PR_FEEDBACK_CYCLE}))
+if [ "$COMBINED_ROUNDS" -ge 3 ]; then
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|COMBINED_CAP_HIT — ITERATION={ITERATION} + PR_FEEDBACK_CYCLE={PR_FEEDBACK_CYCLE} >= 3" >> {LOG_FILE}
+  hb_gate "combined-cap" "fail" "max re-implement rounds (3) reached" "{\"iterations\":\"{ITERATION}\",\"pr_feedback_cycles\":\"{PR_FEEDBACK_CYCLE}\",\"combined\":\"${COMBINED_ROUNDS}\"}"
+  hb_decision "pipeline-outcome" "fired" "stopped: combined cap hit" '{"reason":"combined-cap","iterations":"{ITERATION}","pr_feedback_cycles":"{PR_FEEDBACK_CYCLE}"}'
+  # Report and stop
+fi
+```
+
+If the combined cap is hit, stop with:
+```
+## {TICKET-ID} — max re-implement rounds reached
+
+PR review found gaps after {ITERATION} bot iterations + {PR_FEEDBACK_CYCLE} human feedback cycles (combined cap of 3). Manual intervention needed.
+
+### Unresolved
+{list of unresolved PR comments}
+
+PR: {PR_URL}
+```
+
+Mark remaining tasks as deleted. Stop here.
+
+If under cap, proceed.
+
+### Step 5.5a — Fetch PR metadata and comments
+
+Resolve the PR number from the pipeline log:
+
+```bash
+_pr_number=$(grep '^[^|]*|PR-REVIEW|checkout-pr|done|' {LOG_FILE} 2>/dev/null | tail -1 | cut -d'|' -f5 || true)
+if [ -z "$_pr_number" ]; then
+  _pr_number=$(grep -oP 'PR-REVIEW\|pr-review\|done\|.*?\b(\d+)\b' {LOG_FILE} 2>/dev/null | grep -oP '\d+$' | tail -1 || true)
+fi
+```
+
+Fetch PR metadata and all comments:
+
+```bash
+_PR_JSON=$(gh pr view "$_pr_number" --json number,url,headRefName,comments 2>/dev/null || echo '{"error":"gh failed"}')
+_PR_URL=$(echo "$_PR_JSON" | jq -r '.url // ""')
+_PR_BRANCH=$(echo "$_PR_JSON" | jq -r '.headRefName // ""')
+_PR_COMMENTS=$(echo "$_PR_JSON" | jq -r '.comments // []')
+```
+
+Log the PR context:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-reconcile|info|PR #${_pr_number} — ${_PR_URL} — branch: ${_PR_BRANCH}" >> {LOG_FILE}
+```
+
+### Step 5.5b — Resolve bot identity and compute comment boundary
+
+```bash
+_bot_user=$(gh api user --jq '.login' 2>/dev/null || echo "")
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-reconcile|info|Bot identity: ${_bot_user}" >> {LOG_FILE}
+```
+
+Compute the comment boundary — the last bot-authored comment timestamp:
+
+```bash
+_last_bot_ts=$(echo "$_PR_COMMENTS" | jq -r --arg bot "$_bot_user" '[.[] | select(.author.login == $bot or .author.login == "github-actions[bot]")] | last | .createdAt // ""' 2>/dev/null)
+```
+
+If no bot comment exists (first PR review crashed before posting), use the pipeline session start as the boundary:
+
+```bash
+if [ -z "$_last_bot_ts" ]; then
+  _last_bot_ts=$(grep '^[^|]*|PR-REVIEW|pr-review|done|' {LOG_FILE} 2>/dev/null | tail -1 | cut -d'|' -f1 || true)
+fi
+```
+
+### Step 5.5c — Extract human comments after boundary
+
+```bash
+# Filter to human-authored comments after the boundary
+_human_comments=$(echo "$_PR_COMMENTS" | jq -r --arg bot "$_bot_user" --arg ts "$_last_bot_ts" \
+  '[.[] | select(.author.login != $bot and .author.login != "github-actions[bot]" and .createdAt > $ts)] | group_by(.author.login)')
+```
+
+Log the extraction result:
+
+```bash
+_human_author_count=$(echo "$_human_comments" | jq -r 'length // 0' 2>/dev/null)
+_total_comment_count=$(echo "$_human_comments" | jq -r '[.[] | length] | add // 0' 2>/dev/null)
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-reconcile|info|${_human_author_count} human authors, ${_total_comment_count} comments after boundary" >> {LOG_FILE}
+```
+
+If `_total_comment_count` is 0 → skip to Step 5.5g (clean pass).
+
+### Step 5.5d — Extract change requests and determine scope
+
+For each human author group, read the comment bodies and extract change requests. Use semantic judgment to classify each:
+
+- **In-scope**: Directly relates to a ticket requirement. The change is a refinement, bug fix, or edge-case handling within the ticket's stated scope.
+- **Out-of-scope**: New feature, separate concern, or change unrelated to any ticket requirement.
+- **Ambiguous**: Unclear, contradictory, or lacks enough detail to implement.
+
+Read the ticket requirements from the plan artifact:
+
+```bash
+source ~/.claude/skills/lib/ticket-dir.sh
+PLAN_PATH=$(resolve_plan_path "{LOG_FILE}" "{TICKET_DIR}" "{ticket-id-lowercase}")
+```
+
+Read `{TICKET_DIR}/notes.md` for the original ticket requirements. For each human comment, produce a classification table:
+
+```
+| Author | Comment | Request | Scope | Action |
+|--------|---------|---------|-------|--------|
+| @user  | summary | change  | in-scope/out-of-scope/ambiguous | incorporate/push-back |
+```
+
+Log the classification:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-reconcile|info|Classification: {N} in-scope, {M} out-of-scope, {P} ambiguous" >> {LOG_FILE}
+```
+
+### Step 5.5e — Amendment path (in-scope changes)
+
+**Only if one or more requests are classified as in-scope.**
+
+Amend the plan artifact with a new `## PR Feedback #{PR_FEEDBACK_N}` section:
+
+```markdown
+## PR Feedback #{PR_FEEDBACK_N}
+
+**Source:** Human PR review — {author list}
+**Date:** {today}
+
+### Changes requested
+{list of in-scope change requests with PR comment references}
+
+### What changed
+{concrete plan amendments — specific files, logic changes, new edge cases}
+
+### Implementation steps
+{numbered list of implementation actions derived from the feedback}
+```
+
+The `## PR Feedback #{N}` section is distinct from `## PR Review #{N}` (used by bot review iterations) — the two feedback sources are tracked separately in the plan artifact.
+
+Update notes.md:
+- Append a `## PR Feedback #{PR_FEEDBACK_N}` section linking to the plan amendment
+- Update `## Open Questions` if new questions arose from the feedback
+
+Increment `PR_FEEDBACK_CYCLE` in the log (writes the done entry in Step 5.5 completion below).
+
+Post a summary comment to Linear:
+
+```bash
+SUMMARY_BODY="**PR Feedback Cycle #${PR_FEEDBACK_N}**
+
+## Human PR comments incorporated
+{summary of incorporated changes}
+
+## PR replies
+{list of PR threads replied to, with links}
+
+## Next step
+Re-implementing with amended plan. See PR for updated code."
+```
+
+Use the Linear access strategy to post the comment.
+
+### Step 5.5f — Push-back path (out-of-scope or ambiguous)
+
+**For each out-of-scope or ambiguous request**, reply directly to the PR comment thread:
+
+```bash
+# Out-of-scope reply template
+gh pr comment "$_pr_number" --body "**Out of scope for this ticket.** {rationale — why this change doesn't relate to ticket requirements}. Consider filing a follow-up ticket if this is important." --reply-to {comment_id}
+
+# Ambiguous reply template
+gh pr comment "$_pr_number" --body "Could you clarify what you're looking for here? {specific question about the request}." --reply-to {comment_id}
+```
+
+Post a summary to Linear listing all push-backs:
+
+```bash
+PUSHBACK_BODY="**PR Feedback Cycle #${PR_FEEDBACK_N} — Push-backs**
+
+## Out-of-scope requests
+{list with rationale for each}
+
+## Ambiguous requests
+{list with clarification questions asked}
+
+## Next step
+Waiting for human clarification on the PR. No code changes from this cycle."
+```
+
+Use the Linear access strategy to post the comment.
+
+Write the held log entry:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-reconcile|done|cycle#${PR_FEEDBACK_N}|held: push-back — {N} out-of-scope, {M} ambiguous" >> {LOG_FILE}
+hb_decision "pr-reconcile-result" "fired" "held: push-back" "{\"cycle\":\"${PR_FEEDBACK_N}\",\"out_of_scope\":\"{N}\",\"ambiguous\":\"{M}\"}"
+```
+
+Stop. Report:
+```
+## {TICKET-ID} — PR feedback push-back
+
+**Cycle:** #{PR_FEEDBACK_N}
+
+### Out-of-scope requests pushed back
+{list with rationale}
+
+### Ambiguous requests needing clarification
+{list with questions asked}
+
+PR replies posted. No code changes. Human clarification needed.
+```
+
+Mark remaining tasks as deleted. Stop here.
+
+### Step 5.5g — Clean pass
+
+No human comments to process (or all were already processed). Log clean pass:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-reconcile|done|clean" >> {LOG_FILE}
+hb_decision "pr-reconcile-result" "fired" "clean pass — no unprocessed human comments" "{\"cycle\":\"${PR_FEEDBACK_N}\"}"
+```
+
+Proceed to Step 6 (Report).
+
+---
+
+## Step 5.5 Post-Amendment — Re-enter Implement Loop
+
+**Only when Step 5.5e produced plan amendments (in-scope changes were incorporated).**
+
+### Step 5.5-post-a — Log amendment completion
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-reconcile|done|cycle#${PR_FEEDBACK_N}|held: human feedback incorporated" >> {LOG_FILE}
+hb_decision "pr-reconcile-result" "fired" "amended — re-entering implement loop" "{\"cycle\":\"${PR_FEEDBACK_N}\",\"pr_feedback_cycles\":\"{PR_FEEDBACK_CYCLE}\"}"
+```
+
+### Step 5.5-post-b — Re-enter implement phase
+
+Set up the implement spawn with the amended plan. Follow the same pattern as Step 5d (Re-implement) but using `--from-auto`:
+
+### Re-implement spawn (from human feedback)
+Follow the agent spawn template with: PHASE=IMPLEMENT, SKILL=/ticket-implement, DESCRIPTION=implementing human PR feedback for {TICKET-ID} (PR feedback cycle {PR_FEEDBACK_N}), EXTRA_FLAGS=--from-auto, SKILL_INSTRUCTIONS=Follow the skill exactly. Read the updated plan (including the PR Feedback #{PR_FEEDBACK_N} section), implement the changes, write tests, commit, and push. Report the final output including branch name., EXTRACT=OUTCOME, FAIL_ACTION=stop, NEXT_PHASE=VERIFY
+
+Write the phase context file:
+
+```bash
+echo "IMPLEMENT|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+```
+
+Spawn a `general-purpose` agent:
+
+```
+Run /ticket-implement {TICKET-ID} --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Read the updated plan (including the PR Feedback #{PR_FEEDBACK_N} section), implement the changes, write tests, commit, and push. Report the final output including branch name.
+```
+
+Wait for the agent. Persist the raw output:
+
+```bash
+capture_agent_result "{TICKET-ID}" "implement-feedback" "$AGENT_RESULT" "{PR_FEEDBACK_N}"
+```
+
+Extract:
+- `{OUTCOME}` — `Smooth`, `Rough`, or `Hard`
+
+If the agent fails → write fail log and stop:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|fail|Agent failed (PR feedback cycle {PR_FEEDBACK_N})" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "implement agent failed (PR feedback cycle {PR_FEEDBACK_N})"
+```
+
+On success:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|{OUTCOME}, branch: {branch} (PR feedback cycle {PR_FEEDBACK_N})" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "implement agent done — {OUTCOME} (PR feedback cycle {PR_FEEDBACK_N})"
+```
+
+### Step 5.5-post-c — Verify
+
+Run `/ticket-verify {TICKET-ID} --env local --from-auto`. After the agent returns, persist output:
+
+```bash
+capture_agent_result "{TICKET-ID}" "verify-feedback" "$AGENT_RESULT" "{PR_FEEDBACK_N}"
+```
+
+Extract `{VERDICT}` (PASS or FAIL). On FAIL, apply the standard verify retry logic from Step 4.5b (up to 3 attempts, loop back to implement on retry). On PASS, proceed.
+
+### Step 5.5-post-d — Wiki Maintenance
+
+Run wiki maintenance (same as Step 4.6 pattern, non-blocking):
+
+### Maintenance spawn
+Follow the agent spawn template with: PHASE=MAINTENANCE, SKILL=/wiki-maintenance, DESCRIPTION=wiki maintenance for {TICKET-ID} (after PR feedback), EXTRA_FLAGS=, SKILL_INSTRUCTIONS=Process any unresolved errata entries. Edit only wiki files — do not modify source code. Report the final output including count of errata processed and files modified., EXTRACT=ERRATA_COUNT, FAIL_ACTION=warn-continue, NEXT_PHASE=PR-REVIEW
+
+### Step 5.5-post-e — Re-run PR review
+
+Run a fresh PR review on the updated branch:
+
+### PR Review spawn (post-feedback)
+Follow the agent spawn template with: PHASE=PR-REVIEW, SKILL=/ticket-pr-review, DESCRIPTION=re-reviewing PR after human feedback for {TICKET-ID}, EXTRA_FLAGS=--from-auto, SKILL_INSTRUCTIONS=Follow the skill exactly. Validate the PR diff against the ticket requirements (including PR Feedback #{PR_FEEDBACK_N} amendments). Post a fresh ## Ticket alignment review comment with updated coverage table. If all requirements addressed (verdict ✅), merge via squash. Report the final output., EXTRACT=VERDICT, MERGED, FAIL_ACTION=stop, NEXT_PHASE=REPORT
+
+Write the phase context file:
+
+```bash
+echo "PR-REVIEW|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+```
+
+Spawn a `general-purpose` agent:
+
+```
+Run /ticket-pr-review {TICKET-ID} --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Validate the PR diff against the ticket requirements (including PR Feedback #{PR_FEEDBACK_N} amendments). Post a fresh ## Ticket alignment review comment with updated coverage table. If all requirements addressed (verdict ✅), merge via squash. Report the final output.
+```
+
+Wait for the agent. Persist output:
+
+```bash
+capture_agent_result "{TICKET-ID}" "pr-review-feedback" "$AGENT_RESULT" "{PR_FEEDBACK_N}"
+```
+
+Extract:
+- `{VERDICT}` — ✅ all addressed, or ⚠️ gaps found
+- `{MERGED}` — yes, no, or skipped
+
+If the agent fails → write fail log and stop.
+
+On success:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|done|Verdict: {VERDICT}, merged: {MERGED} (post-feedback cycle {PR_FEEDBACK_N})" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "pr-review agent done — verdict {VERDICT} (post-feedback cycle {PR_FEEDBACK_N})"
+hb_heartbeat "phase-transition" "PR-REVIEW → REPORT"
+```
+
+- **Verdict ✅** → proceed to Step 6 (Report).
+- **Verdict ⚠️** → this is a bot-review iteration (not human feedback). Increment `{ITERATION}`. Apply the ⚠️ branch from Step 5b (combined cap check, then iterate or stop).
 
 ---
 

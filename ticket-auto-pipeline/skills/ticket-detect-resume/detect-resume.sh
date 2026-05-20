@@ -77,7 +77,46 @@ if [ ! -s "$LOG_FILE" ]; then
   RESUME_STEP="STEP_1"
 else
   if grep -q '^[^|]*|PR-REVIEW|pr-review|done|' "$LOG_FILE"; then
-    RESUME_STEP="STEP_6"
+    # PR merge-status check: open PR with human comments → STEP_5_5, else STEP_6
+    _pr_number=$(grep '^[^|]*|PR-REVIEW|checkout-pr|done|' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'|' -f5 || true)
+    if [ -z "$_pr_number" ]; then
+      _pr_number=$(grep -oP 'PR-REVIEW\|pr-review\|done\|.*?\b(\d+)\b' "$LOG_FILE" 2>/dev/null | grep -oP '\d+$' | tail -1 || true)
+    fi
+    _gh_available=false
+    if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
+      _gh_available=true
+    fi
+    if $_gh_available && [ -n "$_pr_number" ]; then
+      _pr_state=$(gh pr view "$_pr_number" --json state --jq '.state' 2>/dev/null || echo "unknown")
+      if [ "$_pr_state" = "MERGED" ] || [ "$_pr_state" = "CLOSED" ]; then
+        RESUME_STEP="STEP_6"
+      else
+        # PR is open — resolve bot identity and check for human comments
+        _bot_user=$(gh api user --jq '.login' 2>/dev/null || echo "")
+        _pr_comments=$(gh pr view "$_pr_number" --json comments --jq '.comments[] | select(.author.login != "'"$_bot_user"'" and .author.login != "github-actions[bot]") | {createdAt: .createdAt, author: .author.login, body: .body}' 2>/dev/null || echo "[]")
+        # Find last bot comment timestamp as boundary
+        _last_bot_ts=$(gh pr view "$_pr_number" --json comments --jq '[.comments[] | select(.author.login == "'"$_bot_user"'" or .author.login == "github-actions[bot]")] | last | .createdAt' 2>/dev/null || echo "")
+        _has_new_human=false
+        if [ "$_pr_comments" != "[]" ] && [ -n "$_pr_comments" ]; then
+          if [ -n "$_last_bot_ts" ]; then
+            _has_new_human=$(echo "$_pr_comments" | jq -e --arg ts "$_last_bot_ts" 'select(.createdAt > $ts) | length > 0' 2>/dev/null && echo true || echo false)
+          else
+            _has_new_human=$(echo "$_pr_comments" | jq -e 'length > 0' 2>/dev/null && echo true || echo false)
+          fi
+        fi
+        if [ "$_has_new_human" = "true" ]; then
+          RESUME_STEP="STEP_5_5"
+        else
+          RESUME_STEP="STEP_6"
+        fi
+      fi
+    else
+      # gh unavailable or no PR number found — fall back to STEP_6
+      RESUME_STEP="STEP_6"
+      if ! $_gh_available; then
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|pr-comment-check|warn|gh unavailable — falling back to STEP_6" >> "$LOG_FILE"
+      fi
+    fi
   elif grep -q '^[^|]*|VERIFY|verify|done|PASS' "$LOG_FILE"; then
     RESUME_STEP="STEP_5"
   elif grep -q '^[^|]*|MAINTENANCE|maintenance|done|' "$LOG_FILE"; then
@@ -204,6 +243,8 @@ if [ "$RESUME_STEP" != "STEP_1" ] && [ "$RESUME_STEP" != "GATE_STILL_HELD" ]; th
 
     ITERATION=$(grep -c '^[^|]*|PR-REVIEW|pr-review|done|Verdict.*⚠️' "$LOG_FILE" 2>/dev/null || true)
     ITERATION=${ITERATION:-0}
+    PR_FEEDBACK_CYCLE=$(grep -c '^[^|]*|PR-REVIEW|pr-reconcile|done|cycle#' "$LOG_FILE" 2>/dev/null || true)
+    PR_FEEDBACK_CYCLE=${PR_FEEDBACK_CYCLE:-0}
   fi
 fi
 
@@ -228,5 +269,6 @@ DETECT_RESUME_RESULT
   VERIFY_ATTEMPTS:    ${VERIFY_ATTEMPTS}
   ITERATION:          ${ITERATION}
   RECONCILE_CYCLE:    ${RECONCILE_CYCLE}
+  PR_FEEDBACK_CYCLE:  ${PR_FEEDBACK_CYCLE}
 END_DETECT_RESUME_RESULT
 EOF
