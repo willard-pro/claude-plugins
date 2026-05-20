@@ -1,0 +1,1400 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>ticket-auto · pipeline</title>
+<style>
+  :root {
+    --bg:        #0b0d10;
+    --bg-1:      #11151a;
+    --bg-2:      #161b22;
+    --bg-3:      #1c232c;
+    --line:      #2a323d;
+    --line-2:    #3a4452;
+    --fg:        #e6edf3;
+    --fg-mute:   #9aa6b2;
+    --fg-dim:    #6b7682;
+    --auto:      #5cc7d1;     /* autonomous transition — teal */
+    --auto-dim:  #2f6770;
+    --human:     #f2a23c;     /* human action — amber */
+    --human-dim: #6e4a18;
+    --warn:      #ef5d6c;     /* gate-stop / fail — red */
+    --warn-dim:  #5a2027;
+    --ok:        #8ecf6c;     /* pass — green */
+    --info:      #8aa6ff;     /* informational — periwinkle */
+    --label-bg:  #20272f;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Inter, sans-serif;
+    font-size: 14px;
+    line-height: 1.4;
+    overflow-x: hidden;
+  }
+  .mono { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+
+  /* ---------- App chrome ---------- */
+  header.app {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 28px;
+    border-bottom: 1px solid var(--line);
+    background: var(--bg-1);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header.app .dot {
+    width: 10px; height: 10px; border-radius: 50%;
+    background: var(--auto);
+    box-shadow: 0 0 12px var(--auto);
+  }
+  header.app h1 {
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    margin: 0;
+  }
+  header.app h1 .muted { color: var(--fg-mute); font-weight: 400; }
+  header.app .crumbs {
+    margin-left: 18px;
+    font-size: 12px;
+    color: var(--fg-mute);
+  }
+  header.app .crumbs .sep { margin: 0 8px; color: var(--fg-dim); }
+  header.app .crumbs .here { color: var(--fg); }
+  header.app .spacer { flex: 1; }
+  header.app .legend {
+    display: flex; gap: 14px; font-size: 11px; color: var(--fg-mute);
+    align-items: center;
+  }
+  header.app .legend .swatch {
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  header.app .legend .swatch i {
+    display: inline-block; width: 18px; height: 2px; border-radius: 1px;
+  }
+  header.app .legend .swatch.dashed i {
+    background: transparent;
+    border-top: 2px dashed currentColor;
+    height: 0;
+  }
+  header.app button.back {
+    background: var(--bg-3);
+    color: var(--fg);
+    border: 1px solid var(--line-2);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    display: none;
+    font-family: inherit;
+  }
+  header.app button.back:hover { background: #242c36; border-color: #4a5563; }
+
+  /* ---------- Views ---------- */
+  main {
+    position: relative;
+    width: 100%;
+    min-height: calc(100vh - 53px);
+  }
+  .view {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 220ms ease, transform 220ms ease;
+    transform: translateY(8px);
+  }
+  .view.active {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+  }
+
+  /* ---------- View 1: full pipeline ---------- */
+  #view-pipeline {
+    padding: 28px 28px 40px;
+  }
+  #view-pipeline .heading {
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    margin-bottom: 4px;
+  }
+  #view-pipeline .heading h2 {
+    font-size: 22px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+  #view-pipeline .heading .sub {
+    color: var(--fg-mute);
+    font-size: 13px;
+  }
+  #view-pipeline .helptext {
+    color: var(--fg-dim);
+    font-size: 12px;
+    margin-bottom: 24px;
+  }
+  .diagram-wrap {
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0 2px 24px;
+  }
+  svg.diagram {
+    display: block;
+    min-width: 1800px;
+    width: 1800px;
+    height: 540px;
+  }
+  /* SVG node styles */
+  .node rect {
+    fill: var(--bg-2);
+    stroke: var(--line-2);
+    stroke-width: 1.5;
+    transition: fill 140ms ease, stroke 140ms ease;
+  }
+  .node .pill {
+    fill: var(--bg-3);
+    stroke: var(--line);
+  }
+  .node text.label {
+    fill: var(--fg);
+    font-size: 14px;
+    font-weight: 600;
+    text-anchor: middle;
+    dominant-baseline: middle;
+    pointer-events: none;
+  }
+  .node text.sublabel {
+    fill: var(--fg-mute);
+    font-size: 9px;
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    letter-spacing: 0.06em;
+    text-anchor: middle;
+    pointer-events: none;
+    text-transform: uppercase;
+  }
+  .node.clickable { cursor: pointer; }
+  .node.clickable:hover rect {
+    fill: #1c242e;
+    stroke: var(--auto);
+  }
+  .node.terminal rect { stroke: var(--ok); }
+  .node.terminal:hover rect { stroke: var(--ok); }
+  .node.start rect { stroke: var(--info); }
+
+  /* Edges */
+  .edge path.line {
+    fill: none;
+    stroke: var(--auto);
+    stroke-width: 1.6;
+    transition: stroke-width 140ms ease, stroke 140ms ease;
+  }
+  .edge.human path.line { stroke: var(--human); }
+  .edge.reject path.line {
+    stroke: var(--human);
+    stroke-dasharray: 6 4;
+  }
+  .edge.loopback path.line {
+    stroke: var(--auto);
+    stroke-dasharray: 5 4;
+    opacity: 0.85;
+  }
+  .edge.sideinfo path.line {
+    stroke: var(--fg-dim);
+    stroke-dasharray: 2 4;
+    opacity: 0.8;
+  }
+  .edge:hover path.line { stroke-width: 2.5; }
+  .edge .label-bg {
+    fill: var(--bg-1);
+    stroke: var(--line);
+  }
+  .edge text.edge-label {
+    fill: var(--fg);
+    font-size: 10.5px;
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    text-anchor: middle;
+    dominant-baseline: middle;
+    pointer-events: none;
+  }
+  .edge.human text.edge-label { fill: var(--human); }
+  .edge.reject text.edge-label { fill: var(--human); }
+  .edge.sideinfo text.edge-label { fill: var(--fg-mute); }
+
+  /* Phase badges */
+  .phase-badge { cursor: pointer; }
+  .phase-badge rect {
+    fill: var(--bg-3);
+    stroke: var(--line-2);
+    stroke-width: 1;
+    transition: fill 140ms ease, stroke 140ms ease, transform 140ms ease;
+  }
+  .phase-badge:hover rect {
+    fill: #232b35;
+    stroke: var(--auto);
+  }
+  .phase-badge text.name {
+    fill: var(--auto);
+    font-size: 10px;
+    font-weight: 700;
+    text-anchor: middle;
+    dominant-baseline: middle;
+    pointer-events: none;
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    letter-spacing: 0.08em;
+  }
+  .phase-badge text.tag {
+    fill: var(--fg-dim);
+    font-size: 9px;
+    text-anchor: middle;
+    pointer-events: none;
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+
+  /* Tooltip */
+  .tooltip {
+    position: fixed;
+    pointer-events: none;
+    background: var(--bg-2);
+    border: 1px solid var(--line-2);
+    border-radius: 6px;
+    padding: 10px 12px;
+    min-width: 240px;
+    max-width: 340px;
+    font-size: 12px;
+    color: var(--fg);
+    box-shadow: 0 8px 24px rgba(0,0,0,.5);
+    opacity: 0;
+    transform: translateY(4px);
+    transition: opacity 100ms ease, transform 100ms ease;
+    z-index: 50;
+  }
+  .tooltip.show { opacity: 1; transform: translateY(0); }
+  .tooltip .ttip-head {
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 6px;
+  }
+  .tooltip .ttip-trigger {
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    color: var(--auto);
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .tooltip.human .ttip-trigger { color: var(--human); }
+  .tooltip .ttip-tag {
+    display: inline-block;
+    padding: 1px 6px;
+    border-radius: 3px;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.06em;
+    background: var(--human-dim);
+    color: var(--human);
+  }
+  .tooltip .ttip-row {
+    display: flex; gap: 8px; align-items: baseline;
+    margin-top: 4px;
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
+  }
+  .tooltip .ttip-row .k { color: var(--fg-mute); width: 56px; flex-shrink: 0; }
+  .tooltip .ttip-row .v.add { color: var(--ok); }
+  .tooltip .ttip-row .v.rem { color: var(--warn); }
+  .tooltip .ttip-row .v.flag { color: var(--info); }
+
+  /* ---------- View 2: phase detail ---------- */
+  #view-phase {
+    padding: 28px 32px 80px;
+    max-width: 1240px;
+    margin: 0 auto;
+  }
+  .phase-hero {
+    display: grid;
+    grid-template-columns: 1fr auto;
+    gap: 32px;
+    align-items: start;
+    margin-bottom: 28px;
+    padding-bottom: 24px;
+    border-bottom: 1px solid var(--line);
+  }
+  .phase-hero .kicker {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 11px;
+    color: var(--fg-mute);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 12px;
+  }
+  .phase-hero .kicker .pulse {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--auto);
+    box-shadow: 0 0 10px var(--auto);
+  }
+  .phase-hero h2 {
+    font-size: 32px;
+    font-weight: 600;
+    margin: 0 0 6px;
+    letter-spacing: -0.02em;
+  }
+  .phase-hero h2 .phasename {
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    color: var(--auto);
+    margin-right: 14px;
+  }
+  .phase-hero .description {
+    color: var(--fg-mute);
+    font-size: 15px;
+    max-width: 720px;
+    line-height: 1.55;
+  }
+  .phase-hero .transition-card {
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+    min-width: 220px;
+  }
+  .phase-hero .transition-card .tc-label {
+    font-size: 10px;
+    color: var(--fg-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    margin-bottom: 8px;
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  .phase-hero .transition-card .tc-flow {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px;
+    flex-wrap: wrap;
+  }
+  .phase-hero .transition-card .tc-flow .st {
+    background: var(--bg-3);
+    border: 1px solid var(--line-2);
+    border-radius: 4px;
+    padding: 3px 8px;
+    font-weight: 600;
+  }
+  .phase-hero .transition-card .tc-flow .arrow { color: var(--auto); font-family: ui-monospace, monospace; }
+
+  /* Phase content layout */
+  .phase-content {
+    display: grid;
+    grid-template-columns: 1fr 320px;
+    gap: 28px;
+  }
+  @media (max-width: 1000px) {
+    .phase-content { grid-template-columns: 1fr; }
+  }
+
+  /* Steps timeline */
+  .section-h {
+    display: flex; align-items: baseline; gap: 10px;
+    margin-bottom: 14px;
+  }
+  .section-h h3 {
+    margin: 0;
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--fg);
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  .section-h .count {
+    font-size: 11px;
+    color: var(--fg-dim);
+    font-family: ui-monospace, "SF Mono", monospace;
+  }
+  .steps {
+    position: relative;
+  }
+  .steps::before {
+    content: "";
+    position: absolute;
+    left: 13px;
+    top: 6px;
+    bottom: 6px;
+    width: 2px;
+    background: linear-gradient(180deg, var(--auto-dim), var(--line));
+  }
+  .step {
+    position: relative;
+    padding: 10px 0 14px 42px;
+  }
+  .step .marker {
+    position: absolute;
+    left: 6px;
+    top: 11px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--bg);
+    border: 2px solid var(--auto);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .step .marker::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--auto);
+  }
+  .step .head {
+    display: flex; align-items: baseline; gap: 10px;
+    margin-bottom: 3px;
+  }
+  .step .head .name {
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--fg);
+  }
+  .step .head .idx {
+    font-size: 10px;
+    color: var(--fg-dim);
+    font-family: ui-monospace, monospace;
+  }
+  .step .desc {
+    font-size: 13px;
+    color: var(--fg-mute);
+    line-height: 1.5;
+    max-width: 640px;
+  }
+  .step .icons {
+    display: inline-flex;
+    gap: 6px;
+    margin-left: 8px;
+    align-items: center;
+  }
+  .step .icons .ic {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+    font-family: ui-monospace, monospace;
+    padding: 1px 6px;
+    border-radius: 3px;
+  }
+  .ic.start { background: rgba(138, 166, 255, 0.12); color: var(--info); }
+  .ic.done  { background: rgba(142, 207, 108, 0.12); color: var(--ok); }
+  .ic.fail  { background: rgba(239, 93, 108, 0.12); color: var(--warn); }
+  .ic.skip  { background: rgba(154, 166, 178, 0.12); color: var(--fg-mute); }
+
+  /* Side rail cards */
+  .rail { display: flex; flex-direction: column; gap: 18px; }
+  .card {
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 14px 16px;
+  }
+  .card h4 {
+    margin: 0 0 10px;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--fg-mute);
+    font-family: ui-monospace, monospace;
+  }
+  .label-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 0;
+    border-bottom: 1px dashed var(--line);
+    font-size: 12px;
+  }
+  .label-row:last-child { border-bottom: none; }
+  .label-row .name {
+    font-family: ui-monospace, monospace;
+    color: var(--fg);
+  }
+  .label-row .state {
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    font-family: ui-monospace, monospace;
+  }
+  .state.required { background: var(--auto-dim); color: var(--auto); }
+  .state.present  { background: rgba(142, 207, 108, 0.15); color: var(--ok); }
+  .state.absent   { background: rgba(154, 166, 178, 0.10); color: var(--fg-mute); }
+
+  /* Gate conditions / stop codes */
+  .gate-block { margin-bottom: 10px; }
+  .gate-block:last-child { margin-bottom: 0; }
+  .gate-block .gtitle {
+    font-size: 12px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: var(--fg);
+  }
+  .gate-block .gtext {
+    font-size: 12px;
+    color: var(--fg-mute);
+    line-height: 1.5;
+  }
+  .gate-block .gtext code {
+    background: var(--bg-3);
+    padding: 1px 5px;
+    border-radius: 3px;
+    font-size: 11px;
+    color: var(--auto);
+  }
+  .stop-list { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
+  .stop-code {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 10px;
+    border-radius: 6px;
+    background: rgba(239, 93, 108, 0.07);
+    border: 1px solid rgba(239, 93, 108, 0.25);
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    color: var(--warn);
+  }
+  .stop-code .stop-dot {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--warn);
+    box-shadow: 0 0 8px var(--warn);
+    flex-shrink: 0;
+  }
+  .stop-code.empty {
+    background: transparent;
+    border-style: dashed;
+    border-color: var(--line);
+    color: var(--fg-dim);
+  }
+  .stop-code.empty .stop-dot { background: var(--fg-dim); box-shadow: none; }
+
+  /* Outcomes (used by GATE / PR-REVIEW / VERIFY) */
+  .outcomes { display: flex; flex-direction: column; gap: 8px; }
+  .outcome {
+    padding: 10px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--line);
+    background: var(--bg-2);
+    font-size: 12px;
+  }
+  .outcome .verdict {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: ui-monospace, monospace;
+    font-weight: 700;
+    margin-right: 8px;
+  }
+  .outcome .verdict.pass { color: var(--ok); }
+  .outcome .verdict.warn { color: var(--human); }
+  .outcome .verdict.fail { color: var(--warn); }
+  .outcome .verdict.auto { color: var(--auto); }
+  .outcome .desc {
+    color: var(--fg-mute);
+    margin-top: 4px;
+    line-height: 1.5;
+    font-size: 12px;
+  }
+
+  /* Sub-nav for quick phase switching in detail view */
+  .phase-nav {
+    display: flex; gap: 6px;
+    margin-bottom: 22px;
+    flex-wrap: wrap;
+  }
+  .phase-nav .pn {
+    padding: 5px 10px;
+    border-radius: 4px;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    color: var(--fg-mute);
+    font-family: ui-monospace, monospace;
+    font-size: 11px;
+    cursor: pointer;
+    transition: all 120ms ease;
+    letter-spacing: 0.04em;
+  }
+  .phase-nav .pn:hover { color: var(--fg); border-color: var(--line-2); }
+  .phase-nav .pn.active { background: var(--auto-dim); color: var(--auto); border-color: var(--auto); }
+
+  /* Side-effect annotation in full view */
+  .side-effects {
+    margin-top: 16px;
+    padding: 16px 20px;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--info);
+    border-radius: 6px;
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: 18px;
+    align-items: start;
+    max-width: 1500px;
+  }
+  .side-effects h4 {
+    margin: 0;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--info);
+    font-family: ui-monospace, monospace;
+  }
+  .side-effects .sub {
+    color: var(--fg-mute);
+    font-size: 11px;
+    margin-top: 4px;
+    font-family: ui-monospace, monospace;
+  }
+  .side-effects ul {
+    margin: 0; padding: 0; list-style: none;
+    display: flex; flex-direction: column; gap: 6px;
+    font-size: 12px;
+  }
+  .side-effects ul li { display: flex; gap: 10px; align-items: baseline; }
+  .side-effects ul li code {
+    background: var(--bg-3);
+    padding: 1px 7px;
+    border-radius: 3px;
+    font-size: 11px;
+    color: var(--info);
+    font-family: ui-monospace, monospace;
+  }
+  .side-effects ul li .ann { color: var(--fg-mute); font-size: 12px; }
+
+  /* Footer */
+  footer.foot {
+    color: var(--fg-dim);
+    font-size: 11px;
+    padding: 16px 28px;
+    border-top: 1px solid var(--line);
+    margin-top: 32px;
+    font-family: ui-monospace, monospace;
+    display: flex; gap: 18px; align-items: center;
+  }
+</style>
+</head>
+<body>
+
+<header class="app">
+  <span class="dot"></span>
+  <h1>ticket-auto <span class="muted">· pipeline state diagram</span></h1>
+  <div class="crumbs">
+    <span id="crumb-root" class="here">overview</span>
+    <span class="sep" id="crumb-sep" style="display:none">/</span>
+    <span class="here mono" id="crumb-phase" style="display:none"></span>
+  </div>
+  <div class="spacer"></div>
+  <div class="legend">
+    <span class="swatch" style="color: var(--auto)"><i style="background: var(--auto)"></i> autonomous</span>
+    <span class="swatch" style="color: var(--human)"><i style="background: var(--human)"></i> human action</span>
+    <span class="swatch dashed" style="color: var(--auto)"><i></i> loop-back</span>
+    <span class="swatch dashed" style="color: var(--fg-mute)"><i></i> side transition</span>
+  </div>
+  <button class="back" id="back-btn">← back to full view</button>
+</header>
+
+<main>
+
+  <!-- ============ VIEW 1 ============ -->
+  <section class="view active" id="view-pipeline">
+    <div class="heading">
+      <h2>End-to-end ticket flow</h2>
+      <span class="sub">Linear states · pipeline phases · transition triggers</span>
+    </div>
+    <div class="helptext">Click any <span class="mono" style="color:var(--auto)">phase chip</span> below the flow to drill into its steps, gates and stop codes. Hover an edge for trigger details.</div>
+
+    <div class="diagram-wrap">
+      <svg class="diagram" id="diagram" viewBox="0 0 1800 540" preserveAspectRatio="xMinYMid meet">
+        <defs>
+          <marker id="arrow-auto" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 Z" fill="var(--auto)"></path>
+          </marker>
+          <marker id="arrow-human" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 Z" fill="var(--human)"></path>
+          </marker>
+          <marker id="arrow-mute" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+            <path d="M0,0 L10,5 L0,10 Z" fill="var(--fg-dim)"></path>
+          </marker>
+        </defs>
+        <!-- groups appended by JS -->
+        <g id="g-edges"></g>
+        <g id="g-phases"></g>
+        <g id="g-nodes"></g>
+      </svg>
+    </div>
+
+    <div class="side-effects">
+      <div>
+        <h4>side transitions</h4>
+        <div class="sub">any state ↔ any state</div>
+      </div>
+      <ul>
+        <li><code>needs-info</code><span class="ann">— pauses workflow, adds <span class="mono" style="color:var(--info)">needs-info</span> label until clarification arrives</span></li>
+        <li><code>needs-info-resolved</code><span class="ann">— removes <span class="mono" style="color:var(--info)">needs-info</span> label, resumes from current state</span></li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ============ VIEW 2 ============ -->
+  <section class="view" id="view-phase">
+    <div class="phase-nav" id="phase-nav"></div>
+
+    <div class="phase-hero">
+      <div>
+        <div class="kicker"><span class="pulse"></span><span id="ph-kicker">phase</span></div>
+        <h2><span class="phasename" id="ph-name"></span><span id="ph-title"></span></h2>
+        <p class="description" id="ph-desc"></p>
+      </div>
+      <div class="transition-card">
+        <div class="tc-label">transition</div>
+        <div class="tc-flow" id="ph-transition"></div>
+      </div>
+    </div>
+
+    <div class="phase-content">
+      <div>
+        <div class="section-h">
+          <h3>Steps</h3>
+          <span class="count" id="ph-stepcount"></span>
+        </div>
+        <div class="steps" id="ph-steps"></div>
+      </div>
+
+      <div class="rail" id="ph-rail"></div>
+    </div>
+  </section>
+
+</main>
+
+<div class="tooltip" id="tooltip"></div>
+
+<footer class="foot">
+  <span>ticket-auto · v1</span>
+  <span>·</span>
+  <span>states: 7</span>
+  <span>·</span>
+  <span>phases: 7</span>
+  <span>·</span>
+  <span>transitions: 10 + 2 side</span>
+</footer>
+
+<script>
+// =========================================================================
+//  DATA  — the entire pipeline as a structured object
+// =========================================================================
+const DATA = {
+  states: [
+    { id: "backlog",  label: "Backlog",  kind: "start" },
+    { id: "todo",     label: "Todo" },
+    { id: "approve",  label: "Approve",  kind: "gate" },
+    { id: "ready",    label: "Ready" },
+    { id: "review",   label: "Review" },
+    { id: "uat",      label: "UAT" },
+    { id: "done",     label: "Done",     kind: "terminal" },
+  ],
+
+  // 7 nodes laid out across the canvas; columns are spaced
+  layout: {
+    width: 1800,
+    height: 540,
+    nodeWidth: 120,
+    nodeHeight: 64,
+    rowY: 170,
+    cols: {
+      backlog: 110,
+      todo:    380,
+      approve: 650,
+      ready:   920,
+      review:  1190,
+      uat:     1460,
+      done:    1730,
+    },
+    // Each loopback transition gets an explicit vertical lane below the phase chips,
+    // so loopback labels never collide with chips or with each other.
+    loopbackLanes: {
+      t4:  330,  // approve → todo  (human-reject)
+      t8:  330,  // review  → ready (pr-iterate) — no x overlap with t4 so safe to share
+      t10: 430,  // uat     → ready (uat-fail)
+    },
+  },
+
+  transitions: [
+    { id: "t1", from: "backlog", to: "todo",    trigger: "appraise-start",      kind: "auto",   phase: "APPRAISE",   add: ["claimed", "{complexity}"] },
+    { id: "t2", from: "todo",    to: "approve", trigger: "appraise-complete",   kind: "auto",   phase: "EXEC" },
+    { id: "t3", from: "approve", to: "ready",   trigger: "human-approve",       kind: "human",  phase: "GATE", add: ["approved"] },
+    { id: "t4", from: "approve", to: "todo",    trigger: "human-reject",        kind: "reject", phase: "GATE", note: "human rejects — loops back to Todo" },
+    { id: "t5", from: "ready",   to: "review",  trigger: "implement-complete",  kind: "auto",   phase: "IMPLEMENT", remove: ["approved"] },
+    { id: "t6", from: "review",  to: "done",    trigger: "pr-review-pass-done", kind: "auto",   phase: "PR-REVIEW", add: ["reviewed"], remove: ["claimed"] },
+    { id: "t7", from: "review",  to: "uat",     trigger: "pr-review-pass-uat",  kind: "auto",   phase: "PR-REVIEW", add: ["reviewed"] },
+    { id: "t8", from: "review",  to: "ready",   trigger: "pr-iterate",          kind: "loopback", phase: "PR-REVIEW", add: ["approved"], remove: ["reviewed", "rejected"] },
+    { id: "t9", from: "uat",     to: "done",    trigger: "uat-pass",            kind: "auto",   phase: "VERIFY", remove: ["claimed", "reviewed"] },
+    { id: "t10", from: "uat",    to: "ready",   trigger: "uat-fail",            kind: "loopback", phase: "VERIFY", add: ["rejected"], remove: ["reviewed"] },
+  ],
+
+  // Phase chips that sit between states (referenced by transition.phase)
+  // Each chip is positioned between fromCol and toCol along the main flow
+  phaseChips: [
+    { phase: "APPRAISE",   between: ["backlog", "todo"],    side: "below" },
+    { phase: "REPRODUCE",  between: ["todo", "todo"],       side: "below", note: "bug only" },
+    { phase: "EXEC",       between: ["todo", "approve"],    side: "below" },
+    { phase: "GATE",       between: ["approve", "ready"],   side: "below" },
+    { phase: "IMPLEMENT",  between: ["ready", "review"],    side: "below" },
+    { phase: "PR-REVIEW",  between: ["review", "uat"],      side: "below" },
+    { phase: "VERIFY",     between: ["uat", "done"],        side: "below" },
+  ],
+
+  phases: {
+    "APPRAISE": {
+      transition: ["Backlog", "Todo"],
+      description: "Reads the ticket, sets up a sandboxed workspace, sizes the work, gathers prior art and codebase context, then hands off an artifact summarising the plan and complexity.",
+      labelsActive: [
+        { name: "claimed",    note: "added on start" },
+        { name: "{complexity}", note: "set on completion" },
+      ],
+      steps: [
+        { name: "setup-workspace",         desc: "Clones the repo into an isolated worktree and prepares the agent shell." },
+        { name: "complexity-sweep",        desc: "Skims the ticket and assigns a complexity score: simple, medium or complex." },
+        { name: "prior-art",               desc: "Searches the ticket tracker and PR history for related work and earlier attempts." },
+        { name: "codebase-investigation",  desc: "Greps the repo for relevant modules, builds a dependency map of likely-touched files." },
+        { name: "handoff",                 desc: "Writes the appraisal artifact and transitions the ticket to Todo." },
+      ],
+      gateText: null,
+      stopCodes: [],
+    },
+
+    "REPRODUCE": {
+      transition: null,
+      description: "Bug tickets only. Launches a browser on UAT, navigates step-by-step through the reproduction plan, and confirms whether the bug manifests. Blocks the pipeline if the bug cannot be reproduced or the ticket lacks sufficient detail.",
+      labelsActive: [
+        { name: "bug",      note: "entry condition — phase skipped if absent" },
+        { name: "needs-info", note: "added on BLOCKED result" },
+      ],
+      steps: [
+        { name: "setup",    desc: "Runs ticket-setup to prepare the workspace and loads app knowledge and credentials." },
+        { name: "plan",     desc: "Derives a concrete browser reproduction plan from ticket steps enriched with navigation hints." },
+        { name: "sufficiency-check", desc: "Assesses whether the ticket has enough detail to execute. Posts a Linear comment and blocks if gaps exist." },
+        { name: "execute",  desc: "Navigates UAT via playwright-cli, taking snapshots at each step and capturing the assertion point." },
+        { name: "record",   desc: "Records the outcome (REPRODUCED / NOT_REPRODUCED / BLOCKED) and emits handoff output." },
+      ],
+      outcomes: [
+        { verdict: "pass", label: "REPRODUCED",     desc: "Bug confirmed on UAT. Pipeline proceeds to Exec." },
+        { verdict: "fail", label: "NOT_REPRODUCED", desc: "Bug does not manifest. Gate-stop — no code changes." },
+        { verdict: "fail", label: "BLOCKED",        desc: "Insufficient detail. adds needs-info label, gate-stop." },
+      ],
+      stopCodes: [
+        { code: "REPRO_NOT_CONFIRMED", desc: "Bug does not manifest on UAT — no defect to fix, implementation would be guesswork." },
+        { code: "REPRO_BLOCKED",       desc: "Ticket lacks sufficient detail to attempt reproduction — needs-info label added." },
+      ],
+    },
+
+    "EXEC": {
+      transition: ["Todo", "Approve"],
+      description: "Loads the saved appraisal workspace, produces the canonical execution artifact, posts it back to Linear as a structured comment, and hands off to the gate.",
+      labelsActive: [
+        { name: "claimed",      note: "present from APPRAISE" },
+        { name: "{complexity}", note: "required, drives gate behaviour" },
+      ],
+      steps: [
+        { name: "load-workspace",  desc: "Re-attaches to the APPRAISE workspace so context carries forward without re-fetching." },
+        { name: "create-artifact", desc: "Generates the formal execution artifact — scope, approach, file plan, test plan." },
+        { name: "post-linear",     desc: "Posts the artifact to the Linear ticket as a structured comment for reviewers." },
+        { name: "handoff",         desc: "Marks the ticket ready for the gate and exits cleanly." },
+      ],
+      gateText: null,
+      stopCodes: [
+        { code: "EXEC_NO_ARTIFACT",            desc: "Artifact generation produced no file — pipeline halts before posting." },
+        { code: "COMPLEXITY_ARTIFACT_MISMATCH", desc: "Artifact shape does not match the complexity bucket assigned in APPRAISE." },
+      ],
+    },
+
+    "GATE": {
+      transition: ["Approve", "Ready"],
+      description: "The decision point. Simple tickets pass through autonomously; complex tickets hold for a human reviewer to add the approved label before continuing.",
+      labelsActive: [
+        { name: "claimed",      note: "present" },
+        { name: "approved",     note: "added on pass" },
+        { name: "{complexity}", note: "drives auto vs hold" },
+      ],
+      steps: [
+        { name: "gate", desc: "Inspects the complexity label and either auto-approves or waits for the human approved label." },
+      ],
+      gateText: {
+        title: "Complexity gate",
+        body: "If <code>complexity = simple</code> the gate auto-applies the <code>approved</code> label and transitions Approve → Ready immediately. Otherwise it parks the ticket in Approve and listens for a human to add <code>approved</code>."
+      },
+      outcomes: [
+        { verdict: "auto",  label: "simple",  desc: "Auto-approved. Adds approved label, transitions Approve → Ready." },
+        { verdict: "pass",  label: "human-approve", desc: "Reviewer adds approved label. Transitions Approve → Ready." },
+        { verdict: "fail",  label: "human-reject",  desc: "Reviewer rejects. Loops back to Todo for re-appraisal." },
+      ],
+      stopCodes: [
+        { code: "APPROVAL_REVOKED", desc: "The approved label was removed while the gate was watching — re-enters hold state." },
+      ],
+    },
+
+    "IMPLEMENT": {
+      transition: ["Ready", "Review"],
+      description: "Writes the code. Verifies the approval still holds, branches, implements against the execution artifact, runs the test suite, performs a self-review, then commits and pushes a PR.",
+      labelsActive: [
+        { name: "approved",     note: "required entry condition" },
+        { name: "claimed",      note: "present" },
+        { name: "{complexity}", note: "present" },
+      ],
+      steps: [
+        { name: "check-approval",  desc: "Re-confirms the approved label is still on the ticket before doing any work." },
+        { name: "detect-path",     desc: "Determines the target paths from the execution artifact's file plan." },
+        { name: "checkout-branch", desc: "Creates the feature branch from the configured base." },
+        { name: "implement",       desc: "Executes the agent loop to write code against the artifact's spec." },
+        { name: "run-tests",       desc: "Runs the project test suite locally; iterates on failures up to the retry budget." },
+        { name: "code-review",     desc: "Self-review pass — formatter, lint, smell checks, diff sanity." },
+        { name: "commit-push",     desc: "Commits, pushes the branch, opens a draft PR and posts the link back to the ticket." },
+      ],
+      gateText: null,
+      stopCodes: [],
+    },
+
+    "PR-REVIEW": {
+      transition: ["Review", "Done / UAT / Ready"],
+      description: "Reads the opened PR, extracts requirements from the ticket, validates the diff against them and posts findings. The verdict decides whether the work merges, escalates to UAT, or loops back for iteration.",
+      labelsActive: [
+        { name: "claimed",  note: "present" },
+        { name: "reviewed", note: "added on pass" },
+        { name: "rejected", note: "added on fail" },
+      ],
+      steps: [
+        { name: "fetch-ticket",        desc: "Pulls the full ticket including all comments and the execution artifact." },
+        { name: "extract-requirements", desc: "Distils the ticket into a checklist of testable requirements." },
+        { name: "find-pr",             desc: "Locates the open PR linked to this ticket." },
+        { name: "validate-diff",       desc: "Compares the PR diff line-by-line against the extracted requirements." },
+        { name: "post-findings",       desc: "Writes a structured review comment with per-requirement verdicts." },
+        { name: "merge-decision",      desc: "Computes overall verdict (pass / warn / fail) and chooses the next transition." },
+      ],
+      outcomes: [
+        { verdict: "pass", label: "✅ pass — done",     desc: "Diff fully satisfies requirements. Transitions Review → Done." },
+        { verdict: "warn", label: "⚠ pass — uat",      desc: "Diff looks right but warrants live verification. Transitions Review → UAT." },
+        { verdict: "fail", label: "❌ fail — iterate", desc: "One or more requirements unmet. Adds rejected, loops Review → Ready." },
+      ],
+      stopCodes: [
+        { code: "PR_REVIEW_VERDICT_UNPARSEABLE", desc: "Reviewer output did not match the expected verdict schema — halts for human inspection." },
+      ],
+    },
+
+    "VERIFY": {
+      transition: ["UAT", "Done / Ready"],
+      description: "Live user-acceptance verification. Launches a real browser, walks through the requirements as a user would, evaluates outcomes against the spec, and reports back to Linear.",
+      labelsActive: [
+        { name: "claimed",  note: "present" },
+        { name: "reviewed", note: "present from PR-REVIEW" },
+        { name: "rejected", note: "added on fail" },
+      ],
+      steps: [
+        { name: "load-requirements", desc: "Reads the checklist extracted by PR-REVIEW so verification mirrors the same spec." },
+        { name: "launch-browser",    desc: "Spins up a headed browser session against the staged deploy." },
+        { name: "execute-steps",     desc: "Walks the user-flow scripts derived from the requirements." },
+        { name: "evaluate",          desc: "Compares observed UI / API responses against expected outcomes." },
+        { name: "report",            desc: "Posts a verification report to the ticket and chooses pass or fail transition." },
+      ],
+      outcomes: [
+        { verdict: "pass", label: "uat-pass", desc: "All checks green. Transitions UAT → Done; removes claimed and reviewed." },
+        { verdict: "fail", label: "uat-fail", desc: "One or more checks failed. Adds rejected, loops UAT → Ready for fixes." },
+      ],
+      stopCodes: [
+        { code: "REMEDIATION_BRIEF_TRUNCATED", desc: "The remediation brief written back to the ticket was cut off — risk that fixes miss context." },
+      ],
+    },
+  },
+};
+
+// Phase order, used by the sub-nav in detail view
+const PHASE_ORDER = ["APPRAISE", "REPRODUCE", "EXEC", "GATE", "IMPLEMENT", "PR-REVIEW", "VERIFY"];
+
+// =========================================================================
+//  RENDER  — View 1: full pipeline SVG
+// =========================================================================
+const NS = "http://www.w3.org/2000/svg";
+function svgEl(tag, attrs = {}) {
+  const el = document.createElementNS(NS, tag);
+  for (const k in attrs) el.setAttribute(k, attrs[k]);
+  return el;
+}
+
+function nodeRect(stateId) {
+  const x = DATA.layout.cols[stateId];
+  const y = DATA.layout.rowY;
+  const w = DATA.layout.nodeWidth;
+  const h = DATA.layout.nodeHeight;
+  return { x: x - w/2, y: y - h/2, cx: x, cy: y, w, h, left: x - w/2, right: x + w/2, top: y - h/2, bottom: y + h/2 };
+}
+
+function renderNodes() {
+  const g = document.getElementById("g-nodes");
+  g.innerHTML = "";
+  DATA.states.forEach((s, i) => {
+    const r = nodeRect(s.id);
+    const node = svgEl("g", { class: `node ${s.kind || ""} clickable`, "data-state": s.id });
+    const rect = svgEl("rect", { x: r.x, y: r.y, width: r.w, height: r.h, rx: 10, ry: 10 });
+    const sub  = svgEl("text", { x: r.cx, y: r.y + 16, class: "sublabel" });
+    sub.textContent = String(i + 1).padStart(2, "0") + " · state";
+    const label = svgEl("text", { x: r.cx, y: r.cy + 6, class: "label" });
+    label.textContent = s.label;
+    node.appendChild(rect); node.appendChild(sub); node.appendChild(label);
+
+    // Clicking on a node jumps to the OUTGOING phase from that state, if any
+    const outPhaseChip = DATA.phaseChips.find(p => p.between[0] === s.id);
+    if (outPhaseChip) {
+      node.addEventListener("click", () => navigateToPhase(outPhaseChip.phase));
+    } else if (s.id === "done") {
+      // Done has no outgoing phase
+      node.classList.remove("clickable");
+      node.style.cursor = "default";
+    }
+    g.appendChild(node);
+  });
+}
+
+const STATE_IDX = Object.fromEntries(DATA.states.map((s, i) => [s.id, i]));
+
+function curveBetween(transitionId, fromId, toId, kind) {
+  const a = nodeRect(fromId);
+  const b = nodeRect(toId);
+  const fromIdx = STATE_IDX[fromId];
+  const toIdx   = STATE_IDX[toId];
+  const dir = b.cx > a.cx ? 1 : -1;
+  const stateGap = Math.abs(toIdx - fromIdx);
+
+  // Forward, adjacent: straight horizontal between right edge of A and left edge of B
+  if (dir === 1 && stateGap === 1) {
+    const x1 = a.right, y1 = a.cy;
+    const x2 = b.left,  y2 = b.cy;
+    return { d: `M ${x1} ${y1} L ${x2} ${y2}`, mid: { x: (x1 + x2) / 2, y: y1 } };
+  }
+
+  // Forward skip-link (review → done): arc above so it clears intermediate node(s)
+  if (dir === 1 && stateGap > 1) {
+    const x1 = a.cx + 25, y1 = a.top;
+    const x2 = b.cx - 25, y2 = b.top;
+    const arcY = a.top - 80;
+    const midX = (a.cx + b.cx) / 2;
+    return { d: `M ${x1} ${y1} C ${x1 + 30} ${arcY}, ${x2 - 30} ${arcY}, ${x2} ${y2}`, mid: { x: midX, y: arcY + 4 } };
+  }
+
+  // Loopback (right-to-left). Each loopback has an explicit lane so labels never collide.
+  if (dir === -1) {
+    const laneY = DATA.layout.loopbackLanes[transitionId] || (a.bottom + 200);
+    const x1 = a.cx - 25, y1 = a.bottom;
+    const x2 = b.cx + 25, y2 = b.bottom;
+    // Push control points slightly past the lane so the curve actually reaches it.
+    const cpY = laneY + 30;
+    const midX = (a.cx + b.cx) / 2;
+    return { d: `M ${x1} ${y1} C ${x1 - 10} ${cpY}, ${x2 + 10} ${cpY}, ${x2} ${y2}`, mid: { x: midX, y: laneY } };
+  }
+
+  return { d: `M ${a.right} ${a.cy} L ${b.left} ${b.cy}`, mid: { x: (a.right + b.left) / 2, y: a.cy } };
+}
+
+function renderEdges() {
+  const g = document.getElementById("g-edges");
+  g.innerHTML = "";
+
+  // Order: forward main flow first (so labels overlay cleanly), then skip-links, then loopbacks
+  const ordered = [...DATA.transitions].sort((x, y) => {
+    const order = { auto: 0, human: 1, reject: 2, loopback: 3 };
+    return order[x.kind] - order[y.kind];
+  });
+
+  ordered.forEach(t => {
+    const c = curveBetween(t.id, t.from, t.to, t.kind);
+    const cls = `edge ${t.kind}`;
+    const eg = svgEl("g", { class: cls, "data-trigger": t.trigger });
+
+    const marker = t.kind === "human" || t.kind === "reject" ? "url(#arrow-human)" : "url(#arrow-auto)";
+    const line = svgEl("path", { d: c.d, class: "line", "marker-end": marker });
+    eg.appendChild(line);
+
+    // Edge label (trigger name) on a chip background
+    const label = t.trigger;
+    const padX = 8, h = 18;
+    const approxW = Math.max(64, label.length * 6.4 + padX * 2);
+    const lbg = svgEl("rect", {
+      x: c.mid.x - approxW / 2, y: c.mid.y - h / 2,
+      width: approxW, height: h, rx: 4, ry: 4, class: "label-bg",
+    });
+    const ltx = svgEl("text", { x: c.mid.x, y: c.mid.y + 0.5, class: "edge-label" });
+    ltx.textContent = label;
+    eg.appendChild(lbg); eg.appendChild(ltx);
+
+    // Tooltip events
+    eg.addEventListener("mouseenter", (e) => showTooltip(t, e));
+    eg.addEventListener("mousemove",  (e) => moveTooltip(e));
+    eg.addEventListener("mouseleave", () => hideTooltip());
+
+    // Clicking an edge jumps to the corresponding phase
+    if (t.phase) {
+      eg.style.cursor = "pointer";
+      eg.addEventListener("click", () => navigateToPhase(t.phase));
+    }
+    g.appendChild(eg);
+  });
+}
+
+function renderPhaseChips() {
+  const g = document.getElementById("g-phases");
+  g.innerHTML = "";
+  DATA.phaseChips.forEach(ch => {
+    const a = nodeRect(ch.between[0]);
+    const b = nodeRect(ch.between[1]);
+    const cx = (a.cx + b.cx) / 2;
+    const cy = a.bottom + 58;  // below the main flow, above the loopback arcs
+    const w = 132, h = 44;
+
+    const grp = svgEl("g", { class: "phase-badge", "data-phase": ch.phase, transform: `translate(${cx - w/2}, ${cy - h/2})` });
+    const rect = svgEl("rect", { x: 0, y: 0, width: w, height: h, rx: 6, ry: 6 });
+    const name = svgEl("text", { x: w/2, y: 17, class: "name" });
+    name.textContent = ch.phase;
+    const tag = svgEl("text", { x: w/2, y: 32, class: "tag" });
+    tag.textContent = "phase →";
+    grp.appendChild(rect); grp.appendChild(name); grp.appendChild(tag);
+
+    // tick connecting state to phase
+    const tick = svgEl("path", { d: `M ${cx} ${a.bottom} L ${cx} ${cy - h/2}`, stroke: "var(--line-2)", "stroke-width": "1", "stroke-dasharray": "2 3", fill: "none" });
+    g.appendChild(tick);
+    g.appendChild(grp);
+
+    grp.addEventListener("click", () => navigateToPhase(ch.phase));
+  });
+}
+
+// =========================================================================
+//  TOOLTIPS
+// =========================================================================
+const tooltipEl = document.getElementById("tooltip");
+function showTooltip(t, e) {
+  let html = `<div class="ttip-head">
+    <span class="ttip-trigger">${t.trigger}</span>
+    ${(t.kind === "human" || t.kind === "reject") ? `<span class="ttip-tag">human</span>` : ``}
+  </div>`;
+  html += `<div class="ttip-row"><span class="k">from → to</span><span class="v mono">${t.from} → ${t.to}</span></div>`;
+  if (t.phase) html += `<div class="ttip-row"><span class="k">phase</span><span class="v mono" style="color:var(--auto)">${t.phase}</span></div>`;
+  if (t.add)    html += `<div class="ttip-row"><span class="k">adds</span><span class="v add mono">+ ${t.add.join(", ")}</span></div>`;
+  if (t.remove) html += `<div class="ttip-row"><span class="k">removes</span><span class="v rem mono">− ${t.remove.join(", ")}</span></div>`;
+  if (t.note)   html += `<div class="ttip-row"><span class="k">note</span><span class="v mono" style="color:var(--fg-mute)">${t.note}</span></div>`;
+
+  tooltipEl.innerHTML = html;
+  tooltipEl.className = "tooltip show " + (t.kind === "human" || t.kind === "reject" ? "human" : "");
+  moveTooltip(e);
+}
+function moveTooltip(e) {
+  const pad = 14;
+  const w = tooltipEl.offsetWidth || 280;
+  const h = tooltipEl.offsetHeight || 100;
+  let x = e.clientX + pad;
+  let y = e.clientY + pad;
+  if (x + w > window.innerWidth - 8) x = e.clientX - w - pad;
+  if (y + h > window.innerHeight - 8) y = e.clientY - h - pad;
+  tooltipEl.style.left = x + "px";
+  tooltipEl.style.top  = y + "px";
+}
+function hideTooltip() { tooltipEl.classList.remove("show"); }
+
+// =========================================================================
+//  VIEW 2  — Phase detail
+// =========================================================================
+function renderPhaseNav(active) {
+  const nav = document.getElementById("phase-nav");
+  nav.innerHTML = "";
+  PHASE_ORDER.forEach(p => {
+    const btn = document.createElement("button");
+    btn.className = "pn" + (p === active ? " active" : "");
+    btn.textContent = p;
+    btn.addEventListener("click", () => navigateToPhase(p));
+    nav.appendChild(btn);
+  });
+}
+
+function renderPhaseDetail(phaseName) {
+  const d = DATA.phases[phaseName];
+  if (!d) return;
+  renderPhaseNav(phaseName);
+
+  document.getElementById("ph-kicker").textContent = "phase · " + phaseName.toLowerCase();
+  document.getElementById("ph-name").textContent = phaseName;
+  document.getElementById("ph-title").textContent = d.transition ? " · " + d.transition.join(" → ") : " · pipeline‑internal phase (bug only, no state change)";
+  document.getElementById("ph-desc").textContent = d.description;
+
+  // transition card
+  const tc = document.getElementById("ph-transition");
+  tc.innerHTML = "";
+  if (d.transition) d.transition.forEach((s, i) => {
+    if (i > 0) {
+      const a = document.createElement("span");
+      a.className = "arrow";
+      a.textContent = "→";
+      tc.appendChild(a);
+    }
+    const st = document.createElement("span");
+    st.className = "st";
+    st.textContent = s;
+    tc.appendChild(st);
+  });
+
+  // steps
+  const stepsEl = document.getElementById("ph-steps");
+  stepsEl.innerHTML = "";
+  d.steps.forEach((s, i) => {
+    const wrap = document.createElement("div");
+    wrap.className = "step";
+    wrap.innerHTML = `
+      <span class="marker"></span>
+      <div class="head">
+        <span class="idx mono">${String(i + 1).padStart(2, "0")}</span>
+        <span class="name">${s.name}</span>
+        <span class="icons">
+          <span class="ic start">▸ start</span>
+          <span class="ic done">✓ done</span>
+          ${i === d.steps.length - 1 ? '<span class="ic fail">✗ fail</span>' : ''}
+          ${i === 0 ? '<span class="ic skip">↷ skip</span>' : ''}
+        </span>
+      </div>
+      <div class="desc">${s.desc}</div>
+    `;
+    stepsEl.appendChild(wrap);
+  });
+  document.getElementById("ph-stepcount").textContent = `${d.steps.length} step${d.steps.length === 1 ? "" : "s"}`;
+
+  // right rail
+  const rail = document.getElementById("ph-rail");
+  rail.innerHTML = "";
+
+  // labels card
+  if (d.labelsActive && d.labelsActive.length) {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `<h4>Labels active</h4>`;
+    d.labelsActive.forEach(l => {
+      const row = document.createElement("div");
+      row.className = "label-row";
+      const stateClass = /required/i.test(l.note) ? "required" : "present";
+      row.innerHTML = `
+        <span class="name">${l.name}</span>
+        <span class="state ${stateClass}">${l.note}</span>
+      `;
+      card.appendChild(row);
+    });
+    rail.appendChild(card);
+  }
+
+  // gate / outcomes
+  if (d.gateText || d.outcomes) {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `<h4>${d.outcomes ? "Outcomes" : "Gate condition"}</h4>`;
+    if (d.gateText) {
+      const block = document.createElement("div");
+      block.className = "gate-block";
+      block.innerHTML = `<div class="gtitle">${d.gateText.title}</div><div class="gtext">${d.gateText.body}</div>`;
+      card.appendChild(block);
+    }
+    if (d.outcomes) {
+      const list = document.createElement("div");
+      list.className = "outcomes";
+      d.outcomes.forEach(o => {
+        const el = document.createElement("div");
+        el.className = "outcome";
+        el.innerHTML = `<span class="verdict ${o.verdict}">${o.verdict}</span><span class="mono">${o.label}</span><div class="desc">${o.desc}</div>`;
+        list.appendChild(el);
+      });
+      card.appendChild(list);
+    }
+    rail.appendChild(card);
+  }
+
+  // stop codes
+  const stopCard = document.createElement("div");
+  stopCard.className = "card";
+  stopCard.innerHTML = `<h4>Gate-stop codes</h4>`;
+  if (d.stopCodes && d.stopCodes.length) {
+    const list = document.createElement("div");
+    list.className = "stop-list";
+    d.stopCodes.forEach(s => {
+      const el = document.createElement("div");
+      el.className = "stop-code";
+      el.innerHTML = `<span class="stop-dot"></span><div><div>${s.code}</div><div style="color:var(--fg-mute); font-family:inherit; margin-top:3px; font-size:11px">${s.desc}</div></div>`;
+      list.appendChild(el);
+    });
+    stopCard.appendChild(list);
+  } else {
+    const el = document.createElement("div");
+    el.className = "stop-code empty";
+    el.innerHTML = `<span class="stop-dot"></span><span>none defined for this phase</span>`;
+    stopCard.appendChild(el);
+  }
+  rail.appendChild(stopCard);
+}
+
+// =========================================================================
+//  ROUTING
+// =========================================================================
+const viewPipeline = document.getElementById("view-pipeline");
+const viewPhase    = document.getElementById("view-phase");
+const backBtn      = document.getElementById("back-btn");
+const crumbRoot    = document.getElementById("crumb-root");
+const crumbSep     = document.getElementById("crumb-sep");
+const crumbPhase   = document.getElementById("crumb-phase");
+
+function navigateToPipeline() {
+  viewPhase.classList.remove("active");
+  viewPipeline.classList.add("active");
+  backBtn.style.display = "none";
+  crumbSep.style.display = "none";
+  crumbPhase.style.display = "none";
+  crumbRoot.classList.add("here");
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  if (location.hash) history.replaceState(null, "", location.pathname);
+}
+function navigateToPhase(phaseName) {
+  if (!DATA.phases[phaseName]) return;
+  renderPhaseDetail(phaseName);
+  viewPipeline.classList.remove("active");
+  viewPhase.classList.add("active");
+  backBtn.style.display = "inline-block";
+  crumbSep.style.display = "inline";
+  crumbPhase.style.display = "inline";
+  crumbPhase.textContent = phaseName;
+  crumbRoot.classList.remove("here");
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  history.replaceState(null, "", "#" + phaseName);
+}
+
+backBtn.addEventListener("click", navigateToPipeline);
+crumbRoot.addEventListener("click", () => { if (viewPhase.classList.contains("active")) navigateToPipeline(); });
+crumbRoot.style.cursor = "pointer";
+
+// Allow deep-link via #PHASE
+window.addEventListener("hashchange", () => {
+  const h = location.hash.replace("#", "");
+  if (h && DATA.phases[h]) navigateToPhase(h);
+  else navigateToPipeline();
+});
+
+// =========================================================================
+//  BOOT
+// =========================================================================
+renderEdges();
+renderPhaseChips();
+renderNodes();
+
+if (location.hash) {
+  const h = location.hash.replace("#", "");
+  if (DATA.phases[h]) navigateToPhase(h);
+}
+</script>
+</body>
+</html>
