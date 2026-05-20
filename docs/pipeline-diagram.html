@@ -150,7 +150,7 @@
     display: block;
     min-width: 1960px;
     width: 1960px;
-    height: 540px;
+    height: 600px;
   }
   /* SVG node styles */
   .node rect {
@@ -712,7 +712,7 @@
     <div class="helptext">Click any <span class="mono" style="color:var(--auto)">phase chip</span> below the flow to drill into its steps, gates and stop codes. Hover an edge for trigger details.</div>
 
     <div class="diagram-wrap">
-      <svg class="diagram" id="diagram" viewBox="0 0 1960 540" preserveAspectRatio="xMinYMid meet">
+      <svg class="diagram" id="diagram" viewBox="0 0 1960 600" preserveAspectRatio="xMinYMid meet">
         <defs>
           <marker id="arrow-auto" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
             <path d="M0,0 L10,5 L0,10 Z" fill="var(--auto)"></path>
@@ -821,8 +821,8 @@ const DATA = {
     // so loopback labels never collide with chips or with each other.
     loopbackLanes: {
       t4:  330,  // approve → todo  (human-reject)
-      t8:  390,  // review  → ready (pr-iterate) — pushed down to clear VERIFY chip at y=318-362
-      t10: 430,  // uat     → ready (uat-fail)
+      t8:  430,  // review  → ready (pr-iterate) — deep enough to clear VERIFY chip (y=318-362) at all x
+      t10: 510,  // uat     → ready (uat-fail)    — deeper still to separate from t8
     },
   },
 
@@ -848,7 +848,7 @@ const DATA = {
     { phase: "GATE",       between: ["approve", "ready"],   side: "below" },
     { phase: "IMPLEMENT",  between: ["ready", "review"],    side: "below" },
     { phase: "PR-REVIEW",  between: ["review", "uat"],      side: "below" },
-    { phase: "VERIFY",     between: ["ready", "review"],    side: "below", chipY: 340, tickFromY: 282, note: "uat only" },
+    { phase: "VERIFY",     between: ["ready", "review"],    side: "below", chipY: 340, tickFromY: 282, note: "localhost" },
   ],
 
   phases: {
