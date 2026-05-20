@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0 (2026-05-20)
+
+- REPRODUCE phase (Step 1.5) for bug tickets — reproduces the bug before implementation begins
+- Interactive pipeline state diagram with full-view and phase drill-down
+- Transcript capture for retrospective analysis — agent outputs persisted for post-mortem
+- Heartbeat error diagnostics — captures API errors and gate-stop causes for retro enrichment
+- Skill preamble deduplication — extracted shared preamble from 9 pipeline skills (290 lines removed)
+- Env-check unification — dual-mode output (full pipe-delimited + colored validate) with thin wrapper
+- jq error guards and flow.sh exit code handling in subskill error patterns
+- RCE vector removed, dead code pruned, fragile JSON parsing replaced
+- Documentation restructure: CHANGELOG, LICENSE, plugin-overview.md, per-plugin CLAUDE.md, docs/ index
+- Catch-up bump: versions 0.3.17–0.3.22 were never tagged; 0.4.0 consolidates PRs #25–#30
+
 ## 0.3.16 (2026-05-20)
 
 - PR comment reconciliation (Step 5.5) in ticket-auto pipeline
