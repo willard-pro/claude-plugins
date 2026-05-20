@@ -195,9 +195,13 @@ for log_file in "${LOG_FILES[@]}"; do
         if [ -n "$detail" ] && [ "$detail" != "{}" ]; then
           _detail_obj=$(echo "$detail" | jq -c '.' 2>/dev/null || echo "{}")
         fi
-        _safe_msg=$(echo "$msg" | sed 's/"/\\"/g')
-        _safe_ts=$(echo "$ts" | sed 's/"/\\"/g')
-        _event_obj="{\"category\":\"retry\",\"event\":\"$event\",\"message\":\"$_safe_msg\",\"timestamp\":\"$_safe_ts\",\"detail\":$_detail_obj}"
+        _event_obj=$(jq -n \
+          --arg category "retry" \
+          --arg event "$event" \
+          --arg message "$msg" \
+          --arg timestamp "$ts" \
+          --argjson detail "$_detail_obj" \
+          '{category: $category, event: $event, message: $message, timestamp: $timestamp, detail: $detail}')
         TICKET_ERROR_EVENTS["$ticket_id"]+="$_event_obj"$'\n'
         TOTAL_ERROR_COUNT=$((TOTAL_ERROR_COUNT + 1))
         ERROR_CATEGORY_HIST["$event"]=$((${ERROR_CATEGORY_HIST["$event"]:-0} + 1))
@@ -210,9 +214,13 @@ for log_file in "${LOG_FILES[@]}"; do
       if [ -n "$detail" ] && [ "$detail" != "{}" ]; then
         _detail_obj=$(echo "$detail" | jq -c '.' 2>/dev/null || echo "{}")
       fi
-      _safe_msg=$(echo "$msg" | sed 's/"/\\"/g')
-      _safe_ts=$(echo "$ts" | sed 's/"/\\"/g')
-      _event_obj="{\"category\":\"api\",\"event\":\"$event\",\"message\":\"$_safe_msg\",\"timestamp\":\"$_safe_ts\",\"detail\":$_detail_obj}"
+      _event_obj=$(jq -n \
+        --arg category "api" \
+        --arg event "$event" \
+        --arg message "$msg" \
+        --arg timestamp "$ts" \
+        --argjson detail "$_detail_obj" \
+        '{category: $category, event: $event, message: $message, timestamp: $timestamp, detail: $detail}')
       TICKET_ERROR_EVENTS["$ticket_id"]+="$_event_obj"$'\n'
       TOTAL_ERROR_COUNT=$((TOTAL_ERROR_COUNT + 1))
       ERROR_CATEGORY_HIST["$event"]=$((${ERROR_CATEGORY_HIST["$event"]:-0} + 1))
@@ -224,9 +232,13 @@ for log_file in "${LOG_FILES[@]}"; do
       if [ -n "$detail" ] && [ "$detail" != "{}" ]; then
         _detail_obj=$(echo "$detail" | jq -c '.' 2>/dev/null || echo "{}")
       fi
-      _safe_msg=$(echo "$msg" | sed 's/"/\\"/g')
-      _safe_ts=$(echo "$ts" | sed 's/"/\\"/g')
-      _event_obj="{\"category\":\"gate\",\"event\":\"$event\",\"message\":\"$_safe_msg\",\"timestamp\":\"$_safe_ts\",\"detail\":$_detail_obj}"
+      _event_obj=$(jq -n \
+        --arg category "gate" \
+        --arg event "$event" \
+        --arg message "$msg" \
+        --arg timestamp "$ts" \
+        --argjson detail "$_detail_obj" \
+        '{category: $category, event: $event, message: $message, timestamp: $timestamp, detail: $detail}')
       TICKET_ERROR_EVENTS["$ticket_id"]+="$_event_obj"$'\n'
       TOTAL_ERROR_COUNT=$((TOTAL_ERROR_COUNT + 1))
       ERROR_CATEGORY_HIST["$event"]=$((${ERROR_CATEGORY_HIST["$event"]:-0} + 1))
