@@ -420,13 +420,8 @@ hb_heartbeat "phase-transition" "EXEC → GATE"
 Resolve and log the plan artifact path so the dashboard can display it:
 
 ```bash
-PLAN_PATH=$(find {TICKET_DIR} -name "simple-fix.md" -print -quit 2>/dev/null)
-if [ -z "$PLAN_PATH" ]; then
-  CHANGE_DIR=$(ls -d openspec/changes/*/ 2>/dev/null | grep -i "{ticket-id-lowercase}" | head -1)
-  if [ -n "$CHANGE_DIR" ]; then
-    PLAN_PATH="${CHANGE_DIR}tasks.md"
-  fi
-fi
+source "$(dirname "${BASH_SOURCE[0]}")/../../lib/ticket-dir.sh"
+PLAN_PATH=$(resolve_plan_path "{LOG_FILE}" "{TICKET_DIR}" "{ticket-id-lowercase}")
 if [ -n "$PLAN_PATH" ]; then
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|plan:$PLAN_PATH" >> {LOG_FILE}
 fi
