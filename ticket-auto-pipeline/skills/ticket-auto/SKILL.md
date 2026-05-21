@@ -221,7 +221,9 @@ Initialize the pipeline log and launch the dashboard (heartbeat log already init
 ```bash
 mkdir -p ./logs
 LOG_FILE="$PWD/logs/{TICKET-ID}-pipeline.log"
+CLAUDE_LOG_FILE="$PWD/logs/{TICKET-ID}-claude.log"
 touch "$LOG_FILE"
+cl_init
 YELLOW=$(tput setaf 3); BOLD=$(tput bold); RESET=$(tput sgr0)
 if [ -n "$TMUX" ]; then
   tmux split-window -h "python3 ~/.claude/skills/ticket-auto/dashboard.py $LOG_FILE; read"
@@ -278,7 +280,7 @@ Follow the agent spawn template with: PHASE={PHASE}, SKILL={SKILL}, DESCRIPTION=
 
 3. Spawn `general-purpose` agent:
    ```
-   Run {SKILL} {TICKET-ID} {EXTRA_FLAGS}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. {SKILL_INSTRUCTIONS}
+   Run {SKILL} {TICKET-ID} {EXTRA_FLAGS}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. {SKILL_INSTRUCTIONS}
    ```
 
 4. Wait for agent. Persist output:
@@ -387,6 +389,7 @@ Follow the agent spawn template with: PHASE=APPRAISE, SKILL=/ticket-appraise, DE
 
 Write the waiting log entry:
 ```bash
+cl_write "APPRAISE" "handoff" "info" "ticket={TICKET-ID} autonomy={AUTONOMY} from_step=${APPRAISE_FROM:-fresh}"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|waiting|Agent launched — investigating {TICKET-ID}" >> {LOG_FILE}
 hb_heartbeat "orchestrator-waiting" "agent appraise launched"
 ```
@@ -400,7 +403,7 @@ echo "APPRAISE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 Spawn a `general-purpose` agent to investigate the ticket:
 
 ```
-Run /ticket-appraise {TICKET-ID} --from-auto{if {APPRAISE_FROM} is non-empty: ` --from-step {APPRAISE_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. When you hit Resume mode and the workspace already exists, if asked "continue or re-investigate?", choose "continue" — do not prompt. Report only the final handoff output.
+Run /ticket-appraise {TICKET-ID} --from-auto{if {APPRAISE_FROM} is non-empty: ` --from-step {APPRAISE_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. When you hit Resume mode and the workspace already exists, if asked "continue or re-investigate?", choose "continue" — do not prompt. Report only the final handoff output.
 ```
 
 Wait for the agent. Persist the raw output immediately before extracting any fields:
@@ -417,6 +420,8 @@ If the agent fails → write fail log and stop:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|fail|Agent failed" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "appraise agent failed"
+_last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
+cl_write "APPRAISE" "context" "fail" "appraise agent failed — last_hb: ${_last_hb}"
 ```
 
 On success, write the done log entry and META title:
@@ -426,6 +431,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|title|info|{TICKET-ID}: {TICKET_TITLE}
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|notes:{TICKET_DIR}/notes.md" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "appraise agent done — {COMPLEXITY}"
 hb_heartbeat "phase-transition" "APPRAISE → EXEC"
+cl_write "APPRAISE" "appraise" "done" "complexity={COMPLEXITY} files_traced={N} ticket_dir={TICKET_DIR} title={TICKET_TITLE}"
 ```
 
 ---
@@ -455,6 +461,7 @@ Follow the agent spawn template with: PHASE=REPRODUCE, SKILL=/ticket-reproduce, 
 
 Write the waiting log entry:
 ```bash
+cl_write "REPRODUCE" "handoff" "info" "bug ticket: {TICKET-ID} from_step=${REPRODUCE_FROM:-fresh}"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|waiting|Agent launched — reproducing bug for {TICKET-ID}" >> {LOG_FILE}
 hb_heartbeat "orchestrator-waiting" "agent reproduce launched"
 ```
@@ -467,7 +474,7 @@ echo "REPRODUCE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 Spawn a `general-purpose` agent to reproduce the bug:
 
 ```
-Run /ticket-reproduce {TICKET-ID} --from-auto{if {REPRODUCE_FROM} is non-empty: ` --from-step {REPRODUCE_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Report only the final handoff output.
+Run /ticket-reproduce {TICKET-ID} --from-auto{if {REPRODUCE_FROM} is non-empty: ` --from-step {REPRODUCE_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Report only the final handoff output.
 ```
 
 Wait for the agent. Persist the raw output immediately before extracting any fields:
@@ -482,6 +489,8 @@ If the agent fails → write fail log and stop:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|fail|Agent failed" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "reproduce agent failed"
+_last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
+cl_write "REPRODUCE" "context" "fail" "reproduce agent failed — last_hb: ${_last_hb}"
 ```
 
 On success, branch on `{REPRODUCE_RESULT}`:
@@ -491,6 +500,7 @@ On success, branch on `{REPRODUCE_RESULT}`:
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|done|REPRODUCED" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "reproduce agent done — REPRODUCED"
 hb_heartbeat "phase-transition" "REPRODUCE → EXEC"
+cl_write "REPRODUCE" "reproduce" "done" "result=REPRODUCED"
 ```
 Continue to **Step 2 — Exec**.
 
@@ -528,13 +538,14 @@ Write the waiting log entry:
 Write the phase context file so the token-tracker hook knows where to log:
 
 ```bash
+cl_write "EXEC" "handoff" "info" "from_appraise: complexity={COMPLEXITY} ticket_dir={TICKET_DIR} from_step=${EXEC_FROM:-fresh}"
 echo "EXEC|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 ```
 
 Spawn a `general-purpose` agent to create artifacts:
 
 ```
-Run /ticket-appraise-exec {TICKET-ID} --from-auto{if {EXEC_FROM} is non-empty: ` --from-step {EXEC_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Report only the final handoff output.
+Run /ticket-appraise-exec {TICKET-ID} --from-auto{if {EXEC_FROM} is non-empty: ` --from-step {EXEC_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Report only the final handoff output.
 ```
 
 Wait for the agent. Persist the raw output immediately before extracting any fields:
@@ -549,6 +560,9 @@ If the agent fails → write fail log and stop:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|fail|Agent failed" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "exec agent failed"
+_last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
+_dir_exists=$([ -d "{TICKET_DIR}" ] && echo "yes" || echo "no")
+cl_write "EXEC" "context" "fail" "exec agent failed — ticket_dir_exists=${_dir_exists} plan_path=${PLAN_PATH:-unresolved} last_hb: ${_last_hb}"
 ```
 
 On success:
@@ -556,6 +570,7 @@ On success:
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|{ARTIFACT_TYPE}" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "exec agent done — {ARTIFACT_TYPE}"
 hb_heartbeat "phase-transition" "EXEC → GATE"
+cl_write "EXEC" "exec" "done" "artifact_type={ARTIFACT_TYPE} plan_path=${PLAN_PATH:-unknown}"
 ```
 
 Resolve and log the plan artifact path so the dashboard can display it:
@@ -848,13 +863,14 @@ Write the waiting log entry:
 Write the phase context file so the token-tracker hook knows where to log:
 
 ```bash
+cl_write "IMPLEMENT" "handoff" "info" "from_gate: complexity={COMPLEXITY} artifact_type={ARTIFACT_TYPE} plan_path=${PLAN_PATH:-unknown} from_step=${IMPLEMENT_FROM:-fresh}"
 echo "IMPLEMENT|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 ```
 
 Spawn a `general-purpose` agent:
 
 ```
-Run /ticket-implement {TICKET-ID} --from-auto{if {IMPLEMENT_FROM} is non-empty: ` --from-step {IMPLEMENT_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Use Serena for all code navigation — mandatory. Commit and push. Report the final output including branch name.
+Run /ticket-implement {TICKET-ID} --from-auto{if {IMPLEMENT_FROM} is non-empty: ` --from-step {IMPLEMENT_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Use Serena for all code navigation — mandatory. Commit and push. Report the final output including branch name.
 
 After this agent returns, clear `{IMPLEMENT_FROM}` (set to empty) — loop re-invocations in Step 5d always start fresh.
 ```
@@ -872,6 +888,8 @@ If the agent fails → write fail log and stop:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|fail|Agent failed" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "implement agent failed"
+_last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
+cl_write "IMPLEMENT" "context" "fail" "implement agent failed — complexity={COMPLEXITY} artifact_type={ARTIFACT_TYPE} last_hb: ${_last_hb}"
 ```
 
 On success:
@@ -879,6 +897,7 @@ On success:
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|{OUTCOME}, branch: {branch}" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "implement agent done — {OUTCOME}"
 hb_heartbeat "phase-transition" "IMPLEMENT → VERIFY"
+cl_write "IMPLEMENT" "implement" "done" "outcome={OUTCOME} branch={branch}"
 ```
 
 ### Step 4a — Verify outcome label
@@ -904,6 +923,7 @@ Proceed to Step 4.6 (Wiki Maintenance).
 
 Write log start event:
 ```bash
+cl_write "VERIFY" "handoff" "info" "attempt={VERIFY_ATTEMPTS}/3 branch={branch} outcome={OUTCOME}"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|start|Attempt {VERIFY_ATTEMPTS}/3 — running Playwright UAT" >> {LOG_FILE}
 hb_heartbeat "orchestrator-waiting" "verify attempt $(({VERIFY_ATTEMPTS}+1))/3"
 ```
@@ -928,9 +948,12 @@ Write log result event:
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|done|PASS" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "verify agent done — PASS"
 hb_heartbeat "phase-transition" "VERIFY → MAINTENANCE"
+cl_write "VERIFY" "verify" "done" "PASS on attempt {VERIFY_ATTEMPTS}"
 # FAIL:
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|fail|FAIL — criteria not met" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "verify agent done — FAIL"
+_last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
+cl_write "VERIFY" "context" "fail" "FAIL attempt {VERIFY_ATTEMPTS}/3 — last_hb: ${_last_hb}"
 ```
 
 - **PASS** → proceed to Step 4.6 (Wiki Maintenance).
@@ -982,13 +1005,14 @@ Write the waiting log entry:
 Write the phase context file so the token-tracker hook knows where to log:
 
 ```bash
+cl_write "MAINTENANCE" "handoff" "info" "post-implement wiki maintenance for {TICKET-ID}"
 echo "MAINTENANCE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 ```
 
 Spawn a `general-purpose` agent:
 
 ```
-Run /wiki-maintenance. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Process any unresolved errata entries that were appended by ticket-implement Step 4c. Edit only wiki files — do not modify source code. Report the final output including count of errata processed and files modified.
+Run /wiki-maintenance. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Process any unresolved errata entries that were appended by ticket-implement Step 4c. Edit only wiki files — do not modify source code. Report the final output including count of errata processed and files modified.
 ```
 
 Wait for the agent. Persist the raw output immediately before extracting any fields:
@@ -1003,6 +1027,8 @@ If the agent fails → log a warning but continue (wiki maintenance is non-block
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|fail|Agent failed — continuing" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "wiki-maintenance agent failed — continuing (non-blocking)"
+_last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
+cl_write "MAINTENANCE" "context" "fail" "wiki maintenance failed (non-blocking) — last_hb: ${_last_hb}"
 ```
 
 On success:
@@ -1010,6 +1036,7 @@ On success:
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|done|{ERRATA_COUNT} errata incorporated" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "wiki-maintenance agent done — {ERRATA_COUNT} errata"
 hb_heartbeat "phase-transition" "MAINTENANCE → PR-REVIEW"
+cl_write "MAINTENANCE" "maintenance" "done" "errata_processed={ERRATA_COUNT}"
 ```
 
 Non-blocking: wiki maintenance failure does not stop the pipeline. The errata remain unresolved and will be picked up by the next ticket's maintenance run.
@@ -1030,13 +1057,14 @@ Write the waiting log entry:
 Write the phase context file so the token-tracker hook knows where to log:
 
 ```bash
+cl_write "PR-REVIEW" "handoff" "info" "iteration={ITERATION} branch={branch} outcome={OUTCOME}"
 echo "PR-REVIEW|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 ```
 
 Spawn a `general-purpose` agent:
 
 ```
-Run /ticket-pr-review {TICKET-ID} --from-auto{if {PR_REVIEW_FROM} is non-empty: ` --from-step {PR_REVIEW_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Validate the PR diff against the ticket requirements. Post findings. If all requirements addressed (verdict ✅), merge via squash. Report the final output.
+Run /ticket-pr-review {TICKET-ID} --from-auto{if {PR_REVIEW_FROM} is non-empty: ` --from-step {PR_REVIEW_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Validate the PR diff against the ticket requirements. Post findings. If all requirements addressed (verdict ✅), merge via squash. Report the final output.
 
 After this agent returns, clear `{PR_REVIEW_FROM}` — subsequent iterations start fresh.
 ```
@@ -1054,12 +1082,15 @@ If the agent fails → write fail log and stop:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|fail|Agent failed" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "pr-review agent failed"
+_last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
+cl_write "PR-REVIEW" "context" "fail" "pr-review agent failed — iteration={ITERATION} last_hb: ${_last_hb}"
 ```
 
 On success:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|done|Verdict: {VERDICT}, merged: {MERGED}" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "pr-review agent done — verdict {VERDICT}"
+cl_write "PR-REVIEW" "pr-review" "done" "verdict={VERDICT} merged={MERGED} iteration={ITERATION}"
 ```
 
 **Verdict-line integrity gate** — before any branching, count parseable verdict lines in the pr-review output:
@@ -1183,7 +1214,7 @@ Follow the agent spawn template with: PHASE=IMPLEMENT, SKILL=/ticket-implement, 
 Spawn a `general-purpose` agent:
 
 ```
-Run /ticket-implement {TICKET-ID} --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Read the updated plan (including the PR Review #{ITERATION} section), implement the changes, write tests, commit, and push. Report the final output including branch name.
+Run /ticket-implement {TICKET-ID} --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Read the updated plan (including the PR Review #{ITERATION} section), implement the changes, write tests, commit, and push. Report the final output including branch name.
 ```
 
 Wait for the agent. Persist the raw output immediately before extracting any fields:
@@ -1544,7 +1575,7 @@ echo "IMPLEMENT|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 Spawn a `general-purpose` agent:
 
 ```
-Run /ticket-implement {TICKET-ID} --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Read the updated plan (including the PR Feedback #{PR_FEEDBACK_N} section), implement the changes, write tests, commit, and push. Report the final output including branch name.
+Run /ticket-implement {TICKET-ID} --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Read the updated plan (including the PR Feedback #{PR_FEEDBACK_N} section), implement the changes, write tests, commit, and push. Report the final output including branch name.
 ```
 
 Wait for the agent. Persist the raw output:
@@ -1603,7 +1634,7 @@ echo "PR-REVIEW|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 Spawn a `general-purpose` agent:
 
 ```
-Run /ticket-pr-review {TICKET-ID} --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Validate the PR diff against the ticket requirements (including PR Feedback #{PR_FEEDBACK_N} amendments). Post a fresh ## Ticket alignment review comment with updated coverage table. If all requirements addressed (verdict ✅), merge via squash. Report the final output.
+Run /ticket-pr-review {TICKET-ID} --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Validate the PR diff against the ticket requirements (including PR Feedback #{PR_FEEDBACK_N} amendments). Post a fresh ## Ticket alignment review comment with updated coverage table. If all requirements addressed (verdict ✅), merge via squash. Report the final output.
 ```
 
 Wait for the agent. Persist output:

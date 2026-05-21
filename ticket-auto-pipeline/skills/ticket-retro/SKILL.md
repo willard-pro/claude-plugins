@@ -229,6 +229,18 @@ If no diffs were proposed (empty Pattern Analysis):
 No diffs proposed — review single-occurrence notes above. Re-run with a wider window (`--window 30d`) if patterns haven't emerged yet.
 ```
 
+**Post-write proposal verify** — confirm the file was written before reporting success:
+
+```bash
+_proposal_file="$HOME/.claude/state/ticket-retro/proposals/{YYYY-MM-DD}-retro.md"
+if [ ! -f "$_proposal_file" ]; then
+  echo "retro: proposal file not written at ${_proposal_file}" >&2
+  exit 1
+fi
+```
+
+If missing, stop — do not proceed to Step 5 or report the retro as complete.
+
 ---
 
 ## Step 5 — Post to Linear (if --post-to-linear)
