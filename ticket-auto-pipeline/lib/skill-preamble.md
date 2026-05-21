@@ -2,8 +2,6 @@
 
 Shared preamble for ticket-auto-pipeline skills. Each skill references this document with its parameters instead of duplicating the guard, Linear access, logging, heartbeat, step dispatch, and task tracking patterns.
 
-**Language:** Always respond and reason in English, regardless of model or context pressure. Do not switch languages mid-session.
-
 ## Parameters
 
 When a skill says "Follow the pipeline preamble with parameters: ...", use the values below. Parameters are **mandatory** unless marked optional.
