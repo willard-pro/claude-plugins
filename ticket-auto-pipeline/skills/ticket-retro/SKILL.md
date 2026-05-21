@@ -48,6 +48,50 @@ If `{FAILURE_HISTOGRAM}` is empty (no failures), skip to Step 4 to write a short
 
 ---
 
+## Step 1.5 — Scan Claude log for failure signals and improvement hints
+
+Source `retro.sh` for the Claude log scan helpers, then scan `$CLAUDE_LOG_FILE` (if set and present) for failure signals, `★ Insight` blocks, and `RETRO|hint` entries:
+
+```bash
+CLAUDE_FAILURES="/tmp/claude-log-failures.txt"
+CLAUDE_INSIGHTS="/tmp/claude-log-insights.txt"
+CLAUDE_HINTS="/tmp/claude-log-hints.txt"
+CLAUDE_CORRELATED="/tmp/claude-log-correlated.txt"
+
+if [ -n "${CLAUDE_LOG_FILE:-}" ] && [ -f "$CLAUDE_LOG_FILE" ]; then
+  RETRO_SH="$(dirname "$(readlink -f "$0")")/retro.sh"
+  source "$RETRO_SH"
+
+  # Phase 1: Failure signal scan
+  scan_claude_log_failures "$CLAUDE_LOG_FILE" "$CLAUDE_FAILURES" || true
+
+  # Phase 2a: ★ Insight block scan
+  grep -n -A5 "★ Insight" "$CLAUDE_LOG_FILE" 2>/dev/null | head -100 > "$CLAUDE_INSIGHTS" || true
+
+  # Phase 2b: RETRO|hint entries
+  grep -n "RETRO|hint" "$CLAUDE_LOG_FILE" 2>/dev/null | head -50 > "$CLAUDE_HINTS" || true
+
+  # Phase 3: Phase-windowed correlation on failures
+  if [ -s "$CLAUDE_FAILURES" ]; then
+    correlate_failures_with_phase "$CLAUDE_LOG_FILE" "$CLAUDE_FAILURES" "$CLAUDE_CORRELATED" || true
+  fi
+
+  echo "claude-log-scan: done"
+else
+  echo "claude-log-scan: skipped (CLAUDE_LOG_FILE not set or file missing)"
+fi
+```
+
+Read the output files into context variables:
+- `{CLAUDE_FAILURES}` — content of `/tmp/claude-log-failures.txt` (failure keyword hits, line-numbered)
+- `{CLAUDE_INSIGHTS}` — content of `/tmp/claude-log-insights.txt` (★ Insight blocks with 5 lines context)
+- `{CLAUDE_HINTS}` — content of `/tmp/claude-log-hints.txt` (RETRO|hint entries verbatim)
+- `{CLAUDE_CORRELATED}` — content of `/tmp/claude-log-correlated.txt` (phase-grouped failure report, or empty if no phase boundaries)
+
+If `$CLAUDE_LOG_FILE` is unset or missing, all variables are empty and all Claude log sections are omitted from the proposal.
+
+---
+
 ## Step 2 — Load prior proposal context
 
 Check for a prior proposal to avoid re-proposing already-submitted fixes:
@@ -158,6 +202,54 @@ Table of predicted vs. actual complexity with per-ticket rows and aggregate accu
 
 **Accuracy:** 0.750 (3/4 correct)
 ```
+
+### Section: Claude Log Failures (if scan ran)
+
+If `{CLAUDE_LOG_FILE}` was set and the scan found failures, include this section:
+
+```markdown
+## Claude Log Failures
+
+<!-- If phase correlation succeeded, use correlated output: -->
+{CLAUDE_CORRELATED}
+
+<!-- If phase correlation was unavailable but failures were found, use flat list: -->
+<!-- If neither, state: "No failure signals detected in Claude log." -->
+```
+
+**Phase-correlated format** (when `{CLAUDE_CORRELATED}` is non-empty): Use the content verbatim — it already has per-phase `###` headings with line-numbered failure entries.
+
+**Flat format** (when `{CLAUDE_CORRELATED}` is empty but `{CLAUDE_FAILURES}` has content): List each failure line with its line number. Precede with the "Phase correlation unavailable" note from the correlated output if present.
+
+If `{CLAUDE_FAILURES}` is empty (scan ran but found nothing): Write "No failure signals detected in Claude log."
+
+If the scan was skipped (CLAUDE_LOG_FILE unset): Omit this section entirely.
+
+### Section: Agent Improvement Hints (if scan ran)
+
+If `{CLAUDE_LOG_FILE}` was set and either insights or hints were found, include this section:
+
+```markdown
+## Agent Improvement Hints
+
+### Insight Blocks
+
+<!-- If {CLAUDE_INSIGHTS} is non-empty, list each Insight block verbatim: -->
+{CLAUDE_INSIGHTS}
+
+<!-- If empty: "No ★ Insight blocks found." -->
+
+### Explicit Hints
+
+<!-- If {CLAUDE_HINTS} is non-empty, list each RETRO|hint entry verbatim: -->
+{CLAUDE_HINTS}
+
+<!-- If empty: "No explicit RETRO|hint entries found." -->
+```
+
+If both Insight Blocks and Explicit Hints are empty, write "No agent improvement hints found."
+
+If the scan was skipped (CLAUDE_LOG_FILE unset): Omit this section entirely.
 
 ### Section: Pattern Analysis
 

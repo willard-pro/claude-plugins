@@ -11,6 +11,102 @@
 
 set -euo pipefail
 
+# ══════════════════════════════════════════════════════════════════════════════
+# Claude Log Scan Helpers (sourced by ticket-retro SKILL.md)
+# ══════════════════════════════════════════════════════════════════════════════
+
+# scan_claude_log_failures <claude-log> <output-file>
+# Grep for high-signal failure keywords, capped at 200 lines.
+# Returns 1 if log file missing; 0 otherwise (empty output is valid).
+scan_claude_log_failures() {
+  local claude_log="$1"
+  local output="$2"
+  [ ! -f "$claude_log" ] && return 1
+  grep -i -n \
+    -e "permission denied" \
+    -e "command not found" \
+    -e "no such file" \
+    -e "exit code" \
+    -e "exited with" \
+    -e "timeout" \
+    -e "rate limit" \
+    -e "429" \
+    -e "STATE_ASSERTION_FAILED" \
+    -e "EXEC_NO_ARTIFACT" \
+    -e "fatal:" \
+    -e "could not" \
+    -e "unable to" \
+    -e "failed to" \
+    "$claude_log" 2>/dev/null \
+    | head -200 > "$output"
+  return 0
+}
+
+# correlate_failures_with_phase <claude-log> <failures-file> <output-file>
+# Takes grep -n failure output (line_num:text), finds the most recent
+# phase boundary above each failure, and writes a phase-grouped report.
+# Phase boundaries are pipe-delimited lines where field 2 matches a
+# known pipeline phase.
+correlate_failures_with_phase() {
+  local claude_log="$1"
+  local failures_file="$2"
+  local output="$3"
+
+  [ ! -f "$failures_file" ] && return 1
+  [ ! -s "$failures_file" ] && return 1
+
+  # Build a sorted list of phase boundary line numbers and their phase names
+  local boundary_file
+  boundary_file="$(mktemp)"
+  grep -n -E '^\d{4}-\d{2}-\d{2}T[^|]+\|(APPRAISE|EXEC|GATE|IMPLEMENT|VERIFY|PR-REVIEW|MAINTENANCE)\|' \
+    "$claude_log" 2>/dev/null \
+    | cut -d: -f1 \
+    | while read -r b_ln; do
+      phase=$(sed -n "${b_ln}p" "$claude_log" | cut -d'|' -f2)
+      echo "${b_ln} ${phase}"
+    done > "$boundary_file"
+
+  local tmp_result
+  tmp_result="$(mktemp)"
+
+  local has_boundaries=0
+  [ -s "$boundary_file" ] && has_boundaries=1
+
+  while IFS=: read -r line_num rest; do
+    local phase="Unknown"
+    if [ "$has_boundaries" -eq 1 ]; then
+      # Find the largest boundary line number <= this failure line
+      local prev
+      prev=$(awk -v target="$line_num" '$1 <= target { last=$0 } END { print last }' "$boundary_file")
+      if [ -n "$prev" ]; then
+        phase=$(echo "$prev" | awk '{print $2}')
+      fi
+    fi
+    echo "${phase}|${line_num}|${rest}" >> "$tmp_result"
+  done < "$failures_file"
+
+  # Write grouped output
+  {
+    if [ "$has_boundaries" -eq 0 ]; then
+      echo "<!-- Phase correlation unavailable — no phase boundary entries found in Claude log -->"
+    fi
+    for p in APPRAISE EXEC GATE IMPLEMENT VERIFY PR-REVIEW MAINTENANCE Unknown; do
+      local count
+      count=$(grep -c "^${p}|" "$tmp_result" 2>/dev/null || echo 0)
+      if [ "$count" -gt 0 ]; then
+        echo ""
+        echo "### ${p} phase — ${count} failure(s)"
+        grep "^${p}|" "$tmp_result" | while IFS='|' read -r _ph _ln _rst; do
+          echo "- line ${_ln}: ${_rst}"
+        done
+      fi
+    done
+  } > "$output"
+
+  rm -f "$boundary_file" "$tmp_result"
+  return 0
+}
+
 WINDOW="7d"
 POSITIONAL_LOG=""
 

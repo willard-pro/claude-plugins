@@ -639,6 +639,7 @@ SECTION
 # Atomic rename — partial writes never visible at the destination
 mv "$PLAN_TMP" "$PLAN" || {
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|REMEDIATION_BRIEF_TRUNCATED — rename failed: $PLAN" >> "$LOG_FILE"
+  cl_write RETRO hint info "REMEDIATION_BRIEF atomic rename failed — plan path: $PLAN, TMP: $PLAN_TMP. Check filesystem permissions and cross-device rename restrictions"
   rm -f "$PLAN_TMP"
   exit 1
 }

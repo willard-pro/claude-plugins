@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.5.2 (2026-05-21)
+
+- Feat: `-claude.log` visibility layer — a third log stream (`{TICKET-ID}-claude.log`) written by the orchestrator at each phase boundary; no 60-char MSG restriction. Carries handoff context before agent spawn, verbose done data after success, and diagnostic failure context (last heartbeat event, path existence) after failure. `cl_write`/`cl_init` helpers added to `lib/heartbeat.sh`; `CLAUDE_LOG_FILE` exported to all 10 agent spawn instructions for sub-agent access.
+- Feat: pipeline verify guards — ticket-appraise pre-handoff completeness gate (checks `## Complexity` Score line and `## Initial Investigation` content before handing off to exec), ticket-setup post-script workspace verify (confirms `notes.md` and `context.md` exist after setup.sh), ticket-pr-iterate post-write section check (verifies `## PR Review #N` heading landed in the artifact), ticket-retro proposal file verify (confirms proposal file written before reporting success).
+
 ## 0.5.1 (2026-05-21)
 
 - Fix: `flow.sh`, `validate-linear-config.sh`, `detect-resume.sh`, and `setup.sh` all used `$SCRIPT_DIR/../../lib/` to source shared libraries — this path breaks when skills are installed as symlinks (resolves to the plugin cache, not `~/.claude/skills/lib/`). All four scripts now use `${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}` instead, which works in both symlinked and direct-checkout layouts.
