@@ -3,7 +3,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../lib/linear-api.sh"
+LIB_DIR="${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}"
+source "$LIB_DIR/linear-api.sh"
 
 usage() {
   echo "Usage: $0 <TICKET-ID>" >&2
