@@ -8,7 +8,7 @@ Maintainer-facing overview of the ticket-auto-pipeline plugin. Read this before 
 
 **Logs as checkpoints.** The pipeline log is the single source of truth for pipeline progress. Crash recovery reads it. Retro analysis reads it. Dashboard reads it. Every meaningful action writes to it. No in-memory state survives agent spawn boundaries.
 
-**Safety over speed.** Five structural gates halt the pipeline when invariants are violated. This is deliberate — a halted pipeline that requires human attention is better than a silent merge of broken code.
+**Safety over speed.** Six structural gates halt the pipeline when invariants are violated. This is deliberate — a halted pipeline that requires human attention is better than a silent merge of broken code.
 
 ## Component inventory
 
@@ -25,7 +25,7 @@ Maintainer-facing overview of the ticket-auto-pipeline plugin. Read this before 
 | Phase | Skill | Step | Agent spawn |
 |-------|-------|------|-------------|
 | Appraise | `ticket-appraise` | 1 | Yes — investigates ticket, scores complexity |
-| Execute | `ticket-appraise-exec` | 2 | Yes — creates artifact (simple-fix.md or OpenSpec) |
+| Execute | `ticket-appraise-exec` | 2 | Yes — creates artifact, regression guard, adversarial review (complex) |
 | Gate | (inline in orchestrator) | 2.5 | No — structural invariant checks |
 | Reproduce | `ticket-reproduce` | 1.5 | Yes — bug reproduction (bug tickets only) |
 | Implement | `ticket-implement` | 3 | Yes — code changes |

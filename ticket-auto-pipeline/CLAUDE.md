@@ -98,7 +98,7 @@ Consumers: `skills/ticket-auto/dashboard.py` (dual-panel), `skills/ticket-overse
 - **Sub-agent isolation**: Orchestrator spawns `general-purpose` agents per phase. Each writes to `$LOG_FILE`. Orchestrator brackets each spawn with `|waiting|`/`|done|`.
 - **Complexity gating**: Simple tickets auto-approve in `auto`/`semi-auto` mode. Complex tickets always gate (require human `approved` label). `manual` mode gates everything.
 - **Phase context**: Before each agent spawn, orchestrator writes `PHASE|{LOG_FILE}` to `/tmp/ticket-auto-{ID}-ctx.txt` for the token-tracker hook.
-- **Safety gates**: Five structural invariants (artifact existence, complexity coherence, re-approval integrity, remediation brief integrity, PR verdict integrity). Violations emit `|META|gate-stop|fail|<CODE>`.
+- **Safety gates**: Six structural invariants (artifact existence, complexity coherence, adversarial review, re-approval integrity, remediation brief integrity, PR verdict integrity). Violations emit `|META|gate-stop|fail|<CODE>`.
 - **Idempotency**: flow.sh computes desired end state from current + adds - removes. No change → exit 0 without mutation.
 
 ## Known sharp edges
