@@ -252,6 +252,7 @@ During execution, `ticket-auto` checks structural invariants and halts if violat
 |------|------|------|
 | Artifact existence | 2.5 | `EXEC_NO_ARTIFACT` |
 | Complexity-artifact coherence | 2 | `COMPLEXITY_ARTIFACT_MISMATCH` |
+| Adversarial review blocked | 2 | `ADVERSARIAL_BLOCKED` |
 | Re-approval integrity | 5d | `APPROVAL_REVOKED` |
 | Remediation brief integrity | 2.5 | `REMEDIATION_BRIEF_TRUNCATED` |
 | PR verdict integrity | 5a | `PR_REVIEW_VERDICT_UNPARSEABLE` |
@@ -296,6 +297,7 @@ When the pipeline halts with a gate-stop, check the pipeline log for the specifi
 |------|----------------|-----|
 | `EXEC_NO_ARTIFACT` | Appraise-exec produced no artifact file | Re-run `/ticket-appraise-exec <id>`. Check `notes.md` has a `## Complexity` section. |
 | `COMPLEXITY_ARTIFACT_MISMATCH` | Artifact type doesn't match complexity score | Re-run `/ticket-appraise <id>` to re-evaluate complexity. |
+| `ADVERSARIAL_BLOCKED` | Adversarial review found blocking issues in the plan | Review `## Adversarial Review` in notes.md, fix the plan, re-run `/ticket-appraise-exec <id> --from-step create-artifact`. |
 | `APPROVAL_REVOKED` | Approved label was removed after PR changes | Re-approve the ticket in Linear (add `approved` label). |
 | `REMEDIATION_BRIEF_TRUNCATED` | Remediation brief is incomplete or empty | Re-run `/ticket-appraise-exec <id>` with full remediation notes. |
 | `PR_REVIEW_VERDICT_UNPARSEABLE` | PR review comment format couldn't be parsed | Check the PR review comment follows the expected verdict format. Re-run `/ticket-pr-review <id>`. |
