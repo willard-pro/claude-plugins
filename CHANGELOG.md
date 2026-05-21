@@ -5,7 +5,7 @@
 - Fix: `flow.sh`, `validate-linear-config.sh`, `detect-resume.sh`, and `setup.sh` all used `$SCRIPT_DIR/../../lib/` to source shared libraries — this path breaks when skills are installed as symlinks (resolves to the plugin cache, not `~/.claude/skills/lib/`). All four scripts now use `${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}` instead, which works in both symlinked and direct-checkout layouts.
 - Fix: `detect-resume.sh` now recognises `META|gate-stop|fail|EXEC_NO_ARTIFACT` in the pipeline log and maps it to `RESUME_STEP=STEP_2` (re-run EXEC), rather than silently advancing to STEP_3 as if EXEC had succeeded.
 - Fix: `ticket-appraise-exec` SKILL.md — after writing `simple-fix.md`, the skill now immediately verifies the file exists on disk before logging `create-artifact|done`. The Step 3.4 coherence check now tests the actual file path instead of grepping `notes.md`, closing the gap where a blocked Write (e.g. from a PreToolUse hook) could go undetected.
-- Fix: `skill-preamble.md` — added explicit language instruction ("always respond in English") to prevent non-English models from switching languages under context pressure.
+- Fix: non-English output from DeepSeek models running at `max` effort — resolved by unsetting `CLAUDE_CODE_EFFORT_LEVEL` in the container config rather than adding a language guard to the skill preamble.
 
 ## 0.5.0 (2026-05-21)
 
