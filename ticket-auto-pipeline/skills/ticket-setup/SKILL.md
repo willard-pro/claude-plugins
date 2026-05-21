@@ -110,4 +110,16 @@ bash ~/.claude/skills/ticket-setup/setup.sh "<TICKET-ID>"
 
 The script emits a JSON summary to stdout with keys: `ticket_dir`, `url`, `title`, `status`, `project`, `epic`, `existing`.
 
+**Post-script workspace verify** — after the script exits 0, confirm the workspace is complete:
+
+```bash
+_ticket_dir=$(echo "$_SETUP_JSON" | jq -r '.ticket_dir // ""')
+if [ -z "$_ticket_dir" ] || [ ! -f "$_ticket_dir/notes.md" ] || [ ! -f "$_ticket_dir/context.md" ]; then
+  echo "ticket-setup produced incomplete workspace — notes.md or context.md missing at ${_ticket_dir:-<unknown>}"
+  exit 1
+fi
+```
+
+If either file is missing, stop immediately — a silent API failure or partial write has left the workspace unusable. Do not proceed to `ticket-appraise`.
+
 Callers read the JSON output to determine the ticket directory path and whether the workspace already existed.
