@@ -17,6 +17,7 @@ Follow the pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with pa
 - **Coherence gate**: after complexity-coherence check, write `hb_gate "coherence-check" "ok|fail" "complexity-artifact match|mismatch" '{"declared":"{COMPLEXITY}","artifact":"{simple-fix|openspec}"}'`
 - **Regression verdict**: after the regression guard, write `hb_decision "regression-verdict" "fired" "{CONFLICT|ADJACENT|SUPERSEDES|clear}" '{"verdict":"{CONFLICT|ADJACENT|SUPERSEDES|clear}"}'`
 - **Linear fallback**: if LINEAR_API_KEY is unset and MCP fallback is used for posting the comment, write `hb_fallback "linear-api" "fired" "using MCP Linear tools" '{"reason":"LINEAR_API_KEY unset"}'`
+- **Adversarial review**: after adversarial agent completes, write `hb_decision "adversarial-review" "fired" "{PASS|WARNINGS|BLOCKED}" '{"verdict":"{PASS|WARNINGS|BLOCKED}","issues":"{N}"}'`
 - **Re-appraisal skip**: if re-appraisal detected no changes and steps 5-6 are skipped, write `hb_decision "re-appraisal-skip" "info" "no changes detected, skipping Linear post"`
 
 ### Step dispatch
@@ -72,6 +73,7 @@ cat > {ticket-dir}/appraise-exec-session.md << 'TRACE'
 - [x] Step 2: State already set by appraise (Todo + claimed + assignee)
 - [x] Step 3: Create change artifacts — {type}
 - [x] Step 3.5: Regression guard — {clear | ADJACENT | CONFLICT | skipped (no prior art)}
+- [x] Step 3.6: Adversarial review — {PASS | WARNINGS | BLOCKED | skipped (simple)}
 - [x] Step 4: Re-appraisal check — {skipped | no marker → continued}
 - [x] Step 5: Post Linear comment — {done | skipped (no changes)}
 - [x] Step 6: Set state → Approve — {done | skipped (no changes)}
@@ -248,6 +250,115 @@ If no overlap: write nothing — proceed silently.
 
 ---
 
+## Step 3.6 — Adversarial Review (complex tickets only)
+
+**Only run this step if `{COMPLEXITY}` = complex.** If simple, skip to Step 4.
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|adversarial-review|start|Spawning adversarial agent" >> "$LOG_FILE"
+
+Spawn a `general-purpose` agent with an adversarial framing. Its sole job is to find what's wrong, missing, or under-specified in the implementation plan — not to confirm it's correct.
+
+**Prompt the agent with:**
+
+```
+You are an adversarial reviewer. Your job is to find holes in an implementation plan for a ticket. Be skeptical. Assume nothing. If the plan is solid, say so — but dig hard first.
+
+Ticket: {ISSUE-ID} — {title}
+Description: {description}
+Labels: {labels}
+
+Read these files in the ticket workspace ({TICKET_DIR}):
+1. `notes.md` — investigation findings, complexity, prior art, blast radius
+2. The implementation artifact:
+   - If `simple-fix.md` exists: read it (this shouldn't happen for complex tickets, but check)
+   - Otherwise: read `openspec/changes/{change-name}/design.md`, `openspec/changes/{change-name}/tasks.md`, and any spec files under `openspec/changes/{change-name}/specs/`
+
+Attack the plan from these angles. For each, report either "CLEAR" or what's wrong:
+
+### 1. Edge cases
+What inputs/states/conditions does the plan NOT handle? List specific scenarios the plan misses.
+
+### 2. Data assumptions
+Does the plan assume data exists where it might not? Are there null/empty/missing cases the plan doesn't address? Is a migration needed but not listed?
+
+### 3. Error handling
+What can fail that the plan doesn't account for? Network errors, timeouts, validation failures, concurrent writes?
+
+### 4. Security
+Any auth/authz gaps? Injection risks? Data exposure? Missing input validation?
+
+### 5. Side effects
+What else breaks if these changes land? Does the plan touch shared utilities, base classes, or Feign clients? Check the blast radius section in notes.md — are all high-risk targets addressed?
+
+### 6. Test coverage
+Does the plan include tests for the edge cases above? If it's a backend change and no unit test task exists, flag it.
+
+### 7. Missing steps
+What needs to happen that isn't in the plan? Config changes, env vars, DB migrations, cache invalidation, API version bumps?
+
+Report your findings in this exact format:
+
+## Adversarial Review
+
+**Verdict:** PASS | WARNINGS | BLOCKED
+
+### Edge cases
+{findings or "CLEAR"}
+
+### Data assumptions
+{findings or "CLEAR"}
+
+### Error handling
+{findings or "CLEAR"}
+
+### Security
+{findings or "CLEAR"}
+
+### Side effects
+{findings or "CLEAR"}
+
+### Test coverage
+{findings or "CLEAR"}
+
+### Missing steps
+{findings or "CLEAR"}
+
+**Summary:** {one sentence verdict with key finding count}
+
+Use BLOCKED if any finding would cause incorrect behavior, data loss, or a security vulnerability if not addressed.
+Use WARNINGS if findings are gaps worth noting but not correctness-critical.
+Use PASS if the plan is solid across all angles.
+```
+
+**When the agent returns:**
+
+Append its output verbatim to notes.md under the `## Adversarial Review` heading. Do not reinterpret or summarise.
+
+**Gate on BLOCKED:**
+
+If the agent's verdict is BLOCKED:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|ADVERSARIAL_BLOCKED — {ISSUE-ID} adversarial review found blocking issues" >> "$LOG_FILE"
+```
+
+Stop with non-zero exit so `ticket-auto` halts the pipeline. Tell the user:
+
+```
+⛔  ADVERSARIAL REVIEW — BLOCKED
+
+The adversarial review for {TICKET-ID} found blocking issues.
+See ## Adversarial Review in notes.md for details.
+
+Fix the plan, then re-run /ticket-appraise-exec {TICKET-ID} --from-step create-artifact.
+```
+
+If WARNINGS or PASS, proceed to Step 4.
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|adversarial-review|done|{PASS|WARNINGS|BLOCKED}" >> "$LOG_FILE"
+
+---
+
 ## Step 4 — Check for re-appraisal skip
 
 Read notes.md and look for a `## Re-appraisal` section. If it contains `**Changes detected:** no`, skip Steps 5 and 6 — no new comment or state change needed. Proceed directly to Step 7 (Report).
@@ -310,6 +421,10 @@ This sets state → `Approve`, keeping all existing labels.
 
 **Artifacts created:**
 - {simple-fix.md | openspec change: <change-name>}
+
+{If adversarial review ran:}
+**Adversarial review:** {PASS | WARNINGS} — {N issues found, or "no issues"}
+{If WARNINGS: see ## Adversarial Review in notes.md before implementing}
 
 **Open questions:**
 {bullets or "None"}

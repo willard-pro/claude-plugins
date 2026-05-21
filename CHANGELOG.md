@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0 (2026-05-21)
+
+- Adversarial review (Step 3.6) — spawns an adversarial agent for complex tickets that attacks the implementation plan from 7 angles (edge cases, data assumptions, error handling, security, side effects, test coverage, missing steps); blocks the pipeline on critical findings via `ADVERSARIAL_BLOCKED` gate-stop
+- Project readiness (Step 0) in ticket-setup — detects project root, initializes CLAUDE.md via GitNexus/code-scan/empty-seeded paths, ensures GitNexus indexing; environment validation runs first before any external calls
+- New safety gate: adversarial review blocked — pipeline halts if the adversarial agent finds blocking issues (incorrect behavior, data loss, security vulnerabilities)
+- Documentation: EXEC phase steps, gate-stop codes table, safety gates count (5→6), pipeline log format
+
 ## 0.4.1 (2026-05-21)
 
 - Token-tracker hooks — SubagentStart/Stop hooks that track per-phase token usage (input/output/cache) and wall-clock duration, appending `META|tokens` lines to the pipeline log with `elapsed_ms`
