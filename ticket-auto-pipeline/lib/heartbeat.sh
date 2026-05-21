@@ -245,3 +245,30 @@ hb_init() {
     echo "$iso|META|schema|info|$_HB_SCHEMA_VERSION|{}" > "$HB_LOG_FILE"
   fi
 }
+
+# Write a verbose entry to CLAUDE_LOG_FILE (ISO|PHASE|STEP|STATUS|MSG).
+# Same format as the pipeline log but no MSG length restriction.
+# No-op if CLAUDE_LOG_FILE is unset.
+cl_write() {
+  [ -z "${CLAUDE_LOG_FILE:-}" ] && return 0
+  local phase="$1"
+  local step="$2"
+  local status="$3"
+  local msg="$4"
+  local dir
+  dir=$(dirname "$CLAUDE_LOG_FILE")
+  mkdir -p "$dir"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|${phase}|${step}|${status}|${msg}" >> "$CLAUDE_LOG_FILE"
+}
+
+# Initialize the claude log file. Idempotent — only writes schema header if
+# the file is empty or doesn't exist.
+cl_init() {
+  [ -z "${CLAUDE_LOG_FILE:-}" ] && return 0
+  local dir
+  dir=$(dirname "$CLAUDE_LOG_FILE")
+  mkdir -p "$dir"
+  if [ ! -f "$CLAUDE_LOG_FILE" ] || [ ! -s "$CLAUDE_LOG_FILE" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" > "$CLAUDE_LOG_FILE"
+  fi
+}
