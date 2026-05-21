@@ -10,7 +10,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../lib/linear-api.sh"
+LIB_DIR="${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}"
+source "$LIB_DIR/linear-api.sh"
 
 SM="$SCRIPT_DIR/state-machine.json"
 SENTINEL_DIR="${SENTINEL_DIR:-$HOME/.claude/state/ticket-flow}"

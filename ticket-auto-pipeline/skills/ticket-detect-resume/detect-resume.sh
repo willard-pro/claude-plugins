@@ -3,10 +3,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-source "$SCRIPT_DIR/../../lib/heartbeat.sh"
-source "$SCRIPT_DIR/../../lib/linear-api.sh"
-source "$SCRIPT_DIR/../../lib/ticket-dir.sh"
-source "$SCRIPT_DIR/../../lib/notes-parse.sh"
+LIB_DIR="${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}"
+source "$LIB_DIR/heartbeat.sh"
+source "$LIB_DIR/linear-api.sh"
+source "$LIB_DIR/ticket-dir.sh"
+source "$LIB_DIR/notes-parse.sh"
 
 CURRENT_SCHEMA_VERSION=1
 
@@ -131,6 +132,10 @@ else
     RESUME_STEP="STEP_4"
   elif grep -q '^[^|]*|GATE|gate|fail|held' "$LOG_FILE"; then
     RESUME_STEP="GATE_HELD"
+  elif grep -q '^[^|]*|META|gate-stop|fail|EXEC_NO_ARTIFACT' "$LOG_FILE"; then
+    # EXEC phase claimed done but artifact was never written — re-run EXEC
+    RESUME_STEP="STEP_2"
+    hb_gate "resume-point" "ok" "EXEC_NO_ARTIFACT detected — resuming at STEP_2 (re-run EXEC)"
   elif grep -q '^[^|]*|EXEC|exec|done|' "$LOG_FILE"; then
     RESUME_STEP="STEP_3"
   elif grep -q '^[^|]*|REPRODUCE|reproduce|' "$LOG_FILE" && ! grep -q '^[^|]*|REPRODUCE|reproduce|done|' "$LOG_FILE"; then

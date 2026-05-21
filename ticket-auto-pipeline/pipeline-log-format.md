@@ -108,3 +108,13 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|<CODE>" >> "$LOG_FILE"
 ## Heartbeat log
 
 A companion heartbeat log captures decisions, fallbacks, retries, and liveness signals at fine granularity. See [`pipeline-heartbeat-format.md`](pipeline-heartbeat-format.md) for the format specification.
+
+## Claude log
+
+A third companion log (`{TICKET-ID}-claude.log`) uses the same `ISO|PHASE|STEP|STATUS|MSG` format with no MSG length restriction. It is written by the orchestrator at three points per phase:
+
+- **Before each agent spawn** — `STEP=handoff STATUS=info` with the full input context (complexity, artifact path, autonomy mode, from_step)
+- **After each agent success** — `STATUS=done` with verbose result data (full paths, branch name, exact counts)
+- **After each agent failure** — `STEP=context STATUS=fail` with diagnostic context (last heartbeat event, dir existence, resolved paths)
+
+Written via `cl_write` / `cl_init` helpers in `lib/heartbeat.sh`. Available to sub-agents via `$CLAUDE_LOG_FILE` env var. Useful for container debugging where the 60-char MSG limit of the pipeline log hides critical context.

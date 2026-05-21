@@ -401,6 +401,28 @@ This sets state → `Todo`, assignee → `me`, and adds `claimed` + the complexi
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|handoff|start|Writing final report" >> "$LOG_FILE"
 
+**Pre-handoff completeness gate** — before reporting, verify `notes.md` is ready for the executor:
+
+```bash
+NOTES_FILE="{ticket-dir}/notes.md"
+
+# Check ## Complexity section with a populated Score line
+_score=$(grep -A5 "^## Complexity" "$NOTES_FILE" 2>/dev/null | grep "^\*\*Score:\*\*" | grep -oi "simple\|complex" | head -1)
+if [ -z "$_score" ]; then
+  [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|handoff|fail|notes.md missing ## Complexity with Score" >> "$LOG_FILE"
+  # Stop — tell the user the complexity sweep is incomplete
+fi
+
+# Check ## Initial Investigation section has content beyond the template stub
+_inv_lines=$(awk '/^## Initial Investigation/{found=1; next} found && /^## /{exit} found{print}' "$NOTES_FILE" | grep -vc "^\s*$")
+if [ "${_inv_lines:-0}" -lt 2 ]; then
+  [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|handoff|fail|notes.md ## Initial Investigation is empty or stub" >> "$LOG_FILE"
+  # Stop — tell the user to complete Step 3 before running ticket-appraise-exec
+fi
+```
+
+If either check fails, stop and tell the user which section is incomplete. Do not run `/ticket-appraise-exec` — it will fail at its own guard with a less specific error.
+
 Tell the user:
 
 ```
