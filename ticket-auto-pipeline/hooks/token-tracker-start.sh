@@ -4,13 +4,8 @@
 set -euo pipefail
 
 read -r hook_json
-CWD=$(echo "$hook_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('cwd',''))")
 
-# Only track ticket-auto pipelines
-if [[ ! "$CWD" =~ /tickets$ ]] && [[ ! "$CWD" =~ /tickets/ ]]; then
-  exit 0
-fi
-
+# Only track ticket-auto pipelines — ctx file is written exclusively by the ticket-auto orchestrator
 CTX_FILE=$(ls -t /tmp/ticket-auto-*-ctx.txt 2>/dev/null | head -1)
 if [ -z "$CTX_FILE" ]; then
   exit 0
