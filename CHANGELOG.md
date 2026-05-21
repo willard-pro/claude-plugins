@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.1 (2026-05-21)
+
+- Token-tracker hooks — SubagentStart/Stop hooks that track per-phase token usage (input/output/cache) and wall-clock duration, appending `META|tokens` lines to the pipeline log with `elapsed_ms`
+- Hooks bundled in `ticket-auto-pipeline/hooks/` and auto-installed via `plugin.json` — no manual setup required
+
 ## 0.4.0 (2026-05-20)
 
 - REPRODUCE phase (Step 1.5) for bug tickets — reproduces the bug before implementation begins
