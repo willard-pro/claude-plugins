@@ -153,6 +153,16 @@ Pass the following to the propose skill as context:
 
 Insert this task after the main implementation tasks and before any commit/push tasks.
 
+**After writing the artifact, immediately verify the file exists on disk before logging done:**
+```bash
+# simple path
+[ ! -f "{TICKET_DIR}/simple-fix.md" ] && {
+  [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|EXEC_NO_ARTIFACT — Write tool returned error or file missing after write" >> "$LOG_FILE"
+  echo "ERROR: simple-fix.md was not written to disk. Check for hook blocks (PreToolUse errors) and retry." >&2
+  exit 1
+}
+```
+
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|create-artifact|done|{simple-fix|openspec}" >> "$LOG_FILE"
 
 ---
@@ -166,10 +176,10 @@ Read complexity from notes.md using the shared helper:
 COMPLEXITY=$(bash -c "source ~/.claude/skills/lib/notes-parse.sh; get_complexity '{TICKET_DIR}'")
 ```
 
-Check artifact presence:
+Check artifact presence **by testing the file path directly** — do not rely on grep of notes.md:
 ```bash
-# simple-fix path
-SIMPLE_FIX=$(find {TICKET_DIR} -name "simple-fix.md" -print -quit 2>/dev/null)
+# simple-fix path — must exist as a real file
+if [ -f "{TICKET_DIR}/simple-fix.md" ]; then SIMPLE_FIX="{TICKET_DIR}/simple-fix.md"; else SIMPLE_FIX=""; fi
 # openspec path
 CHANGE_DIR=$(ls -d openspec/changes/*/ 2>/dev/null | grep -i "{ticket-id-lowercase}" | head -1)
 OPENSPEC_TASKS="${CHANGE_DIR}tasks.md"
@@ -177,9 +187,9 @@ OPENSPEC_TASKS="${CHANGE_DIR}tasks.md"
 
 Assert coherence:
 - If `COMPLEXITY` is empty → gate fires: `COMPLEXITY_ARTIFACT_MISMATCH — notes.md missing **Score:** under ## Complexity`
-- If `COMPLEXITY` = `simple` AND `SIMPLE_FIX` is absent → gate fires: `COMPLEXITY_ARTIFACT_MISMATCH — declared simple but no simple-fix.md found`
+- If `COMPLEXITY` = `simple` AND `SIMPLE_FIX` is empty → gate fires: `COMPLEXITY_ARTIFACT_MISMATCH — declared simple but no simple-fix.md found`
 - If `COMPLEXITY` = `complex` AND (`CHANGE_DIR` is empty OR `OPENSPEC_TASKS` does not exist) → gate fires: `COMPLEXITY_ARTIFACT_MISMATCH — declared complex but no openspec tasks.md found`
-- If `COMPLEXITY` = `simple` AND `SIMPLE_FIX` absent but openspec dir exists → gate fires: `COMPLEXITY_ARTIFACT_MISMATCH — declared simple but found openspec artifact (not simple-fix.md)`
+- If `COMPLEXITY` = `simple` AND `SIMPLE_FIX` empty but openspec dir exists → gate fires: `COMPLEXITY_ARTIFACT_MISMATCH — declared simple but found openspec artifact (not simple-fix.md)`
 
 On any mismatch:
 ```bash
