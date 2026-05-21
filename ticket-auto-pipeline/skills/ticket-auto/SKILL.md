@@ -422,6 +422,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|fail|Agent failed" >> {LO
 hb_heartbeat "agent-returned" "appraise agent failed"
 _last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
 cl_write "APPRAISE" "context" "fail" "appraise agent failed — last_hb: ${_last_hb}"
+cl_write RETRO hint info "sub-agent spawn failure in APPRAISE phase — check agent isolation, tool availability, and CLAUDE_LOG_FILE export for diagnostics"
 ```
 
 On success, write the done log entry and META title:
