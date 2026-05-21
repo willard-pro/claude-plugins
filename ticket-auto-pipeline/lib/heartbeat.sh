@@ -249,6 +249,16 @@ hb_init() {
 # Write a verbose entry to CLAUDE_LOG_FILE (ISO|PHASE|STEP|STATUS|MSG).
 # Same format as the pipeline log but no MSG length restriction.
 # No-op if CLAUDE_LOG_FILE is unset.
+#
+# RETRO|hint convention: Agents may call cl_write with phase=RETRO,
+# step=hint, status=info to explicitly flag improvement observations
+# for the ticket-retro skill. The retro Claude log scan extracts these
+# lines verbatim and surfaces them as "Agent Improvement Hints."
+#
+#   cl_write RETRO hint info "<observation>"
+#
+# Example:
+#   cl_write RETRO hint info "EXEC artifact path hardcoded — breaks if WORKSPACE_ROOT changes"
 cl_write() {
   [ -z "${CLAUDE_LOG_FILE:-}" ] && return 0
   local phase="$1"
