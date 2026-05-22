@@ -13,7 +13,7 @@ if [ -z "$CTX_FILE" ]; then
   exit 0
 fi
 
-IFS='|' read -r PHASE LOG_FILE < "$CTX_FILE"
+IFS='|' read -r PHASE LOG_FILE <"$CTX_FILE"
 if [ -z "$PHASE" ] || [ -z "$LOG_FILE" ]; then
   exit 0
 fi
@@ -44,9 +44,9 @@ print(f'{input_t}/{output_t}/{cache_read + cache_create}')
     if [ -f "$START_FILE" ]; then
       START_NS=$(cat "$START_FILE")
       NOW_NS=$(date +%s%N)
-      ELAPSED="|elapsed_ms=$(( (NOW_NS - START_NS) / 1000000 ))"
+      ELAPSED="|elapsed_ms=$(((NOW_NS - START_NS) / 1000000))"
       rm -f "$START_FILE"
     fi
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|tokens|info|${PHASE}:${TOKENS}${ELAPSED}" >> "$LOG_FILE"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|tokens|info|${PHASE}:${TOKENS}${ELAPSED}" >>"$LOG_FILE"
   fi
 fi

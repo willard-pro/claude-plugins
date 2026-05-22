@@ -55,8 +55,8 @@ EOF
   else
     # No schema line in a non-empty log — apply v0 grace if entries look valid
     if grep -qP '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\|[A-Z-]+\|[^|]+\|[^|]+\|' "$LOG_FILE" 2>/dev/null; then
-      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >> "$LOG_FILE"
-      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|migration|info|v0-grace-applied" >> "$LOG_FILE"
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$LOG_FILE"
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|migration|info|v0-grace-applied" >>"$LOG_FILE"
       hb_gate "schema-check" "ok" "v0-grace applied — no schema header, entries look valid"
     else
       cat <<EOF
@@ -115,7 +115,7 @@ else
       # gh unavailable or no PR number found — fall back to STEP_6
       RESUME_STEP="STEP_6"
       if ! $_gh_available; then
-        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|pr-comment-check|warn|gh unavailable — falling back to STEP_6" >> "$LOG_FILE"
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|pr-comment-check|warn|gh unavailable — falling back to STEP_6" >>"$LOG_FILE"
       fi
     fi
   elif grep -q '^[^|]*|VERIFY|verify|done|PASS' "$LOG_FILE"; then
@@ -150,8 +150,8 @@ fi
 # ── GATE_HELD handling ──────────────────────────────────────────────────────
 
 if [ "$RESUME_STEP" = "GATE_HELD" ]; then
-  ISSUE_JSON=$((get_issue "$TICKET_ID" 2>/dev/null) || echo 'null')
-  if echo "$ISSUE_JSON" | jq -e '.labels.nodes[] | select(.name | ascii_downcase == "approved")' > /dev/null 2>&1; then
+  ISSUE_JSON=$(get_issue "$TICKET_ID" 2>/dev/null || echo 'null')
+  if echo "$ISSUE_JSON" | jq -e '.labels.nodes[] | select(.name | ascii_downcase == "approved")' >/dev/null 2>&1; then
     RESUME_STEP="STEP_3_5"
     hb_gate "resume-point" "ok" "gate was held but approved label found — resuming at STEP_3_5 (comment reconciliation)"
   else
@@ -172,37 +172,37 @@ PR_REVIEW_FROM=""
 PR_ITERATE_FROM=""
 
 if [ -s "$LOG_FILE" ]; then
-  APPRAISE_FROM=$(grep '^[^|]*|APPRAISE|[^|]*|done|' "$LOG_FILE" 2>/dev/null \
-    | grep -v '|APPRAISE|appraise|done|' \
-    | tail -1 | cut -d'|' -f3 || true)
+  APPRAISE_FROM=$(grep '^[^|]*|APPRAISE|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
+    grep -v '|APPRAISE|appraise|done|' |
+    tail -1 | cut -d'|' -f3 || true)
 
-  REPRODUCE_FROM=$(grep '^[^|]*|REPRODUCE|[^|]*|done|' "$LOG_FILE" 2>/dev/null \
-    | grep -v '|REPRODUCE|reproduce|done|' \
-    | tail -1 | cut -d'|' -f3 || true)
+  REPRODUCE_FROM=$(grep '^[^|]*|REPRODUCE|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
+    grep -v '|REPRODUCE|reproduce|done|' |
+    tail -1 | cut -d'|' -f3 || true)
 
-  EXEC_FROM=$(grep '^[^|]*|EXEC|[^|]*|done|' "$LOG_FILE" 2>/dev/null \
-    | grep -v '|EXEC|exec|done|' \
-    | tail -1 | cut -d'|' -f3 || true)
+  EXEC_FROM=$(grep '^[^|]*|EXEC|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
+    grep -v '|EXEC|exec|done|' |
+    tail -1 | cut -d'|' -f3 || true)
 
-  IMPLEMENT_FROM=$(grep '^[^|]*|IMPLEMENT|[^|]*|done|' "$LOG_FILE" 2>/dev/null \
-    | grep -v '|IMPLEMENT|implement|done|' \
-    | tail -1 | cut -d'|' -f3 || true)
+  IMPLEMENT_FROM=$(grep '^[^|]*|IMPLEMENT|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
+    grep -v '|IMPLEMENT|implement|done|' |
+    tail -1 | cut -d'|' -f3 || true)
 
-  MAINTENANCE_FROM=$(grep '^[^|]*|MAINTENANCE|[^|]*|done|' "$LOG_FILE" 2>/dev/null \
-    | grep -v '|MAINTENANCE|maintenance|done|' \
-    | tail -1 | cut -d'|' -f3 || true)
+  MAINTENANCE_FROM=$(grep '^[^|]*|MAINTENANCE|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
+    grep -v '|MAINTENANCE|maintenance|done|' |
+    tail -1 | cut -d'|' -f3 || true)
 
-  VERIFY_FROM=$(grep '^[^|]*|VERIFY|[^|]*|done|' "$LOG_FILE" 2>/dev/null \
-    | grep -v '|VERIFY|verify|done|' \
-    | tail -1 | cut -d'|' -f3 || true)
+  VERIFY_FROM=$(grep '^[^|]*|VERIFY|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
+    grep -v '|VERIFY|verify|done|' |
+    tail -1 | cut -d'|' -f3 || true)
 
-  PR_REVIEW_FROM=$(grep '^[^|]*|PR-REVIEW|[^|]*|done|' "$LOG_FILE" 2>/dev/null \
-    | grep -v '|PR-REVIEW|pr-review|done|' \
-    | grep -v '|PR-REVIEW|plan-iterate' \
-    | tail -1 | cut -d'|' -f3 || true)
+  PR_REVIEW_FROM=$(grep '^[^|]*|PR-REVIEW|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
+    grep -v '|PR-REVIEW|pr-review|done|' |
+    grep -v '|PR-REVIEW|plan-iterate' |
+    tail -1 | cut -d'|' -f3 || true)
 
-  PR_ITERATE_FROM=$(grep '^[^|]*|PR-REVIEW|iterate-[^|]*|done|' "$LOG_FILE" 2>/dev/null \
-    | tail -1 | cut -d'|' -f3 || true)
+  PR_ITERATE_FROM=$(grep '^[^|]*|PR-REVIEW|iterate-[^|]*|done|' "$LOG_FILE" 2>/dev/null |
+    tail -1 | cut -d'|' -f3 || true)
 fi
 
 # ── Reconcile cycle extraction ──────────────────────────────────────────────
@@ -213,7 +213,7 @@ RECONCILE_CYCLE=${RECONCILE_CYCLE:-0}
 # ── Browser-state correction ────────────────────────────────────────────────
 
 case "$VERIFY_FROM" in
-  browser-session|navigate|execute-steps) VERIFY_FROM="build-plan" ;;
+browser-session | navigate | execute-steps) VERIFY_FROM="build-plan" ;;
 esac
 
 # ── Context restoration (mid-pipeline only) ─────────────────────────────────
@@ -234,14 +234,14 @@ if [ "$RESUME_STEP" != "STEP_1" ] && [ "$RESUME_STEP" != "GATE_STILL_HELD" ]; th
   fi
 
   if [ -s "$LOG_FILE" ]; then
-    ARTIFACT_TYPE=$(grep '^[^|]*|EXEC|exec|done|' "$LOG_FILE" 2>/dev/null \
-      | tail -1 | cut -d'|' -f5 || true)
+    ARTIFACT_TYPE=$(grep '^[^|]*|EXEC|exec|done|' "$LOG_FILE" 2>/dev/null |
+      tail -1 | cut -d'|' -f5 || true)
 
-    BRANCH=$(grep '^[^|]*|IMPLEMENT|checkout-branch|done|' "$LOG_FILE" 2>/dev/null \
-      | tail -1 | cut -d'|' -f5 || true)
+    BRANCH=$(grep '^[^|]*|IMPLEMENT|checkout-branch|done|' "$LOG_FILE" 2>/dev/null |
+      tail -1 | cut -d'|' -f5 || true)
 
-    TICKET_TITLE=$(grep '^[^|]*|META|title|info|' "$LOG_FILE" 2>/dev/null \
-      | tail -1 | cut -d'|' -f5 | sed 's/^[^:]*: //' || true)
+    TICKET_TITLE=$(grep '^[^|]*|META|title|info|' "$LOG_FILE" 2>/dev/null |
+      tail -1 | cut -d'|' -f5 | sed 's/^[^:]*: //' || true)
 
     VERIFY_ATTEMPTS=$(grep -c '^[^|]*|VERIFY|[^|]*|fail|' "$LOG_FILE" 2>/dev/null || true)
     VERIFY_ATTEMPTS=${VERIFY_ATTEMPTS:-0}

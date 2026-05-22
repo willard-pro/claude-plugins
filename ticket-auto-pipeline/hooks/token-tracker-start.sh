@@ -11,10 +11,10 @@ if [ -z "$CTX_FILE" ]; then
   exit 0
 fi
 
-IFS='|' read -r PHASE LOG_FILE < "$CTX_FILE"
+IFS='|' read -r PHASE LOG_FILE <"$CTX_FILE"
 if [ -z "$PHASE" ]; then
   exit 0
 fi
 
 TICKET_ID=$(basename "$CTX_FILE" | sed 's/ticket-auto-\(.*\)-ctx\.txt/\1/')
-date +%s%N > "/tmp/ticket-auto-${TICKET_ID}-start-${PHASE}.ts"
+date +%s%N >"/tmp/ticket-auto-${TICKET_ID}-start-${PHASE}.ts"

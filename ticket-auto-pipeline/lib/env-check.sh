@@ -28,21 +28,21 @@ for arg in "${@}"; do
     continue
   fi
   case "$arg" in
-    --mode) _MODE="" ;;
-    --mode=*) _MODE="${arg#*=}" ;;
-    --summary-file) _EXPECTING_SUMMARY_PATH=true ;;
-    --summary-file=*) SUMMARY_FILE="${arg#*=}" ;;
-    --show) SHOW="1" ;;
-    *)
-      if [ "$_MODE" = "" ]; then
-        _MODE="$arg"
-      elif [ -z "$PROJECT_DIR" ]; then
-        PROJECT_DIR="$arg"
-      else
-        echo "env-check: unexpected argument: $arg" >&2
-        exit 1
-      fi
-      ;;
+  --mode) _MODE="" ;;
+  --mode=*) _MODE="${arg#*=}" ;;
+  --summary-file) _EXPECTING_SUMMARY_PATH=true ;;
+  --summary-file=*) SUMMARY_FILE="${arg#*=}" ;;
+  --show) SHOW="1" ;;
+  *)
+    if [ "$_MODE" = "" ]; then
+      _MODE="$arg"
+    elif [ -z "$PROJECT_DIR" ]; then
+      PROJECT_DIR="$arg"
+    else
+      echo "env-check: unexpected argument: $arg" >&2
+      exit 1
+    fi
+    ;;
   esac
 done
 
@@ -54,8 +54,11 @@ PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
 
 # Reject unknown --mode values
 case "${_MODE:-full}" in
-  full|validate) ;;
-  *) echo "ERROR: unknown --mode '${_MODE:-}'. Valid modes: full, validate" >&2; exit 1 ;;
+full | validate) ;;
+*)
+  echo "ERROR: unknown --mode '${_MODE:-}'. Valid modes: full, validate" >&2
+  exit 1
+  ;;
 esac
 # ── Color helpers (used by validate mode) ─────────────────────────────────────
 RED=$(tput setaf 1 2>/dev/null || echo "")
@@ -64,10 +67,10 @@ YELLOW=$(tput setaf 3 2>/dev/null || echo "")
 BOLD=$(tput bold 2>/dev/null || echo "")
 RESET=$(tput sgr0 2>/dev/null || echo "")
 
-say()   { echo "${BOLD}${1}${RESET}: ${2}"; }
-pass()  { echo "  ${GREEN}ok${RESET}  ${1}"; }
-fail()  { echo "  ${RED}MISS${RESET} ${1} — ${2}"; }
-warn()  { echo "  ${YELLOW}warn${RESET} ${1} — ${2}"; }
+say() { echo "${BOLD}${1}${RESET}: ${2}"; }
+pass() { echo "  ${GREEN}ok${RESET}  ${1}"; }
+fail() { echo "  ${RED}MISS${RESET} ${1} — ${2}"; }
+warn() { echo "  ${YELLOW}warn${RESET} ${1} — ${2}"; }
 
 # ── Validate mode ─────────────────────────────────────────────────────────────
 if [ "${_MODE:-full}" = "validate" ]; then
@@ -119,7 +122,7 @@ if [ "${_MODE:-full}" = "validate" ]; then
   fi
 
   # REPOS_ROOT
-  if grep -q '^REPOS_ROOT[=:]\s*.' "$CLAUDE_MD" 2>/dev/null; then
+  if grep -qE '^REPOS_ROOT\s*[=:]\s*.' "$CLAUDE_MD" 2>/dev/null; then
     val=$(grep -oP '^REPOS_ROOT[=:]\s*\K.*' "$CLAUDE_MD" | head -1 | tr -d ' ')
     pass "REPOS_ROOT ($val)"
   else
@@ -381,7 +384,10 @@ else
           COUNT=$((COUNT + 1))
         fi
       done
-      if [ "$COUNT" -ge 2 ]; then DERIVED="$WALK_DIR"; break; fi
+      if [ "$COUNT" -ge 2 ]; then
+        DERIVED="$WALK_DIR"
+        break
+      fi
       WALK_DIR="$(dirname "$WALK_DIR")"
     done
     if [ -n "$DERIVED" ]; then
@@ -469,14 +475,14 @@ show_table() {
   printf '%-35s %-8s %-45s %-22s %s\n' "NAME" "STATUS" "VALUE" "LOCATION" "NOTE"
   printf '%-35s %-8s %-45s %-22s %s\n' "----" "------" "-----" "--------" "----"
   for line in "${VAR_LINES[@]}"; do
-    IFS='|' read -r name status value location note <<< "$line"
+    IFS='|' read -r name status value location note <<<"$line"
     [ -z "$value" ] && value="-"
     printf '%-35s %-8s %-45s %-22s %s\n' "$name" "$status" "$value" "$location" "$note"
   done
 }
 
 if [ -n "${SUMMARY_FILE:-}" ]; then
-  emit_vars > "$SUMMARY_FILE"
+  emit_vars >"$SUMMARY_FILE"
   echo "Summary written to ${SUMMARY_FILE}"
   [ -n "${SHOW:-}" ] && show_table
 else
