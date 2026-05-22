@@ -11,44 +11,52 @@ PASS=0
 FAIL=0
 
 _run() {
-  local name="$1"; shift
+  local name="$1"
+  shift
   if "$@" 2>/dev/null; then
-    echo "PASS: $name"; ((PASS++)) || true
+    echo "PASS: $name"
+    ((PASS++)) || true
   else
-    echo "FAIL: $name"; ((FAIL++)) || true
+    echo "FAIL: $name"
+    ((FAIL++)) || true
   fi
 }
 
 # ── tests ──────────────────────────────────────────────────────────────────────
 
 test_capture_single_attempt_overwrites() {
-  local tmpdir; tmpdir=$(mktemp -d)
+  local tmpdir
+  tmpdir=$(mktemp -d)
   (
     cd "$tmpdir"
     source "$LIB_DIR/capture-transcript.sh"
     capture_agent_result "WIL-1" "appraise" "first content"
     capture_agent_result "WIL-1" "appraise" "second content"
   )
-  local content; content=$(cat "$tmpdir/logs/WIL-1-appraise-agent.log")
+  local content
+  content=$(cat "$tmpdir/logs/WIL-1-appraise-agent.log")
   rm -rf "$tmpdir"
   [ "$content" = "second content" ]
 }
 
 test_capture_multi_attempt_appends_with_separator() {
-  local tmpdir; tmpdir=$(mktemp -d)
+  local tmpdir
+  tmpdir=$(mktemp -d)
   (
     cd "$tmpdir"
     source "$LIB_DIR/capture-transcript.sh"
     capture_agent_result "WIL-1" "verify" "first try" "1"
     capture_agent_result "WIL-1" "verify" "second try" "2"
   )
-  local content; content=$(cat "$tmpdir/logs/WIL-1-verify-agent.log")
+  local content
+  content=$(cat "$tmpdir/logs/WIL-1-verify-agent.log")
   rm -rf "$tmpdir"
   echo "$content" | grep -q -e "--- Attempt 2 ---" && echo "$content" | grep -q "second try"
 }
 
 test_capture_noop_empty_ticket_id() {
-  local tmpdir; tmpdir=$(mktemp -d)
+  local tmpdir
+  tmpdir=$(mktemp -d)
   (
     cd "$tmpdir"
     source "$LIB_DIR/capture-transcript.sh"
@@ -61,7 +69,8 @@ test_capture_noop_empty_ticket_id() {
 }
 
 test_capture_noop_empty_phase() {
-  local tmpdir; tmpdir=$(mktemp -d)
+  local tmpdir
+  tmpdir=$(mktemp -d)
   (
     cd "$tmpdir"
     source "$LIB_DIR/capture-transcript.sh"

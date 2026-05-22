@@ -7,8 +7,14 @@ set -euo pipefail
 
 TICKET_ID="${1:-}"
 LOG_FILE="${2:-}"
-[ -z "$TICKET_ID" ] && { echo "Usage: $0 <ticket_id> <log_file>" >&2; exit 1; }
-[ -z "$LOG_FILE" ] && { echo "Usage: $0 <ticket_id> <log_file>" >&2; exit 1; }
+[ -z "$TICKET_ID" ] && {
+  echo "Usage: $0 <ticket_id> <log_file>" >&2
+  exit 1
+}
+[ -z "$LOG_FILE" ] && {
+  echo "Usage: $0 <ticket_id> <log_file>" >&2
+  exit 1
+}
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/linear-api.sh"
@@ -18,19 +24,19 @@ COMMENTS_JSON=$(cat | normalize_comments)
 
 # Find appraisal comment by content prefix
 APPRAISAL_COMMENT_AT=$(echo "$COMMENTS_JSON" | jq -r \
-  '.[] | select(.body // "" | startswith("**Ticket appraised**")) | .createdAt' \
-  | sort | tail -1)
+  '.[] | select(.body // "" | startswith("**Ticket appraised**")) | .createdAt' |
+  sort | tail -1)
 
 # Fallback to pipeline log if no appraisal comment found (deleted, or pre-standardization)
 if [ -z "$APPRAISAL_COMMENT_AT" ]; then
-  APPRAISAL_COMMENT_AT=$(grep '|APPRAISE|appraise|done|' "$LOG_FILE" 2>/dev/null \
-    | head -1 | cut -d'|' -f1 || true)
+  APPRAISAL_COMMENT_AT=$(grep '|APPRAISE|appraise|done|' "$LOG_FILE" 2>/dev/null |
+    head -1 | cut -d'|' -f1 || true)
 fi
 
 # Find last amendment comment from a prior reconciliation cycle
 LAST_AMENDMENT_AT=$(echo "$COMMENTS_JSON" | jq -r \
-  '.[] | select(.body // "" | startswith("**Amendment cycle #")) | .createdAt' \
-  | sort | tail -1)
+  '.[] | select(.body // "" | startswith("**Amendment cycle #")) | .createdAt' |
+  sort | tail -1)
 
 # LAST_RECONCILE_AT is the later of appraisal vs amendment boundary
 if [ -n "$LAST_AMENDMENT_AT" ] && [[ "$LAST_AMENDMENT_AT" > "$APPRAISAL_COMMENT_AT" ]]; then

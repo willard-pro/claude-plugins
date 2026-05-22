@@ -29,17 +29,20 @@ _retry_classify() {
 
   # curl failed (network error, timeout, etc.)
   if [ "$curl_exit" -ne 0 ]; then
-    echo "transient"; return
+    echo "transient"
+    return
   fi
 
   # HTTP 5xx server errors
   if [[ "$http_code" =~ ^5 ]]; then
-    echo "transient"; return
+    echo "transient"
+    return
   fi
 
   # GraphQL-level transient messages
   if echo "$body" | grep -qiE 'rate.limit|timeout|temporar'; then
-    echo "transient"; return
+    echo "transient"
+    return
   fi
 
   echo "permanent"
@@ -52,7 +55,7 @@ linear_graphql() {
   check_api_key
 
   local attempt=0
-  read -ra delays <<< "${LINEAR_RETRY_DELAYS:-1 2 4}"
+  read -ra delays <<<"${LINEAR_RETRY_DELAYS:-1 2 4}"
   local max_retries="${LINEAR_MAX_RETRIES:-3}"
   local resp http_code curl_exit
 
@@ -85,7 +88,7 @@ linear_graphql() {
 
     # Heartbeat: retry classification
     if [ "$class" = "transient" ]; then
-      hb_retry "classify" "info" "transient: HTTP ${http_code:-curl-err}" "{\"http_code\":\"${http_code:-curl-err}\",\"attempt\":\"$((attempt+1))\"}"
+      hb_retry "classify" "info" "transient: HTTP ${http_code:-curl-err}" "{\"http_code\":\"${http_code:-curl-err}\",\"attempt\":\"$((attempt + 1))\"}"
     fi
 
     # Heartbeat: API call result
@@ -96,7 +99,7 @@ linear_graphql() {
     fi
 
     if [ "$class" = "transient" ] && [ "$attempt" -lt "$max_retries" ]; then
-      echo "linear_graphql: transient error (attempt $((attempt+1))/$max_retries, http=${http_code:-curl-err}), retrying in ${delays[$attempt]}s" >&2
+      echo "linear_graphql: transient error (attempt $((attempt + 1))/$max_retries, http=${http_code:-curl-err}), retrying in ${delays[$attempt]}s" >&2
       sleep "${delays[$attempt]}"
       ((attempt++)) || true
       continue
@@ -113,7 +116,7 @@ linear_graphql() {
     fi
 
     # Check for GraphQL errors in the body
-    if echo "$resp" | jq -e '.errors' > /dev/null 2>&1; then
+    if echo "$resp" | jq -e '.errors' >/dev/null 2>&1; then
       echo "GraphQL error: $(echo "$resp" | jq -r '.errors[0].message // "unknown"')" >&2
       exit 2
     fi
@@ -179,7 +182,7 @@ get_team() {
 update_issue() {
   local issue_id="$1"
   local state_id="${2:-}"
-  local label_ids="${3:-}"   # JSON array string e.g. '["id1","id2"]'
+  local label_ids="${3:-}" # JSON array string e.g. '["id1","id2"]'
   local assignee_id="${4:-}"
 
   # Build input object dynamically
@@ -197,7 +200,6 @@ update_issue() {
   resp=$(linear_graphql "$query")
   echo "$resp" | jq '.data.issueUpdate'
 }
-
 
 # Get current user (me) info from Linear
 get_me() {
@@ -221,7 +223,3 @@ save_comment() {
   resp=$(linear_graphql "$query")
   echo "$resp" | jq '.data.commentCreate.comment'
 }
-
-
-
-

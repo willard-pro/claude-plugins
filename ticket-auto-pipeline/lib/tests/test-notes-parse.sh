@@ -12,19 +12,23 @@ PASS=0
 FAIL=0
 
 _run() {
-  local name="$1"; shift
+  local name="$1"
+  shift
   if "$@" 2>/dev/null; then
-    echo "PASS: $name"; ((PASS++)) || true
+    echo "PASS: $name"
+    ((PASS++)) || true
   else
-    echo "FAIL: $name"; ((FAIL++)) || true
+    echo "FAIL: $name"
+    ((FAIL++)) || true
   fi
 }
 
 # ── tests ──────────────────────────────────────────────────────────────────────
 
 test_extracts_simple() {
-  local tmpdir; tmpdir=$(mktemp -d)
-  printf '## Complexity\n\n**Score:** simple\n' > "$tmpdir/notes.md"
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '## Complexity\n\n**Score:** simple\n' >"$tmpdir/notes.md"
   local result
   result=$(bash -c "source $LIB_DIR/notes-parse.sh; get_complexity '$tmpdir'" 2>/dev/null)
   rm -rf "$tmpdir"
@@ -32,8 +36,9 @@ test_extracts_simple() {
 }
 
 test_extracts_complex() {
-  local tmpdir; tmpdir=$(mktemp -d)
-  printf '## Complexity\n\n**Score:** complex\n' > "$tmpdir/notes.md"
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '## Complexity\n\n**Score:** complex\n' >"$tmpdir/notes.md"
   local result
   result=$(bash -c "source $LIB_DIR/notes-parse.sh; get_complexity '$tmpdir'" 2>/dev/null)
   rm -rf "$tmpdir"
@@ -41,7 +46,8 @@ test_extracts_complex() {
 }
 
 test_missing_notes_file() {
-  local tmpdir; tmpdir=$(mktemp -d)
+  local tmpdir
+  tmpdir=$(mktemp -d)
   # No notes.md created
   local exit_code=0
   bash -c "source $LIB_DIR/notes-parse.sh; get_complexity '$tmpdir'" 2>/dev/null || exit_code=$?
@@ -50,8 +56,9 @@ test_missing_notes_file() {
 }
 
 test_missing_score_section() {
-  local tmpdir; tmpdir=$(mktemp -d)
-  printf '## Complexity\n\nNo score line here.\n' > "$tmpdir/notes.md"
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '## Complexity\n\nNo score line here.\n' >"$tmpdir/notes.md"
   local exit_code=0
   bash -c "source $LIB_DIR/notes-parse.sh; get_complexity '$tmpdir'" 2>/dev/null || exit_code=$?
   rm -rf "$tmpdir"
@@ -59,8 +66,9 @@ test_missing_score_section() {
 }
 
 test_windows_line_endings() {
-  local tmpdir; tmpdir=$(mktemp -d)
-  printf '## Complexity\r\n\r\n**Score:** simple\r\n' > "$tmpdir/notes.md"
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '## Complexity\r\n\r\n**Score:** simple\r\n' >"$tmpdir/notes.md"
   local result
   result=$(bash -c "source $LIB_DIR/notes-parse.sh; get_complexity '$tmpdir'" 2>/dev/null)
   rm -rf "$tmpdir"

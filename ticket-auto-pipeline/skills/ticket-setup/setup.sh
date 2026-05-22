@@ -98,7 +98,7 @@ touch "$TICKET_DIR/artifacts/.gitkeep" "$TICKET_DIR/attachments/.gitkeep"
 
 # ── Write context.md ────────────────────────────────────────────────────
 
-cat > "$TICKET_DIR/context.md" << MDEOF
+cat >"$TICKET_DIR/context.md" <<MDEOF
 # ${TICKET_ID}: ${TITLE}
 
 **Linear:** ${URL}
@@ -144,7 +144,7 @@ MDEOF
 # ── Write notes.md ──────────────────────────────────────────────────────
 
 TODAY=$(date +%Y-%m-%d)
-cat > "$TICKET_DIR/notes.md" << MDEOF
+cat >"$TICKET_DIR/notes.md" <<MDEOF
 # Working Notes — ${TICKET_ID}
 
 ## Status

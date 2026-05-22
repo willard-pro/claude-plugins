@@ -12,19 +12,24 @@ PASS=0
 FAIL=0
 
 _run() {
-  local name="$1"; shift
+  local name="$1"
+  shift
   if "$@" 2>/dev/null; then
-    echo "PASS: $name"; ((PASS++)) || true
+    echo "PASS: $name"
+    ((PASS++)) || true
   else
-    echo "FAIL: $name"; ((FAIL++)) || true
+    echo "FAIL: $name"
+    ((FAIL++)) || true
   fi
 }
 
 # ── tests ──────────────────────────────────────────────────────────────────────
 
 test_finds_appraisal_comment_boundary() {
-  local tmpdir; tmpdir=$(mktemp -d)
-  local log_file="$tmpdir/pipeline.log"; touch "$log_file"
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local log_file="$tmpdir/pipeline.log"
+  touch "$log_file"
 
   local comments='[{"id":"c1","body":"**Ticket appraised** — complexity: simple","createdAt":"2024-01-01T10:00:00Z","user":{"name":"bot"}}]'
   local output
@@ -35,9 +40,10 @@ test_finds_appraisal_comment_boundary() {
 }
 
 test_falls_back_to_log_when_no_appraisal_comment() {
-  local tmpdir; tmpdir=$(mktemp -d)
+  local tmpdir
+  tmpdir=$(mktemp -d)
   local log_file="$tmpdir/pipeline.log"
-  echo "2024-01-01T09:00:00Z|APPRAISE|appraise|done|complexity: simple" > "$log_file"
+  echo "2024-01-01T09:00:00Z|APPRAISE|appraise|done|complexity: simple" >"$log_file"
 
   local comments='[{"id":"c1","body":"regular user comment","createdAt":"2024-01-01T08:00:00Z","user":{"name":"alice"}}]'
   local output
@@ -48,8 +54,10 @@ test_falls_back_to_log_when_no_appraisal_comment() {
 }
 
 test_amendment_boundary_wins_when_later() {
-  local tmpdir; tmpdir=$(mktemp -d)
-  local log_file="$tmpdir/pipeline.log"; touch "$log_file"
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local log_file="$tmpdir/pipeline.log"
+  touch "$log_file"
 
   local comments='[
     {"id":"c1","body":"**Ticket appraised** — info","createdAt":"2024-01-01T10:00:00Z","user":{"name":"bot"}},
@@ -63,8 +71,10 @@ test_amendment_boundary_wins_when_later() {
 }
 
 test_excludes_pipeline_authored_comments() {
-  local tmpdir; tmpdir=$(mktemp -d)
-  local log_file="$tmpdir/pipeline.log"; touch "$log_file"
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local log_file="$tmpdir/pipeline.log"
+  touch "$log_file"
 
   # Appraisal at 10:00, amendment at 11:00 — no user comments after boundary
   local comments='[
@@ -79,8 +89,10 @@ test_excludes_pipeline_authored_comments() {
 }
 
 test_returns_none_when_no_unprocessed() {
-  local tmpdir; tmpdir=$(mktemp -d)
-  local log_file="$tmpdir/pipeline.log"; touch "$log_file"
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local log_file="$tmpdir/pipeline.log"
+  touch "$log_file"
 
   # Appraisal at 10:00, user comment at 09:00 (before boundary)
   local comments='[
