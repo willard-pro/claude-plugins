@@ -20,7 +20,7 @@ test-flow:
 	bash ticket-auto-pipeline/skills/ticket-flow/tests/phase2.sh
 
 lint:
-	shellcheck -S warning $(SCRIPTS)
+	shellcheck -S error $(SCRIPTS)
 
 lint-strict:
 	shellcheck $(SCRIPTS)
