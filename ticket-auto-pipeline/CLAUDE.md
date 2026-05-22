@@ -35,6 +35,7 @@ ticket-auto-pipeline/
 - `ticket-setup` — workspace scaffolding
 
 ### Support skills
+- `ticket-document` — post-implement ai-context.md generation
 - `ticket-detect-resume` — crash recovery via pipeline log checkpoint
 - `ticket-retro` — post-mortem failure analysis from logs
 - `ticket-overseer` — pipeline queue dashboard

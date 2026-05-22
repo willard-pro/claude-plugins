@@ -122,7 +122,19 @@ else
     RESUME_STEP="STEP_5"
   elif grep -q '^[^|]*|MAINTENANCE|maintenance|done|' "$LOG_FILE"; then
     RESUME_STEP="STEP_5"
+  elif grep -q '^[^|]*|MAINTENANCE|maintenance|fail|' "$LOG_FILE"; then
+    RESUME_STEP="STEP_5"
+  elif grep -q '^[^|]*|MAINTENANCE|maintenance|waiting|' "$LOG_FILE"; then
+    RESUME_STEP="STEP_4_7"
+  elif grep -q '^[^|]*|MAINTENANCE|document|done|' "$LOG_FILE"; then
+    RESUME_STEP="STEP_4_7"
+  elif grep -q '^[^|]*|MAINTENANCE|document|fail|' "$LOG_FILE"; then
+    RESUME_STEP="STEP_4_7"
+  elif grep -q '^[^|]*|MAINTENANCE|document|waiting|' "$LOG_FILE"; then
+    RESUME_STEP="STEP_4_6"
   elif grep -q '^[^|]*|MAINTENANCE|maintenance|' "$LOG_FILE"; then
+    RESUME_STEP="STEP_4_7"
+  elif grep -q '^[^|]*|MAINTENANCE|document|' "$LOG_FILE"; then
     RESUME_STEP="STEP_4_6"
   elif grep -q '^[^|]*|VERIFY|verify|' "$LOG_FILE"; then
     RESUME_STEP="STEP_4_5"
@@ -167,6 +179,7 @@ REPRODUCE_FROM=""
 EXEC_FROM=""
 IMPLEMENT_FROM=""
 MAINTENANCE_FROM=""
+DOCUMENT_FROM=""
 VERIFY_FROM=""
 PR_REVIEW_FROM=""
 PR_ITERATE_FROM=""
@@ -190,6 +203,10 @@ if [ -s "$LOG_FILE" ]; then
 
   MAINTENANCE_FROM=$(grep '^[^|]*|MAINTENANCE|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
     grep -v '|MAINTENANCE|maintenance|done|' |
+    grep -v '|MAINTENANCE|document|done|' |
+    tail -1 | cut -d'|' -f3 || true)
+
+  DOCUMENT_FROM=$(grep '^[^|]*|MAINTENANCE|document|done|' "$LOG_FILE" 2>/dev/null |
     tail -1 | cut -d'|' -f3 || true)
 
   VERIFY_FROM=$(grep '^[^|]*|VERIFY|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
@@ -263,6 +280,7 @@ DETECT_RESUME_RESULT
   EXEC_FROM:          ${EXEC_FROM:-}
   IMPLEMENT_FROM:     ${IMPLEMENT_FROM:-}
   MAINTENANCE_FROM:   ${MAINTENANCE_FROM:-}
+  DOCUMENT_FROM:      ${DOCUMENT_FROM:-}
   VERIFY_FROM:        ${VERIFY_FROM:-}
   PR_REVIEW_FROM:     ${PR_REVIEW_FROM:-}
   PR_ITERATE_FROM:    ${PR_ITERATE_FROM:-}

@@ -193,6 +193,39 @@ Append local hits to the same `## Prior Art` section, tagged `[local-ticket]`:
 
 If no local hits score ≥40%, do not add a new entry — the section already reflects the claude-mem result.
 
+**Also search ai-context.md files (post-implement documentation):**
+
+Run a second grep for `ai-context.md` files using the same keywords:
+
+```bash
+grep -rl "{keyword1}\|{keyword2}" . --include="ai-context.md" | grep -v "{TICKET-DIR}" | head -20
+```
+
+For each match, read the full `ai-context.md` file (it is short by design — a single page with named sections). Evaluate confidence using the same High/Medium/Low criteria as the local ticket hits above, with these additional factors:
+
+- **Recency**: newer `ai-context.md` (by the Date header) scores higher. Parse the date from the `**Date:**` metadata line.
+- **Keyword density**: more term matches across sections (especially **Watch out for** and **Patterns used**) scores higher.
+- **Complexity match**: same complexity level as the current ticket scores higher.
+
+**Staleness threshold:** If an `ai-context.md` file's Date header is older than 90 days from today, tag it `[ai-context-stale]` and assign Low confidence regardless of content match. The Date field uses ISO 8601 format (`YYYY-MM-DD`) — parse it directly. The file is still recorded in Prior Art — stale context is better than no context, but the agent should not weight it heavily.
+
+**Result cap:** If more than 5 `ai-context.md` hits pass the confidence threshold, only the top 5 ranked by confidence receive full file reads and Prior Art entries. The remaining hits are summarized as a single line:
+
+```markdown
+- {N} additional ai-context.md hits below cutoff — not read
+```
+
+Append ai-context.md hits to the same `## Prior Art` section, tagged `[ai-context]` (or `[ai-context-stale]` if older than 90 days):
+
+```markdown
+### {TICKET-ID} ({directory name}) — {High | Medium} confidence ({score}%) [ai-context]
+**Relevance:** {one sentence: why this hit applies}
+**Key finding:** {the specific patterns, gotchas, or decisions from the ai-context.md that apply}
+**Incorporate:** {how this should inform the current investigation or implementation}
+```
+
+If no ai-context.md hits score ≥40%, do not add a new entry — the section already reflects the claude-mem and local-ticket results.
+
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|prior-art|done|{N} hits" >> "$LOG_FILE"
 
 Proceed to Step 2.7.
