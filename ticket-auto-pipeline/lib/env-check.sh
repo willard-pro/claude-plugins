@@ -119,7 +119,7 @@ if [ "${_MODE:-full}" = "validate" ]; then
   fi
 
   # REPOS_ROOT
-  if grep -q '^REPOS_ROOT[=:]\s*.' "$CLAUDE_MD" 2>/dev/null; then
+  if grep -qE '^REPOS_ROOT\s*[=:]\s*.' "$CLAUDE_MD" 2>/dev/null; then
     val=$(grep -oP '^REPOS_ROOT[=:]\s*\K.*' "$CLAUDE_MD" | head -1 | tr -d ' ')
     pass "REPOS_ROOT ($val)"
   else
