@@ -1,0 +1,4 @@
+# Project-wide ShellCheck configuration.
+# SC1090 — can't follow non-constant source (systemic: libs resolved at runtime via $LIB_DIR)
+# SC1091 — not following external source file (same reason)
+disable=SC1090,SC1091

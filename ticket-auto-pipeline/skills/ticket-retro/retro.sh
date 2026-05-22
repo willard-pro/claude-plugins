@@ -265,7 +265,7 @@ for log_file in "${LOG_FILES[@]}"; do
 
   while IFS= read -r line; do
     [ -z "$line" ] && continue
-    local category event status msg detail ts
+    category="" event="" status="" msg="" detail="" ts=""
     ts=$(echo "$line" | cut -d'|' -f1)
     category=$(echo "$line" | cut -d'|' -f2)
     event=$(echo "$line" | cut -d'|' -f3)
