@@ -8,13 +8,22 @@ FAIL=0
 _run() {
   local name="$1"
   shift
-  if "$@" 2>/dev/null; then
+  local _stderr
+  _stderr=$(mktemp)
+  local _exit=0
+  if "$@" 2>"$_stderr"; then
     echo "PASS: $name"
     ((PASS++)) || true
   else
-    echo "FAIL: $name"
+    _exit=$?
+    echo "FAIL: $name (exit $_exit)"
+    if [ -s "$_stderr" ]; then
+      echo "  stderr:"
+      sed 's/^/    /' "$_stderr"
+    fi
     ((FAIL++)) || true
   fi
+  rm -f "$_stderr"
 }
 
 # ── Gate 1: EXEC_NO_ARTIFACT ─────────────────────────────────────────────────

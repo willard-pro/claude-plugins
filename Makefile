@@ -16,8 +16,8 @@ test-lib:
 
 test-flow:
 	@echo "=== ticket-flow tests ==="
-	bash ticket-auto-pipeline/skills/ticket-flow/tests/phase1.sh
-	bash ticket-auto-pipeline/skills/ticket-flow/tests/phase2.sh
+	CLAUDE_SKILLS_LIB="$(CURDIR)/ticket-auto-pipeline/lib" bash ticket-auto-pipeline/skills/ticket-flow/tests/phase1.sh
+	CLAUDE_SKILLS_LIB="$(CURDIR)/ticket-auto-pipeline/lib" bash ticket-auto-pipeline/skills/ticket-flow/tests/phase2.sh
 
 lint:
 	shellcheck -S error $(SCRIPTS)
