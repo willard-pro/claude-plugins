@@ -1,1 +1,14 @@
 openspec/
+
+# Downloaded Claude Code artifacts
+anthropic-ai-claude-code-*.tgz
+claude-binary
+claude-readme.md
+
+# Extracted npm package scripts (claude-code wrapper)
+cli-wrapper.cjs
+install.cjs
+sdk-tools.ts
+
+# Python bytecode cache
+__pycache__/

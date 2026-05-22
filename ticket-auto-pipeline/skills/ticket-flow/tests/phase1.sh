@@ -6,10 +6,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILLS_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+PLUGIN_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 FLOW_SH="$SCRIPT_DIR/../flow.sh"
 DETECT_RESUME_SH="$SKILLS_DIR/ticket-detect-resume/detect-resume.sh"
 VALIDATE_SH="$SCRIPT_DIR/../validate-linear-config.sh"
-TICKET_DIR_SH="$SKILLS_DIR/lib/ticket-dir.sh"
+TICKET_DIR_SH="$PLUGIN_DIR/lib/ticket-dir.sh"
 
 PASS=0
 FAIL=0
@@ -151,7 +152,7 @@ test_linear_api_retry_on_503() {
 
   local exit_code=0
   LINEAR_API_URL="http://127.0.0.1:$port" LINEAR_API_KEY="test" \
-    bash -c "source $SKILLS_DIR/lib/linear-api.sh; linear_graphql '{\"query\":\"query{viewer{id name}}\"} '" \
+    bash -c "source $PLUGIN_DIR/lib/linear-api.sh; linear_graphql '{\"query\":\"query{viewer{id name}}\"} '" \
     >/dev/null 2>&1 || exit_code=$?
 
   kill "$socat_pid" 2>/dev/null || true
@@ -165,8 +166,8 @@ test_detect_resume_schema_mismatch() {
   tmpdir=$(mktemp -d)
   mkdir -p "$tmpdir/logs"
   local log="$tmpdir/logs/WIL-99-pipeline.log"
-  # Write a non-empty log with NO schema header but valid format entries
-  echo "2024-01-01T00:00:00Z|APPRAISE|appraise|start|foo" >>"$log"
+  # Write a non-empty log with NO schema header and content that fails v0-grace regex
+  echo "corrupt log content without pipe format" >>"$log"
 
   local out
   out=$(cd "$tmpdir" && bash "$DETECT_RESUME_SH" WIL-99 2>/dev/null || true)
@@ -220,8 +221,7 @@ test_gen_mermaid_roundtrip() {
     echo "state-machine.json missing" >&2
     return 1
   }
-  local readme
-  readme="$(cd "$SCRIPT_DIR/../../.." && git rev-parse --show-toplevel 2>/dev/null)/README.md"
+  local readme="$PLUGIN_DIR/README.md"
   [ -f "$readme" ] || {
     echo "README.md not found" >&2
     return 1
@@ -230,8 +230,7 @@ test_gen_mermaid_roundtrip() {
   local generated
   generated=$(bash "$gen")
   local committed
-  committed=$(sed -n '/<!-- BEGIN state-machine -->/,/<!-- END state-machine -->/p' "$readme" |
-    grep -v 'BEGIN\|END')
+  committed=$(sed -n '/^```mermaid$/,/^```$/p' "$readme" | grep -v '^```')
   [ "$generated" = "$committed" ]
 }
 
