@@ -18,13 +18,22 @@ FAIL=0
 _run() {
   local name="$1"
   shift
-  if "$@" 2>/dev/null; then
+  local _stderr
+  _stderr=$(mktemp)
+  local _exit=0
+  if "$@" 2>"$_stderr"; then
     echo "PASS: $name"
     ((PASS++)) || true
   else
-    echo "FAIL: $name"
+    _exit=$?
+    echo "FAIL: $name (exit $_exit)"
+    if [ -s "$_stderr" ]; then
+      echo "  stderr:"
+      sed 's/^/    /' "$_stderr"
+    fi
     ((FAIL++)) || true
   fi
+  rm -f "$_stderr"
 }
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -101,7 +110,10 @@ test_flow_concurrent_lock() {
   # Hold the lock in a background process
   (
     exec 9>"$tmpdir/logs/.ticket-flow-WIL-99.lock"
-    flock 9
+    if ! flock 9 2>/dev/null; then
+      echo "flock failed (flock not installed?)" >&2
+      exit 1
+    fi
     sleep 5
   ) &
   local holder=$!
@@ -109,9 +121,11 @@ test_flow_concurrent_lock() {
 
   # Second invocation should exit 42
   local exit_code=0
-  (cd "$tmpdir" && bash "$FLOW_SH" WIL-99 appraise-start 2>/dev/null) || exit_code=$?
+  CLAUDE_SKILLS_LIB="$PLUGIN_DIR/lib" \
+    bash -c "cd \"$tmpdir\" && \"$FLOW_SH\" WIL-99 appraise-start" >/dev/null 2>&1 || exit_code=$?
 
   kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
   rm -rf "$tmpdir"
   [ "$exit_code" -eq 42 ]
 }
@@ -123,7 +137,8 @@ test_flow_dispatcher_unknown_trigger() {
   tmpdir=$(mktemp -d)
   mkdir -p "$tmpdir/logs"
   local exit_code=0
-  (cd "$tmpdir" && bash "$FLOW_SH" WIL-99 not-a-real-trigger 2>/dev/null) || exit_code=$?
+  CLAUDE_SKILLS_LIB="$PLUGIN_DIR/lib" \
+    bash -c "cd \"$tmpdir\" && \"$FLOW_SH\" WIL-99 not-a-real-trigger" >/dev/null 2>&1 || exit_code=$?
   rm -rf "$tmpdir"
   [ "$exit_code" -eq 3 ]
 }
