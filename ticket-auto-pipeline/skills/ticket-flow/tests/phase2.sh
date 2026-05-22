@@ -57,7 +57,7 @@ test_complexity_mismatch_complex_declared_simple_found() {
   printf '## Complexity\n\n**Score:** complex\n' >"$ticket_dir/notes.md"
   touch "$ticket_dir/simple-fix.md"
 
-  COMPLEXITY=$(bash -c "source ~/.claude/skills/lib/notes-parse.sh; get_complexity '$ticket_dir'")
+  COMPLEXITY=$(bash -c "source ${CLAUDE_SKILLS_LIB:-~/.claude/skills/lib}/notes-parse.sh; get_complexity '$ticket_dir'")
   CHANGE_DIR=$(ls -d "$tmp/openspec/changes/"*/ 2>/dev/null | grep -i "wil-2" | head -1 || true)
   [ "$COMPLEXITY" = "complex" ] && [ -z "$CHANGE_DIR" ] &&
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|COMPLEXITY_ARTIFACT_MISMATCH — declared=complex artifact=simple-fix.md" >>"$log"
@@ -76,7 +76,7 @@ test_complexity_mismatch_simple_declared_no_artifact() {
   mkdir -p "$ticket_dir"
   printf '## Complexity\n\n**Score:** simple\n' >"$ticket_dir/notes.md"
 
-  COMPLEXITY=$(bash -c "source ~/.claude/skills/lib/notes-parse.sh; get_complexity '$ticket_dir'")
+  COMPLEXITY=$(bash -c "source ${CLAUDE_SKILLS_LIB:-~/.claude/skills/lib}/notes-parse.sh; get_complexity '$ticket_dir'")
   SIMPLE_FIX=$(find "$ticket_dir" -name "simple-fix.md" -print -quit 2>/dev/null)
   [ "$COMPLEXITY" = "simple" ] && [ -z "$SIMPLE_FIX" ] &&
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|COMPLEXITY_ARTIFACT_MISMATCH — declared=simple artifact=none" >>"$log"
@@ -95,7 +95,7 @@ test_complexity_mismatch_missing_score() {
   mkdir -p "$ticket_dir"
   printf '## Complexity\n\nSome notes but no score.\n' >"$ticket_dir/notes.md"
 
-  COMPLEXITY=$(bash -c "source ~/.claude/skills/lib/notes-parse.sh; get_complexity '$ticket_dir'")
+  COMPLEXITY=$(bash -c "source ${CLAUDE_SKILLS_LIB:-~/.claude/skills/lib}/notes-parse.sh; get_complexity '$ticket_dir'")
   [ -z "$COMPLEXITY" ] &&
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|COMPLEXITY_ARTIFACT_MISMATCH — notes.md missing **Score:** field" >>"$log"
 
