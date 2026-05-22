@@ -38,7 +38,7 @@ _socat_stub() {
   local ok_body="$4"
   local count_file
   count_file=$(mktemp)
-  echo 0 > "$count_file"
+  echo 0 >"$count_file"
 
   socat TCP-LISTEN:"$port",reuseaddr,fork SYSTEM:"bash -c '
     n=\$(cat \"$count_file\"); n=\$((n+1)); echo \$n > \"$count_file\"
@@ -60,7 +60,10 @@ test_validate_linear_config_dry_run() {
   tmpdir=$(mktemp -d)
   local sentinel_dir="$tmpdir/state/ticket-flow"
   local sm="$SCRIPT_DIR/../state-machine.json"
-  [ -f "$sm" ] || { echo "state-machine.json missing" >&2; return 1; }
+  [ -f "$sm" ] || {
+    echo "state-machine.json missing" >&2
+    return 1
+  }
 
   SENTINEL_DIR="$sentinel_dir" bash "$VALIDATE_SH" --dry-run --team TEST_TEAM_ID 2>/dev/null || true
   # sentinel should exist after first run
@@ -82,8 +85,8 @@ test_preflight_aborts_on_unset_key() {
   local log="$tmpdir/test.log"
 
   unset LINEAR_API_KEY
-  bash "$VALIDATE_SH" 2>/dev/null && return 1  # should fail when key missing
-  [ ! -f "$log" ]  # no log file should be created
+  bash "$VALIDATE_SH" 2>/dev/null && return 1 # should fail when key missing
+  [ ! -f "$log" ]                             # no log file should be created
   rm -rf "$tmpdir"
 }
 
@@ -101,7 +104,7 @@ test_flow_concurrent_lock() {
     sleep 5
   ) &
   local holder=$!
-  sleep 0.2  # let the holder acquire the lock
+  sleep 0.2 # let the holder acquire the lock
 
   # Second invocation should exit 42
   local exit_code=0
@@ -131,7 +134,7 @@ test_flow_assertion_catches_silent_noop() {
   # The post-trigger assertion should catch the mismatch and exit 7.
   # This test uses LINEAR_API_KEY bypass and mocked linear_graphql.
   echo "SKIP: requires mock infrastructure (see 8.4 notes)" >&2
-  return 0  # placeholder
+  return 0 # placeholder
 }
 
 # ── test_linear_api_retry_on_503 ─────────────────────────────────────────────
@@ -163,7 +166,7 @@ test_detect_resume_schema_mismatch() {
   mkdir -p "$tmpdir/logs"
   local log="$tmpdir/logs/WIL-99-pipeline.log"
   # Write a non-empty log with NO schema header but valid format entries
-  echo "2024-01-01T00:00:00Z|APPRAISE|appraise|start|foo" >> "$log"
+  echo "2024-01-01T00:00:00Z|APPRAISE|appraise|start|foo" >>"$log"
 
   local out
   out=$(cd "$tmpdir" && bash "$DETECT_RESUME_SH" WIL-99 2>/dev/null || true)
@@ -184,11 +187,17 @@ test_ticket_dir_disambiguation() {
   # WIL-4 should resolve to WIL-4--foo only
   local result
   result=$(resolve_ticket_dir WIL-4 "$tmpdir")
-  [[ "$result" == *"WIL-4--foo"* ]] || { rm -rf "$tmpdir"; return 1; }
+  [[ "$result" == *"WIL-4--foo"* ]] || {
+    rm -rf "$tmpdir"
+    return 1
+  }
 
   # WIL-42 should resolve to WIL-42--bar
   result=$(resolve_ticket_dir WIL-42 "$tmpdir")
-  [[ "$result" == *"WIL-42--bar"* ]] || { rm -rf "$tmpdir"; return 1; }
+  [[ "$result" == *"WIL-42--bar"* ]] || {
+    rm -rf "$tmpdir"
+    return 1
+  }
 
   # Adding a second WIL-4 dir should cause multi-match error (exit 2)
   mkdir -p "$tmpdir/WIL-4--baz"
@@ -198,23 +207,31 @@ test_ticket_dir_disambiguation() {
   [ "$exit_code" -eq 2 ]
 }
 
-
 # ── test_gen_mermaid_roundtrip ────────────────────────────────────────────────
 
 test_gen_mermaid_roundtrip() {
   local gen="$SCRIPT_DIR/../gen-mermaid.sh"
   local sm="$SCRIPT_DIR/../state-machine.json"
-  [ -f "$gen" ] || { echo "gen-mermaid.sh missing" >&2; return 1; }
-  [ -f "$sm" ]  || { echo "state-machine.json missing" >&2; return 1; }
+  [ -f "$gen" ] || {
+    echo "gen-mermaid.sh missing" >&2
+    return 1
+  }
+  [ -f "$sm" ] || {
+    echo "state-machine.json missing" >&2
+    return 1
+  }
   local readme
   readme="$(cd "$SCRIPT_DIR/../../.." && git rev-parse --show-toplevel 2>/dev/null)/README.md"
-  [ -f "$readme" ] || { echo "README.md not found" >&2; return 1; }
+  [ -f "$readme" ] || {
+    echo "README.md not found" >&2
+    return 1
+  }
 
   local generated
   generated=$(bash "$gen")
   local committed
-  committed=$(sed -n '/<!-- BEGIN state-machine -->/,/<!-- END state-machine -->/p' "$readme" \
-    | grep -v 'BEGIN\|END')
+  committed=$(sed -n '/<!-- BEGIN state-machine -->/,/<!-- END state-machine -->/p' "$readme" |
+    grep -v 'BEGIN\|END')
   [ "$generated" = "$committed" ]
 }
 

@@ -26,7 +26,7 @@ lint-strict:
 	shellcheck $(SCRIPTS)
 
 fmt-check:
-	shfmt -d $(SCRIPTS)
+	shfmt -i 2 -d $(SCRIPTS)
 
 fmt:
-	shfmt -w $(SCRIPTS)
+	shfmt -i 2 -w $(SCRIPTS)

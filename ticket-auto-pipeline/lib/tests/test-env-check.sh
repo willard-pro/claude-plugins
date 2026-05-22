@@ -11,11 +11,14 @@ PASS=0
 FAIL=0
 
 _run() {
-  local name="$1"; shift
+  local name="$1"
+  shift
   if "$@" 2>/dev/null; then
-    echo "PASS: $name"; ((PASS++)) || true
+    echo "PASS: $name"
+    ((PASS++)) || true
   else
-    echo "FAIL: $name"; ((FAIL++)) || true
+    echo "FAIL: $name"
+    ((FAIL++)) || true
   fi
 }
 
@@ -23,12 +26,12 @@ _run() {
 _mk_project_dir() {
   local dir="$1"
   mkdir -p "$dir/.claude"
-  cat > "$dir/CLAUDE.md" << 'EOF'
+  cat >"$dir/CLAUDE.md" <<'EOF'
 REPOS_ROOT=/tmp/test-repos
 LOCAL_URL=http://localhost:3000
 UAT_URL=http://uat.example.com
 EOF
-  cat > "$dir/.claude/settings.json" << 'EOF'
+  cat >"$dir/.claude/settings.json" <<'EOF'
 {
   "hooks": {
     "SubagentStart": [{"hooks": [{"command": "token-tracker-start.sh"}]}],
@@ -41,43 +44,53 @@ EOF
 # ── validate mode tests ───────────────────────────────────────────────────────
 
 test_validate_passes_all_required() {
-  local tmpdir; tmpdir=$(mktemp -d)
+  local tmpdir
+  tmpdir=$(mktemp -d)
   _mk_project_dir "$tmpdir"
   local exit_code=0
-  ( LINEAR_API_KEY=test GITHUB_PERSONAL_ACCESS_TOKEN=test \
-    bash "$LIB_DIR/env-check.sh" --mode=validate "$tmpdir" ) >/dev/null 2>&1 || exit_code=$?
+  (LINEAR_API_KEY=test GITHUB_PERSONAL_ACCESS_TOKEN=test \
+    bash "$LIB_DIR/env-check.sh" --mode=validate "$tmpdir") >/dev/null 2>&1 || exit_code=$?
   rm -rf "$tmpdir"
   [ "$exit_code" -eq 0 ]
 }
 
 test_validate_fails_missing_linear_key() {
-  local tmpdir; tmpdir=$(mktemp -d)
+  local tmpdir
+  tmpdir=$(mktemp -d)
   _mk_project_dir "$tmpdir"
   local exit_code=0
-  ( unset LINEAR_API_KEY; GITHUB_PERSONAL_ACCESS_TOKEN=test \
-    bash "$LIB_DIR/env-check.sh" --mode=validate "$tmpdir" ) >/dev/null 2>&1 || exit_code=$?
+  (
+    unset LINEAR_API_KEY
+    GITHUB_PERSONAL_ACCESS_TOKEN=test \
+      bash "$LIB_DIR/env-check.sh" --mode=validate "$tmpdir"
+  ) >/dev/null 2>&1 || exit_code=$?
   rm -rf "$tmpdir"
   [ "$exit_code" -ne 0 ]
 }
 
 test_validate_fails_missing_github_token() {
-  local tmpdir; tmpdir=$(mktemp -d)
+  local tmpdir
+  tmpdir=$(mktemp -d)
   _mk_project_dir "$tmpdir"
   local exit_code=0
-  ( unset GITHUB_PERSONAL_ACCESS_TOKEN; LINEAR_API_KEY=test \
-    bash "$LIB_DIR/env-check.sh" --mode=validate "$tmpdir" ) >/dev/null 2>&1 || exit_code=$?
+  (
+    unset GITHUB_PERSONAL_ACCESS_TOKEN
+    LINEAR_API_KEY=test \
+      bash "$LIB_DIR/env-check.sh" --mode=validate "$tmpdir"
+  ) >/dev/null 2>&1 || exit_code=$?
   rm -rf "$tmpdir"
   [ "$exit_code" -ne 0 ]
 }
 
 test_validate_warns_missing_optional() {
   # SLACK_CHANNEL absent — should warn but still exit 0
-  local tmpdir; tmpdir=$(mktemp -d)
+  local tmpdir
+  tmpdir=$(mktemp -d)
   _mk_project_dir "$tmpdir"
   # No SLACK_CHANNEL in CLAUDE.md (default _mk_project_dir doesn't add it)
   local exit_code=0
-  ( LINEAR_API_KEY=test GITHUB_PERSONAL_ACCESS_TOKEN=test \
-    bash "$LIB_DIR/env-check.sh" --mode=validate "$tmpdir" ) >/dev/null 2>&1 || exit_code=$?
+  (LINEAR_API_KEY=test GITHUB_PERSONAL_ACCESS_TOKEN=test \
+    bash "$LIB_DIR/env-check.sh" --mode=validate "$tmpdir") >/dev/null 2>&1 || exit_code=$?
   rm -rf "$tmpdir"
   [ "$exit_code" -eq 0 ]
 }
@@ -85,7 +98,8 @@ test_validate_warns_missing_optional() {
 # ── full mode tests ───────────────────────────────────────────────────────────
 
 test_full_mode_emits_begin_end_sentinels() {
-  local tmpdir; tmpdir=$(mktemp -d)
+  local tmpdir
+  tmpdir=$(mktemp -d)
   _mk_project_dir "$tmpdir"
   local output
   output=$(LINEAR_API_KEY=test GITHUB_PERSONAL_ACCESS_TOKEN=test \
@@ -95,7 +109,8 @@ test_full_mode_emits_begin_end_sentinels() {
 }
 
 test_full_mode_rowcount_matches_var_lines() {
-  local tmpdir; tmpdir=$(mktemp -d)
+  local tmpdir
+  tmpdir=$(mktemp -d)
   _mk_project_dir "$tmpdir"
   local output
   output=$(LINEAR_API_KEY=test GITHUB_PERSONAL_ACCESS_TOKEN=test \
@@ -105,28 +120,32 @@ test_full_mode_rowcount_matches_var_lines() {
   local rowcount
   rowcount=$(echo "$output" | grep '^ROWCOUNT=' | sed 's/ROWCOUNT=//')
   local var_count
-  var_count=$(echo "$output" \
-    | awk '/---BEGIN_VARS---/{p=1;next}/---END_VARS---/{p=0}p' \
-    | grep -v '^NAME|' \
-    | grep -v '^ROWCOUNT=' \
-    | grep -c '|' || true)
+  var_count=$(echo "$output" |
+    awk '/---BEGIN_VARS---/{p=1;next}/---END_VARS---/{p=0}p' |
+    grep -v '^NAME|' |
+    grep -v '^ROWCOUNT=' |
+    grep -c '|' || true)
 
   [ -n "$rowcount" ] && [ "$rowcount" -eq "$var_count" ]
 }
 
 test_full_mode_gh_token_derived() {
-  local tmpdir; tmpdir=$(mktemp -d)
+  local tmpdir
+  tmpdir=$(mktemp -d)
   _mk_project_dir "$tmpdir"
   local output
-  output=$( unset GH_TOKEN 2>/dev/null || true
+  output=$(
+    unset GH_TOKEN 2>/dev/null || true
     LINEAR_API_KEY=test GITHUB_PERSONAL_ACCESS_TOKEN=test \
-    bash "$LIB_DIR/env-check.sh" --mode=full "$tmpdir" 2>/dev/null || true )
+      bash "$LIB_DIR/env-check.sh" --mode=full "$tmpdir" 2>/dev/null || true
+  )
   rm -rf "$tmpdir"
   echo "$output" | grep 'GH_TOKEN' | grep -q 'auto'
 }
 
 test_full_mode_local_url_env_priority() {
-  local tmpdir; tmpdir=$(mktemp -d)
+  local tmpdir
+  tmpdir=$(mktemp -d)
   _mk_project_dir "$tmpdir"
   local output
   output=$(LINEAR_API_KEY=test GITHUB_PERSONAL_ACCESS_TOKEN=test LOCAL_URL=http://env-priority.test \
@@ -136,12 +155,15 @@ test_full_mode_local_url_env_priority() {
 }
 
 test_full_mode_ticket_autonomy_warn() {
-  local tmpdir; tmpdir=$(mktemp -d)
+  local tmpdir
+  tmpdir=$(mktemp -d)
   _mk_project_dir "$tmpdir"
   local output
-  output=$( unset TICKET_AUTONOMY 2>/dev/null || true
+  output=$(
+    unset TICKET_AUTONOMY 2>/dev/null || true
     LINEAR_API_KEY=test GITHUB_PERSONAL_ACCESS_TOKEN=test \
-    bash "$LIB_DIR/env-check.sh" --mode=full "$tmpdir" 2>/dev/null || true )
+      bash "$LIB_DIR/env-check.sh" --mode=full "$tmpdir" 2>/dev/null || true
+  )
   rm -rf "$tmpdir"
   echo "$output" | grep 'TICKET_AUTONOMY' | grep -q 'warn'
 }
@@ -155,7 +177,8 @@ test_unknown_mode_exits_1() {
 }
 
 test_summary_file_flag_writes_to_path() {
-  local tmpdir; tmpdir=$(mktemp -d)
+  local tmpdir
+  tmpdir=$(mktemp -d)
   _mk_project_dir "$tmpdir"
   local summary_file="$tmpdir/summary.txt"
   local stdout_output

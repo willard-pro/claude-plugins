@@ -12,11 +12,14 @@ PASS=0
 FAIL=0
 
 _run() {
-  local name="$1"; shift
+  local name="$1"
+  shift
   if "$@" 2>/dev/null; then
-    echo "PASS: $name"; ((PASS++)) || true
+    echo "PASS: $name"
+    ((PASS++)) || true
   else
-    echo "FAIL: $name"; ((FAIL++)) || true
+    echo "FAIL: $name"
+    ((FAIL++)) || true
   fi
 }
 
@@ -78,7 +81,8 @@ test_normalize_dot_comments_shape() {
 # ── update_issue payload tests (mock linear_graphql) ─────────────────────────
 
 test_update_issue_skips_empty_state_id() {
-  local tmpfile; tmpfile=$(mktemp)
+  local tmpfile
+  tmpfile=$(mktemp)
   bash -c "
     source $LIB_DIR/linear-api.sh
     linear_graphql() { echo \"\$1\" > '$tmpfile'; echo '{\"data\":{\"issueUpdate\":{\"success\":true,\"issue\":{\"id\":\"i1\",\"identifier\":\"WIL-1\"}}}}'; }
@@ -91,7 +95,8 @@ test_update_issue_skips_empty_state_id() {
 }
 
 test_update_issue_all_fields() {
-  local tmpfile; tmpfile=$(mktemp)
+  local tmpfile
+  tmpfile=$(mktemp)
   bash -c "
     source $LIB_DIR/linear-api.sh
     linear_graphql() { echo \"\$1\" > '$tmpfile'; echo '{\"data\":{\"issueUpdate\":{\"success\":true,\"issue\":{\"id\":\"i1\",\"identifier\":\"WIL-1\"}}}}'; }

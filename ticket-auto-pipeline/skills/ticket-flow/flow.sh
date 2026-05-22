@@ -39,13 +39,13 @@ DRY_RUN=false
 declare -A DATA=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --dry-run) DRY_RUN=true ;;
-    --data)
-      key="${2%%=*}"
-      val="${2#*=}"
-      DATA["$key"]="$val"
-      shift
-      ;;
+  --dry-run) DRY_RUN=true ;;
+  --data)
+    key="${2%%=*}"
+    val="${2#*=}"
+    DATA["$key"]="$val"
+    shift
+    ;;
   esac
   shift
 done
@@ -54,7 +54,7 @@ done
 
 _log() {
   [ -n "${LOG_FILE:-}" ] || return 0
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|$1" >> "$LOG_FILE"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|$1" >>"$LOG_FILE"
 }
 
 _emit_schema_header() {
@@ -66,13 +66,12 @@ _emit_schema_header() {
 
 # ── Validate state-machine.json ─────────────────────────────────────────────
 
-if ! jq '.' "$SM" > /dev/null 2>&1; then
+if ! jq '.' "$SM" >/dev/null 2>&1; then
   echo "state-machine.json is not valid JSON: $SM" >&2
   exit 1
 fi
 
 # ── Dispatch trigger via JSON ────────────────────────────────────────────────
-
 
 def=$(jq --arg t "$TRIGGER" '.triggers[$t] // empty' "$SM")
 if [ -z "$def" ]; then
@@ -123,7 +122,10 @@ resolve_state_id() {
   local name="$1"
   local sid
   sid=$(echo "$TEAM_JSON" | jq -r --arg n "$name" '.states[] | select(.name == $n) | .id')
-  [ -n "$sid" ] || { echo "State '$name' not found in team" >&2; exit 3; }
+  [ -n "$sid" ] || {
+    echo "State '$name' not found in team" >&2
+    exit 3
+  }
   echo "$sid"
 }
 
@@ -248,7 +250,7 @@ if ! $IDEMPOTENT; then
   # Assert added labels are present
   for name in "${ADD_LABEL_NAMES[@]}"; do
     if ! echo "$LIVE_LABELS" | jq -e --arg n "$name" \
-      '.[] | select(ascii_downcase == ($n | ascii_downcase))' > /dev/null 2>&1; then
+      '.[] | select(ascii_downcase == ($n | ascii_downcase))' >/dev/null 2>&1; then
       assert_failed=true
       assert_details="${assert_details:+$assert_details; }missing_label=$name"
     fi
@@ -257,7 +259,7 @@ if ! $IDEMPOTENT; then
   # Assert removed labels are absent
   for name in "${REMOVE_LABEL_NAMES[@]}"; do
     if echo "$LIVE_LABELS" | jq -e --arg n "$name" \
-      '.[] | select(ascii_downcase == ($n | ascii_downcase))' > /dev/null 2>&1; then
+      '.[] | select(ascii_downcase == ($n | ascii_downcase))' >/dev/null 2>&1; then
       assert_failed=true
       assert_details="${assert_details:+$assert_details; }unexpected_label=$name"
     fi
