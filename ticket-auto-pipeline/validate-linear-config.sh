@@ -18,7 +18,7 @@ SENTINEL_DIR="${SENTINEL_DIR:-$HOME/.claude/state/ticket-flow}"
 
 # ── Validate state-machine.json ──────────────────────────────────────────────
 
-if ! jq '.' "$SM" > /dev/null 2>&1; then
+if ! jq '.' "$SM" >/dev/null 2>&1; then
   echo "ERROR: state-machine.json is not valid JSON: $SM" >&2
   exit 1
 fi
@@ -38,7 +38,7 @@ mapfile -t EXPECTED_LABELS < <(jq -r '
     (.triggers | to_entries[] | .value | (.adds[]?, .removes[]?) | select(. != null)),
     (.well_known_labels[]? // empty)
   ] | unique | sort[]' "$SM" | sed \
-    's/{complexity}/simple\n{complexity_complex}/g; s/{complexity_complex}/complex/g;
+  's/{complexity}/simple\n{complexity_complex}/g; s/{complexity_complex}/complex/g;
      s/{outcome}/Smooth\n{outcome_rough}\n{outcome_hard}/g;
      s/{outcome_rough}/Rough/g; s/{outcome_hard}/Hard/g' | sort -u)
 
@@ -50,10 +50,13 @@ FORCE=false
 
 for arg in "$@"; do
   case "$arg" in
-    --dry-run) DRY_RUN=true ;;
-    --force)   FORCE=true ;;
-    --*)       echo "Unknown flag: $arg" >&2; exit 1 ;;
-    *)         TEAM_ARG="$arg" ;;
+  --dry-run) DRY_RUN=true ;;
+  --force) FORCE=true ;;
+  --*)
+    echo "Unknown flag: $arg" >&2
+    exit 1
+    ;;
+  *) TEAM_ARG="$arg" ;;
   esac
 done
 
@@ -94,8 +97,8 @@ if [ -f "$SENTINEL" ] && ! $FORCE; then
   stored_hash=$(grep '^sm_hash=' "$SENTINEL" | cut -d= -f2 || true)
   if [ "$stored_hash" = "$SM_HASH" ]; then
     echo "sentinel-valid: team=$TEAM_NAME hash=$SM_HASH"
-    [ -n "${LOG_FILE:-}" ] && \
-      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|preflight|skip|sentinel-valid" >> "$LOG_FILE"
+    [ -n "${LOG_FILE:-}" ] &&
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|preflight|skip|sentinel-valid" >>"$LOG_FILE"
     exit 0
   fi
 fi
@@ -173,7 +176,7 @@ fi
 # ── Write sentinel ────────────────────────────────────────────────────────────
 
 mkdir -p "$SENTINEL_DIR"
-cat > "$SENTINEL" <<EOF
+cat >"$SENTINEL" <<EOF
 schema_version=1
 team_id=${TEAM_ID}
 team_name=${TEAM_NAME}
@@ -183,7 +186,7 @@ states=${states_found}
 labels=${labels_found}
 EOF
 
-[ -n "${LOG_FILE:-}" ] && \
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|preflight|ok|${states_found}/${total_states} states, ${labels_found}/${total_labels} labels" >> "$LOG_FILE"
+[ -n "${LOG_FILE:-}" ] &&
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|preflight|ok|${states_found}/${total_states} states, ${labels_found}/${total_labels} labels" >>"$LOG_FILE"
 
 exit 0

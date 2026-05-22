@@ -14,10 +14,10 @@ get_complexity() {
   fi
 
   local score
-  score=$(grep -A3 '## Complexity' "$notes" 2>/dev/null \
-    | grep '^\*\*Score:' \
-    | awk '{print $2}' \
-    | tr -d '\r' || true)
+  score=$(grep -A3 '## Complexity' "$notes" 2>/dev/null |
+    grep '^\*\*Score:' |
+    awk '{print $2}' |
+    tr -d '\r' || true)
 
   if [ -n "$score" ]; then
     echo "$score"

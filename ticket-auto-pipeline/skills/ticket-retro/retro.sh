@@ -37,8 +37,8 @@ scan_claude_log_failures() {
     -e "could not" \
     -e "unable to" \
     -e "failed to" \
-    "$claude_log" 2>/dev/null \
-    | head -200 > "$output"
+    "$claude_log" 2>/dev/null |
+    head -200 >"$output"
   return 0
 }
 
@@ -59,12 +59,12 @@ correlate_failures_with_phase() {
   local boundary_file
   boundary_file="$(mktemp)"
   grep -n -E '^\d{4}-\d{2}-\d{2}T[^|]+\|(APPRAISE|EXEC|GATE|IMPLEMENT|VERIFY|PR-REVIEW|MAINTENANCE)\|' \
-    "$claude_log" 2>/dev/null \
-    | cut -d: -f1 \
-    | while read -r b_ln; do
+    "$claude_log" 2>/dev/null |
+    cut -d: -f1 |
+    while read -r b_ln; do
       phase=$(sed -n "${b_ln}p" "$claude_log" | cut -d'|' -f2)
       echo "${b_ln} ${phase}"
-    done > "$boundary_file"
+    done >"$boundary_file"
 
   local tmp_result
   tmp_result="$(mktemp)"
@@ -82,8 +82,8 @@ correlate_failures_with_phase() {
         phase=$(echo "$prev" | awk '{print $2}')
       fi
     fi
-    echo "${phase}|${line_num}|${rest}" >> "$tmp_result"
-  done < "$failures_file"
+    echo "${phase}|${line_num}|${rest}" >>"$tmp_result"
+  done <"$failures_file"
 
   # Write grouped output
   {
@@ -101,7 +101,7 @@ correlate_failures_with_phase() {
         done
       fi
     done
-  } > "$output"
+  } >"$output"
 
   rm -f "$boundary_file" "$tmp_result"
   return 0
@@ -112,8 +112,14 @@ POSITIONAL_LOG=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --window) WINDOW="$2"; shift 2 ;;
-    *) POSITIONAL_LOG="$1"; shift ;;
+  --window)
+    WINDOW="$2"
+    shift 2
+    ;;
+  *)
+    POSITIONAL_LOG="$1"
+    shift
+    ;;
   esac
 done
 
@@ -125,11 +131,11 @@ source "$LIBS_DIR/notes-parse.sh" 2>/dev/null || {
     local ticket_dir="$1"
     local notes="$ticket_dir/notes.md"
     [ -f "$notes" ] || return 0
-    grep -A3 '## Complexity' "$notes" 2>/dev/null \
-      | grep '^\*\*Score:' \
-      | awk '{print $2}' \
-      | tr -d '\r' \
-      || true
+    grep -A3 '## Complexity' "$notes" 2>/dev/null |
+      grep '^\*\*Score:' |
+      awk '{print $2}' |
+      tr -d '\r' ||
+      true
   }
 }
 
@@ -190,7 +196,7 @@ for log_file in "${LOG_FILES[@]}"; do
   # ── Scan for failures ─────────────────────────────────────────────────
   while IFS= read -r line; do
     [ -z "$line" ] && continue
-    IFS='|' read -r _ts phase step status msg <<< "$line"
+    IFS='|' read -r _ts phase step status msg <<<"$line"
     [ "$phase" != "META" ] && continue
 
     if [ "$step" = "gate-stop" ] && [ "$status" = "fail" ]; then
@@ -202,7 +208,7 @@ for log_file in "${LOG_FILES[@]}"; do
       FAILURE_COUNT["$step"]=$((${FAILURE_COUNT["$step"]:-0} + 1))
       local_has_failure=1
     fi
-  done < "$log_file"
+  done <"$log_file"
 
   [ "$local_has_failure" -eq 1 ] && LOGS_WITH_FAILURES=$((LOGS_WITH_FAILURES + 1))
 
@@ -229,8 +235,8 @@ for log_file in "${LOG_FILES[@]}"; do
   # Track accuracy
   if [ "$declared" != "null" ] && [ "$actual" != "null" ]; then
     TOTAL_PAIRS=$((TOTAL_PAIRS + 1))
-    if { [ "$declared" = "simple" ] && [ "$actual" = "Smooth" ]; } || \
-       { [ "$declared" = "complex" ] && { [ "$actual" = "Rough" ] || [ "$actual" = "Hard" ]; }; }; then
+    if { [ "$declared" = "simple" ] && [ "$actual" = "Smooth" ]; } ||
+      { [ "$declared" = "complex" ] && { [ "$actual" = "Rough" ] || [ "$actual" = "Hard" ]; }; }; then
       CORRECT_COUNT=$((CORRECT_COUNT + 1))
     fi
   fi
@@ -248,9 +254,9 @@ HB_LOGS_WITH_DATA=0
 
 # Error diagnostics state — populated from retry/api/gate fail events
 # errors_by_ticket: JSON fragment built as an object string
-declare -A TICKET_ERROR_EVENTS=()   # ticket_id -> newline-delimited JSON event objects
+declare -A TICKET_ERROR_EVENTS=() # ticket_id -> newline-delimited JSON event objects
 TOTAL_ERROR_COUNT=0
-declare -A ERROR_CATEGORY_HIST=()   # event_name -> count
+declare -A ERROR_CATEGORY_HIST=() # event_name -> count
 
 for log_file in "${LOG_FILES[@]}"; do
   stem=$(basename "$log_file" .log)
@@ -265,7 +271,7 @@ for log_file in "${LOG_FILES[@]}"; do
 
   while IFS= read -r line; do
     [ -z "$line" ] && continue
-    local category event status msg detail ts
+    category="" event="" status="" msg="" detail="" ts=""
     ts=$(echo "$line" | cut -d'|' -f1)
     category=$(echo "$line" | cut -d'|' -f2)
     event=$(echo "$line" | cut -d'|' -f3)
@@ -339,7 +345,7 @@ for log_file in "${LOG_FILES[@]}"; do
       TOTAL_ERROR_COUNT=$((TOTAL_ERROR_COUNT + 1))
       ERROR_CATEGORY_HIST["$event"]=$((${ERROR_CATEGORY_HIST["$event"]:-0} + 1))
     fi
-  done < "$hb_file"
+  done <"$hb_file"
 
   [ "$local_has_hb" -eq 1 ] && HB_LOGS_WITH_DATA=$((HB_LOGS_WITH_DATA + 1))
 done
@@ -358,7 +364,7 @@ for ticket_id in "${!TICKET_ERROR_EVENTS[@]}"; do
     [ -z "$evt_line" ] && continue
     [ "$_evt_first" -eq 1 ] && _evt_first=0 || _events_arr+=","
     _events_arr+="$evt_line"
-  done <<< "${TICKET_ERROR_EVENTS[$ticket_id]}"
+  done <<<"${TICKET_ERROR_EVENTS[$ticket_id]}"
   _events_arr+="]"
   ERRORS_BY_TICKET_JSON+="\"$ticket_id\":$_events_arr"
 done
@@ -398,7 +404,7 @@ for code in "${!FAILURE_COUNT[@]}"; do
 done | sort -rn | while read -r count code; do
   # This while-read runs in a subshell due to the pipe, so we use a temp file
   echo "$count $code"
-done > /tmp/retro-hist-sorted.$$.txt
+done >/tmp/retro-hist-sorted.$$.txt
 
 # Re-read from temp file to avoid subshell issues
 HISTOGRAM_JSON="{"
@@ -407,7 +413,7 @@ while read -r count code; do
   [ -z "$code" ] && continue
   [ "$HIST_FIRST" -eq 1 ] && HIST_FIRST=0 || HISTOGRAM_JSON+=", "
   HISTOGRAM_JSON+="\"$code\": $count"
-done < /tmp/retro-hist-sorted.$$.txt
+done </tmp/retro-hist-sorted.$$.txt
 HISTOGRAM_JSON+="}"
 rm -f /tmp/retro-hist-sorted.$$.txt
 

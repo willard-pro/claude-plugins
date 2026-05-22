@@ -31,9 +31,9 @@ capture_agent_result() {
   local log_path="./logs/${ticket_id}-${phase}-agent.log"
 
   if [ -n "$attempt" ]; then
-    printf -- "--- Attempt %s ---\n" "$attempt" >> "$log_path"
-    printf "%s\n" "$result" >> "$log_path"
+    printf -- "--- Attempt %s ---\n" "$attempt" >>"$log_path"
+    printf "%s\n" "$result" >>"$log_path"
   else
-    printf "%s\n" "$result" > "$log_path"
+    printf "%s\n" "$result" >"$log_path"
   fi
 }

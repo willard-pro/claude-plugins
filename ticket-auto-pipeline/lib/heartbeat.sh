@@ -81,7 +81,7 @@ hb_write() {
   local iso
   iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-  echo "$iso|$category|$event|$status|$msg|$detail" >> "$HB_LOG_FILE"
+  echo "$iso|$category|$event|$status|$msg|$detail" >>"$HB_LOG_FILE"
 }
 
 # Semantic helpers — each delegates to hb_write with a fixed category
@@ -220,7 +220,7 @@ hb_validate_file() {
       echo "hb_validate_file: line $line_num invalid: $line" >&2
       ((errors++)) || true
     fi
-  done < "$file"
+  done <"$file"
 
   if [ "$errors" -gt 0 ]; then
     echo "hb_validate_file: $errors validation error(s)" >&2
@@ -242,7 +242,7 @@ hb_init() {
   if [ ! -f "$HB_LOG_FILE" ] || [ ! -s "$HB_LOG_FILE" ]; then
     local iso
     iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    echo "$iso|META|schema|info|$_HB_SCHEMA_VERSION|{}" > "$HB_LOG_FILE"
+    echo "$iso|META|schema|info|$_HB_SCHEMA_VERSION|{}" >"$HB_LOG_FILE"
   fi
 }
 
@@ -268,7 +268,7 @@ cl_write() {
   local dir
   dir=$(dirname "$CLAUDE_LOG_FILE")
   mkdir -p "$dir"
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|${phase}|${step}|${status}|${msg}" >> "$CLAUDE_LOG_FILE"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|${phase}|${step}|${status}|${msg}" >>"$CLAUDE_LOG_FILE"
 }
 
 # Initialize the claude log file. Idempotent — only writes schema header if
@@ -279,6 +279,6 @@ cl_init() {
   dir=$(dirname "$CLAUDE_LOG_FILE")
   mkdir -p "$dir"
   if [ ! -f "$CLAUDE_LOG_FILE" ] || [ ! -s "$CLAUDE_LOG_FILE" ]; then
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" > "$CLAUDE_LOG_FILE"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >"$CLAUDE_LOG_FILE"
   fi
 }
