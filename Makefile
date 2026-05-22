@@ -20,6 +20,9 @@ test-flow:
 	bash ticket-auto-pipeline/skills/ticket-flow/tests/phase2.sh
 
 lint:
+	shellcheck -S warning $(SCRIPTS)
+
+lint-strict:
 	shellcheck $(SCRIPTS)
 
 fmt-check:
