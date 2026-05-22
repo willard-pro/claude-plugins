@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0 (2026-05-22)
+
+- Feat: unit test suites for all 7 lib scripts (72 tests) — `linear-api.sh`, `env-check.sh`, `notes-parse.sh`, `ticket-dir.sh`, `heartbeat.sh`, `capture-transcript.sh`, `reconcile-comments.sh` — each with a self-contained test harness using `socat` for HTTP stubbing where needed
+- Feat: ShellCheck linting across all 28 project shell scripts via `make lint`
+- Feat: shfmt formatting enforcement via `make fmt-check` (CI-safe diff mode) and `make fmt` (local auto-fix)
+- Feat: GitHub Actions CI workflow (`.github/workflows/test.yml`) — runs lint → format check → tests on push/PR to main; fails build on any non-zero exit
+- Chore: `marketplace.json` version synced from 0.4.0 to 0.6.0 (missed 0.4.1, 0.5.0, 0.5.1, 0.5.2 bumps)
+
 ## 0.5.2 (2026-05-21)
 
 - Feat: `-claude.log` visibility layer — a third log stream (`{TICKET-ID}-claude.log`) written by the orchestrator at each phase boundary; no 60-char MSG restriction. Carries handoff context before agent spawn, verbose done data after success, and diagnostic failure context (last heartbeat event, path existence) after failure. `cl_write`/`cl_init` helpers added to `lib/heartbeat.sh`; `CLAUDE_LOG_FILE` exported to all 10 agent spawn instructions for sub-agent access.

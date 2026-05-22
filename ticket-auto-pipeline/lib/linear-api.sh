@@ -155,10 +155,10 @@ get_comments() {
 #          .data.comments, .comments
 normalize_comments() {
   jq 'if type == "array" then .
-      elif .data?.issue?.comments?.nodes then .data.issue.comments.nodes
-      elif .data?.issue?.comments then .data.issue.comments
-      elif .data?.comments then .data.comments
-      elif .comments then .comments
+      elif (.data?.issue?.comments?.nodes? // false) then .data.issue.comments.nodes
+      elif (.data?.issue?.comments // false) then .data.issue.comments
+      elif (.data?.comments // false) then .data.comments
+      elif (.comments // false) then .comments
       else . end'
 }
 
