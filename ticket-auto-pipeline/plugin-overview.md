@@ -30,10 +30,12 @@ Maintainer-facing overview of the ticket-auto-pipeline plugin. Read this before 
 | Reproduce | `ticket-reproduce` | 1.5 | Yes — bug reproduction (bug tickets only) |
 | Implement | `ticket-implement` | 3 | Yes — code changes |
 | Verify | `ticket-verify` | 4 | Yes — Playwright UAT |
+| Document | `ticket-document` | 4.6 | Yes — post-implement ai-context.md generation |
+| Maintenance | `wiki-maintenance` | 4.7 | Yes — errata incorporation, ai-context synthesis |
 | PR Review | `ticket-pr-review` | 5 | Yes — code review pass |
 | PR Iterate | `ticket-pr-iterate` | 5c | Yes — iteration on feedback |
 | Comment reconcile | (inline) | 5.5 | No — PR comment cross-reference |
-| Maintenance | `ticket-flow` + manual | 6 | No — label/state cleanup |
+| PR Feedback (retry) | (inline) | 5.5-post | No — post-feedback re-invoke pipeline steps |
 
 ### Support systems
 | System | Components | Purpose |
@@ -59,6 +61,8 @@ ticket-auto (orchestrator)
   │   └─ ticket-flow
   ├─ ticket-verify (UAT)
   │   └─ ticket-flow
+  ├─ ticket-document (post-implement ai-context.md)
+  ├─ wiki-maintenance (errata + ai-context synthesis)
   ├─ ticket-pr-review (code review)
   │   ├─ ticket-flow
   │   └─ ticket-pr-iterate (feedback loop)

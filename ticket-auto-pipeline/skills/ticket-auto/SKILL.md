@@ -257,7 +257,7 @@ Follow the agent spawn template with: PHASE={PHASE}, SKILL={SKILL}, DESCRIPTION=
 | Slot | Description |
 |------|-------------|
 | `{PHASE}` | Uppercase phase: APPRAISE, REPRODUCE, EXEC, IMPLEMENT, VERIFY, MAINTENANCE, PR-REVIEW |
-| `{SKILL}` | Slash command: `/ticket-appraise`, `/ticket-reproduce`, `/ticket-appraise-exec`, `/ticket-implement`, `/ticket-verify`, `/wiki-maintenance`, `/ticket-pr-review`, `/ticket-pr-iterate` |
+| `{SKILL}` | Slash command: `/ticket-appraise`, `/ticket-reproduce`, `/ticket-appraise-exec`, `/ticket-implement`, `/ticket-verify`, `/wiki-maintenance`, `/ticket-document`, `/ticket-pr-review`, `/ticket-pr-iterate` |
 | `{DESCRIPTION}` | What the agent does (for the waiting log entry) |
 | `{EXTRA_FLAGS}` | Flags like `--from-auto`, `--env local`, `--from-step {FROM}` |
 | `{SKILL_INSTRUCTIONS}` | Additional instructions after the exports (e.g., "Follow the skill exactly.", "Use Serena for all code navigation.") |
@@ -318,8 +318,9 @@ cat > {ticket-dir}/auto-session.md << 'TRACE'
 - [x] Step 2: Exec — {simple-fix|openspec: <name>}
 - [x] Step 3: Gate — {auto-approved|stopped: complex}
 - [x] Step 4: Implement — {Smooth|Rough|Hard}
-- [x] Step 4.6: Wiki Maintenance — {N} errata processed
 - [x] Step 4.5: Verify — {✅ PASS (N attempts)|❌ FAIL after N|skipped: no UI}
+- [x] Step 4.6: Document — ai-context.md written ({N} patterns, {N} decisions, {trivial|non-trivial})
+- [x] Step 4.7: Wiki Maintenance — {N} errata processed, {N} ai-context findings promoted
 - [x] Step 5: PR review — {✅|⚠️}, {N} iterations, {N} re-verify retries
 - [x] Step 6: Report — done
 TRACE
@@ -331,7 +332,7 @@ TRACE
 
 Run `/ticket-detect-resume {TICKET-ID}` inline (execute the skill logic directly — no agent spawn needed). Parse the `DETECT_RESUME_RESULT` block and set all variables:
 
-`{RESUME_STEP}`, `{APPRAISE_FROM}`, `{REPRODUCE_FROM}`, `{EXEC_FROM}`, `{IMPLEMENT_FROM}`, `{MAINTENANCE_FROM}`, `{VERIFY_FROM}`, `{PR_REVIEW_FROM}`, `{PR_ITERATE_FROM}`, `{TICKET_DIR}`, `{COMPLEXITY}`, `{ARTIFACT_TYPE}`, `{BRANCH}`, `{TICKET_TITLE}`, `{VERIFY_ATTEMPTS}`, `{ITERATION}`, `{PR_FEEDBACK_CYCLE}`, `{AUTONOMY}` (read from `META|autonomy|info|` log line).
+`{RESUME_STEP}`, `{APPRAISE_FROM}`, `{REPRODUCE_FROM}`, `{EXEC_FROM}`, `{IMPLEMENT_FROM}`, `{MAINTENANCE_FROM}`, `{DOCUMENT_FROM}`, `{VERIFY_FROM}`, `{PR_REVIEW_FROM}`, `{PR_ITERATE_FROM}`, `{TICKET_DIR}`, `{COMPLEXITY}`, `{ARTIFACT_TYPE}`, `{BRANCH}`, `{TICKET_TITLE}`, `{VERIFY_ATTEMPTS}`, `{ITERATION}`, `{PR_FEEDBACK_CYCLE}`, `{AUTONOMY}` (read from `META|autonomy|info|` log line).
 
 **If `RESUME_STEP = SCHEMA_MISMATCH`:**
 Report:
@@ -375,7 +376,8 @@ Based on `{RESUME_STEP}`, jump directly to the corresponding step. Steps before 
 | STEP_3_5 | Step 3.5 (Comment Reconciliation) |
 | STEP_4 | Step 4 (Implement) |
 | STEP_4_5 | Step 4.5 (Verify) |
-| STEP_4_6 | Step 4.6 (Wiki Maintenance) |
+| STEP_4_6 | Step 4.6 (Document) |
+| STEP_4_7 | Step 4.7 (Wiki Maintenance) |
 | STEP_5 | Step 5 (PR Review loop) |
 | STEP_5_5 | Step 5.5 (PR Comment Reconciliation) |
 | STEP_6 | Step 6 (Report) |
@@ -918,7 +920,7 @@ Only if the ticket has a UI surface. Otherwise:
 hb_decision "verification-verdict" "skip" "no UI surface — verification skipped"
 hb_heartbeat "phase-transition" "IMPLEMENT → MAINTENANCE (verify skipped)"
 ```
-Proceed to Step 4.6 (Wiki Maintenance).
+Proceed to Step 4.6 (Document).
 
 ### Step 4.5a — Verification attempt
 
@@ -957,7 +959,7 @@ _last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown
 cl_write "VERIFY" "context" "fail" "FAIL attempt {VERIFY_ATTEMPTS}/3 — last_hb: ${_last_hb}"
 ```
 
-- **PASS** → proceed to Step 4.6 (Wiki Maintenance).
+- **PASS** → proceed to Step 4.6 (Document).
 - **FAIL** → proceed to Step 4.5b.
 
 ### Step 4.5b — Retry decision
@@ -987,19 +989,74 @@ If `{VERIFY_ATTEMPTS} < 3`:
   ticket-implement Step 2.5 detects the Verification FAIL in notes.md,
   appends `## Verification #N` to the plan, and implements the fix.
   After Step 4 completes, proceed through 4a to 4.5a again.
-  Step 4.6 (Wiki Maintenance) runs after VERIFY passes.
+  Step 4.6 (Document) runs after VERIFY passes.
   Do NOT re-initialize `{VERIFY_ATTEMPTS}`.
 
 Pass `--from-auto` to the ticket-implement agent spawn in Step 4 — add `--from-auto` to the agent prompt.
 
 ---
 
-## Step 4.6 — Wiki Maintenance
+## Step 4.6 — Document
 
-Incorporate any errata discovered during implementation into the project wiki so downstream tickets benefit from corrected call chains.
+Generate `ai-context.md` in the ticket directory — a structured, AI-optimized context file capturing what changed, patterns used, key files, gotchas, and decisions from the implementation. This runs after verify and before wiki maintenance.
+
+### Document spawn
+Follow the agent spawn template with: PHASE=MAINTENANCE, SKILL=/ticket-document, DESCRIPTION=generating ai-context.md for {TICKET-ID}, EXTRA_FLAGS=--from-auto, SKILL_INSTRUCTIONS=Generate ai-context.md for {TICKET-ID} in {TICKET_DIR}. Read notes.md, diff the branch against develop, classify significance, and write the context file. Report the final output including the DOCUMENT_RESULT block., EXTRACT=DOCUMENT_FILE,PATTERNS,DECISIONS,SIGNIFICANCE, FAIL_ACTION=warn-continue, NEXT_PHASE=MAINTENANCE
+
+Write the waiting log entry:
+
+Write the phase context file so the token-tracker hook knows where to log:
+
+```bash
+cl_write "MAINTENANCE" "handoff" "info" "post-implement documentation for {TICKET-ID}"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|waiting|Agent launched — generating ai-context.md for {TICKET-ID}" >> {LOG_FILE}
+hb_heartbeat "orchestrator-waiting" "agent document launched"
+echo "MAINTENANCE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+```
+
+Spawn a `general-purpose` agent:
+
+```
+Run /ticket-document --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Generate ai-context.md for {TICKET-ID} in {TICKET_DIR}. Read notes.md, diff the branch against develop, classify significance, and write the context file. Report the final output including the DOCUMENT_RESULT block.
+```
+
+Wait for the agent. Persist the raw output immediately before extracting any fields:
+```bash
+capture_agent_result "{TICKET-ID}" "document" "$AGENT_RESULT"
+```
+
+Extract:
+- `{DOCUMENT_FILE}` — path to ai-context.md, or `none` if failed
+- `{PATTERNS}` — number of patterns documented (0 if trivial or failed)
+- `{DECISIONS}` — number of decisions documented (0 if trivial or failed)
+- `{SIGNIFICANCE}` — `trivial` or `non-trivial` (from the classification audit log)
+
+If the agent fails → log a warning but continue (document is non-blocking):
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|fail|Agent failed — continuing" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "document agent failed — continuing (non-blocking)"
+_last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
+cl_write "MAINTENANCE" "context" "fail" "document agent failed (non-blocking) — last_hb: ${_last_hb}"
+cl_write RETRO hint info "sub-agent spawn failure in DOCUMENT phase — check agent isolation, tool availability, and CLAUDE_LOG_FILE export for diagnostics"
+```
+
+On success:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|{DOCUMENT_FILE} ({PATTERNS} patterns, {DECISIONS} decisions, {SIGNIFICANCE})" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "document agent done — {SIGNIFICANCE}, {PATTERNS} patterns, {DECISIONS} decisions"
+cl_write "MAINTENANCE" "document" "done" "file={DOCUMENT_FILE} patterns={PATTERNS} decisions={DECISIONS} significance={SIGNIFICANCE}"
+```
+
+Non-blocking: document agent failure does not stop the pipeline. The ai-context.md file is a nice-to-have — the pipeline proceeds to wiki maintenance regardless.
+
+---
+
+## Step 4.7 — Wiki Maintenance
+
+Incorporate any errata discovered during implementation into the project wiki so downstream tickets benefit from corrected call chains. Also scans the ai-context.md generated in Step 4.6 and promotes non-obvious findings into consolidated wiki entries.
 
 ### Maintenance spawn
-Follow the agent spawn template with: PHASE=MAINTENANCE, SKILL=/wiki-maintenance, DESCRIPTION=wiki maintenance for {TICKET-ID}, EXTRA_FLAGS=, SKILL_INSTRUCTIONS=Process any unresolved errata entries that were appended by ticket-implement Step 4c. Edit only wiki files — do not modify source code. Report the final output including count of errata processed and files modified., EXTRACT=ERRATA_COUNT, FAIL_ACTION=warn-continue, NEXT_PHASE=PR-REVIEW
+Follow the agent spawn template with: PHASE=MAINTENANCE, SKILL=/wiki-maintenance, DESCRIPTION=wiki maintenance for {TICKET-ID}, EXTRA_FLAGS=, SKILL_INSTRUCTIONS=Process any unresolved errata entries that were appended by ticket-implement Step 4c. Also scan recent ai-context.md files and promote non-obvious findings to wiki entries. Edit only wiki files — do not modify source code. Report the final output including count of errata processed, ai-context findings promoted, and files modified., EXTRACT=ERRATA_COUNT,AI_CONTEXT_FINDINGS, FAIL_ACTION=warn-continue, NEXT_PHASE=PR-REVIEW
 
 Write the waiting log entry:
 
@@ -1013,7 +1070,7 @@ echo "MAINTENANCE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 Spawn a `general-purpose` agent:
 
 ```
-Run /wiki-maintenance. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Process any unresolved errata entries that were appended by ticket-implement Step 4c. Edit only wiki files — do not modify source code. Report the final output including count of errata processed and files modified.
+Run /wiki-maintenance. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Process any unresolved errata entries that were appended by ticket-implement Step 4c. Also scan recent ai-context.md files across ticket directories and promote non-obvious findings to wiki entries. Edit only wiki files — do not modify source code. Report the final output including count of errata processed, ai-context findings promoted, and files modified.
 ```
 
 Wait for the agent. Persist the raw output immediately before extracting any fields:
@@ -1034,10 +1091,10 @@ cl_write "MAINTENANCE" "context" "fail" "wiki maintenance failed (non-blocking) 
 
 On success:
 ```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|done|{ERRATA_COUNT} errata incorporated" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "wiki-maintenance agent done — {ERRATA_COUNT} errata"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|done|{ERRATA_COUNT} errata incorporated, {AI_CONTEXT_FINDINGS} ai-context findings promoted to wiki" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "wiki-maintenance agent done — {ERRATA_COUNT} errata, {AI_CONTEXT_FINDINGS} ai-context findings"
 hb_heartbeat "phase-transition" "MAINTENANCE → PR-REVIEW"
-cl_write "MAINTENANCE" "maintenance" "done" "errata_processed={ERRATA_COUNT}"
+cl_write "MAINTENANCE" "maintenance" "done" "errata_processed={ERRATA_COUNT} ai_context_findings={AI_CONTEXT_FINDINGS}"
 ```
 
 Non-blocking: wiki maintenance failure does not stop the pipeline. The errata remain unresolved and will be picked up by the next ticket's maintenance run.
@@ -1263,7 +1320,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|re-verify|fail|FAIL — criteria not
 hb_heartbeat "agent-returned" "re-verify agent done — FAIL (iteration {ITERATION}, retry {VERIFY_RETRIES})"
 ```
 
-- **PASS** → run Step 4.6 (Wiki Maintenance) to incorporate any new errata from re-implementation, then proceed to Step 5e.
+- **PASS** → run Step 4.6 (Document) then Step 4.7 (Wiki Maintenance) to regenerate ai-context.md and incorporate any new errata from re-implementation, then proceed to Step 5e.
 - **FAIL** → proceed to retry logic below.
 
 #### Step 5d2-retry
@@ -1612,12 +1669,53 @@ capture_agent_result "{TICKET-ID}" "verify-feedback" "$AGENT_RESULT" "{PR_FEEDBA
 
 Extract `{VERDICT}` (PASS or FAIL). On FAIL, apply the standard verify retry logic from Step 4.5b (up to 3 attempts, loop back to implement on retry). On PASS, proceed.
 
-### Step 5.5-post-d — Wiki Maintenance
+### Step 5.5-post-d — Document
 
-Run wiki maintenance (same as Step 4.6 pattern, non-blocking):
+Regenerate `ai-context.md` to reflect PR feedback amendments (non-blocking, same as Step 4.6 pattern):
+
+### Document spawn
+Follow the agent spawn template with: PHASE=MAINTENANCE, SKILL=/ticket-document, DESCRIPTION=regenerating ai-context.md for {TICKET-ID} (after PR feedback), EXTRA_FLAGS=--from-auto, SKILL_INSTRUCTIONS=Generate ai-context.md for {TICKET-ID} in {TICKET_DIR}. Read notes.md, diff the branch against develop, classify significance, and write the context file. Report the final output including the DOCUMENT_RESULT block., EXTRACT=DOCUMENT_FILE,PATTERNS,DECISIONS,SIGNIFICANCE, FAIL_ACTION=warn-continue, NEXT_PHASE=MAINTENANCE
+
+Write the waiting log entry:
+
+```bash
+cl_write "MAINTENANCE" "handoff" "info" "post-feedback documentation for {TICKET-ID}"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|waiting|Agent launched — regenerating ai-context.md for {TICKET-ID} (post-feedback)" >> {LOG_FILE}
+hb_heartbeat "orchestrator-waiting" "agent document launched (post-feedback)"
+echo "MAINTENANCE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+```
+
+Spawn a `general-purpose` agent:
+
+```
+Run /ticket-document --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Generate ai-context.md for {TICKET-ID} in {TICKET_DIR}. Read notes.md (including PR Feedback sections), diff the branch against develop, classify significance, and write the context file. Report the final output including the DOCUMENT_RESULT block.
+```
+
+Wait for the agent. Persist the raw output:
+```bash
+capture_agent_result "{TICKET-ID}" "document-feedback" "$AGENT_RESULT" "{PR_FEEDBACK_N}"
+```
+
+Extract `{DOCUMENT_FILE}`, `{PATTERNS}`, `{DECISIONS}`, `{SIGNIFICANCE}`. On failure, log a warning and continue (non-blocking).
+
+On success:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|{DOCUMENT_FILE} ({PATTERNS} patterns, {DECISIONS} decisions, {SIGNIFICANCE})" >> {LOG_FILE}
+hb_heartbeat "agent-returned" "document agent done (post-feedback) — {SIGNIFICANCE}, {PATTERNS} patterns, {DECISIONS} decisions"
+cl_write "MAINTENANCE" "document" "done" "file={DOCUMENT_FILE} patterns={PATTERNS} decisions={DECISIONS} significance={SIGNIFICANCE}"
+```
+
+### Step 5.5-post-d2 — Wiki Maintenance
+
+Run wiki maintenance (same as Step 4.7 pattern, non-blocking):
 
 ### Maintenance spawn
 Follow the agent spawn template with: PHASE=MAINTENANCE, SKILL=/wiki-maintenance, DESCRIPTION=wiki maintenance for {TICKET-ID} (after PR feedback), EXTRA_FLAGS=, SKILL_INSTRUCTIONS=Process any unresolved errata entries. Edit only wiki files — do not modify source code. Report the final output including count of errata processed and files modified., EXTRACT=ERRATA_COUNT, FAIL_ACTION=warn-continue, NEXT_PHASE=PR-REVIEW
+
+Write the waiting log entry, spawn a `general-purpose` agent with `/wiki-maintenance`, wait, and capture result (same pattern as Step 4.7). On success, include phase-transition heartbeat:
+```bash
+hb_heartbeat "phase-transition" "MAINTENANCE → PR-REVIEW"
+```
 
 ### Step 5.5-post-e — Re-run PR review
 
