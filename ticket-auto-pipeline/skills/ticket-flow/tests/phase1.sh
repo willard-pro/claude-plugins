@@ -204,6 +204,165 @@ test_detect_resume_schema_mismatch() {
   echo "$out" | grep -q "SCHEMA_MISMATCH"
 }
 
+# ── test_detect_resume_maintenance_document_done ────────────────────────────
+
+test_detect_resume_maintenance_document_done() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs"
+  local log="$tmpdir/logs/WIL-99-pipeline.log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple, 5 files traced" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|simple-fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|Smooth, branch: wil-99--fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|ai-context.md (3 patterns, 2 decisions, non-trivial)" >>"$log"
+
+  local out
+  out=$(CLAUDE_SKILLS_LIB="$PLUGIN_DIR/lib" cd "$tmpdir" && bash "$DETECT_RESUME_SH" WIL-99 2>/dev/null || true)
+  local resume_step
+  resume_step=$(echo "$out" | grep 'RESUME_STEP:' | awk '{print $2}')
+  rm -rf "$tmpdir"
+  [ "$resume_step" = "STEP_4_7" ]
+}
+
+# ── test_detect_resume_maintenance_document_waiting ─────────────────────────
+
+test_detect_resume_maintenance_document_waiting() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs"
+  local log="$tmpdir/logs/WIL-99-pipeline.log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple, 5 files traced" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|simple-fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|Smooth, branch: wil-99--fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|waiting|Agent launched — generating ai-context.md" >>"$log"
+
+  local out
+  out=$(CLAUDE_SKILLS_LIB="$PLUGIN_DIR/lib" cd "$tmpdir" && bash "$DETECT_RESUME_SH" WIL-99 2>/dev/null || true)
+  local resume_step
+  resume_step=$(echo "$out" | grep 'RESUME_STEP:' | awk '{print $2}')
+  rm -rf "$tmpdir"
+  [ "$resume_step" = "STEP_4_6" ]
+}
+
+# ── test_detect_resume_maintenance_document_fail ────────────────────────────
+
+test_detect_resume_maintenance_document_fail() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs"
+  local log="$tmpdir/logs/WIL-99-pipeline.log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple, 5 files traced" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|simple-fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|Smooth, branch: wil-99--fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|fail|Agent failed — continuing" >>"$log"
+
+  local out
+  out=$(CLAUDE_SKILLS_LIB="$PLUGIN_DIR/lib" cd "$tmpdir" && bash "$DETECT_RESUME_SH" WIL-99 2>/dev/null || true)
+  local resume_step
+  resume_step=$(echo "$out" | grep 'RESUME_STEP:' | awk '{print $2}')
+  rm -rf "$tmpdir"
+  [ "$resume_step" = "STEP_4_7" ]
+}
+
+# ── test_detect_resume_maintenance_maintenance_done ─────────────────────────
+
+test_detect_resume_maintenance_maintenance_done() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs"
+  local log="$tmpdir/logs/WIL-99-pipeline.log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple, 5 files traced" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|simple-fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|Smooth, branch: wil-99--fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|ai-context.md" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|done|2 errata incorporated, 1 ai-context findings promoted to wiki" >>"$log"
+
+  local out
+  out=$(CLAUDE_SKILLS_LIB="$PLUGIN_DIR/lib" cd "$tmpdir" && bash "$DETECT_RESUME_SH" WIL-99 2>/dev/null || true)
+  local resume_step
+  resume_step=$(echo "$out" | grep 'RESUME_STEP:' | awk '{print $2}')
+  rm -rf "$tmpdir"
+  [ "$resume_step" = "STEP_5" ]
+}
+
+# ── test_detect_resume_maintenance_maintenance_waiting ──────────────────────
+
+test_detect_resume_maintenance_maintenance_waiting() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs"
+  local log="$tmpdir/logs/WIL-99-pipeline.log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple, 5 files traced" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|simple-fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|Smooth, branch: wil-99--fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|ai-context.md" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|waiting|Agent launched — wiki maintenance" >>"$log"
+
+  local out
+  out=$(CLAUDE_SKILLS_LIB="$PLUGIN_DIR/lib" cd "$tmpdir" && bash "$DETECT_RESUME_SH" WIL-99 2>/dev/null || true)
+  local resume_step
+  resume_step=$(echo "$out" | grep 'RESUME_STEP:' | awk '{print $2}')
+  rm -rf "$tmpdir"
+  [ "$resume_step" = "STEP_4_7" ]
+}
+
+# ── test_detect_resume_maintenance_maintenance_fail ─────────────────────────
+
+test_detect_resume_maintenance_maintenance_fail() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs"
+  local log="$tmpdir/logs/WIL-99-pipeline.log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple, 5 files traced" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|simple-fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|Smooth, branch: wil-99--fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|ai-context.md" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|fail|Agent failed — continuing" >>"$log"
+
+  local out
+  out=$(CLAUDE_SKILLS_LIB="$PLUGIN_DIR/lib" cd "$tmpdir" && bash "$DETECT_RESUME_SH" WIL-99 2>/dev/null || true)
+  local resume_step
+  resume_step=$(echo "$out" | grep 'RESUME_STEP:' | awk '{print $2}')
+  rm -rf "$tmpdir"
+  [ "$resume_step" = "STEP_5" ]
+}
+
+# ── test_detect_resume_maintenance_fallback_document ────────────────────────
+
+test_detect_resume_maintenance_fallback_document() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs"
+  local log="$tmpdir/logs/WIL-99-pipeline.log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple, 5 files traced" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|simple-fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|Smooth, branch: wil-99--fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|start|Generating ai-context.md" >>"$log"
+
+  local out
+  out=$(CLAUDE_SKILLS_LIB="$PLUGIN_DIR/lib" cd "$tmpdir" && bash "$DETECT_RESUME_SH" WIL-99 2>/dev/null || true)
+  local resume_step
+  resume_step=$(echo "$out" | grep 'RESUME_STEP:' | awk '{print $2}')
+  local doc_from
+  doc_from=$(echo "$out" | grep 'DOCUMENT_FROM:' | awk '{print $2}')
+  rm -rf "$tmpdir"
+  [ "$resume_step" = "STEP_4_6" ] && [ -z "$doc_from" ]
+}
+
 # ── test_ticket_dir_disambiguation ───────────────────────────────────────────
 
 test_ticket_dir_disambiguation() {
@@ -275,6 +434,13 @@ for fn in \
   test_flow_dispatcher_unknown_trigger \
   test_linear_api_retry_on_503 \
   test_detect_resume_schema_mismatch \
+  test_detect_resume_maintenance_document_done \
+  test_detect_resume_maintenance_document_waiting \
+  test_detect_resume_maintenance_document_fail \
+  test_detect_resume_maintenance_maintenance_done \
+  test_detect_resume_maintenance_maintenance_waiting \
+  test_detect_resume_maintenance_maintenance_fail \
+  test_detect_resume_maintenance_fallback_document \
   test_ticket_dir_disambiguation \
   test_gen_mermaid_roundtrip; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue

@@ -18,7 +18,7 @@ If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/sk
 - **Errata discovered**: after scanning all wiki files, write `hb_decision "errata-count" "info" "{N} unresolved entries found" '{"count":"{N}"}'`; if none found, write `hb_decision "errata-count" "info" "all errata resolved"`
 - **New file created**: if a fix requires creating a new wiki file, write `hb_decision "wiki-file-created" "fired" "created {filename}" '{"file":"{filename}"}'`
 - **Unclear entry**: if an errata entry is unclear and skipped, write `hb_decision "errata-skipped" "warn" "unclear entry skipped" '{"ticket":"{TICKET-ID}"}'`
-- **Maintenance complete**: after all entries processed, write `hb_decision "maintenance-complete" "fired" "{N} errata processed, {M} files modified" '{"processed":"{N}","modified":"{M}"}'`
+- **Maintenance complete**: after all entries processed, write `hb_decision "maintenance-complete" "fired" "{N} errata processed, {M} ai-context findings promoted, {K} files modified" '{"errata_processed":"{N}","ai_context_findings":"{M}","modified":"{K}"}'`
 
 ---
 
@@ -124,12 +124,75 @@ Do NOT delete the entry — the struck-through history shows what has been maint
 
 ---
 
+## Step 2.5 — Synthesize ai-context.md findings
+
+In addition to errata (failures), scan recent `ai-context.md` files (successes) across ticket directories. Promote non-obvious findings into consolidated wiki entries.
+
+### 2.5a — Discover ai-context.md files
+
+Find `ai-context.md` files created within the last 90 days:
+
+```bash
+find . -path "*/tickets/*/ai-context.md" -newermt "90 days ago" 2>/dev/null | head -50
+```
+
+If the `tickets` directory is elsewhere, derive the path from the ticket-auto workspace structure or search from the repo root. If no files are found, skip to Step 3.
+
+### 2.5b — Read and evaluate each file
+
+Read each `ai-context.md` file. It is short by design (a single page with named sections). For each file, evaluate findings against these criteria:
+
+**Inclusion criteria** (promote to wiki):
+- New conventions or patterns not already documented in the wiki — discovered from the **Patterns used** section
+- Gotchas involving undocumented invariants or hidden coupling — from the **Watch out for** section
+- Decisions with non-obvious rationale — from the **Decisions** section
+- Cross-cutting changes that touch multiple modules — derived from the **What changed** and **Key files** sections
+
+**Exclusion criteria** (stay in ai-context.md only):
+- File-by-file change summaries from **What changed** — too granular for wiki
+- Findings already covered by an existing wiki entry — check before creating
+- Trivial-change one-liners ("Trivial change — no architectural impact")
+- Findings from files tagged `[ai-context-stale]` (already marked stale by appraise)
+
+### 2.5c — Write or update wiki entries
+
+For each finding that meets inclusion criteria, check if the wiki already has a relevant entry. Read the most relevant wiki file(s) identified via `{WIKI_ROOT}/index.md`.
+
+**If the finding is already documented:** update the existing entry with the additional source ticket reference (e.g., add `(WIL-67)` to an existing line). Do NOT create a duplicate entry.
+
+**If the finding is new:** add it to the appropriate wiki file. Each entry has two sections:
+
+```markdown
+### {topic} (human)
+
+**Summary:** {high-level summary of what's changed in this area — terse, skimmable}
+**Convention changes:** {new or updated conventions — one-liners}
+**Notable gotchas:** {watch-out items — one per line, with source ticket IDs}
+
+### {topic} (AI)
+
+**File paths:** {list of relevant files with one-line role descriptions}
+**Call chains:** {trace paths if applicable}
+**Patterns:** {pattern descriptions with rationale}
+**Decisions:** {decision rationales with context}
+**Source tickets:** {list of ticket IDs that contributed to this entry}
+```
+
+The human-facing section (`(human)`) is for quick skimming — it answers "what's changed here recently?" The AI-facing section (`(AI)`) is what the appraise agent reads — it provides the details needed to implement in this area.
+
+### 2.5d — Count and track
+
+Track the number of ai-context.md files processed and the number of findings promoted to wiki. These counts are included in the Step 3 report alongside errata counts.
+
+---
+
 ## Step 3 — Report
 
 ```
 ## Wiki maintenance complete
 
 **Errata processed:** {count}
+**ai-context findings promoted:** {count}
 **Files modified:** {list}
 
 **Changes:**

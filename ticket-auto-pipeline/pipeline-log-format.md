@@ -53,6 +53,9 @@ Never use `>>` without a trailing newline on the echo string. Always quote `$LOG
 ### PR-REVIEW
 `fetch-ticket` `extract-requirements` `find-pr` `validate-diff` `post-findings` `merge-decision`
 
+### MAINTENANCE
+`document` `maintenance`
+
 ## META entries
 
 Non-phase metadata. `STEP` is the key, `MSG` is the value:
