@@ -42,6 +42,8 @@ _socat_stub() {
   # Start a socat HTTP stub on $1 that returns $2 (status code) for the first
   # $3 requests, then $4 for subsequent ones.
   # Returns the socat PID.
+  # NOTE: socat must be detached from the subshell's job control (</dev/null,
+  # >/dev/null, &) because command substitution $(...) waits for all children.
   local port="$1"
   local fail_code="$2"
   local fail_count="$3"
@@ -59,7 +61,7 @@ _socat_stub() {
       len=\${#body}
       printf \"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: \$len\r\n\r\n\$body\"
     fi
-  '" &
+  '" </dev/null >/dev/null 2>&1 &
   echo $!
 }
 
@@ -156,21 +158,33 @@ test_flow_assertion_catches_silent_noop() {
 # ── test_linear_api_retry_on_503 ─────────────────────────────────────────────
 
 test_linear_api_retry_on_503() {
-  local port=18765
+  if ! command -v socat &>/dev/null; then
+    echo "SKIP: socat not available" >&2
+    return 0
+  fi
+
+  # Use a random high port to avoid conflicts with parallel CI jobs
+  local port=$((20000 + RANDOM % 10000))
   local ok_body
-  # Minimal valid viewer response
   ok_body=$(echo '{"data":{"viewer":{"id":"u1","name":"Test"}}}' | base64 -w0)
 
   local socat_pid
   socat_pid=$(_socat_stub "$port" 503 2 "$ok_body")
-  sleep 0.2
+  sleep 0.3
+
+  # Verify socat actually started before proceeding
+  if ! kill -0 "$socat_pid" 2>/dev/null; then
+    echo "SKIP: socat failed to start" >&2
+    return 0
+  fi
 
   local exit_code=0
   LINEAR_API_URL="http://127.0.0.1:$port" LINEAR_API_KEY="test" \
-    bash -c "source $PLUGIN_DIR/lib/linear-api.sh; linear_graphql '{\"query\":\"query{viewer{id name}}\"} '" \
+    timeout 15 bash -c "source $PLUGIN_DIR/lib/linear-api.sh; linear_graphql '{\"query\":\"query{viewer{id name}}\"} '" \
     >/dev/null 2>&1 || exit_code=$?
 
   kill "$socat_pid" 2>/dev/null || true
+  wait "$socat_pid" 2>/dev/null || true
   [ "$exit_code" -eq 0 ]
 }
 
