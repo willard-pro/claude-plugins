@@ -4,17 +4,19 @@
 
 ## What it does
 
-`app-knowledge` is a living reference file, not an interactive skill — you read it directly rather than invoking it. It captures business rules, user role definitions, UI behaviour patterns, and system conventions discovered during Playwright sessions and ticket work. When reasoning about role-based behaviour during verification or reproduction, agents read this file to avoid re-deriving the same domain knowledge. New learnings are appended over time as they are discovered.
+`app-knowledge` is a living reference file rather than an interactive skill — agents read it directly to look up domain facts rather than invoking it as a command. It records business rules, user role definitions, UI behaviour patterns, and system conventions discovered during Playwright sessions and ticket work. Instead of re-deriving the same "what does this role see?" or "what does this field mean?" logic on every ticket, agents consult this file first. New learnings get appended to the relevant section over time so the file grows more useful with each ticket processed.
 
-## Trigger
+## How to use
 
-**Not invoked as a slash command.** Read directly:
+Read the file directly when you need domain context — no slash command required:
 
 ```bash
 cat ~/.claude/skills/app-knowledge/SKILL.md
 ```
 
-Referenced by: `/ticket-verify`, `/ticket-reproduce`, and any agent reasoning about app behaviour.
+To add a new learning, append it under the relevant section at the bottom.
+
+Referenced automatically by: `/ticket-verify`, `/ticket-reproduce`.
 
 ## Inputs
 

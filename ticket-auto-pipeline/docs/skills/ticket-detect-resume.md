@@ -2,11 +2,11 @@
 
 > **Private helper** — not intended for direct invocation. Called internally by [`/ticket-auto`](ticket-auto.md) at Step 0.7 only.
 
-Reads the pipeline log for a ticket, determines where the last run reached, and emits a `DETECT_RESUME_RESULT` block so the orchestrator can jump to the correct restart point.
+Reads the pipeline log for a ticket, determines where the last run stopped, and emits a `DETECT_RESUME_RESULT` block so the orchestrator knows exactly where to restart — skipping phases that already completed.
 
 ## What it does
 
-`ticket-detect-resume` is the crash recovery mechanism for the pipeline. When `/ticket-auto` starts, it calls this skill first. The skill delegates entirely to `detect-resume.sh`, which parses the pipeline log and identifies the last completed step. The result is a structured block with 18 fields — one resume point per pipeline phase — that the orchestrator uses to skip already-completed work and continue from the failure point.
+`ticket-detect-resume` is the crash-recovery mechanism that makes the pipeline restartable. Every time `/ticket-auto` starts (fresh or after a crash), it calls this skill first. The skill hands off to `detect-resume.sh`, which scans the pipeline log for the last `done` or `fail` entry in each phase and maps those entries to restart points. The result is an 18-field block telling the orchestrator which step to jump to and which `--from-step` flags to pass to each sub-skill — so re-runs pick up exactly where they left off rather than repeating completed work.
 
 ## Trigger
 

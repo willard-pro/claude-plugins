@@ -34,15 +34,13 @@
 ```mermaid
 flowchart TD
     A([Start]) --> B[Setup workspace\nticket-setup]
-    B --> C[Complexity sweep\nscore 8 axes]
-    C --> D{Score threshold}
-    D -- simple --> E[Prior art search]
-    D -- complex --> E
-    E --> F[Codebase investigation\ncall chain trace]
-    F --> G[Regression check\nblast radius]
-    G --> H[Critique check\nticket-critique]
-    H --> I[Write notes.md\nfindings report]
-    I --> J([Done — run /ticket-appraise-exec])
+    B --> C[Complexity sweep\nscore 8 axes\nresult: simple or complex]
+    C --> D[Prior art search\npast tickets + PRs]
+    D --> E[Codebase investigation\ncall chain trace]
+    E --> F[Regression check\nblast radius]
+    F --> G[Critique check\nticket-critique]
+    G --> H[Write notes.md\nfindings + complexity score]
+    H --> I([Done — run /ticket-appraise-exec])
 ```
 
 ## Related skills
