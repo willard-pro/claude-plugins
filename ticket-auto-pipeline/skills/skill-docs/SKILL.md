@@ -1,0 +1,198 @@
+---
+name: skill-docs
+description: Generates or regenerates the full docs/skills/ documentation tree. Reads every SKILL.md under ticket-auto-pipeline/skills/, writes one human-readable README per skill with a Mermaid diagram, then writes the master index at docs/skills/README.md. Use when the user says "/skill-docs", "regenerate skill docs", or "update skill documentation".
+---
+
+# Skill Docs — Documentation Generator
+
+Generate (or regenerate) the complete `docs/skills/` documentation tree for the ticket-auto-pipeline plugin. This skill reads each `SKILL.md` and produces a high-level, human-readable README with a Mermaid diagram.
+
+## Usage
+
+```
+/skill-docs
+```
+
+No arguments. Run from the repository root (`claude-plugins/`).
+
+---
+
+## Step 1 — Locate the skills directory
+
+Resolve the plugin root:
+
+```bash
+PLUGIN_ROOT="$(pwd)/ticket-auto-pipeline"
+SKILLS_DIR="$PLUGIN_ROOT/skills"
+DOCS_DIR="$PLUGIN_ROOT/docs/skills"
+mkdir -p "$DOCS_DIR"
+```
+
+If `$SKILLS_DIR` does not exist, abort with: `Error: skills/ directory not found at $SKILLS_DIR`.
+
+---
+
+## Step 2 — Build the skill list
+
+Enumerate skill directories in two ordered groups (alphabetical within each group):
+
+**Pipeline Skills** (process first):
+1. `ticket-appraise`
+2. `ticket-appraise-exec`
+3. `ticket-auto`
+4. `ticket-flow`
+5. `ticket-implement`
+6. `ticket-pr-iterate`
+7. `ticket-pr-review`
+8. `ticket-retro`
+9. `ticket-setup`
+10. `ticket-verify`
+
+**Support Skills** (process second):
+1. `app-knowledge`
+2. `nav-hints`
+3. `ticket-batch-appraise`
+4. `ticket-batch-verify`
+5. `ticket-critique`
+6. `ticket-detect-resume`
+7. `ticket-document`
+8. `ticket-env-check`
+9. `ticket-overseer`
+10. `ticket-reproduce`
+11. `wiki-maintenance`
+
+Track two counters: `written=0`, `skipped=0`. Track a `skipped_list=()`.
+
+---
+
+## Step 3 — Process each skill
+
+For each skill name in the ordered list above:
+
+### 3a — Read the SKILL.md
+
+```bash
+SKILL_FILE="$SKILLS_DIR/<skill-name>/SKILL.md"
+```
+
+If the file does not exist, add the skill name to `skipped_list`, increment `skipped`, and continue to the next skill.
+
+### 3b — Extract key fields
+
+From the SKILL.md frontmatter and body, extract:
+- `NAME` — from `name:` frontmatter field
+- `DESCRIPTION` — from `description:` frontmatter field (the trigger-phrase sentence)
+- `PURPOSE` — 1–3 sentence summary of what the skill does and what it produces (synthesize from the body, not just the description)
+- `TRIGGER_CMD` — the primary slash command (e.g., `/ticket-appraise <ID>`)
+- `TRIGGER_PHRASES` — natural-language triggers from the description field (e.g., "appraise ticket <ID>", "take on ticket <ID>")
+- `INPUTS` — list of inputs the skill consumes (ticket ID, env vars, flags, CLAUDE.md fields)
+- `OUTPUTS` — list of artifacts produced (files written, Linear comments posted, state changes)
+- `IS_PRIVATE` — true if the description or body marks this as a private/internal helper
+
+### 3c — Choose the diagram type
+
+Use `stateDiagram-v2` for: `ticket-auto`, `ticket-flow`, `ticket-detect-resume`.
+Use `flowchart TD` for all other skills.
+
+### 3d — Write the per-skill README
+
+Write to `$DOCS_DIR/<skill-name>.md` using the template below. Fill every section from the extracted fields. Keep the Mermaid diagram to ≤15 nodes.
+
+**Template:**
+
+```markdown
+# <NAME>
+
+> <DESCRIPTION (one-line from frontmatter)>
+
+## What it does
+
+<PURPOSE — 2–3 sentences: goal, when to use, what it produces>
+
+## Trigger
+
+**Slash command:** `<TRIGGER_CMD>`
+
+**Natural language:** <TRIGGER_PHRASES as comma-separated list>
+
+## Inputs
+
+| Input | Source | Required |
+|-------|--------|----------|
+| ... | ... | Yes/No |
+
+## Outputs / Artifacts
+
+| Artifact | Location | Description |
+|----------|----------|-------------|
+| ... | ... | ... |
+
+## How it works
+
+```mermaid
+flowchart TD / stateDiagram-v2
+    ...
+```
+
+## Related skills
+
+- [`/other-skill`](other-skill.md) — relationship
+```
+
+**For private/internal helper skills**, prepend the following callout immediately after the `>` description line:
+
+```markdown
+> **Private helper** — not intended for direct invocation. Called internally by [`/parent-skill`](parent-skill.md).
+```
+
+After writing, increment `written`.
+
+---
+
+## Step 4 — Write the master index
+
+After all per-skill files have been written, write `$DOCS_DIR/README.md`:
+
+```markdown
+# Skill Reference
+
+The ticket-auto-pipeline ships 21 skills that automate the full Linear ticket lifecycle — from investigation through implementation, verification, and merge. **Pipeline Skills** form the core workflow invoked by `/ticket-auto`. **Support Skills** provide targeted utilities callable independently.
+
+## Pipeline Skills
+
+| Skill | Purpose |
+|-------|---------|
+| [ticket-appraise](ticket-appraise.md) | ... |
+...
+
+## Support Skills
+
+| Skill | Purpose |
+|-------|---------|
+| [app-knowledge](app-knowledge.md) | ... |
+...
+
+---
+*Generated by `/skill-docs` on <ISO date>.*
+```
+
+Fill each table row with the skill's one-line purpose (≤12 words, describing what it does).
+
+---
+
+## Step 5 — Print generation summary
+
+Output to the user:
+
+```
+✓ Skill documentation generated
+  Written: <written> files
+  Skipped: <skipped> files
+  Location: ticket-auto-pipeline/docs/skills/
+```
+
+If `skipped > 0`, list each skipped skill with reason:
+```
+  Skipped:
+    - <skill-name>: SKILL.md not found
+```
