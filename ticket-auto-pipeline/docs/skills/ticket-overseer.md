@@ -1,12 +1,10 @@
 # ticket-overseer
 
-> **Private helper** — not intended for direct invocation by users. Called internally by the pipeline observability layer.
-
-Observability layer for the ticket-auto pipeline. Reads pipeline logs and session traces to produce standup reports (retrospective) and status reports (in-flight progress).
+> Pipeline observability dashboard — generates standup summaries of completed work and real-time status reports of in-flight tickets, including stall detection.
 
 ## What it does
 
-`ticket-overseer` is the reporting and observability skill. It reads `pipeline.log` files and `auto-session.md` traces across all ticket workspaces and produces two report types: a **standup** report summarising what completed yesterday (or on a given date), and a **status** report showing what is currently in-flight, including stall detection for phases that have been running too long. It does not modify any state — it is purely read-only.
+`ticket-overseer` gives you a window into what the pipeline is doing (or has done). Run it in **standup** mode to get a summary of every ticket that completed, failed, or stalled yesterday (or on a given date). Run it in **status** mode to see which tickets are currently in-flight, which phase each one is in, and whether any phase has been running suspiciously long. It reads only pipeline logs and session traces — it never modifies any state.
 
 ## Trigger
 

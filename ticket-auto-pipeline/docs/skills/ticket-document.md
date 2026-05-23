@@ -4,7 +4,7 @@
 
 ## What it does
 
-`ticket-document` is a post-implementation step that captures institutional knowledge for future AI agents. It diffs the implementation branch against `develop`, reads `notes.md` for design rationale, classifies the change as trivial or non-trivial, and writes `ai-context.md` — a terse, structured file containing patterns discovered, decisions made, and file-level change summaries. Called automatically by `/ticket-auto` after implementation completes.
+`ticket-document` captures the "why" of an implementation for future AI agents. Once code is committed, it diffs the branch against `develop`, reads `notes.md` for design rationale, and classifies the change as trivial or non-trivial. The output is `ai-context.md` — a terse, structured file recording which patterns were applied, which decisions were made, and which files changed. Future agents (e.g. a second ticket touching the same code) read this file instead of re-deriving the same context from scratch.
 
 ## Trigger
 
