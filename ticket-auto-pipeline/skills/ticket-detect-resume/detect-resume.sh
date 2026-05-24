@@ -23,6 +23,7 @@ TICKET_ID="${1:-}"
 
 LOG_FILE="$PWD/logs/${TICKET_ID}-pipeline.log"
 HB_LOG_FILE="$PWD/logs/${TICKET_ID}-heartbeat.log"
+hb_init
 
 # ── Heartbeat log validation ─────────────────────────────────────────────────
 if [ -f "$HB_LOG_FILE" ]; then
@@ -97,14 +98,9 @@ else
         _pr_comments=$(gh pr view "$_pr_number" --json comments --jq '.comments[] | select(.author.login != "'"$_bot_user"'" and .author.login != "github-actions[bot]") | {createdAt: .createdAt, author: .author.login, body: .body}' 2>/dev/null || echo "[]")
         # Find last bot comment timestamp as boundary
         _last_bot_ts=$(gh pr view "$_pr_number" --json comments --jq '[.comments[] | select(.author.login == "'"$_bot_user"'" or .author.login == "github-actions[bot]")] | last | .createdAt' 2>/dev/null || echo "")
-        _has_new_human=false
-        if [ "$_pr_comments" != "[]" ] && [ -n "$_pr_comments" ]; then
-          if [ -n "$_last_bot_ts" ]; then
-            _has_new_human=$(echo "$_pr_comments" | jq -e --arg ts "$_last_bot_ts" 'select(.createdAt > $ts) | length > 0' 2>/dev/null && echo true || echo false)
-          else
-            _has_new_human=$(echo "$_pr_comments" | jq -e 'length > 0' 2>/dev/null && echo true || echo false)
-          fi
-        fi
+        _has_new_human=$(echo "$_pr_comments" |
+          jq -e --arg ts "$_last_bot_ts" 'select(.createdAt > $ts)' >/dev/null 2>&1 &&
+          echo true || echo false)
         if [ "$_has_new_human" = "true" ]; then
           RESUME_STEP="STEP_5_5"
         else
@@ -242,6 +238,7 @@ BRANCH=""
 TICKET_TITLE=""
 VERIFY_ATTEMPTS=0
 ITERATION=0
+PR_FEEDBACK_CYCLE=0
 
 if [ "$RESUME_STEP" != "STEP_1" ] && [ "$RESUME_STEP" != "GATE_STILL_HELD" ]; then
   TICKET_DIR=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || true)
@@ -252,13 +249,13 @@ if [ "$RESUME_STEP" != "STEP_1" ] && [ "$RESUME_STEP" != "GATE_STILL_HELD" ]; th
 
   if [ -s "$LOG_FILE" ]; then
     ARTIFACT_TYPE=$(grep '^[^|]*|EXEC|exec|done|' "$LOG_FILE" 2>/dev/null |
-      tail -1 | cut -d'|' -f5 || true)
+      tail -1 | cut -d'|' -f5- || true)
 
     BRANCH=$(grep '^[^|]*|IMPLEMENT|checkout-branch|done|' "$LOG_FILE" 2>/dev/null |
-      tail -1 | cut -d'|' -f5 || true)
+      tail -1 | cut -d'|' -f5- || true)
 
     TICKET_TITLE=$(grep '^[^|]*|META|title|info|' "$LOG_FILE" 2>/dev/null |
-      tail -1 | cut -d'|' -f5 | sed 's/^[^:]*: //' || true)
+      tail -1 | cut -d'|' -f5- | sed 's/^[^:]*: //' || true)
 
     VERIFY_ATTEMPTS=$(grep -c '^[^|]*|VERIFY|[^|]*|fail|' "$LOG_FILE" 2>/dev/null || true)
     VERIFY_ATTEMPTS=${VERIFY_ATTEMPTS:-0}

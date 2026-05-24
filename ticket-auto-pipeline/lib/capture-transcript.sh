@@ -25,6 +25,10 @@ capture_agent_result() {
 
   [ -z "$ticket_id" ] && return 0
   [ -z "$phase" ] && return 0
+  if ! [[ "$phase" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    echo "capture_agent_result: invalid phase '$phase' (must be kebab-case)" >&2
+    return 1
+  fi
 
   mkdir -p "./logs"
 
