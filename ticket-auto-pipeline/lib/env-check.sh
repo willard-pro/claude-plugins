@@ -72,6 +72,26 @@ pass() { echo "  ${GREEN}ok${RESET}  ${1}"; }
 fail() { echo "  ${RED}MISS${RESET} ${1} — ${2}"; }
 warn() { echo "  ${YELLOW}warn${RESET} ${1} — ${2}"; }
 
+# Walk ancestors from start_dir; emit the first dir with ≥2 child repos on stdout.
+# Returns empty string (exit 0) when no qualifying ancestor is found.
+_derive_repos_root() {
+  local walk_dir="$1"
+  while [ "$walk_dir" != "/" ] && [ "$walk_dir" != "." ]; do
+    local count=0
+    for child in "$walk_dir"/*/; do
+      [ -d "$child" ] || continue
+      if [ -d "$child/.git" ] || [ -f "$child/CLAUDE.md" ]; then
+        count=$((count + 1))
+      fi
+    done
+    if [ "$count" -ge 2 ]; then
+      echo "$walk_dir"
+      return 0
+    fi
+    walk_dir="$(dirname "$walk_dir")"
+  done
+}
+
 # ── Validate mode ─────────────────────────────────────────────────────────────
 if [ "${_MODE:-full}" = "validate" ]; then
   # Resolve CLAUDE.md path: if PROJECT_DIR points to a file, it IS the CLAUDE.md
@@ -126,22 +146,7 @@ if [ "${_MODE:-full}" = "validate" ]; then
     val=$(grep -oP '^REPOS_ROOT[=:]\s*\K.*' "$CLAUDE_MD" | head -1 | tr -d ' ')
     pass "REPOS_ROOT ($val)"
   else
-    DERIVED=""
-    WALK_DIR="$(dirname "$CLAUDE_MD")"
-    while [ "$WALK_DIR" != "/" ] && [ "$WALK_DIR" != "." ]; do
-      COUNT=0
-      for child in "$WALK_DIR"/*/; do
-        [ -d "$child" ] || continue
-        if [ -d "$child/.git" ] || [ -f "$child/CLAUDE.md" ]; then
-          COUNT=$((COUNT + 1))
-        fi
-      done
-      if [ "$COUNT" -ge 2 ]; then
-        DERIVED="$WALK_DIR"
-        break
-      fi
-      WALK_DIR="$(dirname "$WALK_DIR")"
-    done
+    DERIVED="$(_derive_repos_root "$(dirname "$CLAUDE_MD")")"
     if [ -n "$DERIVED" ]; then
       fail "REPOS_ROOT" "not in CLAUDE.md — propose: REPOS_ROOT = $DERIVED"
     else
@@ -374,22 +379,7 @@ else
     VAL=$(grep -oP '^`?REPOS_ROOT`?\s*[=:]\s*`?\K[^`\s]+' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ' || true)
     _var "REPOS_ROOT" "ok" "$VAL" "CLAUDE.md" ""
   else
-    DERIVED=""
-    WALK_DIR="$PROJECT_DIR"
-    while [ "$WALK_DIR" != "/" ] && [ "$WALK_DIR" != "." ]; do
-      COUNT=0
-      for child in "$WALK_DIR"/*/; do
-        [ -d "$child" ] || continue
-        if [ -d "$child/.git" ] || [ -f "$child/CLAUDE.md" ]; then
-          COUNT=$((COUNT + 1))
-        fi
-      done
-      if [ "$COUNT" -ge 2 ]; then
-        DERIVED="$WALK_DIR"
-        break
-      fi
-      WALK_DIR="$(dirname "$WALK_DIR")"
-    done
+    DERIVED="$(_derive_repos_root "$PROJECT_DIR")"
     if [ -n "$DERIVED" ]; then
       _var "REPOS_ROOT" "auto" "$DERIVED" "CLAUDE.md" "add REPOS_ROOT = $DERIVED to CLAUDE.md"
     else

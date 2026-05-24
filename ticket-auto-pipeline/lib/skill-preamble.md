@@ -20,6 +20,7 @@ When a skill says "Follow the pipeline preamble with parameters: ...", use the v
 | `{HAS_HEARTBEAT}` | Whether skill writes heartbeat entries | `true` |
 | `{HAS_STEP_DISPATCH}` | Whether skill supports --from-step resume | `true` |
 | `{HAS_TASK_TRACKER}` | Whether skill creates a TaskCreate tracker | `true` |
+| `{HAS_API_ERROR_CAPTURE}` | Whether skill applies API error-capture patterns | `true` |
 
 ---
 
@@ -183,5 +184,70 @@ After each step is fully done (including all sub-steps), mark it completed with 
 
 <!-- skill-specific trace template goes here -->
 ```
+
+<!-- endif -->
+
+---
+
+## 9. API error capture
+
+<!-- if {HAS_API_ERROR_CAPTURE} == true -->
+
+After every Linear API call (`get_issue`, `get_comments`, `save_comment`, `get_me`), capture failures in the heartbeat log using `hb_retry`. This is mandatory — never silently discard API errors.
+
+**get_issue failure pattern:**
+```bash
+_raw=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_issue '{TICKET-ID}'" 2>&1)
+_rc=$?
+if [ $_rc -ne 0 ] || ! echo "$_raw" | jq -e '.data.issue' >/dev/null 2>&1; then
+  _snippet=$(echo "$_raw" | head -c 200)
+  hb_retry "get-issue" "fail" "get_issue failed (exit ${_rc})" \
+    "{\"command\":\"get_issue\",\"ticket\":\"{TICKET-ID}\",\"exit_code\":\"${_rc}\",\"error_snippet\":\"$(echo "$_snippet" | tr '"' "'"  | tr '\n' ' ')\"}"
+  # Handle failure per-step (report or stop as appropriate)
+fi
+```
+
+**get_comments failure pattern:**
+```bash
+_raw=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_comments '{TICKET-ID}'" 2>&1)
+_rc=$?
+if [ $_rc -ne 0 ]; then
+  hb_retry "get-comments" "fail" "get_comments failed (exit ${_rc})" \
+    "{\"command\":\"get_comments\",\"ticket\":\"{TICKET-ID}\",\"exit_code\":\"${_rc}\"}"
+fi
+```
+
+**jq extraction failure pattern:** When `jq` fails to extract a field from a Linear API response, capture it before stopping:
+```bash
+_field=$(echo "$_raw" | jq -r '.data.issue.fieldName' 2>&1)
+if [ $? -ne 0 ] || [ "$_field" = "null" ]; then
+  hb_retry "jq-parse" "fail" "jq extraction failed for fieldName" \
+    "{\"error_type\":\"jq_parse\",\"command\":\"get_issue\",\"field\":\"fieldName\"}"
+fi
+```
+
+**flow.sh failure pattern:** After every `flow.sh` invocation, capture non-zero exits:
+```bash
+bash ~/.claude/skills/ticket-flow/flow.sh "{TICKET-ID}" "{trigger}" 2>&1
+_rc=$?
+if [ $_rc -ne 0 ]; then
+  _error_type=$( [ $_rc -eq 7 ] && echo "state_assertion" || echo "flow_error" )
+  hb_retry "flow-sh" "fail" "flow.sh {trigger} failed (exit ${_rc})" \
+    "{\"trigger\":\"{trigger}\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\",\"error_type\":\"${_error_type}\"}"
+fi
+```
+
+**API telemetry pattern:** For read operations where elapsed time matters, wrap with `hb_api`:
+```bash
+_t0=$(date +%s)
+_raw=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_issue '{TICKET-ID}'" 2>&1)
+_rc=$?
+_elapsed=$(( $(date +%s) - _t0 ))
+hb_api "get-issue" "$( [ $_rc -eq 0 ] && echo ok || echo fail )" \
+  "get_issue {TICKET-ID} (${_elapsed}s)" \
+  "{\"command\":\"get_issue\",\"ticket\":\"{TICKET-ID}\",\"elapsed_s\":\"${_elapsed}\",\"exit_code\":\"${_rc}\"}"
+```
+
+Apply the API telemetry pattern to `get_issue` and `get_comments` calls at each step.
 
 <!-- endif -->
