@@ -98,9 +98,9 @@ else
         _pr_comments=$(gh pr view "$_pr_number" --json comments --jq '.comments[] | select(.author.login != "'"$_bot_user"'" and .author.login != "github-actions[bot]") | {createdAt: .createdAt, author: .author.login, body: .body}' 2>/dev/null || echo "[]")
         # Find last bot comment timestamp as boundary
         _last_bot_ts=$(gh pr view "$_pr_number" --json comments --jq '[.comments[] | select(.author.login == "'"$_bot_user"'" or .author.login == "github-actions[bot]")] | last | .createdAt' 2>/dev/null || echo "")
-        _has_new_human=$(echo "$_pr_comments" | \
-          jq -e --arg ts "$_last_bot_ts" 'select(.createdAt > $ts)' > /dev/null 2>&1 \
-          && echo true || echo false)
+        _has_new_human=$(echo "$_pr_comments" |
+          jq -e --arg ts "$_last_bot_ts" 'select(.createdAt > $ts)' >/dev/null 2>&1 &&
+          echo true || echo false)
         if [ "$_has_new_human" = "true" ]; then
           RESUME_STEP="STEP_5_5"
         else

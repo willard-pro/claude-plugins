@@ -23,7 +23,10 @@ shift 2 2>/dev/null || true
 
 [ -z "$TICKET_ID" ] && usage
 [ -z "$TRIGGER" ] && usage
-[[ "$TICKET_ID" =~ ^[A-Z]+-[0-9]+$ ]] || { echo "Invalid TICKET_ID: $TICKET_ID" >&2; exit 1; }
+[[ "$TICKET_ID" =~ ^[A-Z]+-[0-9]+$ ]] || {
+  echo "Invalid TICKET_ID: $TICKET_ID" >&2
+  exit 1
+}
 
 # ── Concurrent-execution lock (flock FD 9) ──────────────────────────────────
 
