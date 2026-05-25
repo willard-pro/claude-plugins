@@ -48,5 +48,6 @@ print(f'{input_t}/{output_t}/{cache_read + cache_create}')
       rm -f "$START_FILE"
     fi
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|tokens|info|${PHASE}:${TOKENS}${ELAPSED}" >>"$LOG_FILE"
+    echo "tokens logged: ${PHASE} ${TOKENS}" >&2
   fi
 fi

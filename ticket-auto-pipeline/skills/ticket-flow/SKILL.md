@@ -24,7 +24,9 @@ This skill is a thin wrapper around `flow.sh`. All state machine logic, label co
 `flow.sh` sources `lib/linear-api.sh` for all GraphQL operations. When `$LINEAR_API_KEY` is set, operations use direct GraphQL calls. When unset, `flow.sh` will fail with a clear error — set `$LINEAR_API_KEY` before invoking this skill.
 
 ```bash
-bash ~/.claude/skills/ticket-flow/flow.sh "<TICKET-ID>" "<TRIGGER>" [--data key=value] [--dry-run]
+_flow_sh="${HOME}/.claude/skills/ticket-flow/flow.sh"
+[ -f "$_flow_sh" ] || _flow_sh=$(find "${HOME}/.claude/plugins/cache" -name "flow.sh" -path "*/ticket-auto-pipeline/*/skills/ticket-flow/flow.sh" 2>/dev/null | sort | tail -1)
+bash "$_flow_sh" "<TICKET-ID>" "<TRIGGER>" [--data key=value] [--dry-run]
 ```
 
 ## Reference: State Machine
@@ -90,7 +92,9 @@ The sentinel contains `schema_version`, `sm_hash` (SHA256 of `state-machine.json
 
 To force re-validation:
 ```bash
-bash ~/.claude/skills/ticket-flow/validate-linear-config.sh --force
+_validate_sh="${HOME}/.claude/skills/ticket-flow/validate-linear-config.sh"
+[ -f "$_validate_sh" ] || _validate_sh=$(find "${HOME}/.claude/plugins/cache" -name "validate-linear-config.sh" -path "*/ticket-auto-pipeline/*/validate-linear-config.sh" 2>/dev/null | sort | tail -1)
+bash "$_validate_sh" --force
 ```
 
 To delete the sentinel manually:

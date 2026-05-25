@@ -75,7 +75,9 @@ fi
 
 **flow.sh failure pattern:** After every `flow.sh` invocation, capture non-zero exits:
 ```bash
-bash ~/.claude/skills/ticket-flow/flow.sh "{TICKET-ID}" "{trigger}" 2>&1
+_flow_sh="${HOME}/.claude/skills/ticket-flow/flow.sh"
+[ -f "$_flow_sh" ] || _flow_sh=$(find "${HOME}/.claude/plugins/cache" -name "flow.sh" -path "*/ticket-auto-pipeline/*/skills/ticket-flow/flow.sh" 2>/dev/null | sort | tail -1)
+bash "$_flow_sh" "{TICKET-ID}" "{trigger}" 2>&1
 _rc=$?
 if [ $_rc -ne 0 ]; then
   _error_type=$( [ $_rc -eq 7 ] && echo "state_assertion" || echo "flow_error" )
@@ -516,7 +518,9 @@ Stop. The reproduce skill already posted findings to Linear. No code changes wer
 
 **BLOCKED** — insufficient info, add needs-info label and gate-stop:
 ```bash
-bash ~/.claude/skills/ticket-flow/flow.sh "{TICKET-ID}" "needs-info" 2>&1
+_flow_sh="${HOME}/.claude/skills/ticket-flow/flow.sh"
+[ -f "$_flow_sh" ] || _flow_sh=$(find "${HOME}/.claude/plugins/cache" -name "flow.sh" -path "*/ticket-auto-pipeline/*/skills/ticket-flow/flow.sh" 2>/dev/null | sort | tail -1)
+bash "$_flow_sh" "{TICKET-ID}" "needs-info" 2>&1
 _rc=$?
 if [ $_rc -ne 0 ]; then
   _error_type=$( [ $_rc -eq 7 ] && echo "state_assertion" || echo "flow_error" )
@@ -805,7 +809,9 @@ Use the Linear access strategy to post the comment (bash `save_comment` when `LI
 Call `re-claim` to remove the `approved` label without changing the ticket's Linear state:
 
 ```bash
-bash ~/.claude/skills/ticket-flow/flow.sh "{TICKET-ID}" "re-claim"
+_flow_sh="${HOME}/.claude/skills/ticket-flow/flow.sh"
+[ -f "$_flow_sh" ] || _flow_sh=$(find "${HOME}/.claude/plugins/cache" -name "flow.sh" -path "*/ticket-auto-pipeline/*/skills/ticket-flow/flow.sh" 2>/dev/null | sort | tail -1)
+bash "$_flow_sh" "{TICKET-ID}" "re-claim"
 ```
 
 Write the held log entry:
