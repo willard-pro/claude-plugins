@@ -235,8 +235,9 @@ for log_file in "${LOG_FILES[@]}"; do
   # Track accuracy
   if [ "$declared" != "null" ] && [ "$actual" != "null" ]; then
     TOTAL_PAIRS=$((TOTAL_PAIRS + 1))
-    if { [ "$declared" = "simple" ] && [ "$actual" = "Smooth" ]; } ||
-      { [ "$declared" = "complex" ] && { [ "$actual" = "Rough" ] || [ "$actual" = "Hard" ]; }; }; then
+    _d_lower=$(echo "$declared" | tr '[:upper:]' '[:lower:]')
+    if { [ "$_d_lower" = "simple" ] && [ "$actual" = "Smooth" ]; } ||
+      { [ "$_d_lower" = "complex" ] && { [ "$actual" = "Rough" ] || [ "$actual" = "Hard" ]; }; }; then
       CORRECT_COUNT=$((CORRECT_COUNT + 1))
     fi
   fi

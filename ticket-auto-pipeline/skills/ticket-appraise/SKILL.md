@@ -113,7 +113,7 @@ Activate the analyzer persona before scoring:
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|complexity-sweep|start|Scoring complexity axes" >> "$LOG_FILE"
 
-Score the ticket on the three axes below using only what ticket-setup already returned (title, description, labels, comments, epic). No codebase reads yet.
+Score the ticket on the three axes below using only what ticket-setup already returned (title, description, labels, comments, epic). No codebase reads yet. Classification as `complex` requires 2 or more axes to fire — a single axis alone (e.g., `cross-layer` only) classifies as `simple`.
 
 | Axis                | Fires when                                                                                                                                             |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -121,9 +121,9 @@ Score the ticket on the three axes below using only what ticket-setup already re
 | **Cross-layer**     | Fix clearly requires both frontend AND backend changes, OR touches high-risk areas: DB migrations, Feign clients, payments, PDF generation, async jobs |
 | **Prior rejection** | Comments contain a previous appraisal that was marked `rejected`, or the ticket description says "tried X, didn't work"                                |
 
-**If zero axes fire → proceed to Step 2.6, then Step 3 (inline).**
+**If fewer than 2 axes fire → proceed to Step 2.6, then Step 3 (inline).**
 
-**If one or more axes fire → proceed to Step 2.6, then Step 3-Agent (delegated) instead.**
+**If 2 or more axes fire → proceed to Step 2.6, then Step 3-Agent (delegated) instead.**
 
 Record the decision in notes.md under a `## Complexity` heading:
 
