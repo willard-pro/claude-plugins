@@ -269,10 +269,11 @@ Follow the agent spawn template with: PHASE={PHASE}, SKILL={SKILL}, DESCRIPTION=
 
 **Execution sequence:**
 
-1. Write waiting log entry:
+1. Write waiting log entry and start heartbeat pinger:
    ```bash
    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|{PHASE}|{phase}|waiting|Agent launched — {DESCRIPTION}" >> {LOG_FILE}
    hb_heartbeat "orchestrator-waiting" "agent {phase} launched"
+   hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
    ```
 
 2. Write phase context file:
@@ -294,6 +295,7 @@ Follow the agent spawn template with: PHASE={PHASE}, SKILL={SKILL}, DESCRIPTION=
 
 6. On failure:
    ```bash
+   hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|{PHASE}|{phase}|fail|Agent failed{if FAIL_ACTION=warn-continue: ` — continuing`}" >> {LOG_FILE}
    hb_heartbeat "agent-returned" "{phase} agent failed"
    ```
@@ -301,6 +303,7 @@ Follow the agent spawn template with: PHASE={PHASE}, SKILL={SKILL}, DESCRIPTION=
 
 7. On success:
    ```bash
+   hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|{PHASE}|{phase}|done|{result}" >> {LOG_FILE}
    hb_heartbeat "agent-returned" "{phase} agent done — {result}"
    hb_heartbeat "phase-transition" "{PHASE} → {NEXT_PHASE}"
@@ -391,11 +394,12 @@ Based on `{RESUME_STEP}`, jump directly to the corresponding step. Steps before 
 ### Appraise spawn
 Follow the agent spawn template with: PHASE=APPRAISE, SKILL=/ticket-appraise, DESCRIPTION=investigating {TICKET-ID}, EXTRA_FLAGS=--from-auto{if {APPRAISE_FROM} is non-empty: ` --from-step {APPRAISE_FROM}`}, SKILL_INSTRUCTIONS=Follow the skill exactly. When you hit Resume mode and the workspace already exists, if asked "continue or re-investigate?", choose "continue" — do not prompt. Report only the final handoff output., EXTRACT=COMPLEXITY, TICKET_DIR, TICKET_TITLE, FAIL_ACTION=stop, NEXT_PHASE=EXEC
 
-Write the waiting log entry:
+Write the waiting log entry and start heartbeat pinger:
 ```bash
 cl_write "APPRAISE" "handoff" "info" "ticket={TICKET-ID} autonomy={AUTONOMY} from_step=${APPRAISE_FROM:-fresh}"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|waiting|Agent launched — investigating {TICKET-ID}" >> {LOG_FILE}
 hb_heartbeat "orchestrator-waiting" "agent appraise launched"
+hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 ```
 
 Write the phase context file so the token-tracker hook knows where to log:
@@ -422,6 +426,7 @@ Extract from its result:
 
 If the agent fails → write fail log and stop:
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|fail|Agent failed" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "appraise agent failed"
 _last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
@@ -431,6 +436,7 @@ cl_write RETRO hint info "sub-agent spawn failure in APPRAISE phase — check ag
 
 On success, write the done log entry and META title:
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|{COMPLEXITY}, {N} files traced" >> {LOG_FILE}
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|title|info|{TICKET-ID}: {TICKET_TITLE}" >> {LOG_FILE}
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|notes:{TICKET_DIR}/notes.md" >> {LOG_FILE}
@@ -469,6 +475,7 @@ Write the waiting log entry:
 cl_write "REPRODUCE" "handoff" "info" "bug ticket: {TICKET-ID} from_step=${REPRODUCE_FROM:-fresh}"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|waiting|Agent launched — reproducing bug for {TICKET-ID}" >> {LOG_FILE}
 hb_heartbeat "orchestrator-waiting" "agent reproduce launched"
+hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 ```
 
 Write the phase context file:
@@ -492,6 +499,7 @@ Extract:
 
 If the agent fails → write fail log and stop:
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|fail|Agent failed" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "reproduce agent failed"
 _last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
@@ -502,6 +510,7 @@ On success, branch on `{REPRODUCE_RESULT}`:
 
 **REPRODUCED** — bug confirmed, proceed to Exec:
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|done|REPRODUCED" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "reproduce agent done — REPRODUCED"
 hb_heartbeat "phase-transition" "REPRODUCE → EXEC"
@@ -511,6 +520,7 @@ Continue to **Step 2 — Exec**.
 
 **NOT_REPRODUCED** — bug doesn't manifest, gate-stop:
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|REPRO_NOT_CONFIRMED" >> {LOG_FILE}
 hb_heartbeat "gate-stop" "fail" "REPRO_NOT_CONFIRMED — bug not reproducible on UAT"
 ```
@@ -518,6 +528,7 @@ Stop. The reproduce skill already posted findings to Linear. No code changes wer
 
 **BLOCKED** — insufficient info, add needs-info label and gate-stop:
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 _flow_sh="${HOME}/.claude/skills/ticket-flow/flow.sh"
 [ -f "$_flow_sh" ] || _flow_sh=$(find "${HOME}/.claude/plugins/cache" -name "flow.sh" -path "*/ticket-auto-pipeline/*/skills/ticket-flow/flow.sh" 2>/dev/null | sort | tail -1)
 bash "$_flow_sh" "{TICKET-ID}" "needs-info" 2>&1
@@ -542,10 +553,16 @@ Follow the agent spawn template with: PHASE=EXEC, SKILL=/ticket-appraise-exec, D
 
 Write the waiting log entry:
 
+```bash
+cl_write "EXEC" "handoff" "info" "from_appraise: complexity={COMPLEXITY} ticket_dir={TICKET_DIR} from_step=${EXEC_FROM:-fresh}"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|waiting|Agent launched — creating artifacts for {TICKET-ID}" >> {LOG_FILE}
+hb_heartbeat "orchestrator-waiting" "agent exec launched"
+hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
+```
+
 Write the phase context file so the token-tracker hook knows where to log:
 
 ```bash
-cl_write "EXEC" "handoff" "info" "from_appraise: complexity={COMPLEXITY} ticket_dir={TICKET_DIR} from_step=${EXEC_FROM:-fresh}"
 echo "EXEC|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 ```
 
@@ -565,6 +582,7 @@ Extract:
 
 If the agent fails → write fail log and stop:
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|fail|Agent failed" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "exec agent failed"
 _last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
@@ -574,6 +592,7 @@ cl_write "EXEC" "context" "fail" "exec agent failed — ticket_dir_exists=${_dir
 
 On success:
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|{ARTIFACT_TYPE}" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "exec agent done — {ARTIFACT_TYPE}"
 hb_heartbeat "phase-transition" "EXEC → GATE"
@@ -869,10 +888,16 @@ Follow the agent spawn template with: PHASE=IMPLEMENT, SKILL=/ticket-implement, 
 
 Write the waiting log entry:
 
+```bash
+cl_write "IMPLEMENT" "handoff" "info" "from_gate: complexity={COMPLEXITY} artifact_type={ARTIFACT_TYPE} plan_path=${PLAN_PATH:-unknown} from_step=${IMPLEMENT_FROM:-fresh}"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|waiting|Agent launched — implementing {TICKET-ID}" >> {LOG_FILE}
+hb_heartbeat "orchestrator-waiting" "agent implement launched"
+hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
+```
+
 Write the phase context file so the token-tracker hook knows where to log:
 
 ```bash
-cl_write "IMPLEMENT" "handoff" "info" "from_gate: complexity={COMPLEXITY} artifact_type={ARTIFACT_TYPE} plan_path=${PLAN_PATH:-unknown} from_step=${IMPLEMENT_FROM:-fresh}"
 echo "IMPLEMENT|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 ```
 
@@ -895,6 +920,7 @@ Extract:
 
 If the agent fails → write fail log and stop:
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|fail|Agent failed" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "implement agent failed"
 _last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
@@ -903,6 +929,7 @@ cl_write "IMPLEMENT" "context" "fail" "implement agent failed — complexity={CO
 
 On success:
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|{OUTCOME}, branch: {branch}" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "implement agent done — {OUTCOME}"
 hb_heartbeat "phase-transition" "IMPLEMENT → VERIFY"
@@ -935,6 +962,7 @@ Write log start event:
 cl_write "VERIFY" "handoff" "info" "attempt={VERIFY_ATTEMPTS}/3 branch={branch} outcome={OUTCOME}"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|start|Attempt {VERIFY_ATTEMPTS}/3 — running Playwright UAT" >> {LOG_FILE}
 hb_heartbeat "orchestrator-waiting" "verify attempt $(({VERIFY_ATTEMPTS}+1))/3"
+hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 ```
 
 Write the phase context file so the token-tracker hook knows where to log:
@@ -953,6 +981,7 @@ After this call, clear `{VERIFY_FROM}` (set to empty) — retry re-invocations a
 
 Write log result event:
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 # PASS:
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|done|PASS" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "verify agent done — PASS"
@@ -1017,6 +1046,7 @@ Write the phase context file so the token-tracker hook knows where to log:
 cl_write "MAINTENANCE" "handoff" "info" "post-implement documentation for {TICKET-ID}"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|waiting|Agent launched — generating ai-context.md for {TICKET-ID}" >> {LOG_FILE}
 hb_heartbeat "orchestrator-waiting" "agent document launched"
+hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "MAINTENANCE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 ```
 
@@ -1039,6 +1069,7 @@ Extract:
 
 If the agent fails → log a warning but continue (document is non-blocking):
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|fail|Agent failed — continuing" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "document agent failed — continuing (non-blocking)"
 _last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
@@ -1048,6 +1079,7 @@ cl_write RETRO hint info "sub-agent spawn failure in DOCUMENT phase — check ag
 
 On success:
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|{DOCUMENT_FILE} ({PATTERNS} patterns, {DECISIONS} decisions, {SIGNIFICANCE})" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "document agent done — {SIGNIFICANCE}, {PATTERNS} patterns, {DECISIONS} decisions"
 cl_write "MAINTENANCE" "document" "done" "file={DOCUMENT_FILE} patterns={PATTERNS} decisions={DECISIONS} significance={SIGNIFICANCE}"
@@ -1066,10 +1098,16 @@ Follow the agent spawn template with: PHASE=MAINTENANCE, SKILL=/wiki-maintenance
 
 Write the waiting log entry:
 
+```bash
+cl_write "MAINTENANCE" "handoff" "info" "post-implement wiki maintenance for {TICKET-ID}"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|waiting|Agent launched — wiki maintenance for {TICKET-ID}" >> {LOG_FILE}
+hb_heartbeat "orchestrator-waiting" "agent maintenance launched"
+hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
+```
+
 Write the phase context file so the token-tracker hook knows where to log:
 
 ```bash
-cl_write "MAINTENANCE" "handoff" "info" "post-implement wiki maintenance for {TICKET-ID}"
 echo "MAINTENANCE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 ```
 
@@ -1089,6 +1127,7 @@ Extract:
 
 If the agent fails → log a warning but continue (wiki maintenance is non-blocking):
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|fail|Agent failed — continuing" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "wiki-maintenance agent failed — continuing (non-blocking)"
 _last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
@@ -1097,6 +1136,7 @@ cl_write "MAINTENANCE" "context" "fail" "wiki maintenance failed (non-blocking) 
 
 On success:
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|done|{ERRATA_COUNT} errata incorporated, {AI_CONTEXT_FINDINGS} ai-context findings promoted to wiki" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "wiki-maintenance agent done — {ERRATA_COUNT} errata, {AI_CONTEXT_FINDINGS} ai-context findings"
 hb_heartbeat "phase-transition" "MAINTENANCE → PR-REVIEW"
@@ -1118,10 +1158,16 @@ Follow the agent spawn template with: PHASE=PR-REVIEW, SKILL=/ticket-pr-review, 
 
 Write the waiting log entry:
 
+```bash
+cl_write "PR-REVIEW" "handoff" "info" "iteration={ITERATION} branch={branch} outcome={OUTCOME}"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|waiting|Agent launched — reviewing PR for {TICKET-ID}" >> {LOG_FILE}
+hb_heartbeat "orchestrator-waiting" "agent pr-review launched"
+hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
+```
+
 Write the phase context file so the token-tracker hook knows where to log:
 
 ```bash
-cl_write "PR-REVIEW" "handoff" "info" "iteration={ITERATION} branch={branch} outcome={OUTCOME}"
 echo "PR-REVIEW|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 ```
 
@@ -1144,6 +1190,7 @@ Extract:
 
 If the agent fails → write fail log and stop:
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|fail|Agent failed" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "pr-review agent failed"
 _last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
@@ -1152,6 +1199,7 @@ cl_write "PR-REVIEW" "context" "fail" "pr-review agent failed — iteration={ITE
 
 On success:
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|done|Verdict: {VERDICT}, merged: {MERGED}" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "pr-review agent done — verdict {VERDICT}"
 cl_write "PR-REVIEW" "pr-review" "done" "verdict={VERDICT} merged={MERGED} iteration={ITERATION}"
@@ -1275,6 +1323,14 @@ echo "IMPLEMENT|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
 ### Re-implement spawn
 Follow the agent spawn template with: PHASE=IMPLEMENT, SKILL=/ticket-implement, DESCRIPTION=re-implementing {TICKET-ID} (iteration {ITERATION}), EXTRA_FLAGS=--from-auto, SKILL_INSTRUCTIONS=Follow the skill exactly. Read the updated plan (including the PR Review #{ITERATION} section), implement the changes, write tests, commit, and push. Report the final output including branch name., EXTRACT=OUTCOME, FAIL_ACTION=stop, NEXT_PHASE=RE-VERIFY
 
+Write the waiting log entry:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|re-implement|waiting|Agent launched — re-implementing {TICKET-ID} (iteration {ITERATION})" >> {LOG_FILE}
+hb_heartbeat "orchestrator-waiting" "agent re-implement launched (iteration {ITERATION})"
+hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
+```
+
 Spawn a `general-purpose` agent:
 
 ```
@@ -1291,12 +1347,14 @@ Extract:
 
 If the agent fails → write fail log and stop:
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|re-implement|fail|Agent failed (iteration {ITERATION})" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "re-implement agent failed (iteration {ITERATION})"
 ```
 
 On success:
 ```bash
+hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|re-implement|done|{OUTCOME}, iteration {ITERATION}" >> {LOG_FILE}
 hb_heartbeat "agent-returned" "re-implement agent done — {OUTCOME} (iteration {ITERATION})"
 hb_heartbeat "phase-transition" "IMPLEMENT → RE-VERIFY"
