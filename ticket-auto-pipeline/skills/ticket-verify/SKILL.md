@@ -426,18 +426,23 @@ Append to `{ticket-dir}/notes.md`:
 Verification passed on localhost — the implementation is confirmed working. Now open the PR:
 
 1. Read `notes.md` for the branch name and repo from the `committed` entry.
-2. For each affected repo, open a PR against `develop`:
+2. For each affected repo, check if a PR already exists for this branch, then open one against `develop` if needed:
    ```bash
-   cd {repo-path} && gh pr create --base develop --head {branch-name} \
-     --title "{type}({TICKET-ID}): {description}" \
-     --body "$(cat <<'EOF'
+   existing_pr=$(cd {repo-path} && gh pr list --head {branch-name} --json url --jq '.[0].url' 2>/dev/null)
+   if [ -n "$existing_pr" ]; then
+     echo "PR already exists: $existing_pr"
+   else
+     cd {repo-path} && gh pr create --base develop --head {branch-name} \
+       --title "{type}({TICKET-ID}): {description}" \
+       --body "$(cat <<'EOF'
    ## Summary
    {bullets from the plan}
    
    ## Test plan
    - [x] ticket-verify --env local PASS ({N}/{N} criteria)
    EOF
-   )"
+     )"
+   fi
    ```
 3. Capture the PR URL(s).
 4. Delegate to the flow executor:
