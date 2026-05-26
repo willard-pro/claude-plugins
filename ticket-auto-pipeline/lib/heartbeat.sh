@@ -122,6 +122,41 @@ hb_source() {
   hb_write "source" "$@"
 }
 
+# ── Pinger functions ──────────────────────────────────────────────────────────
+
+# Start a background heartbeat pinger that writes periodic "orchestrator-waiting"
+# entries while the orchestrator waits for a sub-agent. Uses a stop-file
+# mechanism to survive between separate bash invocations.
+# Args: stop_file [sleep_secs=90] [max_iter=80]
+hb_pinger_start() {
+  [ -z "${HB_LOG_FILE:-}" ] && return 0
+
+  local stop_file="$1"
+  local sleep_secs="${2:-90}"
+  local max_iter="${3:-80}"
+
+  rm -f "$stop_file"
+
+  (
+    set +e
+    local i=0
+    while [ "$i" -lt "$max_iter" ]; do
+      sleep "$sleep_secs"
+      [ -f "$stop_file" ] && break
+      hb_heartbeat "orchestrator-waiting" "pinger ${i}/${max_iter}" || true
+      i=$((i + 1))
+    done
+  ) &
+  disown
+}
+
+# Stop a running heartbeat pinger by creating its stop file.
+# Args: stop_file
+hb_pinger_stop() {
+  [ -z "${HB_LOG_FILE:-}" ] && return 0
+  touch "$1"
+}
+
 # Validate a single heartbeat log line. Returns 0 if valid, non-zero otherwise.
 # Handles both the schema header line (META) and regular entries.
 hb_validate_line() {
