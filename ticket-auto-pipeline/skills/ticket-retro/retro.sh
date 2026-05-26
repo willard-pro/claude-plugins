@@ -5,9 +5,9 @@
 # and emits structured JSON to stdout.
 #
 # Usage:
-#   retro.sh --window <N>d [<single-log-path>]
+#   retro.sh --window <N>d [--force] [<single-log-path>]
 #   retro.sh --window 7d
-#   retro.sh --window 1 ./logs/CRE-47-pipeline.log
+#   retro.sh --window 1 --force ./logs/CRE-47-pipeline.log
 
 set -euo pipefail
 
@@ -109,12 +109,17 @@ correlate_failures_with_phase() {
 
 WINDOW="7d"
 POSITIONAL_LOG=""
+FORCE_RESCAN=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
   --window)
     WINDOW="$2"
     shift 2
+    ;;
+  --force)
+    FORCE_RESCAN=1
+    shift
     ;;
   *)
     POSITIONAL_LOG="$1"
@@ -141,6 +146,21 @@ source "$LIBS_DIR/notes-parse.sh" 2>/dev/null || {
 
 WINDOW_DAYS="${WINDOW%d}"
 LOGS_DIR="./logs"
+
+# ── Cursor file for deduplication ────────────────────────────────────────
+CURSOR_FILE="${CURSOR_FILE:-$HOME/.claude/state/ticket-retro/retro-cursor.json}"
+declare -A CURSOR_MTIMES=()
+declare -A SCANNED_MTIMES=()
+LOGS_SKIPPED=0
+
+if [ "$FORCE_RESCAN" -eq 0 ] && [ -f "$CURSOR_FILE" ]; then
+  while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    tid=$(echo "$entry" | jq -r '.ticket_id // empty' 2>/dev/null || true)
+    mtime=$(echo "$entry" | jq -r '.log_mtime // 0' 2>/dev/null || true)
+    [ -n "$tid" ] && [ "$mtime" -gt 0 ] 2>/dev/null && CURSOR_MTIMES["$tid"]="$mtime"
+  done < <(jq -c 'to_entries[] | {ticket_id: .key, log_mtime: .value.log_mtime}' "$CURSOR_FILE" 2>/dev/null || true)
+fi
 
 # ── Log file discovery ───────────────────────────────────────────────────
 
@@ -178,11 +198,22 @@ TOTAL_PAIRS=0
 # ── Process each log ─────────────────────────────────────────────────────
 
 for log_file in "${LOG_FILES[@]}"; do
-  LOGS_SCANNED=$((LOGS_SCANNED + 1))
   local_has_failure=0
 
   stem=$(basename "$log_file" .log)
   ticket_id="${stem%-pipeline}"
+
+  # ── Cursor dedup: skip if log hasn't changed since last scan ──────────
+  log_mtime=$(stat -c %Y "$log_file" 2>/dev/null || echo 0)
+  if [ "$FORCE_RESCAN" -eq 0 ] && [ -n "${CURSOR_MTIMES[$ticket_id]:-}" ]; then
+    stored_mtime="${CURSOR_MTIMES[$ticket_id]}"
+    if [ "$log_mtime" -eq "$stored_mtime" ] 2>/dev/null; then
+      LOGS_SKIPPED=$((LOGS_SKIPPED + 1))
+      continue
+    fi
+  fi
+  LOGS_SCANNED=$((LOGS_SCANNED + 1))
+  SCANNED_MTIMES["$ticket_id"]="$log_mtime"
 
   # Resolve ticket directory from the log's notes artifact line
   ticket_dir=""
@@ -265,6 +296,10 @@ for log_file in "${LOG_FILES[@]}"; do
   hb_file="$(dirname "$log_file")/${ticket_id}-heartbeat.log"
 
   if [ ! -f "$hb_file" ]; then
+    continue
+  fi
+  # Skip heartbeat for logs that were cursor-skipped in the pipeline scan
+  if [ "$FORCE_RESCAN" -eq 0 ] && [ -n "${CURSOR_MTIMES[$ticket_id]:-}" ] && [ -z "${SCANNED_MTIMES[$ticket_id]:-}" ]; then
     continue
   fi
   HB_LOGS_SCANNED=$((HB_LOGS_SCANNED + 1))
@@ -430,6 +465,7 @@ fi
 jq -n \
   --argjson window_days "$WINDOW_DAYS" \
   --argjson logs_scanned "$LOGS_SCANNED" \
+  --argjson logs_skipped "$LOGS_SKIPPED" \
   --argjson logs_with_failures "$LOGS_WITH_FAILURES" \
   --argjson gate_stop_total "$GATE_STOP_TOTAL" \
   --argjson complexity_accuracy "$ACCURACY" \
@@ -446,6 +482,7 @@ jq -n \
   '{
     window_days: $window_days,
     logs_scanned: $logs_scanned,
+    logs_skipped: $logs_skipped,
     logs_with_failures: $logs_with_failures,
     failure_histogram: ($histogram_str | fromjson),
     gate_stop_total: $gate_stop_total,
@@ -464,3 +501,29 @@ jq -n \
       error_category_histogram: ($error_hist_str | fromjson)
     }
   }'
+
+# ── Write cursor file ────────────────────────────────────────────────────
+_CURSOR_JSON="{"
+_CURSOR_FIRST=1
+for tid in "${!SCANNED_MTIMES[@]}"; do
+  _mtime="${SCANNED_MTIMES[$tid]}"
+  _now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  [ "$_CURSOR_FIRST" -eq 1 ] && _CURSOR_FIRST=0 || _CURSOR_JSON+=","
+  _CURSOR_JSON+="\"$tid\":{\"scanned_at\":\"$_now\",\"log_mtime\":$_mtime}"
+done
+# Preserve existing cursor entries for tickets not in this scan window
+if [ -f "$CURSOR_FILE" ]; then
+  _preserved_file="$(mktemp)"
+  jq -r 'to_entries[] | "\(.key) \(.value.log_mtime) \(.value.scanned_at)"' "$CURSOR_FILE" 2>/dev/null >"$_preserved_file" || true
+  while read -r _tid _mtime _scanned_at; do
+    [ -z "$_tid" ] && continue
+    if [ -z "${SCANNED_MTIMES[$_tid]:-}" ]; then
+      [ "$_CURSOR_FIRST" -eq 1 ] && _CURSOR_FIRST=0 || _CURSOR_JSON+=","
+      _CURSOR_JSON+="\"$_tid\":{\"scanned_at\":\"$_scanned_at\",\"log_mtime\":$_mtime}"
+    fi
+  done <"$_preserved_file"
+  rm -f "$_preserved_file"
+fi
+_CURSOR_JSON+="}"
+mkdir -p "$(dirname "$CURSOR_FILE")"
+echo "$_CURSOR_JSON" | jq '.' >"$CURSOR_FILE"
