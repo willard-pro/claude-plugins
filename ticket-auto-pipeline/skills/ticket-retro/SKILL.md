@@ -10,11 +10,12 @@ You are the `/ticket-retro` skill. Your job is to aggregate pipeline log failure
 ## Invocation
 
 ```
-/ticket-retro [--window Nd] [--post-to-linear]
+/ticket-retro [--window Nd] [--post-to-linear] [--force]
 ```
 
 - `--window Nd`: days of log history to scan (default: `7d`)
 - `--post-to-linear`: if present, post a summary comment to the Linear retro issue configured in `RETRO_LINEAR_ISSUE`
+- `--force`: re-scan all logs even if unchanged since last retro (bypasses the cursor deduplication)
 
 ## Guard — Ensure state directory
 
@@ -28,11 +29,13 @@ This is user state, not skill-bundle state. It survives plugin upgrades.
 
 ## Step 1 — Aggregate logs via retro.sh
 
-Invoke `retro.sh` with the window flag:
+Invoke `retro.sh` with the window flag. Include `--force` to bypass cursor-based deduplication:
 
 ```bash
 bash ~/.claude/skills/ticket-retro/retro.sh --window {WINDOW}
 ```
+
+`retro.sh` maintains a cursor file at `~/.claude/state/ticket-retro/retro-cursor.json` that records the last-scanned mtime for each log. On subsequent runs, logs whose mtime hasn't changed are skipped. This prevents re-reporting failures from logs that were already analyzed in a prior retro run. Use `--force` to re-scan all logs regardless.
 
 If `retro.sh` exits non-zero, report the stderr message and stop — no logs were found in the window.
 
@@ -41,7 +44,7 @@ Parse the JSON output into the following variables:
 - `{GATE_STOP_TOTAL}` — total gate-stop events
 - `{COMPLEXITY_PREDICTIONS}` — array of `{ticket, declared, actual, actual_source}`
 - `{COMPLEXITY_ACCURACY}` — float 0–1
-- `{LOGS_SCANNED}`, `{LOGS_WITH_FAILURES}` — counts
+- `{LOGS_SCANNED}`, `{LOGS_SKIPPED}`, `{LOGS_WITH_FAILURES}` — counts. `LOGS_SCANNED` counts only newly-scanned logs (not cursor-skipped). `LOGS_SKIPPED` counts logs that were skipped because their mtime matched the cursor.
 - `{ERROR_DIAGNOSTICS}` — object with `total_errors`, `errors_by_ticket`, `error_category_histogram` (from heartbeat structured error events)
 
 If `{FAILURE_HISTOGRAM}` is empty (no failures), skip to Step 4 to write a short "clean window" report.
