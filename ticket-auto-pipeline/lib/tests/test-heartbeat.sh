@@ -285,6 +285,106 @@ test_cl_init_idempotent() {
   [ "$schema_count" -eq 1 ]
 }
 
+# ── hb_pinger tests ────────────────────────────────────────────────────────────
+
+test_pinger_noop_when_hb_log_file_unset() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local stop_file="$tmpdir/pinger-stop"
+  (
+    unset HB_LOG_FILE 2>/dev/null || true
+    source "$LIB_DIR/heartbeat.sh"
+    hb_pinger_start "$stop_file" 1 3
+    hb_pinger_stop "$stop_file"
+  )
+  local rc=0
+  [ ! -f "$stop_file" ]
+  rc=$?
+  rm -rf "$tmpdir"
+  return $rc
+}
+
+test_pinger_stop_creates_stop_file() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local stop_file="$tmpdir/pinger-stop"
+  local hb_log="$tmpdir/hb.log"
+  (
+    export HB_LOG_FILE="$hb_log"
+    source "$LIB_DIR/heartbeat.sh"
+    hb_pinger_stop "$stop_file"
+  )
+  local rc=0
+  [ -f "$stop_file" ]
+  rc=$?
+  rm -rf "$tmpdir"
+  return $rc
+}
+
+test_pinger_writes_heartbeat_entries_during_run() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local stop_file="$tmpdir/pinger-stop"
+  local hb_log="$tmpdir/hb.log"
+  (
+    export HB_LOG_FILE="$hb_log"
+    source "$LIB_DIR/heartbeat.sh"
+    hb_init
+    hb_pinger_start "$stop_file" 1 10
+  )
+  sleep 3
+  touch "$stop_file"
+  sleep 2
+  local count
+  count=$(grep -c "orchestrator-waiting" "$hb_log" 2>/dev/null || echo 0)
+  rm -rf "$tmpdir"
+  [ "$count" -ge 2 ]
+}
+
+test_pinger_stops_after_stop_file_appears() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local stop_file="$tmpdir/pinger-stop"
+  local hb_log="$tmpdir/hb.log"
+  (
+    export HB_LOG_FILE="$hb_log"
+    source "$LIB_DIR/heartbeat.sh"
+    hb_init
+    hb_pinger_start "$stop_file" 1 10
+  )
+  sleep 2
+  local count_before
+  count_before=$(grep -c "orchestrator-waiting" "$hb_log" 2>/dev/null || echo 0)
+  touch "$stop_file"
+  sleep 3
+  local count_after
+  count_after=$(grep -c "orchestrator-waiting" "$hb_log" 2>/dev/null || echo 0)
+  rm -rf "$tmpdir"
+  # After stop, at most 1 more entry may slip in due to sleep/check race
+  [ "$((count_after - count_before))" -le 1 ]
+}
+
+test_pinger_start_removes_stale_stop_file() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local stop_file="$tmpdir/pinger-stop"
+  local hb_log="$tmpdir/hb.log"
+  touch "$stop_file"
+  (
+    export HB_LOG_FILE="$hb_log"
+    source "$LIB_DIR/heartbeat.sh"
+    hb_init
+    hb_pinger_start "$stop_file" 1 10
+  )
+  sleep 3
+  touch "$stop_file"
+  sleep 2
+  local count
+  count=$(grep -c "orchestrator-waiting" "$hb_log" 2>/dev/null || echo 0)
+  rm -rf "$tmpdir"
+  [ "$count" -ge 2 ]
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -308,7 +408,12 @@ for fn in \
   test_hb_validate_file_valid \
   test_cl_write_noop_when_unset \
   test_cl_write_retro_hint_format \
-  test_cl_init_idempotent; do
+  test_cl_init_idempotent \
+  test_pinger_noop_when_hb_log_file_unset \
+  test_pinger_stop_creates_stop_file \
+  test_pinger_writes_heartbeat_entries_during_run \
+  test_pinger_stops_after_stop_file_appears \
+  test_pinger_start_removes_stale_stop_file; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done
