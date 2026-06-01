@@ -9,7 +9,7 @@ You have been given a ticket ID as the argument (e.g. `WIL-42`). Execute the inv
 
 ## Pipeline Preamble
 
-Follow the pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=APPRAISE, FROM_FLAG=--from-auto, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,get_comments, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=REPOS_ROOT,ISSUE_PREFIX,BE_SERVICES,WIKI_ROOT, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
+If `--from-auto` is present in the arguments, follow the auto-pipeline preamble in `~/.claude/skills/lib/skill-preamble-auto.md` with parameters: TICKET_ID=<from args>, PHASE=APPRAISE, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,get_comments, HAS_LOGGING=true, HAS_HEARTBEAT=true. Before starting, source the project context: `source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true`. Otherwise, follow the full pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=APPRAISE, FROM_FLAG=none, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,get_comments, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=REPOS_ROOT,ISSUE_PREFIX,BE_SERVICES,WIKI_ROOT, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
 
 ### Heartbeat points
 - **Complexity axes**: after complexity sweep, write `hb_decision "complexity-score" "fired" "...score..." '{"axes":"...","score":"..."}'`
@@ -300,15 +300,16 @@ Based on the ticket's description and labels, identify which service(s) are invo
 
 ### 3a — Load wiki context (if WIKI_ROOT is set)
 
-Use the service(s) identified above to decide which wiki files to load.
+Use the service(s) identified above to decide which wiki files to load. Prefer smart_search for relevance scoping before loading full files.
 
 **If `{WIKI_ROOT}` is set (from Step 0.5):**
 
 1. Read `{WIKI_ROOT}/index.md`. It contains a **Lookup by Topic** section with keyword-to-file mappings, and a **Lookup by Service** table. Match the ticket's labels, title, and description against the topic keywords in the index to identify which wiki files to load. The index is the authoritative routing table — do not use any hardcoded keyword list.
-2. Load every file the index points to for the matching topics. Set `{WIKI_FLOW}` = the first flow file loaded (or the most relevant). Each file contains pre-traced call chains with real class names, endpoints, and entity fields.
-3. Also load `{WIKI_ROOT}/services.md` (service responsibilities and Feign wiring) and the relevant sections of `{WIKI_ROOT}/domain/data-model.md` (entity fields and relationships).
-4. Record the wiki files loaded in notes.md under Initial Investigation: `**Wiki bootstrap:** {list of files loaded}`
-5. If no topic in the index matches, leave `{WIKI_FLOW}` empty — fall through to full Serena discovery in 3c.
+2. **Scoped loading via smart_search**: Instead of loading every matched wiki file, use `smart_search` with the ticket's keywords, service names, and entity names against the wiki root to identify the most relevant files. Then use `smart_outline` on candidate files to confirm relevance before reading. Only Read the files (or sections) that smart_search confirms as relevant.
+3. Set `{WIKI_FLOW}` = the first flow file loaded (or the most relevant). Each file contains pre-traced call chains with real class names, endpoints, and entity fields.
+4. Also load `{WIKI_ROOT}/services.md` (service responsibilities and Feign wiring) — outline first, then read only the relevant service sections.
+5. Record the wiki files loaded in notes.md under Initial Investigation: `**Wiki bootstrap:** {list of files loaded}`
+6. If no topic in the index matches, or smart_search returns no results, leave `{WIKI_FLOW}` empty — fall through to full discovery in 3c.
 
 **If `{WIKI_ROOT}` is empty:** skip to 3b. No wiki is available for this project.
 
@@ -328,7 +329,11 @@ Skip the full traversal instructions below — you already have your roadmap.
 
 **Path B — No wiki (`{WIKI_FLOW}` is empty):**
 
-Use Serena for all code navigation — mandatory. Symbol search or go_to_definition to locate, find_references to trace downstream effects, symbols_overview for file structure. Only Read after Serena has pinpointed the location — never grep for symbols.
+**Preferred path — smart_search pre-filter:** Use `smart_search` first to locate symbols by name, class, or function. For each hit, use `smart_outline` to get a structural view (methods, signatures, imports) without loading full files. Then `smart_unfold` or `Read` only the confirmed symbols. This is 5-10x more token-efficient than full file reads.
+
+**Fallback — Serena:** If smart_search is unavailable or returns no results, use Serena for code navigation: symbol search or go_to_definition to locate, find_references to trace downstream effects, symbols_overview for file structure. Only Read after Serena has pinpointed the location — never grep for symbols.
+
+**Last resort — grep:** If neither smart_search nor Serena is available, use `grep -r` to locate symbols by name. This is the least efficient path and should only be used when both structural tools are unavailable.
 
 Do not stop at the first plausible file. Trace the feature end-to-end across all layers involved:
 
@@ -391,7 +396,7 @@ Repos to search (under {REPOS_ROOT} — resolved from the project CLAUDE.md code
 {If WIKI_FLOW was loaded above, include this paragraph verbatim:}
 A wiki file at `{WIKI_FLOW}` contains a pre-traced call chain for this feature area. Read it now. It lists real class names, method signatures, endpoints, and entity fields. Start by CONFIRMING those paths — do not rediscover from scratch. If a class was renamed or moved, note it but follow the wiki's structure.
 
-IMPORTANT — use Serena for all code navigation: symbol search or go_to_definition to locate, find_references to trace usages, symbols_overview for file structure. Only Read after Serena locates the exact spot — never scan whole files or grep for symbols.
+IMPORTANT — Prefer smart_search for code navigation: use `smart_search` to locate symbols by name, `smart_outline` for structural views, `smart_unfold` or `Read` to load only confirmed symbols. Fall back to Serena if smart_search returns nothing: symbol search or go_to_definition to locate, find_references to trace usages, symbols_overview for file structure. Only Read after pinpointing — never scan whole files. Use grep only as last resort.
 
 Answer each question below with specific file paths and line numbers. If you cannot confirm an answer, say "NOT FOUND" — do not guess.
 
