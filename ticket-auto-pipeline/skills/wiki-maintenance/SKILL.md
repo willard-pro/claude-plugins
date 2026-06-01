@@ -14,7 +14,7 @@ If `$LOG_FILE` is set (passed by the `ticket-auto` orchestrator): read `~/.claud
 ## Heartbeat (--from-auto)
 
 If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/skills/lib/heartbeat.sh` then write heartbeat entries at these points:
-- **Wiki bootstrap**: if WIKI_ROOT not found in CLAUDE.md, write `hb_fallback "wiki-bootstrap" "fail" "WIKI_ROOT not in CLAUDE.md" '{"reason":"no WIKI_ROOT configured"}'`
+- **Wiki bootstrap**: if WIKI_ROOT not set in environment or CLAUDE.md, write `hb_fallback "wiki-bootstrap" "fail" "WIKI_ROOT not configured" '{"reason":"no WIKI_ROOT configured"}'`
 - **Errata discovered**: after scanning all wiki files, write `hb_decision "errata-count" "info" "{N} unresolved entries found" '{"count":"{N}"}'`; if none found, write `hb_decision "errata-count" "info" "all errata resolved"`
 - **New file created**: if a fix requires creating a new wiki file, write `hb_decision "wiki-file-created" "fired" "created {filename}" '{"file":"{filename}"}'`
 - **Unclear entry**: if an errata entry is unclear and skipped, write `hb_decision "errata-skipped" "warn" "unclear entry skipped" '{"ticket":"{TICKET-ID}"}'`
@@ -22,11 +22,19 @@ If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/sk
 
 ---
 
-## Step 0 — Detect project context
+## Step 0 — Load project context
 
-Read `CLAUDE.md` from the current working directory and extract `{WIKI_ROOT}`. Stop here if no `WIKI_ROOT` line is found — no wiki exists for this project.
+If `--from-auto` is set: source the project context env file instead of reading CLAUDE.md.
 
-After extracting:
+```bash
+source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true
+```
+
+Use `$WIKI_ROOT` from the environment. If `$WIKI_ROOT` is empty, fall back to reading CLAUDE.md in the current directory.
+
+Stop here if no `WIKI_ROOT` is available — no wiki exists for this project.
+
+After resolving:
 ```
 WIKI_ROOT = {resolved absolute path}
 ```

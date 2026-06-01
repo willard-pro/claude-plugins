@@ -11,7 +11,7 @@ You have been given a ticket ID as the argument (e.g. `WIL-42`). Execute the ful
 
 ## Pipeline Preamble
 
-Follow the pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=IMPLEMENT, FROM_FLAG=--from-auto, EXTRA_GUARD=base-branch, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=REPOS_ROOT,ISSUE_PREFIX,BE_SERVICES,BE_TEST_CMD,FE_TEST_CMD, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
+If `--from-auto` is present in the arguments, follow the auto-pipeline preamble in `~/.claude/skills/lib/skill-preamble-auto.md` with parameters: TICKET_ID=<from args>, PHASE=IMPLEMENT, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_LOGGING=true, HAS_HEARTBEAT=true. Before starting, source the project context: `source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true`. Otherwise, follow the full pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=IMPLEMENT, FROM_FLAG=none, EXTRA_GUARD=base-branch, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=REPOS_ROOT,ISSUE_PREFIX,BE_SERVICES,BE_TEST_CMD,FE_TEST_CMD, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
 
 ### Heartbeat points
 - **Test command**: if BE_TEST_CMD found, write `hb_heartbeat "test-command" "BE_TEST_CMD configured" '{"cmd":"<cmd>"}'`; if absent, write `hb_heartbeat "test-command" "skip" "no BE_TEST_CMD"`
@@ -268,7 +268,7 @@ Append to `notes.md`:
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|start|Implementing changes" >> "$LOG_FILE"
 
-**Use Serena for all real-time code navigation during editing — mandatory for both modes.** Before any file is read or edited: symbol search or go_to_definition to locate the target, find_references to check downstream impact. Read only what Serena has pinpointed — never scan whole files.
+**Prefer smart_search for code navigation during editing — for both modes.** Use `smart_search` to locate symbols by name, `smart_outline` to get structural views, then `smart_unfold` or `Read` to load only confirmed targets. Fall back to Serena if smart_search returns nothing: symbol search or go_to_definition to locate the target, find_references to check downstream impact. Read only what these tools pinpoint — never scan whole files.
 
 **Before editing, run GitNexus blast radius:** Call `mcp__gitnexus__impact` on each target symbol from the plan. Compare the result's d=1 (WILL BREAK) callers against the affected files listed in the plan. If any d=1 symbol is NOT in the plan, append it to the implementation scope. If GitNexus is unavailable, log a warning and proceed — never block on it.
 
@@ -284,7 +284,7 @@ Spawn a `general-purpose` agent to apply the change and return a difficulty summ
 ```
 Apply the openspec change `{change-name}` by running `/opsx:apply` in the repo at `{repo-path}`. Follow its instructions fully.
 
-Use Serena for all real-time code navigation during editing. Before any file is read or edited: symbol search or go_to_definition to locate the target, find_references to check downstream impact. Read only what Serena has pinpointed — never scan whole files. Before starting edits, run GitNexus `impact()` on target symbols to map blast radius.
+Use smart_search for code navigation during editing: `smart_search` to locate symbols, `smart_outline` for structural views, then `smart_unfold` or `Read` for confirmed targets only. Fall back to Serena if smart_search returns nothing: symbol search or go_to_definition to locate, find_references to trace usages. Read only what these tools pinpoint — never scan whole files. Before starting edits, run GitNexus `impact()` on target symbols to map blast radius.
 
 Track these metrics as you work:
 - fix_cycles: how many times did you need to fix and re-run tests?
