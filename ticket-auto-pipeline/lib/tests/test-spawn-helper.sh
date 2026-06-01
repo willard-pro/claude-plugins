@@ -67,11 +67,11 @@ test_write_env_exports_all_fields() {
     UAT_URL=http://localhost:8080 \
     SLACK_CHANNEL="#alerts" >/dev/null 2>&1
   local f=/tmp/ticket-auto-TEST-42-env.sh
-  grep -q 'export TICKET_ID="TEST-42"' "$f" \
-    && grep -q 'export REPOS_ROOT="/repos"' "$f" \
-    && grep -q 'export BE_SERVICES="svc1 svc2"' "$f" \
-    && grep -q 'export WIKI_ROOT="/wiki"' "$f" \
-    && grep -q 'export SLACK_CHANNEL="#alerts"' "$f"
+  grep -q 'export TICKET_ID="TEST-42"' "$f" &&
+    grep -q 'export REPOS_ROOT="/repos"' "$f" &&
+    grep -q 'export BE_SERVICES="svc1 svc2"' "$f" &&
+    grep -q 'export WIKI_ROOT="/wiki"' "$f" &&
+    grep -q 'export SLACK_CHANNEL="#alerts"' "$f"
 }
 
 test_write_env_rejects_empty_ticket_id() {
@@ -98,8 +98,8 @@ test_write_env_no_shell_expansion_in_heredoc() {
   spawn_write_env TICKET_ID=TEST-42 REPOS_ROOT='$(echo pwned)' ISSUE_PREFIX=TEST BE_SERVICES='$HOME' >/dev/null 2>&1
   local f=/tmp/ticket-auto-TEST-42-env.sh
   # The literal strings should appear, not their expanded values
-  grep -q 'export REPOS_ROOT="$(echo pwned)"' "$f" \
-    && grep -q 'export BE_SERVICES="$HOME"' "$f"
+  grep -q 'export REPOS_ROOT="$(echo pwned)"' "$f" &&
+    grep -q 'export BE_SERVICES="$HOME"' "$f"
 }
 
 # ── spawn_agent_pre tests ──────────────────────────────────────────────────────
@@ -175,7 +175,7 @@ test_pre_writes_context_file() {
 test_post_reads_metadata_file() {
   source "$LIB_DIR/spawn-helper.sh"
   # Write metadata manually to simulate spawn_agent_pre having run
-  cat > /tmp/ticket-auto-TEST-42-spawn-meta.txt << 'META'
+  cat >/tmp/ticket-auto-TEST-42-spawn-meta.txt <<'META'
 PHASE=TEST
 STEP=test
 TICKET_ID=TEST-42
@@ -216,7 +216,7 @@ test_post_fail_explicit_params() {
 }
 
 test_post_cleans_up_metadata_file() {
-  cat > /tmp/ticket-auto-TEST-42-spawn-meta.txt << 'META'
+  cat >/tmp/ticket-auto-TEST-42-spawn-meta.txt <<'META'
 PHASE=TEST
 STEP=test
 TICKET_ID=TEST-42
@@ -228,7 +228,7 @@ META
 }
 
 test_post_warn_continue_stops_pinger_but_does_not_exit() {
-  cat > /tmp/ticket-auto-TEST-42-spawn-meta.txt << 'META'
+  cat >/tmp/ticket-auto-TEST-42-spawn-meta.txt <<'META'
 PHASE=MAINTENANCE
 STEP=maintenance
 TICKET_ID=TEST-42
