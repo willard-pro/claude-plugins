@@ -179,8 +179,9 @@ spawn_agent_pre() {
   fi
 
   # 5. Print the agent spawn prompt for the orchestrator to forward
-  # Build the env-sourcing prefix
-  local env_prefix="export LOG_FILE=\"${LOG_FILE}\"; export HB_LOG_FILE=\"${HB_LOG_FILE}\"; export CLAUDE_LOG_FILE=\"${CLAUDE_LOG_FILE}\"; source ~/.claude/skills/lib/heartbeat.sh; source /tmp/ticket-auto-${TICKET_ID}-env.sh"
+  # Build the env-sourcing prefix. printf '%q' escapes shell metacharacters
+  # in path values, preventing command injection if a path contains ";", $(), etc.
+  local _q; _q() { printf '%q' "$1"; }; local env_prefix="export LOG_FILE=$(_q "${LOG_FILE}"); export HB_LOG_FILE=$(_q "${HB_LOG_FILE}"); export CLAUDE_LOG_FILE=$(_q "${CLAUDE_LOG_FILE}"); source ~/.claude/skills/lib/heartbeat.sh; source /tmp/ticket-auto-$(_q "${TICKET_ID}")-env.sh"
 
   echo "AGENT_PROMPT=Run ${SKILL} ${TICKET_ID} ${FLAGS}. Before starting, run: ${env_prefix}. ${INSTRUCTIONS}"
 
