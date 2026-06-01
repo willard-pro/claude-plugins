@@ -267,46 +267,33 @@ Follow the agent spawn template with: PHASE={PHASE}, SKILL={SKILL}, DESCRIPTION=
 | `{FAIL_ACTION}` | `stop` or `warn-continue` (maintenance is non-blocking) |
 | `{NEXT_PHASE}` | Next phase for the transition heartbeat |
 
-**Execution sequence:**
+**Execution sequence (using spawn-helper.sh):**
 
-1. Write waiting log entry and start heartbeat pinger:
+All spawn boilerplate is handled by `lib/spawn-helper.sh`. Each spawn site follows this 3-step pattern:
+
+1. **Pre-spawn** — `spawn_agent_pre` handles the waiting log entry, heartbeat pinger start, phase context file, cl_write handoff, and prints the full agent prompt (including env sourcing):
    ```bash
-   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|{PHASE}|{phase}|waiting|Agent launched — {DESCRIPTION}" >> {LOG_FILE}
-   hb_heartbeat "orchestrator-waiting" "agent {phase} launched"
-   hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
+   source ~/.claude/skills/lib/spawn-helper.sh
+   _prompt=$(spawn_agent_pre \
+     PHASE=<phase> STEP=<step> TICKET_ID={TICKET-ID} \
+     LOG_FILE={LOG_FILE} HB_LOG_FILE={HB_LOG_FILE} CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE \
+     SKILL=/ticket-<skill> FLAGS="--from-auto" \
+     FROM_STEP={<FROM>} \
+     DESCRIPTION="<what the agent does>" \
+     INSTRUCTIONS="<additional skill-specific instructions>")
    ```
 
-2. Write phase context file:
+2. **Spawn** — pass `$_prompt` to a `general-purpose` agent.
+
+3. **Post-spawn** — `spawn_capture` persists output, then `spawn_agent_post` writes done/fail log entries, stops pinger, and writes heartbeat transitions:
    ```bash
-   echo "{PHASE}|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
-   ```
-
-3. Spawn `general-purpose` agent:
-   ```
-   Run {SKILL} {TICKET-ID} {EXTRA_FLAGS}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. {SKILL_INSTRUCTIONS}
-   ```
-
-4. Wait for agent. Persist output:
-   ```bash
-   capture_agent_result "{TICKET-ID}" "{phase}" "$AGENT_RESULT"
-   ```
-
-5. Extract `{EXTRACT}` from result.
-
-6. On failure:
-   ```bash
-   hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|{PHASE}|{phase}|fail|Agent failed{if FAIL_ACTION=warn-continue: ` — continuing`}" >> {LOG_FILE}
-   hb_heartbeat "agent-returned" "{phase} agent failed"
-   ```
-   → `{FAIL_ACTION}`
-
-7. On success:
-   ```bash
-   hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|{PHASE}|{phase}|done|{result}" >> {LOG_FILE}
-   hb_heartbeat "agent-returned" "{phase} agent done — {result}"
-   hb_heartbeat "phase-transition" "{PHASE} → {NEXT_PHASE}"
+   spawn_capture TICKET_ID={TICKET-ID} PHASE=<phase> RESULT="$AGENT_RESULT"
+   # On success:
+   spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done MSG="<result>" NEXT_PHASE=<next>
+   # On failure (blocking):
+   spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail MSG="<reason>"
+   # On failure (non-blocking, e.g. document/wiki):
+   FAIL_ACTION=warn-continue spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail MSG="<reason>"
    ```
 
 At session end, write a trace file:
@@ -324,8 +311,7 @@ cat > {ticket-dir}/auto-session.md << 'TRACE'
 - [x] Step 3: Gate — {auto-approved|stopped: complex}
 - [x] Step 4: Implement — {Smooth|Rough|Hard}
 - [x] Step 4.5: Verify — {✅ PASS (N attempts)|❌ FAIL after N|skipped: no UI}
-- [x] Step 4.6: Document — ai-context.md written ({N} patterns, {N} decisions, {trivial|non-trivial})
-- [x] Step 4.7: Wiki Maintenance — {N} errata processed, {N} ai-context findings promoted
+- [x] Step 4.6: Document + Wiki — ai-context.md ({trivial|non-trivial}), {N} errata processed, {N} ai-context findings promoted
 - [x] Step 5: PR review — {✅|⚠️}, {N} iterations, {N} re-verify retries
 - [x] Step 6: Report — done
 TRACE
@@ -381,8 +367,7 @@ Based on `{RESUME_STEP}`, jump directly to the corresponding step. Steps before 
 | STEP_3_5 | Step 3.5 (Comment Reconciliation) |
 | STEP_4 | Step 4 (Implement) |
 | STEP_4_5 | Step 4.5 (Verify) |
-| STEP_4_6 | Step 4.6 (Document) |
-| STEP_4_7 | Step 4.7 (Wiki Maintenance) |
+| STEP_4_6 | Step 4.6 (Document + Wiki Maintenance) |
 | STEP_5 | Step 5 (PR Review loop) |
 | STEP_5_5 | Step 5.5 (PR Comment Reconciliation) |
 | STEP_6 | Step 6 (Report) |
@@ -392,31 +377,24 @@ Based on `{RESUME_STEP}`, jump directly to the corresponding step. Steps before 
 ## Step 1 — Appraise
 
 ### Appraise spawn
-Follow the agent spawn template with: PHASE=APPRAISE, SKILL=/ticket-appraise, DESCRIPTION=investigating {TICKET-ID}, EXTRA_FLAGS=--from-auto{if {APPRAISE_FROM} is non-empty: ` --from-step {APPRAISE_FROM}`}, SKILL_INSTRUCTIONS=Follow the skill exactly. When you hit Resume mode and the workspace already exists, if asked "continue or re-investigate?", choose "continue" — do not prompt. Report only the final handoff output., EXTRACT=COMPLEXITY, TICKET_DIR, TICKET_TITLE, FAIL_ACTION=stop, NEXT_PHASE=EXEC
 
-Write the waiting log entry and start heartbeat pinger:
+Run pre-spawn boilerplate (waiting log, heartbeat pinger, phase context). Capture the generated agent prompt:
 ```bash
-cl_write "APPRAISE" "handoff" "info" "ticket={TICKET-ID} autonomy={AUTONOMY} from_step=${APPRAISE_FROM:-fresh}"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|waiting|Agent launched — investigating {TICKET-ID}" >> {LOG_FILE}
-hb_heartbeat "orchestrator-waiting" "agent appraise launched"
-hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
+source ~/.claude/skills/lib/spawn-helper.sh
+_appraise_prompt=$(spawn_agent_pre \
+  PHASE=APPRAISE STEP=appraise TICKET_ID={TICKET-ID} \
+  LOG_FILE={LOG_FILE} HB_LOG_FILE={HB_LOG_FILE} CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE \
+  SKILL=/ticket-appraise FLAGS="--from-auto" \
+  FROM_STEP={APPRAISE_FROM} \
+  DESCRIPTION="investigating {TICKET-ID}" \
+  INSTRUCTIONS="Follow the skill exactly. When you hit Resume mode and the workspace already exists, if asked 'continue or re-investigate?', choose 'continue' — do not prompt. Report only the final handoff output.")
 ```
 
-Write the phase context file so the token-tracker hook knows where to log:
+Spawn a `general-purpose` agent with `$_appraise_prompt` as the instruction.
 
+Wait for the agent. Persist:
 ```bash
-echo "APPRAISE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
-```
-
-Spawn a `general-purpose` agent to investigate the ticket:
-
-```
-Run /ticket-appraise {TICKET-ID} --from-auto{if {APPRAISE_FROM} is non-empty: ` --from-step {APPRAISE_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. When you hit Resume mode and the workspace already exists, if asked "continue or re-investigate?", choose "continue" — do not prompt. Report only the final handoff output.
-```
-
-Wait for the agent. Persist the raw output immediately before extracting any fields:
-```bash
-capture_agent_result "{TICKET-ID}" "appraise" "$AGENT_RESULT"
+spawn_capture TICKET_ID={TICKET-ID} PHASE=appraise RESULT="$AGENT_RESULT"
 ```
 
 Extract from its result:
@@ -424,25 +402,18 @@ Extract from its result:
 - `{TICKET_DIR}` — local workspace path (derive from the find command in Step 1 of appraise-exec pattern, or read from agent output)
 - `{TICKET_TITLE}` — the full ticket title. If not present in the agent's handoff, fetch it via the Linear access strategy above (bash `get_issue` when key is set, MCP fallback otherwise) before writing the META title line.
 
-If the agent fails → write fail log and stop:
+If the agent fails → post fail and stop:
 ```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|fail|Agent failed" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "appraise agent failed"
-_last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
-cl_write "APPRAISE" "context" "fail" "appraise agent failed — last_hb: ${_last_hb}"
-cl_write RETRO hint info "sub-agent spawn failure in APPRAISE phase — check agent isolation, tool availability, and CLAUDE_LOG_FILE export for diagnostics"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail
 ```
+Stop here.
 
-On success, write the done log entry and META title:
+On success → post done, then write META title/artifact lines:
 ```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|{COMPLEXITY}, {N} files traced" >> {LOG_FILE}
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
+  MSG="{COMPLEXITY}, {N} files traced" NEXT_PHASE=EXEC
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|title|info|{TICKET-ID}: {TICKET_TITLE}" >> {LOG_FILE}
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|notes:{TICKET_DIR}/notes.md" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "appraise agent done — {COMPLEXITY}"
-hb_heartbeat "phase-transition" "APPRAISE → EXEC"
-cl_write "APPRAISE" "appraise" "done" "complexity={COMPLEXITY} files_traced={N} ticket_dir={TICKET_DIR} title={TICKET_TITLE}"
 ```
 
 ---
@@ -468,59 +439,47 @@ Then jump to **Step 2 — Exec**.
 If `_bug_labels` is > 0 → proceed with the reproduce spawn below.
 
 ### Reproduce spawn
-Follow the agent spawn template with: PHASE=REPRODUCE, SKILL=/ticket-reproduce, DESCRIPTION=reproducing bug for {TICKET-ID}, EXTRA_FLAGS=--from-auto{if {REPRODUCE_FROM} is non-empty: ` --from-step {REPRODUCE_FROM}`}, SKILL_INSTRUCTIONS=Follow the skill exactly. Report only the final handoff output., EXTRACT=REPRODUCE_RESULT, FAIL_ACTION=stop, NEXT_PHASE=EXEC
 
-Write the waiting log entry:
+Run pre-spawn boilerplate. Capture the generated agent prompt:
 ```bash
-cl_write "REPRODUCE" "handoff" "info" "bug ticket: {TICKET-ID} from_step=${REPRODUCE_FROM:-fresh}"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|waiting|Agent launched — reproducing bug for {TICKET-ID}" >> {LOG_FILE}
-hb_heartbeat "orchestrator-waiting" "agent reproduce launched"
-hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
+source ~/.claude/skills/lib/spawn-helper.sh
+_reproduce_prompt=$(spawn_agent_pre \
+  PHASE=REPRODUCE STEP=reproduce TICKET_ID={TICKET-ID} \
+  LOG_FILE={LOG_FILE} HB_LOG_FILE={HB_LOG_FILE} CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE \
+  SKILL=/ticket-reproduce FLAGS="--from-auto" \
+  FROM_STEP={REPRODUCE_FROM} \
+  DESCRIPTION="reproducing bug for {TICKET-ID}" \
+  INSTRUCTIONS="Follow the skill exactly. Report only the final handoff output.")
 ```
 
-Write the phase context file:
+Spawn a `general-purpose` agent with `$_reproduce_prompt` as the instruction.
+
+Wait for the agent. Persist:
 ```bash
-echo "REPRODUCE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
-```
-
-Spawn a `general-purpose` agent to reproduce the bug:
-
-```
-Run /ticket-reproduce {TICKET-ID} --from-auto{if {REPRODUCE_FROM} is non-empty: ` --from-step {REPRODUCE_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Report only the final handoff output.
-```
-
-Wait for the agent. Persist the raw output immediately before extracting any fields:
-```bash
-capture_agent_result "{TICKET-ID}" "reproduce" "$AGENT_RESULT"
+spawn_capture TICKET_ID={TICKET-ID} PHASE=reproduce RESULT="$AGENT_RESULT"
 ```
 
 Extract:
 - `{REPRODUCE_RESULT}` — `REPRODUCED`, `NOT_REPRODUCED`, or `BLOCKED`
 
-If the agent fails → write fail log and stop:
+If the agent fails → post fail and stop:
 ```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|fail|Agent failed" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "reproduce agent failed"
-_last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
-cl_write "REPRODUCE" "context" "fail" "reproduce agent failed — last_hb: ${_last_hb}"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail
 ```
+Stop.
 
 On success, branch on `{REPRODUCE_RESULT}`:
 
 **REPRODUCED** — bug confirmed, proceed to Exec:
 ```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|done|REPRODUCED" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "reproduce agent done — REPRODUCED"
-hb_heartbeat "phase-transition" "REPRODUCE → EXEC"
-cl_write "REPRODUCE" "reproduce" "done" "result=REPRODUCED"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
+  MSG="REPRODUCED" NEXT_PHASE=EXEC
 ```
 Continue to **Step 2 — Exec**.
 
 **NOT_REPRODUCED** — bug doesn't manifest, gate-stop:
 ```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done MSG="NOT_REPRODUCED"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|REPRO_NOT_CONFIRMED" >> {LOG_FILE}
 hb_heartbeat "gate-stop" "fail" "REPRO_NOT_CONFIRMED — bug not reproducible on UAT"
 ```
@@ -528,7 +487,7 @@ Stop. The reproduce skill already posted findings to Linear. No code changes wer
 
 **BLOCKED** — insufficient info, add needs-info label and gate-stop:
 ```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done MSG="BLOCKED"
 _flow_sh="${HOME}/.claude/skills/ticket-flow/flow.sh"
 [ -f "$_flow_sh" ] || _flow_sh=$(find "${HOME}/.claude/plugins/cache" -name "flow.sh" -path "*/ticket-auto-pipeline/*/skills/ticket-flow/flow.sh" 2>/dev/null | sort | tail -1)
 bash "$_flow_sh" "{TICKET-ID}" "needs-info" 2>&1
@@ -549,60 +508,40 @@ Stop. The reproduce skill already posted a Linear comment requesting details. Th
 ## Step 2 — Exec
 
 ### Exec spawn
-Follow the agent spawn template with: PHASE=EXEC, SKILL=/ticket-appraise-exec, DESCRIPTION=creating artifacts for {TICKET-ID}, EXTRA_FLAGS=--from-auto{if {EXEC_FROM} is non-empty: ` --from-step {EXEC_FROM}`}, SKILL_INSTRUCTIONS=Follow the skill exactly. Report only the final handoff output., EXTRACT=ARTIFACT_TYPE, FAIL_ACTION=stop, NEXT_PHASE=GATE
 
-Write the waiting log entry:
-
+Run pre-spawn boilerplate. Capture the generated agent prompt:
 ```bash
-cl_write "EXEC" "handoff" "info" "from_appraise: complexity={COMPLEXITY} ticket_dir={TICKET_DIR} from_step=${EXEC_FROM:-fresh}"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|waiting|Agent launched — creating artifacts for {TICKET-ID}" >> {LOG_FILE}
-hb_heartbeat "orchestrator-waiting" "agent exec launched"
-hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
+source ~/.claude/skills/lib/spawn-helper.sh
+_exec_prompt=$(spawn_agent_pre \
+  PHASE=EXEC STEP=exec TICKET_ID={TICKET-ID} \
+  LOG_FILE={LOG_FILE} HB_LOG_FILE={HB_LOG_FILE} CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE \
+  SKILL=/ticket-appraise-exec FLAGS="--from-auto" \
+  FROM_STEP={EXEC_FROM} \
+  DESCRIPTION="creating artifacts for {TICKET-ID}" \
+  INSTRUCTIONS="Follow the skill exactly. Report only the final handoff output.")
 ```
 
-Write the phase context file so the token-tracker hook knows where to log:
+Spawn a `general-purpose` agent with `$_exec_prompt` as the instruction.
 
+Wait for the agent. Persist:
 ```bash
-echo "EXEC|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
-```
-
-Spawn a `general-purpose` agent to create artifacts:
-
-```
-Run /ticket-appraise-exec {TICKET-ID} --from-auto{if {EXEC_FROM} is non-empty: ` --from-step {EXEC_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Report only the final handoff output.
-```
-
-Wait for the agent. Persist the raw output immediately before extracting any fields:
-```bash
-capture_agent_result "{TICKET-ID}" "exec" "$AGENT_RESULT"
+spawn_capture TICKET_ID={TICKET-ID} PHASE=exec RESULT="$AGENT_RESULT"
 ```
 
 Extract:
 - `{ARTIFACT_TYPE}` — `simple-fix` or `openspec:<name>`
 
-If the agent fails → write fail log and stop:
+If the agent fails → post fail and stop:
 ```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|fail|Agent failed" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "exec agent failed"
-_last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
-_dir_exists=$([ -d "{TICKET_DIR}" ] && echo "yes" || echo "no")
-cl_write "EXEC" "context" "fail" "exec agent failed — ticket_dir_exists=${_dir_exists} plan_path=${PLAN_PATH:-unresolved} last_hb: ${_last_hb}"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail
 ```
+Stop.
 
-On success:
+On success → post done, then resolve the plan artifact path:
 ```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|{ARTIFACT_TYPE}" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "exec agent done — {ARTIFACT_TYPE}"
-hb_heartbeat "phase-transition" "EXEC → GATE"
-cl_write "EXEC" "exec" "done" "artifact_type={ARTIFACT_TYPE} plan_path=${PLAN_PATH:-unknown}"
-```
-
-Resolve and log the plan artifact path so the dashboard can display it:
-
-```bash
-source "$(dirname "${BASH_SOURCE[0]}")/../../lib/ticket-dir.sh"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
+  MSG="{ARTIFACT_TYPE}" NEXT_PHASE=GATE
+source ~/.claude/skills/lib/ticket-dir.sh
 PLAN_PATH=$(resolve_plan_path "{LOG_FILE}" "{TICKET_DIR}" "{ticket-id-lowercase}")
 if [ -n "$PLAN_PATH" ]; then
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|plan:$PLAN_PATH" >> {LOG_FILE}
@@ -884,56 +823,41 @@ Proceed to Step 4.
 Fetch the ticket via the Linear access strategy (bash `get_issue` when `LINEAR_API_KEY` is set, MCP fallback otherwise) and verify the `approved` label is present. If missing (shouldn't happen given Step 3 or Step 3.5, but verify) — add it now for simple tickets, or stop for complex.
 
 ### Implement spawn
-Follow the agent spawn template with: PHASE=IMPLEMENT, SKILL=/ticket-implement, DESCRIPTION=implementing {TICKET-ID}, EXTRA_FLAGS=--from-auto{if {IMPLEMENT_FROM} is non-empty: ` --from-step {IMPLEMENT_FROM}`}, SKILL_INSTRUCTIONS=Follow the skill exactly. Use Serena for all code navigation — mandatory. Commit and push. Report the final output including branch name. After this agent returns, clear `{IMPLEMENT_FROM}` (set to empty) — loop re-invocations in Step 5d always start fresh., EXTRACT=OUTCOME, MISMATCH, FAIL_ACTION=stop, NEXT_PHASE=VERIFY
 
-Write the waiting log entry:
-
+Run pre-spawn boilerplate. Capture the generated agent prompt:
 ```bash
-cl_write "IMPLEMENT" "handoff" "info" "from_gate: complexity={COMPLEXITY} artifact_type={ARTIFACT_TYPE} plan_path=${PLAN_PATH:-unknown} from_step=${IMPLEMENT_FROM:-fresh}"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|waiting|Agent launched — implementing {TICKET-ID}" >> {LOG_FILE}
-hb_heartbeat "orchestrator-waiting" "agent implement launched"
-hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
+source ~/.claude/skills/lib/spawn-helper.sh
+_implement_prompt=$(spawn_agent_pre \
+  PHASE=IMPLEMENT STEP=implement TICKET_ID={TICKET-ID} \
+  LOG_FILE={LOG_FILE} HB_LOG_FILE={HB_LOG_FILE} CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE \
+  SKILL=/ticket-implement FLAGS="--from-auto" \
+  FROM_STEP={IMPLEMENT_FROM} \
+  DESCRIPTION="implementing {TICKET-ID}" \
+  INSTRUCTIONS="Follow the skill exactly. Use Serena for all code navigation — mandatory. Commit and push. Report the final output including branch name.")
 ```
 
-Write the phase context file so the token-tracker hook knows where to log:
-
-```bash
-echo "IMPLEMENT|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
-```
-
-Spawn a `general-purpose` agent:
-
-```
-Run /ticket-implement {TICKET-ID} --from-auto{if {IMPLEMENT_FROM} is non-empty: ` --from-step {IMPLEMENT_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Use Serena for all code navigation — mandatory. Commit and push. Report the final output including branch name.
-
+Spawn a `general-purpose` agent with `$_implement_prompt` as the instruction.
 After this agent returns, clear `{IMPLEMENT_FROM}` (set to empty) — loop re-invocations in Step 5d always start fresh.
-```
 
-Wait for the agent. Persist the raw output immediately before extracting any fields:
+Wait for the agent. Persist:
 ```bash
-capture_agent_result "{TICKET-ID}" "implement" "$AGENT_RESULT"
+spawn_capture TICKET_ID={TICKET-ID} PHASE=implement RESULT="$AGENT_RESULT"
 ```
 
 Extract:
 - `{OUTCOME}` — `Smooth`, `Rough`, or `Hard`
 - `{MISMATCH}` — whether a complexity mismatch was reported (look for "Complexity mismatch" in the output)
 
-If the agent fails → write fail log and stop:
+If the agent fails → post fail and stop:
 ```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|fail|Agent failed" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "implement agent failed"
-_last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
-cl_write "IMPLEMENT" "context" "fail" "implement agent failed — complexity={COMPLEXITY} artifact_type={ARTIFACT_TYPE} last_hb: ${_last_hb}"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail
 ```
+Stop.
 
-On success:
+On success → post done:
 ```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|{OUTCOME}, branch: {branch}" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "implement agent done — {OUTCOME}"
-hb_heartbeat "phase-transition" "IMPLEMENT → VERIFY"
-cl_write "IMPLEMENT" "implement" "done" "outcome={OUTCOME} branch={branch}"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
+  MSG="{OUTCOME}, branch: {branch}" NEXT_PHASE=VERIFY
 ```
 
 ### Step 4a — Verify outcome label
@@ -953,48 +877,45 @@ Only if the ticket has a UI surface. Otherwise:
 hb_decision "verification-verdict" "skip" "no UI surface — verification skipped"
 hb_heartbeat "phase-transition" "IMPLEMENT → MAINTENANCE (verify skipped)"
 ```
-Proceed to Step 4.6 (Document).
+Proceed to Step 4.6 (Document + Wiki).
 
 ### Step 4.5a — Verification attempt
 
-Write log start event:
+Run pre-spawn boilerplate. Capture the generated agent prompt:
 ```bash
-cl_write "VERIFY" "handoff" "info" "attempt={VERIFY_ATTEMPTS}/3 branch={branch} outcome={OUTCOME}"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|start|Attempt {VERIFY_ATTEMPTS}/3 — running Playwright UAT" >> {LOG_FILE}
-hb_heartbeat "orchestrator-waiting" "verify attempt $(({VERIFY_ATTEMPTS}+1))/3"
-hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
+source ~/.claude/skills/lib/spawn-helper.sh
+_verify_prompt=$(spawn_agent_pre \
+  PHASE=VERIFY STEP=verify TICKET_ID={TICKET-ID} \
+  LOG_FILE={LOG_FILE} HB_LOG_FILE={HB_LOG_FILE} CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE \
+  SKILL=/ticket-verify FLAGS="--from-auto --env local" \
+  FROM_STEP={VERIFY_FROM} \
+  DESCRIPTION="verifying {TICKET-ID} (attempt $(({VERIFY_ATTEMPTS}+1))/3)" \
+  INSTRUCTIONS="Follow the skill exactly. Run Playwright UAT against localhost. Report only the final handoff output.")
 ```
 
-Write the phase context file so the token-tracker hook knows where to log:
+Spawn a `general-purpose` agent with `$_verify_prompt` as the instruction.
+After this agent returns, clear `{VERIFY_FROM}` (set to empty) — retry re-invocations always start fresh.
 
+Wait for the agent. Persist (attempt number tracks retries):
 ```bash
-echo "VERIFY|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+spawn_capture TICKET_ID={TICKET-ID} PHASE=verify RESULT="$AGENT_RESULT" ATTEMPT="$(({VERIFY_ATTEMPTS}+1))"
 ```
 
-Run `/ticket-verify {TICKET-ID} --env local --from-auto{if {VERIFY_FROM} is non-empty: ` --from-step {VERIFY_FROM}`}`.
-After the agent returns, persist the raw output using append mode (attempt number tracks retries):
-```bash
-capture_agent_result "{TICKET-ID}" "verify" "$AGENT_RESULT" "$(({VERIFY_ATTEMPTS}+1))"
-```
 Extract `{VERDICT}` (PASS or FAIL).
-After this call, clear `{VERIFY_FROM}` (set to empty) — retry re-invocations always start fresh.
 
-Write log result event:
+**PASS:**
 ```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-# PASS:
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|done|PASS" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "verify agent done — PASS"
-hb_heartbeat "phase-transition" "VERIFY → MAINTENANCE"
-cl_write "VERIFY" "verify" "done" "PASS on attempt {VERIFY_ATTEMPTS}"
-# FAIL:
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|fail|FAIL — criteria not met" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "verify agent done — FAIL"
-_last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
-cl_write "VERIFY" "context" "fail" "FAIL attempt {VERIFY_ATTEMPTS}/3 — last_hb: ${_last_hb}"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
+  MSG="PASS on attempt {VERIFY_ATTEMPTS}" NEXT_PHASE=MAINTENANCE
 ```
 
-- **PASS** → proceed to Step 4.6 (Document).
+**FAIL:**
+```bash
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail \
+  MSG="FAIL — criteria not met (attempt {VERIFY_ATTEMPTS}/3)"
+```
+
+- **PASS** → proceed to Step 4.6 (Document + Wiki).
 - **FAIL** → proceed to Step 4.5b.
 
 ### Step 4.5b — Retry decision
@@ -1024,126 +945,89 @@ If `{VERIFY_ATTEMPTS} < 3`:
   ticket-implement Step 2.5 detects the Verification FAIL in notes.md,
   appends `## Verification #N` to the plan, and implements the fix.
   After Step 4 completes, proceed through 4a to 4.5a again.
-  Step 4.6 (Document) runs after VERIFY passes.
+  Step 4.6 (Document + Wiki) runs after VERIFY passes.
   Do NOT re-initialize `{VERIFY_ATTEMPTS}`.
 
 Pass `--from-auto` to the ticket-implement agent spawn in Step 4 — add `--from-auto` to the agent prompt.
 
 ---
 
-## Step 4.6 — Document
+## Step 4.6 — Document + Wiki Maintenance
 
-Generate `ai-context.md` in the ticket directory — a structured, AI-optimized context file capturing what changed, patterns used, key files, gotchas, and decisions from the implementation. This runs after verify and before wiki maintenance.
+Generate `ai-context.md` in the ticket directory, then incorporate any unresolved errata into the project wiki. Both run in a single agent spawn — the agent executes both sub-tasks sequentially, writing separate pipeline log entries for each.
 
-### Document spawn
-Follow the agent spawn template with: PHASE=MAINTENANCE, SKILL=/ticket-document, DESCRIPTION=generating ai-context.md for {TICKET-ID}, EXTRA_FLAGS=--from-auto, SKILL_INSTRUCTIONS=Generate ai-context.md for {TICKET-ID} in {TICKET_DIR}. Read notes.md, diff the branch against develop, classify significance, and write the context file. Report the final output including the DOCUMENT_RESULT block., EXTRACT=DOCUMENT_FILE,PATTERNS,DECISIONS,SIGNIFICANCE, FAIL_ACTION=warn-continue, NEXT_PHASE=MAINTENANCE
+### Combined maintenance spawn
 
-Write the waiting log entry:
-
-Write the phase context file so the token-tracker hook knows where to log:
-
+Run pre-spawn boilerplate. Capture the generated agent prompt:
 ```bash
-cl_write "MAINTENANCE" "handoff" "info" "post-implement documentation for {TICKET-ID}"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|waiting|Agent launched — generating ai-context.md for {TICKET-ID}" >> {LOG_FILE}
-hb_heartbeat "orchestrator-waiting" "agent document launched"
-hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-echo "MAINTENANCE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+source ~/.claude/skills/lib/spawn-helper.sh
+_maintenance_prompt=$(spawn_agent_pre \
+  PHASE=MAINTENANCE STEP=maintenance TICKET_ID={TICKET-ID} \
+  LOG_FILE={LOG_FILE} HB_LOG_FILE={HB_LOG_FILE} CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE \
+  SKILL=none FLAGS="--from-auto" \
+  DESCRIPTION="document + wiki maintenance for {TICKET-ID}" \
+  INSTRUCTIONS="You are performing post-implement maintenance for {TICKET-ID}. Execute both sub-tasks in order, writing separate pipeline log entries for each.
+
+SUB-TASK 1 — Generate ai-context.md:
+1. Source the project env: source /tmp/ticket-auto-{TICKET-ID}-env.sh 2>/dev/null || true
+2. Read notes.md from {TICKET_DIR}. Extract complexity and key findings.
+3. Diff the branch against develop: git diff develop...{BRANCH}
+4. Get commit log: git log develop..{BRANCH} --oneline
+5. Classify significance (trivial vs non-trivial) based on the diff content.
+6. Write ai-context.md to {TICKET_DIR} following the ticket-document skill format.
+7. Append to notes.md session log: '- ai-context.md written ({N} patterns, {N} decisions)'
+8. Write pipeline log: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|{DOCUMENT_FILE} ({PATTERNS} patterns, {DECISIONS} decisions, {SIGNIFICANCE}) >> {LOG_FILE}
+9. If document generation fails: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|fail|Agent failed — continuing >> {LOG_FILE}
+
+SUB-TASK 2 — Wiki Maintenance:
+1. Use \$WIKI_ROOT from the environment (sourced above). If unset, skip wiki maintenance.
+2. Scan wiki files under \$WIKI_ROOT for unresolved errata entries (## Errata sections, non-strikethrough).
+3. Also scan recent ai-context.md files (find . -path '*/tickets/*/ai-context.md' -newermt '90 days ago').
+4. For each unresolved errata entry: apply the fix to the wiki flow file, mark resolved with strikethrough + date.
+5. For ai-context findings meeting inclusion criteria: promote to wiki entries.
+6. Write pipeline log: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|done|{ERRATA_COUNT} errata incorporated, {AI_CONTEXT_FINDINGS} ai-context findings promoted >> {LOG_FILE}
+7. If wiki maintenance fails: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|fail|Agent failed — continuing >> {LOG_FILE}
+
+At the end, emit a MAINTENANCE_RESULT block:
+=== MAINTENANCE_RESULT ===
+document_file={path to ai-context.md or 'none'}
+patterns={N}
+decisions={N}
+significance={trivial|non-trivial}
+errata_count={N}
+ai_context_findings={N}
+=== END MAINTENANCE_RESULT ===")
 ```
 
-Spawn a `general-purpose` agent:
+Spawn a `general-purpose` agent with `$_maintenance_prompt` as the instruction.
 
-```
-Run /ticket-document --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Generate ai-context.md for {TICKET-ID} in {TICKET_DIR}. Read notes.md, diff the branch against develop, classify significance, and write the context file. Report the final output including the DOCUMENT_RESULT block.
-```
-
-Wait for the agent. Persist the raw output immediately before extracting any fields:
+Wait for the agent. Persist:
 ```bash
-capture_agent_result "{TICKET-ID}" "document" "$AGENT_RESULT"
+spawn_capture TICKET_ID={TICKET-ID} PHASE=maintenance RESULT="$AGENT_RESULT"
 ```
 
-Extract:
+Extract from the MAINTENANCE_RESULT block:
 - `{DOCUMENT_FILE}` — path to ai-context.md, or `none` if failed
 - `{PATTERNS}` — number of patterns documented (0 if trivial or failed)
 - `{DECISIONS}` — number of decisions documented (0 if trivial or failed)
-- `{SIGNIFICANCE}` — `trivial` or `non-trivial` (from the classification audit log)
-
-If the agent fails → log a warning but continue (document is non-blocking):
-```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|fail|Agent failed — continuing" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "document agent failed — continuing (non-blocking)"
-_last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
-cl_write "MAINTENANCE" "context" "fail" "document agent failed (non-blocking) — last_hb: ${_last_hb}"
-cl_write RETRO hint info "sub-agent spawn failure in DOCUMENT phase — check agent isolation, tool availability, and CLAUDE_LOG_FILE export for diagnostics"
-```
-
-On success:
-```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|{DOCUMENT_FILE} ({PATTERNS} patterns, {DECISIONS} decisions, {SIGNIFICANCE})" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "document agent done — {SIGNIFICANCE}, {PATTERNS} patterns, {DECISIONS} decisions"
-cl_write "MAINTENANCE" "document" "done" "file={DOCUMENT_FILE} patterns={PATTERNS} decisions={DECISIONS} significance={SIGNIFICANCE}"
-```
-
-Non-blocking: document agent failure does not stop the pipeline. The ai-context.md file is a nice-to-have — the pipeline proceeds to wiki maintenance regardless.
-
----
-
-## Step 4.7 — Wiki Maintenance
-
-Incorporate any errata discovered during implementation into the project wiki so downstream tickets benefit from corrected call chains. Also scans the ai-context.md generated in Step 4.6 and promotes non-obvious findings into consolidated wiki entries.
-
-### Maintenance spawn
-Follow the agent spawn template with: PHASE=MAINTENANCE, SKILL=/wiki-maintenance, DESCRIPTION=wiki maintenance for {TICKET-ID}, EXTRA_FLAGS=, SKILL_INSTRUCTIONS=Process any unresolved errata entries that were appended by ticket-implement Step 4c. Also scan recent ai-context.md files and promote non-obvious findings to wiki entries. Edit only wiki files — do not modify source code. Report the final output including count of errata processed, ai-context findings promoted, and files modified., EXTRACT=ERRATA_COUNT,AI_CONTEXT_FINDINGS, FAIL_ACTION=warn-continue, NEXT_PHASE=PR-REVIEW
-
-Write the waiting log entry:
-
-```bash
-cl_write "MAINTENANCE" "handoff" "info" "post-implement wiki maintenance for {TICKET-ID}"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|waiting|Agent launched — wiki maintenance for {TICKET-ID}" >> {LOG_FILE}
-hb_heartbeat "orchestrator-waiting" "agent maintenance launched"
-hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-```
-
-Write the phase context file so the token-tracker hook knows where to log:
-
-```bash
-echo "MAINTENANCE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
-```
-
-Spawn a `general-purpose` agent:
-
-```
-Run /wiki-maintenance. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Process any unresolved errata entries that were appended by ticket-implement Step 4c. Also scan recent ai-context.md files across ticket directories and promote non-obvious findings to wiki entries. Edit only wiki files — do not modify source code. Report the final output including count of errata processed, ai-context findings promoted, and files modified.
-```
-
-Wait for the agent. Persist the raw output immediately before extracting any fields:
-```bash
-capture_agent_result "{TICKET-ID}" "maintenance" "$AGENT_RESULT"
-```
-
-Extract:
+- `{SIGNIFICANCE}` — `trivial` or `non-trivial`
 - `{ERRATA_COUNT}` — number of errata entries processed (0 if none)
+- `{AI_CONTEXT_FINDINGS}` — number of ai-context findings promoted to wiki (0 if none)
 
-If the agent fails → log a warning but continue (wiki maintenance is non-blocking):
+If the agent fails → log a warning but continue (maintenance is non-blocking):
 ```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|fail|Agent failed — continuing" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "wiki-maintenance agent failed — continuing (non-blocking)"
-_last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
-cl_write "MAINTENANCE" "context" "fail" "wiki maintenance failed (non-blocking) — last_hb: ${_last_hb}"
+FAIL_ACTION=warn-continue spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail \
+  MSG="Agent failed — continuing"
 ```
 
 On success:
 ```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|done|{ERRATA_COUNT} errata incorporated, {AI_CONTEXT_FINDINGS} ai-context findings promoted to wiki" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "wiki-maintenance agent done — {ERRATA_COUNT} errata, {AI_CONTEXT_FINDINGS} ai-context findings"
-hb_heartbeat "phase-transition" "MAINTENANCE → PR-REVIEW"
-cl_write "MAINTENANCE" "maintenance" "done" "errata_processed={ERRATA_COUNT} ai_context_findings={AI_CONTEXT_FINDINGS}"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
+  MSG="doc={DOCUMENT_FILE} ({SIGNIFICANCE}) errata={ERRATA_COUNT} wiki_findings={AI_CONTEXT_FINDINGS}" \
+  NEXT_PHASE=PR-REVIEW
 ```
 
-Non-blocking: wiki maintenance failure does not stop the pipeline. The errata remain unresolved and will be picked up by the next ticket's maintenance run.
+Non-blocking: maintenance agent failure does not stop the pipeline. Both ai-context.md and wiki errata are nice-to-haves — the pipeline proceeds to PR review regardless.
 
 ---
 
@@ -1154,55 +1038,42 @@ Initialize `{ITERATION}` = 0. The loop runs at most 3 times.
 ### Step 5a — Run PR review
 
 ### PR Review spawn
-Follow the agent spawn template with: PHASE=PR-REVIEW, SKILL=/ticket-pr-review, DESCRIPTION=reviewing PR for {TICKET-ID}, EXTRA_FLAGS=--from-auto{if {PR_REVIEW_FROM} is non-empty: ` --from-step {PR_REVIEW_FROM}`}, SKILL_INSTRUCTIONS=Follow the skill exactly. Validate the PR diff against the ticket requirements. Post findings. If all requirements addressed (verdict ✅), merge via squash. Report the final output. After this agent returns, clear `{PR_REVIEW_FROM}` — subsequent iterations start fresh., EXTRACT=VERDICT, MERGED, FAIL_ACTION=stop, NEXT_PHASE=REPORT
 
-Write the waiting log entry:
-
+Run pre-spawn boilerplate. Capture the generated agent prompt:
 ```bash
-cl_write "PR-REVIEW" "handoff" "info" "iteration={ITERATION} branch={branch} outcome={OUTCOME}"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|waiting|Agent launched — reviewing PR for {TICKET-ID}" >> {LOG_FILE}
-hb_heartbeat "orchestrator-waiting" "agent pr-review launched"
-hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
+source ~/.claude/skills/lib/spawn-helper.sh
+_pr_review_prompt=$(spawn_agent_pre \
+  PHASE=PR-REVIEW STEP=pr-review TICKET_ID={TICKET-ID} \
+  LOG_FILE={LOG_FILE} HB_LOG_FILE={HB_LOG_FILE} CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE \
+  SKILL=/ticket-pr-review FLAGS="--from-auto" \
+  FROM_STEP={PR_REVIEW_FROM} \
+  DESCRIPTION="reviewing PR for {TICKET-ID} (iteration {ITERATION})" \
+  INSTRUCTIONS="Follow the skill exactly. Validate the PR diff against the ticket requirements. Post findings. If all requirements addressed (verdict ✅), merge via squash. Report the final output.")
 ```
 
-Write the phase context file so the token-tracker hook knows where to log:
-
-```bash
-echo "PR-REVIEW|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
-```
-
-Spawn a `general-purpose` agent:
-
-```
-Run /ticket-pr-review {TICKET-ID} --from-auto{if {PR_REVIEW_FROM} is non-empty: ` --from-step {PR_REVIEW_FROM}`}. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Validate the PR diff against the ticket requirements. Post findings. If all requirements addressed (verdict ✅), merge via squash. Report the final output.
-
+Spawn a `general-purpose` agent with `$_pr_review_prompt` as the instruction.
 After this agent returns, clear `{PR_REVIEW_FROM}` — subsequent iterations start fresh.
-```
 
-Wait for the agent. Persist the raw output immediately before extracting any fields:
+Wait for the agent. Persist:
 ```bash
-capture_agent_result "{TICKET-ID}" "pr-review" "$AGENT_RESULT"
+spawn_capture TICKET_ID={TICKET-ID} PHASE=pr-review RESULT="$AGENT_RESULT"
 ```
 
 Extract:
 - `{VERDICT}` — ✅ all addressed, or ⚠️ gaps found
 - `{MERGED}` — yes, no, or skipped
 
-If the agent fails → write fail log and stop:
+If the agent fails → post fail and stop:
 ```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|fail|Agent failed" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "pr-review agent failed"
-_last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
-cl_write "PR-REVIEW" "context" "fail" "pr-review agent failed — iteration={ITERATION} last_hb: ${_last_hb}"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail \
+  MSG="Agent failed (iteration {ITERATION})"
 ```
+Stop.
 
 On success:
 ```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|done|Verdict: {VERDICT}, merged: {MERGED}" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "pr-review agent done — verdict {VERDICT}"
-cl_write "PR-REVIEW" "pr-review" "done" "verdict={VERDICT} merged={MERGED} iteration={ITERATION}"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
+  MSG="Verdict: {VERDICT}, merged: {MERGED}" NEXT_PHASE=REPORT
 ```
 
 **Verdict-line integrity gate** — before any branching, count parseable verdict lines in the pr-review output:
@@ -1268,12 +1139,39 @@ hb_decision "loop-back" "fired" "pr-review gaps → pr-iterate" "{\"iteration\":
 ```
 
 ### PR Iterate spawn
-Follow the agent spawn template with: PHASE=PR-REVIEW, SKILL=/ticket-pr-iterate, DESCRIPTION=iterating on PR feedback for {TICKET-ID}, EXTRA_FLAGS=--from-auto{if {PR_ITERATE_FROM} is non-empty: ` --from-step {PR_ITERATE_FROM}`}, SKILL_INSTRUCTIONS=Follow the skill exactly. Parse the PR review findings, append a PR Review #{ITERATION} section to the plan, update Linear to Ready + approved. Report the final output. After this agent returns, clear `{PR_ITERATE_FROM}`., EXTRACT=none, FAIL_ACTION=stop, NEXT_PHASE=RE-IMPLEMENT
 
-Write the phase context file:
+Run pre-spawn boilerplate. Capture the generated agent prompt:
+```bash
+source ~/.claude/skills/lib/spawn-helper.sh
+_pr_iterate_prompt=$(spawn_agent_pre \
+  PHASE=PR-REVIEW STEP=plan-iterate-start TICKET_ID={TICKET-ID} \
+  LOG_FILE={LOG_FILE} HB_LOG_FILE={HB_LOG_FILE} CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE \
+  SKILL=/ticket-pr-iterate FLAGS="--from-auto" \
+  FROM_STEP={PR_ITERATE_FROM} \
+  DESCRIPTION="iterating on PR feedback for {TICKET-ID} (iteration {ITERATION})" \
+  INSTRUCTIONS="Follow the skill exactly. Parse the PR review findings, append a PR Review #{ITERATION} section to the plan, update Linear to Ready + approved. Report the final output.")
 ```
 
-Wait for the agent. If it fails → stop and report.
+Spawn a `general-purpose` agent with `$_pr_iterate_prompt` as the instruction.
+After this agent returns, clear `{PR_ITERATE_FROM}`.
+
+Wait for the agent. Persist:
+```bash
+spawn_capture TICKET_ID={TICKET-ID} PHASE=pr-iterate RESULT="$AGENT_RESULT"
+```
+
+If the agent fails → post fail and stop:
+```bash
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail \
+  MSG="Agent failed (iteration {ITERATION})"
+```
+Stop.
+
+On success:
+```bash
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
+  MSG="Plan updated with PR Review #{ITERATION}" NEXT_PHASE=RE-IMPLEMENT
+```
 
 ### Step 5d — Re-implement
 
@@ -1314,50 +1212,40 @@ On pass:
 hb_gate "preflight" "ok" "re-approval confirmed — state={LIVE_STATE}" "{\"state\":\"{LIVE_STATE}\"}"
 ```
 
-Write the phase context file so the token-tracker hook knows where to log:
-
-```bash
-echo "IMPLEMENT|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
-```
-
 ### Re-implement spawn
-Follow the agent spawn template with: PHASE=IMPLEMENT, SKILL=/ticket-implement, DESCRIPTION=re-implementing {TICKET-ID} (iteration {ITERATION}), EXTRA_FLAGS=--from-auto, SKILL_INSTRUCTIONS=Follow the skill exactly. Read the updated plan (including the PR Review #{ITERATION} section), implement the changes, write tests, commit, and push. Report the final output including branch name., EXTRACT=OUTCOME, FAIL_ACTION=stop, NEXT_PHASE=RE-VERIFY
 
-Write the waiting log entry:
-
+Run pre-spawn boilerplate. Capture the generated agent prompt:
 ```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|re-implement|waiting|Agent launched — re-implementing {TICKET-ID} (iteration {ITERATION})" >> {LOG_FILE}
-hb_heartbeat "orchestrator-waiting" "agent re-implement launched (iteration {ITERATION})"
-hb_pinger_start "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
+source ~/.claude/skills/lib/spawn-helper.sh
+_reimplement_prompt=$(spawn_agent_pre \
+  PHASE=IMPLEMENT STEP=re-implement TICKET_ID={TICKET-ID} \
+  LOG_FILE={LOG_FILE} HB_LOG_FILE={HB_LOG_FILE} CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE \
+  SKILL=/ticket-implement FLAGS="--from-auto" \
+  DESCRIPTION="re-implementing {TICKET-ID} (iteration {ITERATION})" \
+  INSTRUCTIONS="Follow the skill exactly. Read the updated plan (including the PR Review #{ITERATION} section), implement the changes, write tests, commit, and push. Report the final output including branch name.")
 ```
 
-Spawn a `general-purpose` agent:
+Spawn a `general-purpose` agent with `$_reimplement_prompt` as the instruction.
 
-```
-Run /ticket-implement {TICKET-ID} --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Read the updated plan (including the PR Review #{ITERATION} section), implement the changes, write tests, commit, and push. Report the final output including branch name.
-```
-
-Wait for the agent. Persist the raw output immediately before extracting any fields:
+Wait for the agent. Persist:
 ```bash
-capture_agent_result "{TICKET-ID}" "re-implement" "$AGENT_RESULT" "{ITERATION}"
+spawn_capture TICKET_ID={TICKET-ID} PHASE=re-implement RESULT="$AGENT_RESULT" ATTEMPT="{ITERATION}"
 ```
 
 Extract:
 - `{OUTCOME}` — `Smooth`, `Rough`, or `Hard`
 
-If the agent fails → write fail log and stop:
+If the agent fails → post fail and stop:
 ```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|re-implement|fail|Agent failed (iteration {ITERATION})" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "re-implement agent failed (iteration {ITERATION})"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail \
+  MSG="Agent failed (iteration {ITERATION})"
 ```
+Stop.
 
 On success:
 ```bash
-hb_pinger_stop "/tmp/ticket-auto-{TICKET-ID}-pinger-stop"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|re-implement|done|{OUTCOME}, iteration {ITERATION}" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "re-implement agent done — {OUTCOME} (iteration {ITERATION})"
-hb_heartbeat "phase-transition" "IMPLEMENT → RE-VERIFY"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
+  MSG="{OUTCOME}, iteration {ITERATION}" NEXT_PHASE=RE-VERIFY
 ```
 
 ### Step 5d2 — Re-verify
@@ -1384,7 +1272,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|re-verify|fail|FAIL — criteria not
 hb_heartbeat "agent-returned" "re-verify agent done — FAIL (iteration {ITERATION}, retry {VERIFY_RETRIES})"
 ```
 
-- **PASS** → run Step 4.6 (Document) then Step 4.7 (Wiki Maintenance) to regenerate ai-context.md and incorporate any new errata from re-implementation, then proceed to Step 5e.
+- **PASS** → run Step 4.6 (Document + Wiki) to regenerate ai-context.md and incorporate any new errata from re-implementation, then proceed to Step 5e.
 - **FAIL** → proceed to retry logic below.
 
 #### Step 5d2-retry
@@ -1686,41 +1574,39 @@ hb_decision "pr-reconcile-result" "fired" "amended — re-entering implement loo
 Set up the implement spawn with the amended plan. Follow the same pattern as Step 5d (Re-implement) but using `--from-auto`:
 
 ### Re-implement spawn (from human feedback)
-Follow the agent spawn template with: PHASE=IMPLEMENT, SKILL=/ticket-implement, DESCRIPTION=implementing human PR feedback for {TICKET-ID} (PR feedback cycle {PR_FEEDBACK_N}), EXTRA_FLAGS=--from-auto, SKILL_INSTRUCTIONS=Follow the skill exactly. Read the updated plan (including the PR Feedback #{PR_FEEDBACK_N} section), implement the changes, write tests, commit, and push. Report the final output including branch name., EXTRACT=OUTCOME, FAIL_ACTION=stop, NEXT_PHASE=VERIFY
 
-Write the phase context file:
-
+Run pre-spawn boilerplate. Capture the generated agent prompt:
 ```bash
-echo "IMPLEMENT|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+source ~/.claude/skills/lib/spawn-helper.sh
+_fb_implement_prompt=$(spawn_agent_pre \
+  PHASE=IMPLEMENT STEP=implement TICKET_ID={TICKET-ID} \
+  LOG_FILE={LOG_FILE} HB_LOG_FILE={HB_LOG_FILE} CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE \
+  SKILL=/ticket-implement FLAGS="--from-auto" \
+  DESCRIPTION="implementing human PR feedback for {TICKET-ID} (PR feedback cycle {PR_FEEDBACK_N})" \
+  INSTRUCTIONS="Follow the skill exactly. Read the updated plan (including the PR Feedback #{PR_FEEDBACK_N} section), implement the changes, write tests, commit, and push. Report the final output including branch name.")
 ```
 
-Spawn a `general-purpose` agent:
+Spawn a `general-purpose` agent with `$_fb_implement_prompt` as the instruction.
 
-```
-Run /ticket-implement {TICKET-ID} --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Read the updated plan (including the PR Feedback #{PR_FEEDBACK_N} section), implement the changes, write tests, commit, and push. Report the final output including branch name.
-```
-
-Wait for the agent. Persist the raw output:
-
+Wait for the agent. Persist:
 ```bash
-capture_agent_result "{TICKET-ID}" "implement-feedback" "$AGENT_RESULT" "{PR_FEEDBACK_N}"
+spawn_capture TICKET_ID={TICKET-ID} PHASE=implement-feedback RESULT="$AGENT_RESULT" ATTEMPT="{PR_FEEDBACK_N}"
 ```
 
 Extract:
 - `{OUTCOME}` — `Smooth`, `Rough`, or `Hard`
 
-If the agent fails → write fail log and stop:
-
+If the agent fails → post fail and stop:
 ```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|fail|Agent failed (PR feedback cycle {PR_FEEDBACK_N})" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "implement agent failed (PR feedback cycle {PR_FEEDBACK_N})"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail \
+  MSG="Agent failed (PR feedback cycle {PR_FEEDBACK_N})"
 ```
+Stop.
 
 On success:
-
 ```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|{OUTCOME}, branch: {branch} (PR feedback cycle {PR_FEEDBACK_N})" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "implement agent done — {OUTCOME} (PR feedback cycle {PR_FEEDBACK_N})"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
+  MSG="{OUTCOME}, branch: {branch} (PR feedback cycle {PR_FEEDBACK_N})" NEXT_PHASE=VERIFY
 ```
 
 ### Step 5.5-post-c — Verify
@@ -1733,52 +1619,54 @@ capture_agent_result "{TICKET-ID}" "verify-feedback" "$AGENT_RESULT" "{PR_FEEDBA
 
 Extract `{VERDICT}` (PASS or FAIL). On FAIL, apply the standard verify retry logic from Step 4.5b (up to 3 attempts, loop back to implement on retry). On PASS, proceed.
 
-### Step 5.5-post-d — Document
+### Step 5.5-post-d — Document + Wiki Maintenance
 
-Regenerate `ai-context.md` to reflect PR feedback amendments (non-blocking, same as Step 4.6 pattern):
+Regenerate `ai-context.md` and run wiki maintenance in a single agent spawn (non-blocking, same pattern as Step 4.6):
 
-### Document spawn
-Follow the agent spawn template with: PHASE=MAINTENANCE, SKILL=/ticket-document, DESCRIPTION=regenerating ai-context.md for {TICKET-ID} (after PR feedback), EXTRA_FLAGS=--from-auto, SKILL_INSTRUCTIONS=Generate ai-context.md for {TICKET-ID} in {TICKET_DIR}. Read notes.md, diff the branch against develop, classify significance, and write the context file. Report the final output including the DOCUMENT_RESULT block., EXTRACT=DOCUMENT_FILE,PATTERNS,DECISIONS,SIGNIFICANCE, FAIL_ACTION=warn-continue, NEXT_PHASE=MAINTENANCE
-
-Write the waiting log entry:
-
+Run pre-spawn boilerplate. Capture the generated agent prompt:
 ```bash
-cl_write "MAINTENANCE" "handoff" "info" "post-feedback documentation for {TICKET-ID}"
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|waiting|Agent launched — regenerating ai-context.md for {TICKET-ID} (post-feedback)" >> {LOG_FILE}
-hb_heartbeat "orchestrator-waiting" "agent document launched (post-feedback)"
-echo "MAINTENANCE|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+source ~/.claude/skills/lib/spawn-helper.sh
+_fb_maintenance_prompt=$(spawn_agent_pre \
+  PHASE=MAINTENANCE STEP=maintenance TICKET_ID={TICKET-ID} \
+  LOG_FILE={LOG_FILE} HB_LOG_FILE={HB_LOG_FILE} CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE \
+  SKILL=none FLAGS="--from-auto" \
+  DESCRIPTION="document + wiki maintenance for {TICKET-ID} (post-feedback cycle {PR_FEEDBACK_N})" \
+  INSTRUCTIONS="Execute both sub-tasks in order (same pattern as Step 4.6 combined maintenance):
+
+SUB-TASK 1 — Regenerate ai-context.md:
+1. Source: source /tmp/ticket-auto-{TICKET-ID}-env.sh 2>/dev/null || true
+2. Read notes.md from {TICKET_DIR}, including PR Feedback sections.
+3. Diff the branch against develop, classify significance, write ai-context.md.
+4. Write pipeline log: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|{DOCUMENT_FILE} ({PATTERNS} patterns, {DECISIONS} decisions, {SIGNIFICANCE}) >> {LOG_FILE}
+5. On failure: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|fail|Agent failed — continuing >> {LOG_FILE}
+
+SUB-TASK 2 — Wiki Maintenance:
+1. Use \$WIKI_ROOT from env. If unset, skip.
+2. Process unresolved errata, promote ai-context findings.
+3. Write pipeline log: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|done|{ERRATA_COUNT} errata, {AI_CONTEXT_FINDINGS} findings >> {LOG_FILE}
+4. On failure: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|fail|Agent failed — continuing >> {LOG_FILE}
+
+Emit MAINTENANCE_RESULT block as in Step 4.6.")
 ```
 
-Spawn a `general-purpose` agent:
-
-```
-Run /ticket-document --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Generate ai-context.md for {TICKET-ID} in {TICKET_DIR}. Read notes.md (including PR Feedback sections), diff the branch against develop, classify significance, and write the context file. Report the final output including the DOCUMENT_RESULT block.
-```
-
-Wait for the agent. Persist the raw output:
+Spawn a `general-purpose` agent with `$_fb_maintenance_prompt`. Wait, persist:
 ```bash
-capture_agent_result "{TICKET-ID}" "document-feedback" "$AGENT_RESULT" "{PR_FEEDBACK_N}"
+spawn_capture TICKET_ID={TICKET-ID} PHASE=maintenance-feedback RESULT="$AGENT_RESULT" ATTEMPT="{PR_FEEDBACK_N}"
 ```
 
-Extract `{DOCUMENT_FILE}`, `{PATTERNS}`, `{DECISIONS}`, `{SIGNIFICANCE}`. On failure, log a warning and continue (non-blocking).
+Extract `{DOCUMENT_FILE}`, `{PATTERNS}`, `{DECISIONS}`, `{SIGNIFICANCE}`, `{ERRATA_COUNT}`, `{AI_CONTEXT_FINDINGS}`.
 
-On success:
+On failure (non-blocking):
 ```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|{DOCUMENT_FILE} ({PATTERNS} patterns, {DECISIONS} decisions, {SIGNIFICANCE})" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "document agent done (post-feedback) — {SIGNIFICANCE}, {PATTERNS} patterns, {DECISIONS} decisions"
-cl_write "MAINTENANCE" "document" "done" "file={DOCUMENT_FILE} patterns={PATTERNS} decisions={DECISIONS} significance={SIGNIFICANCE}"
+FAIL_ACTION=warn-continue spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail \
+  MSG="Agent failed — continuing"
 ```
 
-### Step 5.5-post-d2 — Wiki Maintenance
-
-Run wiki maintenance (same as Step 4.7 pattern, non-blocking):
-
-### Maintenance spawn
-Follow the agent spawn template with: PHASE=MAINTENANCE, SKILL=/wiki-maintenance, DESCRIPTION=wiki maintenance for {TICKET-ID} (after PR feedback), EXTRA_FLAGS=, SKILL_INSTRUCTIONS=Process any unresolved errata entries. Edit only wiki files — do not modify source code. Report the final output including count of errata processed and files modified., EXTRACT=ERRATA_COUNT, FAIL_ACTION=warn-continue, NEXT_PHASE=PR-REVIEW
-
-Write the waiting log entry, spawn a `general-purpose` agent with `/wiki-maintenance`, wait, and capture result (same pattern as Step 4.7). On success, include phase-transition heartbeat:
+On success, include phase-transition heartbeat:
 ```bash
-hb_heartbeat "phase-transition" "MAINTENANCE → PR-REVIEW"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
+  MSG="doc={DOCUMENT_FILE} ({SIGNIFICANCE}) errata={ERRATA_COUNT} wiki_findings={AI_CONTEXT_FINDINGS}" \
+  NEXT_PHASE=PR-REVIEW
 ```
 
 ### Step 5.5-post-e — Re-run PR review
@@ -1786,37 +1674,40 @@ hb_heartbeat "phase-transition" "MAINTENANCE → PR-REVIEW"
 Run a fresh PR review on the updated branch:
 
 ### PR Review spawn (post-feedback)
-Follow the agent spawn template with: PHASE=PR-REVIEW, SKILL=/ticket-pr-review, DESCRIPTION=re-reviewing PR after human feedback for {TICKET-ID}, EXTRA_FLAGS=--from-auto, SKILL_INSTRUCTIONS=Follow the skill exactly. Validate the PR diff against the ticket requirements (including PR Feedback #{PR_FEEDBACK_N} amendments). Post a fresh ## Ticket alignment review comment with updated coverage table. If all requirements addressed (verdict ✅), merge via squash. Report the final output., EXTRACT=VERDICT, MERGED, FAIL_ACTION=stop, NEXT_PHASE=REPORT
 
-Write the phase context file:
-
+Run pre-spawn boilerplate. Capture the generated agent prompt:
 ```bash
-echo "PR-REVIEW|{LOG_FILE}" > /tmp/ticket-auto-{TICKET-ID}-ctx.txt
+source ~/.claude/skills/lib/spawn-helper.sh
+_fb_pr_review_prompt=$(spawn_agent_pre \
+  PHASE=PR-REVIEW STEP=pr-review TICKET_ID={TICKET-ID} \
+  LOG_FILE={LOG_FILE} HB_LOG_FILE={HB_LOG_FILE} CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE \
+  SKILL=/ticket-pr-review FLAGS="--from-auto" \
+  DESCRIPTION="re-reviewing PR after human feedback for {TICKET-ID} (cycle {PR_FEEDBACK_N})" \
+  INSTRUCTIONS="Follow the skill exactly. Validate the PR diff against the ticket requirements (including PR Feedback #{PR_FEEDBACK_N} amendments). Post a fresh ## Ticket alignment review comment with updated coverage table. If all requirements addressed (verdict ✅), merge via squash. Report the final output.")
 ```
 
-Spawn a `general-purpose` agent:
+Spawn a `general-purpose` agent with `$_fb_pr_review_prompt` as the instruction.
 
-```
-Run /ticket-pr-review {TICKET-ID} --from-auto. Before starting, run: export LOG_FILE="{LOG_FILE}"; export HB_LOG_FILE="{HB_LOG_FILE}"; export CLAUDE_LOG_FILE="$CLAUDE_LOG_FILE"; source ~/.claude/skills/lib/heartbeat.sh. Follow the skill exactly. Validate the PR diff against the ticket requirements (including PR Feedback #{PR_FEEDBACK_N} amendments). Post a fresh ## Ticket alignment review comment with updated coverage table. If all requirements addressed (verdict ✅), merge via squash. Report the final output.
-```
-
-Wait for the agent. Persist output:
-
+Wait for the agent. Persist:
 ```bash
-capture_agent_result "{TICKET-ID}" "pr-review-feedback" "$AGENT_RESULT" "{PR_FEEDBACK_N}"
+spawn_capture TICKET_ID={TICKET-ID} PHASE=pr-review-feedback RESULT="$AGENT_RESULT" ATTEMPT="{PR_FEEDBACK_N}"
 ```
 
 Extract:
 - `{VERDICT}` — ✅ all addressed, or ⚠️ gaps found
 - `{MERGED}` — yes, no, or skipped
 
-If the agent fails → write fail log and stop.
+If the agent fails → post fail and stop:
+```bash
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail \
+  MSG="Agent failed (post-feedback cycle {PR_FEEDBACK_N})"
+```
+Stop.
 
 On success:
 ```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|done|Verdict: {VERDICT}, merged: {MERGED} (post-feedback cycle {PR_FEEDBACK_N})" >> {LOG_FILE}
-hb_heartbeat "agent-returned" "pr-review agent done — verdict {VERDICT} (post-feedback cycle {PR_FEEDBACK_N})"
-hb_heartbeat "phase-transition" "PR-REVIEW → REPORT"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
+  MSG="Verdict: {VERDICT}, merged: {MERGED} (post-feedback cycle {PR_FEEDBACK_N})" NEXT_PHASE=REPORT
 ```
 
 - **Verdict ✅** → proceed to Step 6 (Report).

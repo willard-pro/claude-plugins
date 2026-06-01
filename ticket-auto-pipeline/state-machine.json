@@ -6,7 +6,7 @@
       "from": "Backlog",
       "to": "Todo",
       "adds": ["claimed", "{complexity}"],
-      "removes": [],
+      "removes": ["simple", "complex"],
       "set_assignee": "me",
       "description": "Claim a ticket and begin appraisal"
     },
