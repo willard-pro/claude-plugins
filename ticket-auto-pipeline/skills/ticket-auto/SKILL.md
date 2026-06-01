@@ -479,7 +479,7 @@ Continue to **Step 2 — Exec**.
 
 **NOT_REPRODUCED** — bug doesn't manifest, gate-stop:
 ```bash
-spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done MSG="REPRODUCED"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done MSG="NOT_REPRODUCED"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|REPRO_NOT_CONFIRMED" >> {LOG_FILE}
 hb_heartbeat "gate-stop" "fail" "REPRO_NOT_CONFIRMED — bug not reproducible on UAT"
 ```
@@ -487,7 +487,7 @@ Stop. The reproduce skill already posted findings to Linear. No code changes wer
 
 **BLOCKED** — insufficient info, add needs-info label and gate-stop:
 ```bash
-spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done MSG="REPRODUCED"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done MSG="BLOCKED"
 _flow_sh="${HOME}/.claude/skills/ticket-flow/flow.sh"
 [ -f "$_flow_sh" ] || _flow_sh=$(find "${HOME}/.claude/plugins/cache" -name "flow.sh" -path "*/ticket-auto-pipeline/*/skills/ticket-flow/flow.sh" 2>/dev/null | sort | tail -1)
 bash "$_flow_sh" "{TICKET-ID}" "needs-info" 2>&1
