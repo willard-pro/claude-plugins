@@ -13,6 +13,7 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-heartbeat.sh
 	bash ticket-auto-pipeline/lib/tests/test-capture-transcript.sh
 	bash ticket-auto-pipeline/lib/tests/test-reconcile-comments.sh
+	bash ticket-auto-pipeline/lib/tests/test-spawn-helper.sh
 
 test-flow:
 	@echo "=== ticket-flow tests ==="
