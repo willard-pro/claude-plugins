@@ -22,6 +22,12 @@ If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/sk
 
 ## Step 0 — Resolve context
 
+If `--from-auto` is set, source the project context env file before anything else:
+
+```bash
+source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true
+```
+
 The orchestrator passes the ticket directory path in the spawn instruction. Identify it from the instruction text. If ambiguous, derive it from the ticket ID (passed alongside the spawn instruction or derivable from the branch name).
 
 Read `notes.md` from the ticket directory. Extract:
@@ -47,7 +53,7 @@ The ticket directory name follows the pattern `{ID}--{slug}`. Derive the branch 
 
 ## Step 2 — Gather git history
 
-Run both commands from the repository root (derive from the ticket directory or CLAUDE.md `{REPOS_ROOT}`):
+Run both commands from the repository root (use `$REPOS_ROOT` from the environment, or derive from the ticket directory):
 
 ```bash
 git diff develop...{branch}
