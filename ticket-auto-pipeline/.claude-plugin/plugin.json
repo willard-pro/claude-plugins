@@ -20,9 +20,9 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash -c 'mkdir -p ~/.claude/skills/lib && cp \"${CLAUDE_PLUGIN_ROOT}/lib/\"*.sh ~/.claude/skills/lib/'",
+            "command": "bash -c 'mkdir -p ~/.claude/skills/lib ~/.claude/skills/ticket-flow && cp \"${CLAUDE_PLUGIN_ROOT}/lib/\"*.sh ~/.claude/skills/lib/ && cp \"${CLAUDE_PLUGIN_ROOT}/skills/ticket-flow/\"*.sh ~/.claude/skills/ticket-flow/ && cp \"${CLAUDE_PLUGIN_ROOT}/skills/ticket-flow/\"*.json ~/.claude/skills/ticket-flow/'",
             "timeout": 10,
-            "statusMessage": "Syncing ticket-auto-pipeline lib scripts..."
+            "statusMessage": "Syncing ticket-auto-pipeline lib scripts and ticket-flow assets..."
           }
         ]
       }

@@ -178,7 +178,9 @@ if [ -f "$SENTINEL" ] && grep -q "^sm_hash=${SM_HASH}$" "$SENTINEL" 2>/dev/null;
   # Log after pipeline log is initialized (Step 0.6 logs META|preflight|skip|sentinel-valid)
 else
   # Cold run — run full validation
-  bash ~/.claude/skills/ticket-flow/validate-linear-config.sh "$TEAM_ID" || {
+  _validate_sh="${HOME}/.claude/skills/ticket-flow/validate-linear-config.sh"
+  [ -f "$_validate_sh" ] || _validate_sh=$(find "${HOME}/.claude/plugins/cache" -name "validate-linear-config.sh" -path "*/ticket-auto-pipeline/*/validate-linear-config.sh" 2>/dev/null | sort | tail -1)
+  bash "$_validate_sh" "$TEAM_ID" || {
     echo "Preflight failed: Linear config validation error. Fix the team config and retry." >&2
     hb_gate "preflight" "fail" "Linear config validation failed" "{\"team_id\":\"$TEAM_ID\"}"
     exit 1
