@@ -267,6 +267,27 @@ test_env_prefix_survives_shell_special_chars_in_paths() {
   ! echo "$output" | grep -qF '$(id)'
 }
 
+# ── heartbeat source guard ────────────────────────────────────────────────────
+
+test_heartbeat_sourced_when_not_predefined() {
+  # Run in a clean subshell with no pre-defined hb_* mocks — spawn-helper.sh
+  # must source heartbeat.sh itself so hb_heartbeat is available.
+  bash -c "
+    source '${LIB_DIR}/spawn-helper.sh'
+    declare -f hb_heartbeat >/dev/null 2>&1
+  "
+}
+
+test_heartbeat_not_sourced_when_already_defined() {
+  # When hb_heartbeat is already defined (e.g. test mocks), spawn-helper.sh
+  # must not overwrite it with the real heartbeat.sh implementation.
+  bash -c "
+    hb_heartbeat() { echo MOCK; }
+    source '${LIB_DIR}/spawn-helper.sh'
+    [ \"\$(hb_heartbeat)\" = 'MOCK' ]
+  "
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -299,7 +320,9 @@ for fn in \
   test_post_warn_continue_stops_pinger_but_does_not_exit \
   test_capture_rejects_missing_phase \
   test_capture_calls_through_with_all_params \
-  test_env_prefix_survives_shell_special_chars_in_paths; do
+  test_env_prefix_survives_shell_special_chars_in_paths \
+  test_heartbeat_sourced_when_not_predefined \
+  test_heartbeat_not_sourced_when_already_defined; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

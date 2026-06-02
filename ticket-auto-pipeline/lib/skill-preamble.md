@@ -199,7 +199,7 @@ After every Linear API call (`get_issue`, `get_comments`, `save_comment`, `get_m
 ```bash
 _raw=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_issue '{TICKET-ID}'" 2>&1)
 _rc=$?
-if [ $_rc -ne 0 ] || ! echo "$_raw" | jq -e '.data.issue' >/dev/null 2>&1; then
+if [ $_rc -ne 0 ] || ! echo "$_raw" | jq -e '.id' >/dev/null 2>&1; then
   _snippet=$(echo "$_raw" | head -c 200)
   hb_retry "get-issue" "fail" "get_issue failed (exit ${_rc})" \
     "{\"command\":\"get_issue\",\"ticket\":\"{TICKET-ID}\",\"exit_code\":\"${_rc}\",\"error_snippet\":\"$(echo "$_snippet" | tr '"' "'"  | tr '\n' ' ')\"}"
@@ -219,7 +219,7 @@ fi
 
 **jq extraction failure pattern:** When `jq` fails to extract a field from a Linear API response, capture it before stopping:
 ```bash
-_field=$(echo "$_raw" | jq -r '.data.issue.fieldName' 2>&1)
+_field=$(echo "$_raw" | jq -r '.fieldName' 2>&1)
 if [ $? -ne 0 ] || [ "$_field" = "null" ]; then
   hb_retry "jq-parse" "fail" "jq extraction failed for fieldName" \
     "{\"error_type\":\"jq_parse\",\"command\":\"get_issue\",\"field\":\"fieldName\"}"
