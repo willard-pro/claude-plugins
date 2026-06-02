@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.6 (2026-06-02)
+
+- Fix: removed `-u` (nounset) from `linear-api.sh` — Claude Code shell snapshots inject `ZSH_VERSION` references that trigger false-positive "unbound variable" errors; stderr pollution could contaminate `linear_graphql` JSON output
+- Fix: added missing `-e` flags to multi-expression `sed` in `flow.sh` label substitution (line 102–104) — second expression was interpreted as a filename, blocking `human-approve` and `appraise-start` triggers
+- Fix: added `"claimed"` to `removes` array in `state-machine.json` `human-approve` trigger — `claimed` and `approved` share the same Linear label group ("Flow"), causing Linear API to reject the mutation with "labelIds not exclusive child labels"
+
 ## 0.7.5 (2026-06-02)
 
 - Fix: `spawn-helper.sh` now sources `heartbeat.sh` at load time — `hb_*` and `cl_write` calls were silently unresolved when `HB_LOG_FILE`/`CLAUDE_LOG_FILE` were set during real pipeline runs

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Shared Linear GraphQL API helpers. Source this file from skill scripts.
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
 
 # Source heartbeat library if available
 _HB_LIB="$(dirname "${BASH_SOURCE[0]}")/heartbeat.sh"
