@@ -223,7 +223,7 @@ test_detect_resume_maintenance_document_done() {
   local resume_step
   resume_step=$(echo "$out" | grep 'RESUME_STEP:' | awk '{print $2}')
   rm -rf "$tmpdir"
-  [ "$resume_step" = "STEP_4_7" ]
+  [ "$resume_step" = "STEP_5" ]
 }
 
 # ── test_detect_resume_maintenance_document_waiting ─────────────────────────
@@ -245,7 +245,7 @@ test_detect_resume_maintenance_document_waiting() {
   local resume_step
   resume_step=$(echo "$out" | grep 'RESUME_STEP:' | awk '{print $2}')
   rm -rf "$tmpdir"
-  [ "$resume_step" = "STEP_4_6" ]
+  [ "$resume_step" = "STEP_5" ]
 }
 
 # ── test_detect_resume_maintenance_document_fail ────────────────────────────
@@ -267,7 +267,7 @@ test_detect_resume_maintenance_document_fail() {
   local resume_step
   resume_step=$(echo "$out" | grep 'RESUME_STEP:' | awk '{print $2}')
   rm -rf "$tmpdir"
-  [ "$resume_step" = "STEP_4_7" ]
+  [ "$resume_step" = "STEP_5" ]
 }
 
 # ── test_detect_resume_maintenance_maintenance_done ─────────────────────────
@@ -290,7 +290,7 @@ test_detect_resume_maintenance_maintenance_done() {
   local resume_step
   resume_step=$(echo "$out" | grep 'RESUME_STEP:' | awk '{print $2}')
   rm -rf "$tmpdir"
-  [ "$resume_step" = "STEP_5" ]
+  [ "$resume_step" = "STEP_6" ]
 }
 
 # ── test_detect_resume_maintenance_maintenance_waiting ──────────────────────
@@ -313,7 +313,7 @@ test_detect_resume_maintenance_maintenance_waiting() {
   local resume_step
   resume_step=$(echo "$out" | grep 'RESUME_STEP:' | awk '{print $2}')
   rm -rf "$tmpdir"
-  [ "$resume_step" = "STEP_4_7" ]
+  [ "$resume_step" = "STEP_5" ]
 }
 
 # ── test_detect_resume_maintenance_maintenance_fail ─────────────────────────
@@ -336,7 +336,7 @@ test_detect_resume_maintenance_maintenance_fail() {
   local resume_step
   resume_step=$(echo "$out" | grep 'RESUME_STEP:' | awk '{print $2}')
   rm -rf "$tmpdir"
-  [ "$resume_step" = "STEP_5" ]
+  [ "$resume_step" = "STEP_6" ]
 }
 
 # ── test_detect_resume_maintenance_fallback_document ────────────────────────
@@ -360,7 +360,7 @@ test_detect_resume_maintenance_fallback_document() {
   local doc_from
   doc_from=$(echo "$out" | grep 'DOCUMENT_FROM:' | awk '{print $2}')
   rm -rf "$tmpdir"
-  [ "$resume_step" = "STEP_4_6" ] && [ -z "$doc_from" ]
+  [ "$resume_step" = "STEP_5" ] && [ -z "$doc_from" ]
 }
 
 # ── test_ticket_dir_disambiguation ───────────────────────────────────────────
