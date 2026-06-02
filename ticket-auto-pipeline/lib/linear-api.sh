@@ -28,8 +28,10 @@ check_api_key() {
       if [ -f "$_dir/.env" ] && grep -q '^LINEAR_API_KEY=' "$_dir/.env" 2>/dev/null; then
         _key_value=$(grep -m1 '^LINEAR_API_KEY=' "$_dir/.env" 2>/dev/null | sed 's/^LINEAR_API_KEY=//')
         # Strip optional surrounding quotes
-        _key_value="${_key_value#\"}"; _key_value="${_key_value%\"}"
-        _key_value="${_key_value#\'}"; _key_value="${_key_value%\'}"
+        _key_value="${_key_value#\"}"
+        _key_value="${_key_value%\"}"
+        _key_value="${_key_value#\'}"
+        _key_value="${_key_value%\'}"
         if [ -n "$_key_value" ]; then
           export LINEAR_API_KEY="$_key_value"
           _found=true
