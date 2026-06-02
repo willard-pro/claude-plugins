@@ -4,6 +4,12 @@
 # logging, heartbeat pinger, phase context file, and result capture.
 set -euo pipefail
 
+# Source heartbeat library (provides hb_* and cl_write) unless already loaded (e.g. test mocks)
+if ! declare -f hb_heartbeat >/dev/null 2>&1; then
+  _HB_LIB="$(dirname "${BASH_SOURCE[0]}")/heartbeat.sh"
+  [ -f "$_HB_LIB" ] && source "$_HB_LIB"
+fi
+
 # ── spawn_write_env ──────────────────────────────────────────────────────────────
 # Write extracted CLAUDE.md fields to /tmp/ticket-auto-{TICKET_ID}-env.sh using
 # single-quote heredoc that prevents shell interpretation. Sub-agents source this

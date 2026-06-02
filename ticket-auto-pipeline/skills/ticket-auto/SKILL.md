@@ -36,7 +36,7 @@ fi
 | Fetch comments | `get_comments "<id>"` | `mcp__linear-server__list_comments(id: "<id>")` |
 | Post comment | `save_comment "<id>" "<body>"` | `mcp__linear-server__save_comment(issueId: "<id>", body: "<body>")` |
 
-The `get_issue` function returns JSON at `.data.issue` — use `jq` to extract fields. The `get_comments` function returns a JSON array of comment nodes.
+The `get_issue` function returns the issue object already unwrapped from `.data.issue` — use `jq` to extract fields directly (e.g., `.id`, `.title`, `.labels`). The `get_comments` function returns a JSON array of comment nodes.
 
 ### API error capture convention
 
@@ -46,7 +46,7 @@ After every Linear API call (`get_issue`, `get_comments`, `save_comment`, `get_m
 ```bash
 _raw=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_issue '{TICKET-ID}'" 2>&1)
 _rc=$?
-if [ $_rc -ne 0 ] || ! echo "$_raw" | jq -e '.data.issue' >/dev/null 2>&1; then
+if [ $_rc -ne 0 ] || ! echo "$_raw" | jq -e '.id' >/dev/null 2>&1; then
   _snippet=$(echo "$_raw" | head -c 200)
   hb_retry "get-issue" "fail" "get_issue failed (exit ${_rc})" \
     "{\"command\":\"get_issue\",\"ticket\":\"{TICKET-ID}\",\"exit_code\":\"${_rc}\",\"error_snippet\":\"$(echo "$_snippet" | tr '"' "'"  | tr '\n' ' ')\"}"
@@ -66,7 +66,7 @@ fi
 
 **jq extraction failure pattern:** When `jq` fails to extract a field from a Linear API response, capture it before stopping:
 ```bash
-_field=$(echo "$_raw" | jq -r '.data.issue.fieldName' 2>&1)
+_field=$(echo "$_raw" | jq -r '.fieldName' 2>&1)
 if [ $? -ne 0 ] || [ "$_field" = "null" ]; then
   hb_retry "jq-parse" "fail" "jq extraction failed for fieldName" \
     "{\"error_type\":\"jq_parse\",\"command\":\"get_issue\",\"field\":\"fieldName\"}"
@@ -427,7 +427,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|notes:{TICKET_DIR}/notes
 Extract labels from `$ISSUE_JSON` (already fetched during appraise):
 
 ```bash
-_bug_labels=$(echo "$ISSUE_JSON" | jq -r '.data.issue.labels.nodes[].name // empty' 2>/dev/null | grep -c "bug" || echo "0")
+_bug_labels=$(echo "$ISSUE_JSON" | jq -r '.labels.nodes[].name // empty' 2>/dev/null | grep -c "bug" || echo "0")
 ```
 
 If `_bug_labels` is 0 → skip Step 1.5. Write a skip log entry and proceed to Step 2:
