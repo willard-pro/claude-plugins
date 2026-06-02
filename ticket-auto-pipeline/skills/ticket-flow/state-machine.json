@@ -21,7 +21,7 @@
       "from": "Approve",
       "to": "Ready",
       "adds": ["approved"],
-      "removes": ["rejected"],
+      "removes": ["rejected", "claimed"],
       "description": "Human approved the plan"
     },
     "human-reject": {
