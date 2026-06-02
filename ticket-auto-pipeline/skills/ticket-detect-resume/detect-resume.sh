@@ -92,6 +92,10 @@ else
     RESUME_STEP="STEP_5"
   elif grep -q '^[^|]*|MAINTENANCE|document|waiting|' "$LOG_FILE"; then
     RESUME_STEP="STEP_5"
+  elif grep -q '^[^|]*|MAINTENANCE|maintenance|' "$LOG_FILE"; then
+    RESUME_STEP="STEP_5"
+  elif grep -q '^[^|]*|MAINTENANCE|document|' "$LOG_FILE"; then
+    RESUME_STEP="STEP_5"
   elif grep -q '^[^|]*|PR-REVIEW|pr-review|done|' "$LOG_FILE"; then
     # PR merge-status check: merged → STEP_6, open with human comments → STEP_5_5, else → STEP_5
     _pr_number=$(grep '^[^|]*|PR-REVIEW|checkout-pr|done|' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'|' -f5 || true)
