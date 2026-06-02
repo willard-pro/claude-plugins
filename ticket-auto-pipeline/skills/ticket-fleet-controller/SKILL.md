@@ -1,0 +1,165 @@
+# Ticket Fleet Controller — Automated Pipeline Intervention
+
+The fleet controller watches all active ticket-auto pipelines and acts at defined severity thresholds. It complements `ticket-overseer` — overseer is the dashboard, fleet controller is the circuit breaker.
+
+## When to Use
+
+| Trigger | Mode |
+|---------|------|
+| `/ticket-fleet-controller monitor` | Continuous detection loop with automated intervention |
+| `/ticket-fleet-controller status` | One-shot health dashboard + markdown report |
+| `/ticket-fleet-controller intervene <TICKET_ID>` | Manual kill or restart of a specific pipeline |
+
+## Modes
+
+### Monitor (`monitor`)
+
+Runs detection in a `while true` loop, rendering the dashboard each cycle and executing interventions at KILL and KILL+RESTART severities.
+
+```
+/ticket-fleet-controller monitor
+```
+
+- Polls every `FLEET_POLL_INTERVAL` seconds (default 30)
+- Checks for stop file `/tmp/ticket-fleet-controller-stop` at the start of each cycle
+- Respects `FLEET_DRY_RUN=true` — detection runs but interventions are logged, not executed
+- Exits cleanly when stop file is detected
+
+### Status (`status`)
+
+One-shot health check — renders the dashboard to terminal and writes a report to `logs/reports/fleet-dashboard.md`.
+
+```
+/ticket-fleet-controller status
+```
+
+### Intervene (`intervene`)
+
+Manual kill or restart for a specific ticket. Useful for operator-driven recovery.
+
+```
+/ticket-fleet-controller intervene CRE-47           # kill + attempt restart if eligible
+/ticket-fleet-controller intervene CRE-47 --kill     # kill only, no restart
+/ticket-fleet-controller intervene CRE-47 --restart  # restart if eligible (implies kill first)
+```
+
+## Detection Rules
+
+The fleet controller runs 6 detection engines against every active pipeline:
+
+| Detector | What it catches | Severity |
+|----------|----------------|----------|
+| Phase failures | `\|fail\|` entries on non-MAINTENANCE phases | WARN (gate-stops may escalate) |
+| Stalls | Stale heartbeats (last `orchestrator-waiting` or `watchdog\|alive`) | WARN → KILL → KILL+RESTART based on elapsed time |
+| Zombies | Unresolved `\|waiting\|` entries with no matching terminal | WARN → KILL based on age |
+| Loops | Excessive `decision\|loop-back` counts vs configured caps | KILL+RESTART for rogue loops and exhaustion gates |
+| Abandonment | Pipeline log exists but no `META\|outcome` after threshold | WARN → KILL+RESTART based on elapsed time |
+| Flow failures | `retry\|flow-sh\|fail` entries in heartbeat log | WARN (1 failure) → KILL (2+ failures) |
+
+## Escalation Path
+
+```
+OBSERVE (sev=0) → WARN (sev=1) → KILL (sev=2) → KILL+RESTART (sev=3)
+```
+
+- **OBSERVE**: Log detection results, no action
+- **WARN**: Write alert to dashboard, no destructive action
+- **KILL**: Touch stop files (`/tmp/ticket-auto-{ID}-pinger-stop`, `/tmp/ticket-auto-{ID}-watchdog-stop`), finalize pipeline log, write heartbeat audit
+- **KILL+RESTART**: Kill + spawn new `/ticket-auto {ID} --auto` agent (if `FLEET_AUTO_RESTART=true` and restart count < `FLEET_MAX_RESTARTS`)
+
+## Configuration
+
+All settings in `lib/config.sh` with `${VAR:-default}` pattern:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FLEET_POLL_INTERVAL` | 30 | Seconds between monitor cycles |
+| `FLEET_STALL_WARN_SECS` | 300 | Stale heartbeat threshold for WARN |
+| `FLEET_STALL_KILL_SECS` | 900 | Stale heartbeat threshold for KILL |
+| `FLEET_STALL_RESTART_SECS` | 1800 | Stale heartbeat threshold for KILL+RESTART |
+| `FLEET_ABANDON_WARN_HOURS` | 1 | Abandonment threshold for WARN |
+| `FLEET_ABANDON_KILL_HOURS` | 4 | Abandonment threshold for KILL+RESTART |
+| `FLEET_MAX_RESTARTS` | 2 | Max automatic restarts before giving up |
+| `FLEET_AUTO_RESTART` | false | Must be `true` to enable automatic restarts |
+| `FLEET_DRY_RUN` | false | When `true`, interventions are logged not executed |
+
+## Implementation
+
+The skill delegates to bash libraries for all heavy lifting. `fleet-intervene.sh` sources `heartbeat.sh` at file level via the declare-guard pattern (F9 fix in 0.9.1), so `hb_decision` audit calls execute unconditionally — no need for call-site `declare -f` guards.
+
+The restart spawn path works as follows:
+1. `fleet_detect_all` returns severity 3 for pipelines needing restart
+2. `fleet_restart_pipeline` kills the old pipeline, writes a `META|fleet-restart-marker` entry
+3. The monitor loop scans for fresh markers and emits `ACTION:spawn-restart tid=<id>`
+4. The skill layer (Claude Code) parses the ACTION line and spawns a `general-purpose` agent for `/ticket-auto {tid} --auto`
+
+This replaces the broken `RESTART_ELIGIBLE=` stdout-echo pattern (F5 fix in 0.9.1).
+
+```
+# Status mode — one-shot dashboard + report
+source ticket-auto-pipeline/lib/fleet-detect.sh
+source ticket-auto-pipeline/lib/fleet-dashboard.sh
+fleet_render_dashboard ./logs
+fleet_write_report ./logs
+
+# Monitor mode — continuous loop
+source ticket-auto-pipeline/lib/fleet-detect.sh
+source ticket-auto-pipeline/lib/fleet-intervene.sh
+source ticket-auto-pipeline/lib/fleet-dashboard.sh
+while true; do
+  [ -f /tmp/ticket-fleet-controller-stop ] && break
+  data=$(fleet_detect_all ./logs)
+  fleet_render_dashboard ./logs
+  fleet_write_report ./logs
+  # Save detection data for restart-marker scanning
+  data_file=$(mktemp)
+  echo "$data" >"$data_file"
+  # Execute interventions for KILL and KILL+RESTART severities
+  echo "$data" | jq -r '.pipelines[] | select(.severity >= 2) | "\(.tid) \(.severity)"' | while read -r tid sev; do
+    if [ "$sev" -eq 3 ]; then
+      fleet_restart_pipeline "$tid" "auto-restart" ./logs || true
+      # Capture restart intent: fleet_restart_pipeline writes META|fleet-restart-marker
+      # to the pipeline log. Scan for fresh markers and spawn new pipeline.
+      if grep -q "META|fleet-restart-marker|info|restart-intent" "./logs/${tid}-pipeline.log" 2>/dev/null; then
+        echo "FLEET: spawning restart for ${tid}"
+        # The skill layer (Claude Code) spawns the agent, not bash.
+        # Emit structured output for the orchestrator to parse.
+        echo "ACTION:spawn-restart tid=${tid}"
+      fi
+    else
+      fleet_kill_pipeline "$tid" "auto-kill" ./logs || true
+    fi
+  done
+  rm -f "$data_file"
+  sleep "${FLEET_POLL_INTERVAL:-30}"
+done
+
+# Intervene mode — manual kill/restart
+source ticket-auto-pipeline/lib/fleet-intervene.sh
+fleet_kill_pipeline "$TICKET_ID" "manual-intervention" ./logs
+# Or: fleet_restart_pipeline "$TICKET_ID" "manual-restart" ./logs
+```
+
+## Scheduling (Recommended)
+
+For autonomous operation, schedule the fleet controller via cron:
+
+```
+# Status check every 10 minutes
+*/10 * * * * cd /path/to/workspace && /ticket-fleet-controller status
+
+# Or continuous monitor via a cron-triggered agent loop
+# (monitor mode exits on stop file, so cron restarts it if it dies)
+```
+
+## Output
+
+- **Terminal**: Health table with ticket ID, phase, stall time, severity, and anomalies
+- **File**: `logs/reports/fleet-dashboard.md` — markdown report with health table + alert details + diagnostic context
+- **Interventions**: Pipeline log entries (`META|fleet-intervention`, `META|outcome`) and heartbeat audit entries (`decision|fleet-kill|fired`, `decision|fleet-restart|fired`)
+
+## Related Skills
+
+- `ticket-overseer` — human-facing status reports (complementary)
+- `ticket-detect-resume` — crash recovery from pipeline log
+- `ticket-retro` — post-mortem failure analysis
