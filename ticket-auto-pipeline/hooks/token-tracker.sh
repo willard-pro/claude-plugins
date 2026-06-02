@@ -1,24 +1,52 @@
 #!/bin/bash
 # SubagentStop hook — parses agent transcript, sums token usage, appends to pipeline log.
-# Requires /tmp/ticket-auto-{TICKET_ID}-ctx.txt with format: PHASE|LOG_FILE
+# Resolves PHASE from spawn-meta file (/tmp/ticket-auto-{ID}-spawn-meta.txt) which is
+# a stable per-spawn snapshot — avoids the race where the ctx file is overwritten by
+# the next phase's spawn_agent_pre before this async hook fires.
 # Reads start timestamp written by token-tracker-start.sh to compute elapsed_ms.
 set -euo pipefail
 
 read -r hook_json
 AGENT_TRANSCRIPT=$(echo "$hook_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('agent_transcript_path',''))")
 
-# Only track ticket-auto pipelines — ctx file is written exclusively by the ticket-auto orchestrator
-CTX_FILE=$(ls -t /tmp/ticket-auto-*-ctx.txt 2>/dev/null | head -1)
-if [ -z "$CTX_FILE" ]; then
-  exit 0
+# ── Resolve PHASE and LOG_FILE ───────────────────────────────────────────────
+# Priority: spawn-meta file (stable per-spawn snapshot) → ctx file (legacy) → UNKNOWN
+PHASE=""
+LOG_FILE=""
+TICKET_ID=""
+
+# Try spawn-meta files first (written atomically by spawn_agent_pre, not overwritten
+# until the NEXT spawn_agent_pre — avoids the race where ctx file already shows next phase)
+META_FILE=$(ls -t /tmp/ticket-auto-*-spawn-meta.txt 2>/dev/null | head -1 || true)
+if [ -n "$META_FILE" ]; then
+  TICKET_ID=$(basename "$META_FILE" | sed 's/ticket-auto-\(.*\)-spawn-meta\.txt/\1/')
+  while IFS='=' read -r key val; do
+    case "$key" in
+      PHASE) PHASE="$val" ;;
+      LOG_FILE) LOG_FILE="$val" ;;
+    esac
+  done <"$META_FILE"
 fi
 
-IFS='|' read -r PHASE LOG_FILE <"$CTX_FILE"
+# Fallback: try legacy ctx file
 if [ -z "$PHASE" ] || [ -z "$LOG_FILE" ]; then
+  CTX_FILE=$(ls -t /tmp/ticket-auto-*-ctx.txt 2>/dev/null | head -1 || true)
+  if [ -n "$CTX_FILE" ]; then
+    IFS='|' read -r CTX_PHASE CTX_LOG_FILE <"$CTX_FILE"
+    [ -z "$PHASE" ] && PHASE="$CTX_PHASE"
+    [ -z "$LOG_FILE" ] && LOG_FILE="$CTX_LOG_FILE"
+    [ -z "$TICKET_ID" ] && TICKET_ID=$(basename "$CTX_FILE" | sed 's/ticket-auto-\(.*\)-ctx\.txt/\1/')
+  fi
+fi
+
+# Default: if still unresolved, use UNKNOWN
+[ -z "$PHASE" ] && PHASE="UNKNOWN"
+
+if [ -z "$LOG_FILE" ]; then
   exit 0
 fi
 
-TICKET_ID=$(basename "$CTX_FILE" | sed 's/ticket-auto-\(.*\)-ctx\.txt/\1/')
+[ -z "$TICKET_ID" ] && TICKET_ID="unknown"
 START_FILE="/tmp/ticket-auto-${TICKET_ID}-start-${PHASE}.ts"
 
 if [ -n "$AGENT_TRANSCRIPT" ] && [ -f "$AGENT_TRANSCRIPT" ]; then

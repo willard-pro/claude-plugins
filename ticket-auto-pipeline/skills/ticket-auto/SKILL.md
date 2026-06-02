@@ -1755,6 +1755,12 @@ spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
 
 ## Step 6 — Report
 
+**CRITICAL ORDERING CONSTRAINT:** Do NOT write `META|outcome` until ALL of these have completed:
+1. Step 5 (Document + Wiki Maintenance) — verified by `|MAINTENANCE|maintenance|done|` or `|MAINTENANCE|maintenance|fail|` in the log
+2. Step 6a (Retro auto-trigger) — retro-trigger entry written (or skipped)
+
+The outcome line MUST be the final substantive entry in the pipeline log. On every exit path (success, gate-stop, no-op, crash), verify that no maintenance or retro steps remain before writing outcome.
+
 ### Step 6a — Retro auto-trigger check
 
 Before writing the final outcome, check whether this run warrants a retrospection:
@@ -1792,12 +1798,18 @@ Skill(skill="ticket-retro", args="--window 1 {LOG_FILE}")
 
 If the retro invocation fails (skill not found, retro.sh error), log a warning but do NOT change the ticket outcome:
 ```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|retro-trigger|fail|/ticket-retro invocation failed — continuing" >> {LOG_FILE}
+# Idempotency guard: skip if retro-trigger already written
+if ! tail -1 {LOG_FILE} 2>/dev/null | grep -q '|META|retro-trigger|'; then
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|retro-trigger|fail|/ticket-retro invocation failed — continuing" >> {LOG_FILE}
+fi
 ```
 
 **Skipped (clean run):**
 ```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|retro-trigger|skip|clean run, retro skipped" >> {LOG_FILE}
+# Idempotency guard: skip if retro-trigger already written
+if ! tail -1 {LOG_FILE} 2>/dev/null | grep -q '|META|retro-trigger|'; then
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|retro-trigger|skip|clean run, retro skipped" >> {LOG_FILE}
+fi
 hb_decision "retro-trigger" "skip" "clean run, retro skipped"
 ```
 
@@ -1805,9 +1817,26 @@ Do NOT block the pipeline on retro failure — the ticket outcome is already det
 
 ### Step 6b — Write outcome and report
 
-Write the pipeline outcome event:
+**Before writing outcome**, verify MAINTENANCE has completed:
 ```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|outcome|info|complete" >> {LOG_FILE}
+# Verify maintenance completed (or was skipped/not applicable)
+if ! grep -q '|MAINTENANCE|maintenance|' {LOG_FILE} 2>/dev/null; then
+  # Maintenance hasn't run yet — check if it was skipped on this path
+  # (gate-stop paths skip maintenance; success paths must have it)
+  if grep -q '|GATE|gate|fail|held:' {LOG_FILE} 2>/dev/null; then
+    : # Gate-stop: maintenance was skipped, outcome already written at gate
+  else
+    echo "WARNING: outcome written but no MAINTENANCE entries found — verify ordering" >&2
+  fi
+fi
+```
+
+Write the pipeline outcome event (idempotent — skip if already the last line):
+```bash
+# Idempotency guard: skip if outcome already written
+if ! tail -1 {LOG_FILE} 2>/dev/null | grep -q '|META|outcome|'; then
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|outcome|info|complete" >> {LOG_FILE}
+fi
 hb_decision "pipeline-outcome" "fired" "pipeline complete" '{"outcome":"complete","iterations":"{ITERATION}","merged":"{MERGED}"}'
 ```
 
