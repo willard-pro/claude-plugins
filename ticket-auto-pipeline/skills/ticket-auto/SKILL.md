@@ -208,7 +208,26 @@ Log preflight result after the pipeline log is initialized in Step 0.6:
 
 ## Step 0.5 — Detect project context
 
-Read `CLAUDE.md` and extract: `{REPOS_ROOT}` (parent path of all service dirs), `{ISSUE_PREFIX}` (issue ID prefix, e.g. `CRE`), `{BE_SERVICES}` (BE service dir names).
+Read `CLAUDE.md` and extract ALL available project-context fields: `{REPOS_ROOT}` (parent path of all service dirs), `{ISSUE_PREFIX}` (issue ID prefix, e.g. `CRE`), `{BE_SERVICES}` (BE service dir names), `{WIKI_ROOT}` (wiki directory path; use default if not found), `{BE_TEST_CMD}` (backend test command), `{FE_TEST_CMD}` (frontend test command; skip FE tests if absent), `{LOCAL_URL}` (local dev URL), `{UAT_URL}` (UAT base URL), `{SLACK_CHANNEL}` (Slack channel for notifications).
+
+After extraction, write the env file that sub-agents source for project context:
+
+```bash
+source ~/.claude/skills/lib/spawn-helper.sh
+spawn_write_env \
+  TICKET_ID="{TICKET_ID}" \
+  REPOS_ROOT="{REPOS_ROOT}" \
+  ISSUE_PREFIX="{ISSUE_PREFIX}" \
+  BE_SERVICES="{BE_SERVICES}" \
+  WIKI_ROOT="{WIKI_ROOT}" \
+  BE_TEST_CMD="{BE_TEST_CMD}" \
+  FE_TEST_CMD="{FE_TEST_CMD}" \
+  LOCAL_URL="{LOCAL_URL}" \
+  UAT_URL="{UAT_URL}" \
+  SLACK_CHANNEL="{SLACK_CHANNEL}"
+```
+
+This MUST run before Step 0.6 (pipeline log init) and before Step 1 (first agent spawn). The env file is needed by every `spawn_agent_pre` call — sub-agents source it via `source /tmp/ticket-auto-{TICKET_ID}-env.sh`.
 
 ---
 
