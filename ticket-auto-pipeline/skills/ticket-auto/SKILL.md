@@ -241,6 +241,7 @@ fi
 Log the resolved autonomy mode immediately after dashboard launch:
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|autonomy|info|{AUTONOMY}" >> {LOG_FILE}
+hb_gate "phase-transition" "ok" "START → APPRAISE"
 ```
 
 ### Logging convention
@@ -313,8 +314,8 @@ cat > {ticket-dir}/auto-session.md << 'TRACE'
 - [x] Step 3: Gate — {auto-approved|stopped: complex}
 - [x] Step 4: Implement — {Smooth|Rough|Hard}
 - [x] Step 4.5: Verify — {✅ PASS (N attempts)|❌ FAIL after N|skipped: no UI}
-- [x] Step 4.6: Document + Wiki — ai-context.md ({trivial|non-trivial}), {N} errata processed, {N} ai-context findings promoted
-- [x] Step 5: PR review — {✅|⚠️}, {N} iterations, {N} re-verify retries
+- [x] Step 4.6: PR review — {✅|⚠️}, {N} iterations, {N} re-verify retries
+- [x] Step 5: Document + Wiki — ai-context.md ({trivial|non-trivial}), {N} errata processed, {N} ai-context findings promoted
 - [x] Step 6: Report — done
 TRACE
 ```
@@ -369,8 +370,8 @@ Based on `{RESUME_STEP}`, jump directly to the corresponding step. Steps before 
 | STEP_3_5 | Step 3.5 (Comment Reconciliation) |
 | STEP_4 | Step 4 (Implement) |
 | STEP_4_5 | Step 4.5 (Verify) |
-| STEP_4_6 | Step 4.6 (Document + Wiki Maintenance) |
-| STEP_5 | Step 5 (PR Review loop) |
+| STEP_4_6 | Step 4.6 (PR Review loop) |
+| STEP_5 | Step 5 (Document + Wiki Maintenance) |
 | STEP_5_5 | Step 5.5 (PR Comment Reconciliation) |
 | STEP_6 | Step 6 (Report) |
 
@@ -414,8 +415,17 @@ On success → post done, then write META title/artifact lines:
 ```bash
 spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
   MSG="{COMPLEXITY}, {N} files traced" NEXT_PHASE=EXEC
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|title|info|{TICKET-ID}: {TICKET_TITLE}" >> {LOG_FILE}
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|notes:{TICKET_DIR}/notes.md" >> {LOG_FILE}
+# Guard: only emit title if resolved (not empty, not "unknown")
+if [ -n "{TICKET_TITLE}" ] && [ "{TICKET_TITLE}" != "unknown" ] && ! echo "{TICKET_TITLE}" | grep -q '^unknown$'; then
+  # Guard: only emit if no prior META|title entry exists (at-most-once)
+  if ! grep -q '|META|title|info|' {LOG_FILE} 2>/dev/null; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|title|info|{TICKET-ID}: {TICKET_TITLE}" >> {LOG_FILE}
+  fi
+fi
+# Guard: only emit artifact if path is absolute
+if [ -n "{TICKET_DIR}" ] && [ "$(echo '{TICKET_DIR}' | cut -c1)" = "/" ]; then
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|notes:{TICKET_DIR}/notes.md" >> {LOG_FILE}
+fi
 ```
 
 ---
@@ -434,6 +444,7 @@ If `_bug_labels` is 0 → skip Step 1.5. Write a skip log entry and proceed to S
 
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|skip|not a bug ticket" >> {LOG_FILE}
+hb_gate "phase-transition" "ok" "APPRAISE → REPRODUCE (skipped)"
 ```
 
 Then jump to **Step 2 — Exec**.
@@ -441,6 +452,10 @@ Then jump to **Step 2 — Exec**.
 If `_bug_labels` is > 0 → proceed with the reproduce spawn below.
 
 ### Reproduce spawn
+
+```bash
+hb_gate "phase-transition" "ok" "APPRAISE → REPRODUCE"
+```
 
 Run pre-spawn boilerplate. Capture the generated agent prompt:
 ```bash
@@ -476,6 +491,7 @@ On success, branch on `{REPRODUCE_RESULT}`:
 ```bash
 spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
   MSG="REPRODUCED" NEXT_PHASE=EXEC
+hb_gate "phase-transition" "ok" "REPRODUCE → EXEC"
 ```
 Continue to **Step 2 — Exec**.
 
@@ -545,7 +561,7 @@ spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
   MSG="{ARTIFACT_TYPE}" NEXT_PHASE=GATE
 source ~/.claude/skills/lib/ticket-dir.sh
 PLAN_PATH=$(resolve_plan_path "{LOG_FILE}" "{TICKET_DIR}" "{ticket-id-lowercase}")
-if [ -n "$PLAN_PATH" ]; then
+if [ -n "$PLAN_PATH" ] && [ "$(echo "$PLAN_PATH" | cut -c1)" = "/" ]; then
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|plan:$PLAN_PATH" >> {LOG_FILE}
 fi
 ```
@@ -577,6 +593,7 @@ Stop. Report: `{TICKET-ID} pipeline halted: artifact file not found at '${PLAN_P
 On success:
 ```bash
 hb_gate "artifact-detect" "ok" "artifact file confirmed" "{\"path\":\"$PLAN_PATH\"}"
+hb_gate "phase-transition" "ok" "EXEC → GATE"
 ```
 Proceed to Step 3.
 
@@ -649,7 +666,7 @@ hb_gate "preflight" "fired" "gate evaluation started" '{"complexity":"{COMPLEXIT
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-result|info|simple — auto-approved ({AUTONOMY})" >> {LOG_FILE}
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >> {LOG_FILE}
   hb_decision "gate-result" "fired" "auto-approved: simple" '{"reason":"simple","autonomy":"{AUTONOMY}"}'
-  hb_heartbeat "phase-transition" "GATE → IMPLEMENT"
+  hb_gate "phase-transition" "ok" "GATE → IMPLEMENT"
   ```
   Proceed to Step 4.
 
@@ -814,7 +831,7 @@ No hold conditions active. All open questions are answered and no unprocessed us
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|reconcile|done|clean" >> {LOG_FILE}
 hb_decision "reconcile-result" "fired" "clean pass — no unprocessed comments or unanswered questions" "{\"cycle\":\"${RECONCILE_N}\"}"
 hb_gate "reconcile" "ok" "clean pass — proceeding to implement"
-hb_heartbeat "phase-transition" "GATE → IMPLEMENT"
+hb_gate "phase-transition" "ok" "GATE → IMPLEMENT"
 ```
 
 Proceed to Step 4.
@@ -877,9 +894,9 @@ This is critical for training data (predicted-vs-actual complexity pairs). State
 Only if the ticket has a UI surface. Otherwise:
 ```bash
 hb_decision "verification-verdict" "skip" "no UI surface — verification skipped"
-hb_heartbeat "phase-transition" "IMPLEMENT → MAINTENANCE (verify skipped)"
+hb_heartbeat "phase-transition" "IMPLEMENT → PR-REVIEW (verify skipped)"
 ```
-Proceed to Step 4.6 (Document + Wiki).
+Proceed to Step 4.6 (PR Review).
 
 ### Step 4.5a — Verification attempt
 
@@ -908,7 +925,7 @@ Extract `{VERDICT}` (PASS or FAIL).
 **PASS:**
 ```bash
 spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
-  MSG="PASS on attempt {VERIFY_ATTEMPTS}" NEXT_PHASE=MAINTENANCE
+  MSG="PASS on attempt {VERIFY_ATTEMPTS}" NEXT_PHASE=PR-REVIEW
 ```
 
 **FAIL:**
@@ -917,7 +934,7 @@ spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail \
   MSG="FAIL — criteria not met (attempt {VERIFY_ATTEMPTS}/3)"
 ```
 
-- **PASS** → proceed to Step 4.6 (Document + Wiki).
+- **PASS** → proceed to Step 4.6 (PR Review).
 - **FAIL** → proceed to Step 4.5b.
 
 ### Step 4.5b — Retry decision
@@ -947,93 +964,14 @@ If `{VERIFY_ATTEMPTS} < 3`:
   ticket-implement Step 2.5 detects the Verification FAIL in notes.md,
   appends `## Verification #N` to the plan, and implements the fix.
   After Step 4 completes, proceed through 4a to 4.5a again.
-  Step 4.6 (Document + Wiki) runs after VERIFY passes.
+  Step 4.6 (PR Review) runs after VERIFY passes.
   Do NOT re-initialize `{VERIFY_ATTEMPTS}`.
 
 Pass `--from-auto` to the ticket-implement agent spawn in Step 4 — add `--from-auto` to the agent prompt.
 
 ---
 
-## Step 4.6 — Document + Wiki Maintenance
-
-Generate `ai-context.md` in the ticket directory, then incorporate any unresolved errata into the project wiki. Both run in a single agent spawn — the agent executes both sub-tasks sequentially, writing separate pipeline log entries for each.
-
-### Combined maintenance spawn
-
-Run pre-spawn boilerplate. Capture the generated agent prompt:
-```bash
-source ~/.claude/skills/lib/spawn-helper.sh
-_maintenance_prompt=$(spawn_agent_pre \
-  PHASE=MAINTENANCE STEP=maintenance TICKET_ID={TICKET-ID} \
-  LOG_FILE={LOG_FILE} HB_LOG_FILE={HB_LOG_FILE} CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE \
-  SKILL=none FLAGS="--from-auto" \
-  DESCRIPTION="document + wiki maintenance for {TICKET-ID}" \
-  INSTRUCTIONS="You are performing post-implement maintenance for {TICKET-ID}. Execute both sub-tasks in order, writing separate pipeline log entries for each.
-
-SUB-TASK 1 — Generate ai-context.md:
-1. Source the project env: source /tmp/ticket-auto-{TICKET-ID}-env.sh 2>/dev/null || true
-2. Read notes.md from {TICKET_DIR}. Extract complexity and key findings.
-3. Diff the branch against develop: git diff develop...{BRANCH}
-4. Get commit log: git log develop..{BRANCH} --oneline
-5. Classify significance (trivial vs non-trivial) based on the diff content.
-6. Write ai-context.md to {TICKET_DIR} following the ticket-document skill format.
-7. Append to notes.md session log: '- ai-context.md written ({N} patterns, {N} decisions)'
-8. Write pipeline log: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|{DOCUMENT_FILE} ({PATTERNS} patterns, {DECISIONS} decisions, {SIGNIFICANCE}) >> {LOG_FILE}
-9. If document generation fails: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|fail|Agent failed — continuing >> {LOG_FILE}
-
-SUB-TASK 2 — Wiki Maintenance:
-1. Use \$WIKI_ROOT from the environment (sourced above). If unset, skip wiki maintenance.
-2. Scan wiki files under \$WIKI_ROOT for unresolved errata entries (## Errata sections, non-strikethrough).
-3. Also scan recent ai-context.md files (find . -path '*/tickets/*/ai-context.md' -newermt '90 days ago').
-4. For each unresolved errata entry: apply the fix to the wiki flow file, mark resolved with strikethrough + date.
-5. For ai-context findings meeting inclusion criteria: promote to wiki entries.
-6. Write pipeline log: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|done|{ERRATA_COUNT} errata incorporated, {AI_CONTEXT_FINDINGS} ai-context findings promoted >> {LOG_FILE}
-7. If wiki maintenance fails: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|fail|Agent failed — continuing >> {LOG_FILE}
-
-At the end, emit a MAINTENANCE_RESULT block:
-=== MAINTENANCE_RESULT ===
-document_file={path to ai-context.md or 'none'}
-patterns={N}
-decisions={N}
-significance={trivial|non-trivial}
-errata_count={N}
-ai_context_findings={N}
-=== END MAINTENANCE_RESULT ===")
-```
-
-Spawn a `general-purpose` agent with `$_maintenance_prompt` as the instruction.
-
-Wait for the agent. Persist:
-```bash
-spawn_capture TICKET_ID={TICKET-ID} PHASE=maintenance RESULT="$AGENT_RESULT"
-```
-
-Extract from the MAINTENANCE_RESULT block:
-- `{DOCUMENT_FILE}` — path to ai-context.md, or `none` if failed
-- `{PATTERNS}` — number of patterns documented (0 if trivial or failed)
-- `{DECISIONS}` — number of decisions documented (0 if trivial or failed)
-- `{SIGNIFICANCE}` — `trivial` or `non-trivial`
-- `{ERRATA_COUNT}` — number of errata entries processed (0 if none)
-- `{AI_CONTEXT_FINDINGS}` — number of ai-context findings promoted to wiki (0 if none)
-
-If the agent fails → log a warning but continue (maintenance is non-blocking):
-```bash
-FAIL_ACTION=warn-continue spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail \
-  MSG="Agent failed — continuing"
-```
-
-On success:
-```bash
-spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
-  MSG="doc={DOCUMENT_FILE} ({SIGNIFICANCE}) errata={ERRATA_COUNT} wiki_findings={AI_CONTEXT_FINDINGS}" \
-  NEXT_PHASE=PR-REVIEW
-```
-
-Non-blocking: maintenance agent failure does not stop the pipeline. Both ai-context.md and wiki errata are nice-to-haves — the pipeline proceeds to PR review regardless.
-
----
-
-## Step 5 — PR Review + Iteration Loop
+## Step 4.6 — PR Review + Iteration Loop
 
 Initialize `{ITERATION}` = 0. The loop runs at most 3 times.
 
@@ -1075,7 +1013,7 @@ Stop.
 On success:
 ```bash
 spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
-  MSG="Verdict: {VERDICT}, merged: {MERGED}" NEXT_PHASE=REPORT
+  MSG="Verdict: {VERDICT}, merged: {MERGED}" NEXT_PHASE=MAINTENANCE
 ```
 
 **Verdict-line integrity gate** — before any branching, count parseable verdict lines in the pr-review output:
@@ -1112,13 +1050,13 @@ Extract `{VERDICT}` from that line and proceed.
     ```
     Set `{MERGED}` = `auto-merged`.
     ```bash
-    hb_heartbeat "phase-transition" "PR-REVIEW → REPORT"
+    hb_heartbeat "phase-transition" "PR-REVIEW → MAINTENANCE"
     ```
     Break out of loop. Go to Step 6 (Report).
   - Otherwise (wrong flag, complex ticket, or outcome ≠ Smooth) → normal merge flow. The PR review agent already handles merge.
     ```bash
     hb_decision "merge-decision" "fired" "merged via PR review agent" '{"verdict":"✅","autonomy":"{AUTONOMY}","complexity":"{COMPLEXITY}"}'
-    hb_heartbeat "phase-transition" "PR-REVIEW → REPORT"
+    hb_heartbeat "phase-transition" "PR-REVIEW → MAINTENANCE"
     ```
     Set `{MERGED}` = `yes`. Break out of loop. Go to Step 6 (Report).
 - **Verdict ⚠️** → auto-merge blocked regardless of flag. Increment `{ITERATION}`. If `{ITERATION} + {PR_FEEDBACK_CYCLE} >= 3` → stop and report:
@@ -1274,7 +1212,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|re-verify|fail|FAIL — criteria not
 hb_heartbeat "agent-returned" "re-verify agent done — FAIL (iteration {ITERATION}, retry {VERIFY_RETRIES})"
 ```
 
-- **PASS** → run Step 4.6 (Document + Wiki) to regenerate ai-context.md and incorporate any new errata from re-implementation, then proceed to Step 5e.
+- **PASS** → run Step 5 (Document + Wiki) to regenerate ai-context.md and incorporate any new errata from re-implementation, then proceed to Step 5e.
 - **FAIL** → proceed to retry logic below.
 
 #### Step 5d2-retry
@@ -1310,6 +1248,85 @@ If `{VERIFY_RETRIES} < 3`:
 hb_decision "loop-back" "fired" "re-implement+verify done → re-review" "{\"iteration\":\"{ITERATION}\"}"
 ```
 Go back to Step 5a (re-run PR review on the updated PR).
+
+---
+
+## Step 5 — Document + Wiki Maintenance
+
+Generate `ai-context.md` in the ticket directory, then incorporate any unresolved errata into the project wiki. Both run in a single agent spawn — the agent executes both sub-tasks sequentially, writing separate pipeline log entries for each.
+
+### Combined maintenance spawn
+
+Run pre-spawn boilerplate. Capture the generated agent prompt:
+```bash
+source ~/.claude/skills/lib/spawn-helper.sh
+_maintenance_prompt=$(spawn_agent_pre \
+  PHASE=MAINTENANCE STEP=maintenance TICKET_ID={TICKET-ID} \
+  LOG_FILE={LOG_FILE} HB_LOG_FILE={HB_LOG_FILE} CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE \
+  SKILL=none FLAGS="--from-auto" \
+  DESCRIPTION="document + wiki maintenance for {TICKET-ID}" \
+  INSTRUCTIONS="You are performing post-implement maintenance for {TICKET-ID}. Execute both sub-tasks in order, writing separate pipeline log entries for each.
+
+SUB-TASK 1 — Generate ai-context.md:
+1. Source the project env: source /tmp/ticket-auto-{TICKET-ID}-env.sh 2>/dev/null || true
+2. Read notes.md from {TICKET_DIR}. Extract complexity and key findings.
+3. Diff the branch against develop: git diff develop...{BRANCH}
+4. Get commit log: git log develop..{BRANCH} --oneline
+5. Classify significance (trivial vs non-trivial) based on the diff content.
+6. Write ai-context.md to {TICKET_DIR} following the ticket-document skill format.
+7. Append to notes.md session log: '- ai-context.md written ({N} patterns, {N} decisions)'
+8. Write pipeline log: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|{DOCUMENT_FILE} ({PATTERNS} patterns, {DECISIONS} decisions, {SIGNIFICANCE}) >> {LOG_FILE}
+9. If document generation fails: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|fail|Agent failed — continuing >> {LOG_FILE}
+
+SUB-TASK 2 — Wiki Maintenance:
+1. Use \$WIKI_ROOT from the environment (sourced above). If unset, skip wiki maintenance.
+2. Scan wiki files under \$WIKI_ROOT for unresolved errata entries (## Errata sections, non-strikethrough).
+3. Also scan recent ai-context.md files (find . -path '*/tickets/*/ai-context.md' -newermt '90 days ago').
+4. For each unresolved errata entry: apply the fix to the wiki flow file, mark resolved with strikethrough + date.
+5. For ai-context findings meeting inclusion criteria: promote to wiki entries.
+6. Write pipeline log: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|wiki-errata|done|{ERRATA_COUNT} errata incorporated, {AI_CONTEXT_FINDINGS} ai-context findings promoted >> {LOG_FILE}
+7. If wiki maintenance fails: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|wiki-errata|fail|Agent failed — continuing >> {LOG_FILE}
+
+At the end, emit a MAINTENANCE_RESULT block:
+=== MAINTENANCE_RESULT ===
+document_file={path to ai-context.md or 'none'}
+patterns={N}
+decisions={N}
+significance={trivial|non-trivial}
+errata_count={N}
+ai_context_findings={N}
+=== END MAINTENANCE_RESULT ===")
+```
+
+Spawn a `general-purpose` agent with `$_maintenance_prompt` as the instruction.
+
+Wait for the agent. Persist:
+```bash
+spawn_capture TICKET_ID={TICKET-ID} PHASE=maintenance RESULT="$AGENT_RESULT"
+```
+
+Extract from the MAINTENANCE_RESULT block:
+- `{DOCUMENT_FILE}` — path to ai-context.md, or `none` if failed
+- `{PATTERNS}` — number of patterns documented (0 if trivial or failed)
+- `{DECISIONS}` — number of decisions documented (0 if trivial or failed)
+- `{SIGNIFICANCE}` — `trivial` or `non-trivial`
+- `{ERRATA_COUNT}` — number of errata entries processed (0 if none)
+- `{AI_CONTEXT_FINDINGS}` — number of ai-context findings promoted to wiki (0 if none)
+
+If the agent fails → log a warning but continue (maintenance is non-blocking):
+```bash
+FAIL_ACTION=warn-continue spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail \
+  MSG="Agent failed — continuing"
+```
+
+On success:
+```bash
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
+  MSG="doc={DOCUMENT_FILE} ({SIGNIFICANCE}) errata={ERRATA_COUNT} wiki_findings={AI_CONTEXT_FINDINGS}" \
+  NEXT_PHASE=REPORT
+```
+
+Non-blocking: maintenance agent failure does not stop the pipeline. Both ai-context.md and wiki errata are nice-to-haves — the pipeline proceeds to report regardless.
 
 ---
 
@@ -1645,8 +1662,8 @@ SUB-TASK 1 — Regenerate ai-context.md:
 SUB-TASK 2 — Wiki Maintenance:
 1. Use \$WIKI_ROOT from env. If unset, skip.
 2. Process unresolved errata, promote ai-context findings.
-3. Write pipeline log: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|done|{ERRATA_COUNT} errata, {AI_CONTEXT_FINDINGS} findings >> {LOG_FILE}
-4. On failure: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|maintenance|fail|Agent failed — continuing >> {LOG_FILE}
+3. Write pipeline log: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|wiki-errata|done|{ERRATA_COUNT} errata, {AI_CONTEXT_FINDINGS} findings >> {LOG_FILE}
+4. On failure: \$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|wiki-errata|fail|Agent failed — continuing >> {LOG_FILE}
 
 Emit MAINTENANCE_RESULT block as in Step 4.6.")
 ```
@@ -1786,9 +1803,9 @@ hb_decision "pipeline-outcome" "fired" "pipeline complete" '{"outcome":"complete
 | Exec | {simple-fix | openspec: <name>} |
 | Gate | {auto-approved | held} |
 | Implement | {Smooth|Rough|Hard}, PRs: {URLs} |
-| Wiki Maintenance | {N} errata incorporated |
 | Verify | {✅ PASS ({VERIFY_ATTEMPTS} attempts)|❌ FAIL after {VERIFY_ATTEMPTS}|skipped} |
 | PR Review | {✅|⚠️}, merged: {yes\|auto-merged (semi-auto, simple+Smooth)\|no} |
+| Wiki Maintenance | {N} errata incorporated |
 | PR iteration re-verify | {VERIFY_RETRIES} retries across iterations |
 | Iterations | {ITERATION} |
 | Retro | {triggered → ~/.claude/state/ticket-retro/proposals/{date}-retro.md \| skipped (clean run)} |

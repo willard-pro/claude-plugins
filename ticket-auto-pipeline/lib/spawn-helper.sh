@@ -171,12 +171,14 @@ spawn_agent_pre() {
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|${PHASE}|${phase_lower}|waiting|Agent launched — ${desc}" >>"$LOG_FILE"
   fi
 
-  # 2. Start heartbeat pinger
+  # 2. Start heartbeat pinger and watchdog
   if [ -n "${HB_LOG_FILE:-}" ]; then
     local pinger_stop="/tmp/ticket-auto-${TICKET_ID}-pinger-stop"
+    local watchdog_stop="/tmp/ticket-auto-${TICKET_ID}-watchdog-stop"
     export HB_LOG_FILE="$HB_LOG_FILE"
     hb_heartbeat "orchestrator-waiting" "agent ${phase_lower} launched"
     hb_pinger_start "$pinger_stop"
+    spawn_watchdog_start "$watchdog_stop" "$PHASE"
   fi
 
   # 3. Write phase context file
@@ -274,9 +276,11 @@ spawn_agent_post() {
   local phase_lower=""
   [ -n "${STEP:-}" ] && phase_lower=$(echo "${STEP:-}" | tr '[:upper:]' '[:lower:]')
 
-  # Stop heartbeat pinger
+  # Stop watchdog and heartbeat pinger
   if [ -n "${HB_LOG_FILE:-}" ]; then
+    local watchdog_stop="/tmp/ticket-auto-${TICKET_ID}-watchdog-stop"
     local pinger_stop="/tmp/ticket-auto-${TICKET_ID}-pinger-stop"
+    spawn_watchdog_stop "$watchdog_stop"
     hb_pinger_stop "$pinger_stop"
   fi
 
@@ -363,4 +367,36 @@ spawn_capture() {
   else
     capture_agent_result "$TICKET_ID" "$PHASE" "${RESULT:-}"
   fi
+}
+
+# ── spawn_watchdog_start ─────────────────────────────────────────────────────────
+# Backgrounds a watchdog heartbeat loop that emits hb_heartbeat entries every 60s
+# while the orchestrator waits for a sub-agent. Uses a stop-file to signal shutdown.
+#
+# Usage: spawn_watchdog_start <stop_file> <phase_label>
+spawn_watchdog_start() {
+  [ -z "${HB_LOG_FILE:-}" ] && return 0
+
+  local stop_file="$1"
+  local phase_label="${2:-unknown}"
+
+  rm -f "$stop_file"
+
+  (
+    set +e
+    while true; do
+      sleep 60
+      [ -f "$stop_file" ] && break
+      hb_heartbeat "watchdog" "alive" "waiting for ${phase_label} agent" || true
+    done
+  ) >/dev/null 2>&1 &
+  disown
+}
+
+# ── spawn_watchdog_stop ──────────────────────────────────────────────────────────
+# Stops the watchdog background process by creating its stop file.
+# Args: stop_file
+spawn_watchdog_stop() {
+  [ -z "${HB_LOG_FILE:-}" ] && return 0
+  touch "$1"
 }
