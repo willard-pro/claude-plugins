@@ -75,6 +75,23 @@ test_write_env_exports_all_fields() {
     grep -q 'export SLACK_CHANNEL="#alerts"' "$f"
 }
 
+test_write_env_appends_linear_key_when_set() {
+  local tmpfile
+  source "$LIB_DIR/spawn-helper.sh"
+  LINEAR_API_KEY=test-spawn-key spawn_write_env TICKET_ID=TEST-LL \
+    REPOS_ROOT=/repos ISSUE_PREFIX=TEST BE_SERVICES=svc1 >/dev/null 2>&1
+  tmpfile=/tmp/ticket-auto-TEST-LL-env.sh
+  grep -q 'export LINEAR_API_KEY="test-spawn-key"' "$tmpfile"
+}
+
+test_write_env_does_not_append_linear_key_when_unset() {
+  source "$LIB_DIR/spawn-helper.sh"
+  unset LINEAR_API_KEY
+  spawn_write_env TICKET_ID=TEST-NK \
+    REPOS_ROOT=/repos ISSUE_PREFIX=TEST BE_SERVICES=svc1 >/dev/null 2>&1
+  ! grep -q 'LINEAR_API_KEY' /tmp/ticket-auto-TEST-NK-env.sh
+}
+
 test_write_env_rejects_empty_ticket_id() {
   source "$LIB_DIR/spawn-helper.sh"
   spawn_write_env REPOS_ROOT=/tmp/test ISSUE_PREFIX=TEST BE_SERVICES=svc1 >/dev/null 2>&1 && false || true
@@ -755,6 +772,8 @@ for fn in \
   test_write_env_exports_ticket_id \
   test_write_env_exports_repos_root \
   test_write_env_exports_all_fields \
+  test_write_env_appends_linear_key_when_set \
+  test_write_env_does_not_append_linear_key_when_unset \
   test_write_env_rejects_empty_ticket_id \
   test_write_env_rejects_unknown_param \
   test_write_env_handles_special_chars_in_values \
