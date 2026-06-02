@@ -98,7 +98,7 @@ Consumers: `skills/ticket-auto/dashboard.py` (dual-panel), `skills/ticket-overse
 - **Crash recovery**: Pipeline log is the checkpoint. `ticket-detect-resume` reads last completed step. Orchestrator resumes from there.
 - **Sub-agent isolation**: Orchestrator spawns `general-purpose` agents per phase. Each writes to `$LOG_FILE`. Orchestrator brackets each spawn with `|waiting|`/`|done|`.
 - **Complexity gating**: Simple tickets auto-approve in `auto`/`semi-auto` mode. Complex tickets always gate (require human `approved` label). `manual` mode gates everything.
-- **Phase context**: Before each agent spawn, orchestrator writes `PHASE|{LOG_FILE}` to `/tmp/ticket-auto-{ID}-ctx.txt` for the token-tracker hook.
+- **Phase context**: Before each agent spawn, orchestrator writes both a ctx file (`/tmp/ticket-auto-{ID}-ctx.txt`) and a spawn-meta file (`/tmp/ticket-auto-{ID}-spawn-meta.txt`). The token-tracker hook reads PHASE from the spawn-meta file (stable per-spawn snapshot) with fallback to the ctx file (legacy). The spawn-meta file persists until the next `spawn_agent_pre` call overwrites it — this avoids a race where the ctx file shows the next phase before the async SubagentStop hook fires.
 - **Safety gates**: Six structural invariants (artifact existence, complexity coherence, adversarial review, re-approval integrity, remediation brief integrity, PR verdict integrity). Violations emit `|META|gate-stop|fail|<CODE>`.
 - **Idempotency**: flow.sh computes desired end state from current + adds - removes. No change → exit 0 without mutation.
 
@@ -106,8 +106,15 @@ Consumers: `skills/ticket-auto/dashboard.py` (dual-panel), `skills/ticket-overse
 
 - Pipeline log fragility: `cut -f5` in detect-resume.sh can silently truncate rows containing `|` in the message field. See memory: pipeline-log-fragility.
 - Dashboard dead zone: Pipeline log shows `|waiting|` while agent runs but heartbeat log may be silent during long operations. Gap between pipeline log and heartbeat log during sub-agent execution.
-- Zombie steps: If agent crashes without writing a terminal status (`done`/`fail`), the step remains `|waiting|` forever. `ticket-detect-resume` treats these as not-started and re-runs the phase.
+- Zombie steps: If agent crashes without writing a terminal status (`done`/`fail`), the step remains `|waiting|` forever. `ticket-detect-resume` treats these as not-started and re-runs the phase. Bracket idempotency guards (tail-check before write) prevent duplicate brackets but do not eliminate the zombie root cause.
 - Version synchronization: `plugin.json`, root `README.md`, and `marketplace.json` each carry a version number. Must be updated in all three places on version bump.
+
+### Resolved (0.7.11)
+
+- Token phase mislabeling: Token `META|tokens` lines now carry the correct phase label. `token-tracker.sh` reads PHASE from the spawn-meta file (`/tmp/ticket-auto-{ID}-spawn-meta.txt`) — a stable per-spawn snapshot — instead of the volatile ctx file. Fallback chain: spawn-meta → ctx file → UNKNOWN.
+- Outcome ordering: `META|outcome` is now guaranteed to be the final entry in the pipeline log. The orchestrator defers outcome until after MAINTENANCE and retro-trigger complete, with a tail-check idempotency guard.
+- Bracket duplication: `spawn_agent_pre` and `spawn_agent_post` now tail-check the last log line before writing `waiting`/`done`/`fail` entries. Duplicate calls (e.g., from orchestrator retry/resume paths) are suppressed.
+- Retro-trigger duplication: `META|retro-trigger` writes are tail-check guarded — at most one per pipeline run.
 
 ## Related docs
 
