@@ -101,12 +101,21 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|<CODE>" >> "$LOG_FILE"
 | `REPRO_NOT_CONFIRMED` | Reproduce skill determined bug does not manifest on UAT (Step 1.5) |
 | `REPRO_BLOCKED` | Reproduce skill blocked — insufficient detail in ticket (Step 1.5) |
 
+## Ordering guarantees
+
+1. **Outcome is final**: `META|outcome|info|<result>` MUST be the last substantive entry in the log. It SHALL be written after all MAINTENANCE phase steps and retro-trigger evaluation are complete, on every exit path (success, gate-stop, no-op, crash).
+2. **Bracket uniqueness**: Each phase-step transition produces exactly one `waiting` entry and exactly one terminal entry (`done`, `fail`, or `skip`). Writers guard against duplicates by tail-checking the last log line before appending.
+3. **Token META accuracy**: `META|tokens` lines carry the correct PHASE label matching the agent that consumed those tokens. The phase is resolved from the spawn-meta file (`/tmp/ticket-auto-{ID}-spawn-meta.txt`), not the volatile ctx file.
+4. **Retro-trigger before outcome**: `META|retro-trigger` SHALL appear before `META|outcome`, not after. Retro-trigger entries are idempotent — at most one per pipeline run.
+5. **MAINTENANCE before outcome**: On success and no-op paths, all `MAINTENANCE|*` entries SHALL appear before `META|outcome`.
+
 ## Rules
 
 1. Write `|start|` before the step begins, `|done|` or `|fail|` after it finishes.
 2. Only write steps you actually execute — don't pre-declare future steps.
 3. `MSG` should be brief (under 60 chars). Put details in trace.md, not here.
 4. If `$LOG_FILE` is unset, skip logging — don't create a file in the wrong place.
+5. Before writing `waiting`, `done`, `fail`, or `retro-trigger` entries, tail-check the log: if the last line already contains the same `PHASE|STEP|STATUS` pattern, skip the duplicate write.
 
 ## Heartbeat log
 
