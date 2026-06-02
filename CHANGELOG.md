@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.9.1 (2026-06-02)
+
+- Fix: Fleet controller `_flow_mutex_held()` now uses `flock -n` on `./logs/.ticket-flow-{tid}.lock` instead of pidfile `kill -0` on `/tmp/ticket-auto-{tid}-flow.lock` — mutex check was dead code (wrong path, wrong primitive). (F1)
+- Fix: Added 6th detector `detect_flow_failures` to fleet-detect.sh — scans heartbeat logs for `retry|flow-sh|fail` entries. 1 failure → WARN, 2+ → KILL. (F4)
+- Fix: `fleet_restart_pipeline` now writes `META|fleet-restart-marker` to pipeline log instead of printing `RESTART_ELIGIBLE=` to stdout. Monitor loop updated to scan for markers and emit `ACTION:spawn-restart`. (F5)
+- Fix: Heartbeat category `HB` now explicitly rejected in `hb_write` with diagnostic message. Added BASH_SOURCE caller validation warning. (Bug #1)
+- Fix: `spawn_agent_pre` captures pinger/watchdog PIDs; `spawn_agent_post` reaps them via PID-targeted `wait` with 5-second timeout. Added stop-file existence check before spawn to close kill-during-spawn race window. (Bug #4, F10)
+- Fix: Added `-c` compact flag to intermediate `jq -n` calls in `fleet_detect_all` (entry + summary JSON). Final output remains pretty-printed. (F2)
+- Fix: `_last_field` now asserts `idx < 5` — fields 5+ require `_last_msg` to preserve embedded pipe characters. (F3)
+- Fix: `fleet_kill_pipeline` guards against nonexistent pipeline logs — returns 1 instead of creating orphaned log directories. (F6)
+- Fix: Severity capped at 2 (KILL) when `FLEET_AUTO_RESTART=false` — dashboard labels show "KILL (auto-restart off)" instead of misleading "RESTART". (F7)
+- Fix: Added `FLEET_MAX_LOG_AGE_HOURS` config (empty default = no filter) — `fleet_detect_all` skips pipeline logs whose mtime exceeds threshold. (F8)
+- Fix: `fleet-intervene.sh` now sources `heartbeat.sh` at file level with declare-guard pattern — `hb_decision` audit calls no longer silently skipped. (F9)
+- Cleanup: Removed duplicate `LINEAR_API_KEY` + `chmod` block in `spawn-helper.sh` `spawn_write_env`. Removed duplicate test definitions and dispatcher registrations in `test-spawn-helper.sh`.
+- Test: Added 24 new tests across `test-fleet-detect.sh`, `test-fleet-intervene.sh` (new), `test-heartbeat.sh`, and `test-spawn-helper.sh`. All existing tests pass.
+
+## 0.9.0 (2026-06-02)
+
+- Added: Ticket Fleet Controller — automated pipeline intervention with 5 detection engines (phase failures, stalls, zombies, loops, abandonment), severity-based escalation (WARN→KILL→KILL+RESTART), dry-run mode, health dashboard (terminal + markdown report), and three invocation modes (monitor, status, intervene).
+- Added: `lib/fleet-detect.sh` (~300 lines) — detection engine with `detect_phase_failures`, `detect_stalls`, `detect_zombies`, `detect_loops`, `detect_abandoned`, `fleet_detect_all` aggregator, and diagnostic context extraction.
+- Added: `lib/fleet-intervene.sh` (~150 lines) — intervention library with `fleet_kill_pipeline`, `fleet_restart_pipeline`, `fleet_can_restart`, `FLEET_DRY_RUN` guard, and flow.sh mutex awareness.
+- Added: `lib/fleet-dashboard.sh` (~140 lines) — dashboard renderer with `fleet_render_dashboard` (terminal) and `fleet_write_report` (markdown).
+- Added: `skills/ticket-fleet-controller/SKILL.md` — fleet controller skill with monitor, status, and intervene modes.
+- Added: `lib/tests/test-fleet-detect.sh` — 32 unit tests for detection engine following existing pure-bash harness pattern.
+- Added: 7 `FLEET_*` configuration variables to `lib/config.sh` with safe defaults (`FLEET_AUTO_RESTART` defaults to `false`).
+- Added: `spawn_fleet_kill` function to `lib/spawn-helper.sh` — unified kill primitive touching both stop files with heartbeat audit.
+
 ## 0.8.1 (2026-06-02)
 
 - Fix: Added missing comma after `version` field in `.claude-plugin/plugin.json` — JSON parse error `Expected '}'` prevented plugin installation.

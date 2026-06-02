@@ -38,7 +38,8 @@ ticket-auto-pipeline/
 - `ticket-document` — post-implement ai-context.md generation
 - `ticket-detect-resume` — crash recovery via pipeline log checkpoint
 - `ticket-retro` — post-mortem failure analysis from logs
-- `ticket-overseer` — pipeline queue dashboard
+- `ticket-overseer` — pipeline queue dashboard (human-facing)
+- `ticket-fleet-controller` — automated pipeline intervention (fleet controller with detect/kill/restart)
 - `ticket-batch-appraise` / `ticket-batch-verify` — batch operations
 - `ticket-reproduce` — bug reproduction (Step 1.5 for bug tickets)
 - `ticket-critique` — code/PR critique
@@ -59,6 +60,9 @@ ticket-auto-pipeline/
 | `env-check.sh` | Full environment check (env vars, MCP, CLI tools, CLAUDE.md). Dual-mode: `full` (pipe-delimited) and `validate` (colored output). |
 | `capture-transcript.sh` | Agent transcript capture for retro analysis. |
 | `reconcile-comments.sh` | PR comment reconciliation utility. |
+| `fleet-detect.sh` | 6 detection engines: phase failures, stalls, zombies, loops, abandonment, flow failures. Aggregator `fleet_detect_all` outputs JSON. |
+| `fleet-intervene.sh` | Intervention executor: `fleet_kill_pipeline`, `fleet_restart_pipeline`, `fleet_can_restart`. flow.sh mutex-aware, `FLEET_DRY_RUN` guard. |
+| `fleet-dashboard.sh` | Dashboard renderer: `fleet_render_dashboard` (terminal) and `fleet_write_report` (markdown). |
 | `skill-preamble.md` | Shared preamble referenced by all pipeline skill SKILL.md files. Defines parameters and common guard patterns. |
 
 ## State machine

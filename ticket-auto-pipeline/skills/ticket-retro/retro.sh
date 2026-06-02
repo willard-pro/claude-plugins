@@ -333,7 +333,7 @@ for log_file in "${LOG_FILES[@]}"; do
         if [ -n "$detail" ] && [ "$detail" != "{}" ]; then
           _detail_obj=$(echo "$detail" | jq -c '.' 2>/dev/null || echo "{}")
         fi
-        _event_obj=$(jq -n \
+        _event_obj=$(jq -c -n \
           --arg category "retry" \
           --arg event "$event" \
           --arg message "$msg" \
@@ -352,7 +352,7 @@ for log_file in "${LOG_FILES[@]}"; do
       if [ -n "$detail" ] && [ "$detail" != "{}" ]; then
         _detail_obj=$(echo "$detail" | jq -c '.' 2>/dev/null || echo "{}")
       fi
-      _event_obj=$(jq -n \
+      _event_obj=$(jq -c -n \
         --arg category "api" \
         --arg event "$event" \
         --arg message "$msg" \
@@ -370,7 +370,7 @@ for log_file in "${LOG_FILES[@]}"; do
       if [ -n "$detail" ] && [ "$detail" != "{}" ]; then
         _detail_obj=$(echo "$detail" | jq -c '.' 2>/dev/null || echo "{}")
       fi
-      _event_obj=$(jq -n \
+      _event_obj=$(jq -c -n \
         --arg category "gate" \
         --arg event "$event" \
         --arg message "$msg" \

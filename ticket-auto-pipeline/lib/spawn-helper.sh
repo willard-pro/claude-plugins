@@ -106,14 +106,6 @@ ENVEOF
 
   echo "spawn_write_env: wrote $env_file"
 
-  # Auto-append LINEAR_API_KEY to env file when available
-  if [ -n "${LINEAR_API_KEY:-}" ]; then
-    echo "export LINEAR_API_KEY=\"${LINEAR_API_KEY}\"" >>"$env_file"
-  fi
-
-  # Restrict permissions — env file may contain credentials
-  chmod 600 "$env_file"
-
   return 0
 }
 
@@ -179,6 +171,14 @@ spawn_agent_pre() {
     FLAGS="$FLAGS --from-step $FROM_STEP"
   fi
 
+  # Check for stop file before spawning — fleet controller may have killed
+  # this pipeline between detection and agent spawn (F10 race window guard).
+  local _pinger_stop="/tmp/ticket-auto-${TICKET_ID}-pinger-stop"
+  if [ -f "$_pinger_stop" ]; then
+    echo "spawn_agent_pre: spawn aborted — stop file exists for ${TICKET_ID}" >&2
+    return 1
+  fi
+
   local phase_lower
   phase_lower=$(echo "$STEP" | tr '[:upper:]' '[:lower:]')
 
@@ -195,13 +195,17 @@ spawn_agent_pre() {
   fi
 
   # 2. Start heartbeat pinger and watchdog
+  local PINGER_PID=""
+  local WATCHDOG_PID=""
   if [ -n "${HB_LOG_FILE:-}" ]; then
     local pinger_stop="/tmp/ticket-auto-${TICKET_ID}-pinger-stop"
     local watchdog_stop="/tmp/ticket-auto-${TICKET_ID}-watchdog-stop"
     export HB_LOG_FILE="$HB_LOG_FILE"
     hb_heartbeat "orchestrator-waiting" "agent ${phase_lower} launched"
     hb_pinger_start "$pinger_stop"
+    PINGER_PID=$!
     spawn_watchdog_start "$watchdog_stop" "$PHASE"
+    WATCHDOG_PID=$!
   fi
 
   # 3. Write phase context file
@@ -233,6 +237,8 @@ TICKET_ID=$TICKET_ID
 LOG_FILE=$LOG_FILE
 HB_LOG_FILE=$HB_LOG_FILE
 CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE
+PINGER_PID=$PINGER_PID
+WATCHDOG_PID=$WATCHDOG_PID
 EOF
 
   return 0
@@ -279,6 +285,8 @@ spawn_agent_post() {
 
   # If metadata file exists and explicit params not given, read from it
   local meta_file="/tmp/ticket-auto-${TICKET_ID}-spawn-meta.txt"
+  local PINGER_PID=""
+  local WATCHDOG_PID=""
   if [ -f "$meta_file" ] && [ -z "$PHASE" ]; then
     while IFS='=' read -r key val; do
       case "$key" in
@@ -287,6 +295,8 @@ spawn_agent_post() {
       LOG_FILE) [ -z "$LOG_FILE" ] && LOG_FILE="$val" ;;
       HB_LOG_FILE) [ -z "$HB_LOG_FILE" ] && HB_LOG_FILE="$val" ;;
       CLAUDE_LOG_FILE) [ -z "$CLAUDE_LOG_FILE" ] && CLAUDE_LOG_FILE="$val" ;;
+      PINGER_PID) [ -z "$PINGER_PID" ] && PINGER_PID="$val" ;;
+      WATCHDOG_PID) [ -z "$WATCHDOG_PID" ] && WATCHDOG_PID="$val" ;;
       esac
     done <"$meta_file"
   fi
@@ -305,6 +315,36 @@ spawn_agent_post() {
     local pinger_stop="/tmp/ticket-auto-${TICKET_ID}-pinger-stop"
     spawn_watchdog_stop "$watchdog_stop"
     hb_pinger_stop "$pinger_stop"
+
+    # Reap background processes — wait for captured PIDs to prevent zombie accumulation.
+    # Handles stale PIDs (process already exited): wait on dead PID returns immediately
+    # with exit 127, which is acceptable (non-fatal, logged to stderr only in debug).
+    if [ -n "$PINGER_PID" ] || [ -n "$WATCHDOG_PID" ]; then
+      local _pid _waited=0
+      for _pid in "$PINGER_PID" "$WATCHDOG_PID"; do
+        [ -z "$_pid" ] && continue
+        wait "$_pid" 2>/dev/null &
+        local _wait_pid=$!
+        # 5-second timeout per PID
+        local _timeout=50
+        while [ "$_timeout" -gt 0 ] && kill -0 "$_wait_pid" 2>/dev/null; do
+          sleep 0.1
+          _timeout=$((_timeout - 1))
+        done
+        kill -0 "$_wait_pid" 2>/dev/null && kill "$_wait_pid" 2>/dev/null || true
+        _waited=1
+      done
+      # Suppress shell's "Terminated" messages for killed wait jobs
+      [ "$_waited" -eq 1 ] && wait 2>/dev/null || true
+    else
+      # Fallback: no PID capture available — wait for any child with 5-second total timeout
+      local _waited=0
+      while [ "$_waited" -lt 50 ]; do
+        wait -n 2>/dev/null && break || break
+        _waited=$((_waited + 1))
+        sleep 0.1
+      done
+    fi
   fi
 
   case "$RESULT" in

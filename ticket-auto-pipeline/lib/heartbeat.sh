@@ -22,6 +22,13 @@ hb_write() {
   local msg="$4"
   local detail="${5:-}"
 
+  # Reject 'HB' explicitly — the two-letter uppercase form is a known
+  # corruption pattern from sub-agents echoing raw pipe-delimited lines.
+  if [ "$category" = "HB" ]; then
+    echo "hb_write: category 'HB' is not valid — use one of: $_HB_CATEGORIES" >&2
+    return 1
+  fi
+
   # Validate category enum
   local found=0
   for c in $_HB_CATEGORIES; do
@@ -71,6 +78,13 @@ hb_write() {
   if [[ "$msg" == *"|"* ]]; then
     echo "hb_write: MSG field contains pipe character — entry skipped" >&2
     return 1
+  fi
+
+  # Warn if caller is not heartbeat.sh (sub-agents legitimately call hb_*
+  # after sourcing, but direct writes from unknown callers may indicate
+  # raw-echo corruption). Warning only — does not reject the entry.
+  if [ -n "${BASH_SOURCE[0]:-}" ] && [[ ! "${BASH_SOURCE[0]}" == *heartbeat.sh* ]]; then
+    echo "hb_write: WARNING — called from outside heartbeat.sh (${BASH_SOURCE[0]}). Ensure this is a legitimate hb_* function call, not a raw echo to HB_LOG_FILE." >&2
   fi
 
   # Ensure directory exists

@@ -43,7 +43,8 @@ Maintainer-facing overview of the ticket-auto-pipeline plugin. Read this before 
 | Logging | `pipeline-log-format.md`, `pipeline-heartbeat-format.md`, `lib/heartbeat.sh` | Dual-stream progress + operational logging |
 | Crash recovery | `ticket-detect-resume`, pipeline log | Resumes from last completed step |
 | Failure analysis | `ticket-retro`, retro templates | Post-mortem classification + fix proposals |
-| Monitoring | `ticket-overseer`, `dashboard.py`, `report.py` | Queue status, stall detection |
+| Monitoring | `ticket-overseer`, `dashboard.py`, `report.py` | Queue status, stall detection (human-facing) |
+| Fleet control | `ticket-fleet-controller`, `lib/fleet-detect.sh`, `lib/fleet-intervene.sh`, `lib/fleet-dashboard.sh` | Automated intervention — detect, kill, restart pipelines |
 | Validation | `ticket-env-check`, `validate-linear-config.sh` | Pre-flight checks |
 | Batch ops | `ticket-batch-appraise`, `ticket-batch-verify` | Bulk ticket processing |
 
@@ -73,6 +74,7 @@ Support (invoked independently):
   ticket-detect-resume ── reads pipeline log
   ticket-retro ── reads pipeline + heartbeat logs
   ticket-overseer ── reads pipeline logs
+  ticket-fleet-controller ── reads pipeline + heartbeat logs, writes interventions
   ticket-env-check ── validates environment
 ```
 
@@ -105,12 +107,28 @@ All pipeline skills source their preamble from `lib/skill-preamble.md`. All bash
     ┌──────┴───────┐
     │              │
     ▼              ▼
-┌────────┐  ┌──────────┐
+├────────┐  ┌──────────┐
 │Detect  │  │ Retro    │
 │Resume  │  │ (post-   │
 │(crash  │  │ mortem)  │
 │recovery│  │          │
-└────────┘  └──────────┘
+├────────┘  └──────────┘
+│              │
+▼              ▼
+┌──────────────┐  ┌──────────────┐
+│ Fleet        │  │ Overseer     │
+│ Controller   │  │ (human       │
+│ (automated   │  │  dashboard)  │
+│  intervention│  │              │
+└──────┬───────┘  └──────────────┘
+       │
+       ▼
+┌──────────────┐
+│ Stop files,  │
+│ pipeline log │
+│ intervention │
+│ entries      │
+└──────────────┘
 ```
 
 ## How to add a new pipeline phase

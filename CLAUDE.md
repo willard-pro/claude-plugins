@@ -31,7 +31,11 @@ Skills are Claude Code `.md` files with YAML frontmatter. Claude Code runs them 
 
 **Pipeline skills** (the core workflow): `ticket-auto` (orchestrator), `ticket-appraise` (investigation + complexity scoring), `ticket-appraise-exec` (artifact creation), `ticket-implement` (code changes), `ticket-verify` (Playwright UAT), `ticket-flow` (state/label mutations), `ticket-pr-review`, `ticket-pr-iterate`, `ticket-setup`, `ticket-retro`.
 
-**Support skills**: `ticket-critique`, `ticket-detect-resume`, `ticket-document`, `ticket-overseer`, `ticket-batch-appraise`, `ticket-batch-verify`, `ticket-reproduce`, `wiki-maintenance`, `nav-hints`, `app-knowledge`.
+**Support skills**: `ticket-critique`, `ticket-detect-resume`, `ticket-document`, `ticket-overseer`, `ticket-fleet-controller`, `ticket-batch-appraise`, `ticket-batch-verify`, `ticket-reproduce`, `wiki-maintenance`, `nav-hints`, `app-knowledge`.
+
+## Plan/file name matching — no guessing
+
+When a skill or command references a file by name (e.g., `openspec-propose` pointing at `go-over-what-this-agile-reef.md`), and the exact filename does not exist on disk or in `.claude/plans/`, **abort and ask the user for the correct name**. Do not fuzzy-match to the closest plan and run with it — the wrong plan can produce an entirely wrong change. Only proceed when the file is found verbatim or the user clarifies.
 
 ## Determinism boundary
 
