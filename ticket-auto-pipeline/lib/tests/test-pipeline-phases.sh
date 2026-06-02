@@ -284,11 +284,11 @@ test_meta_title_guarded_against_unknown() {
   [ -f "$skill_md" ] || return 1
 
   # Guard should check for "unknown" before emitting title
-  grep -q 'unknown' "$skill_md" | grep -q 'META|title' || \
+  grep -q 'unknown' "$skill_md" | grep -q 'META|title' ||
     grep -q '|META|title|info|' "$skill_md" || {
-      echo "Cannot verify title guard"
-      return 1
-    }
+    echo "Cannot verify title guard"
+    return 1
+  }
 
   # Title emission should be inside an if guard
   grep -B5 'META|title|info|' "$skill_md" | grep -q 'if \[' || {
@@ -315,9 +315,12 @@ test_meta_title_at_most_once() {
   [ -f "$skill_md" ] || return 1
 
   # Title emission should check for existing META|title before writing
-  grep -q 'META|title.*grep.*META|title' "$skill_md" || \
-    grep -B10 'META|title|info|' "$skill_md" | grep -q 'grep.*META|title' || \
-    { echo "At-most-once guard not found for META|title"; return 1; }
+  grep -q 'META|title.*grep.*META|title' "$skill_md" ||
+    grep -B10 'META|title|info|' "$skill_md" | grep -q 'grep.*META|title' ||
+    {
+      echo "At-most-once guard not found for META|title"
+      return 1
+    }
 }
 
 # ── dispatcher ─────────────────────────────────────────────────────────────────

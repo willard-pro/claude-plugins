@@ -444,12 +444,12 @@ for fn in \
   test_capture_calls_through_with_all_params \
   test_env_prefix_survives_shell_special_chars_in_paths \
   test_heartbeat_sourced_when_not_predefined \
-    test_heartbeat_not_sourced_when_already_defined \
-    test_watchdog_start_creates_background_process \
-    test_watchdog_stop_kills_background_process \
-    test_watchdog_entries_use_correct_category \
-    test_watchdog_integrated_into_spawn_agent_pre \
-    test_watchdog_integrated_into_spawn_agent_post; do
+  test_heartbeat_not_sourced_when_already_defined \
+  test_watchdog_start_creates_background_process \
+  test_watchdog_stop_kills_background_process \
+  test_watchdog_entries_use_correct_category \
+  test_watchdog_integrated_into_spawn_agent_pre \
+  test_watchdog_integrated_into_spawn_agent_post; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done
