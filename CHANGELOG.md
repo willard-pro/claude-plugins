@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.10 (2026-06-02)
+
+- Fix: `check_api_key` in `lib/linear-api.sh` now walks up from `$PWD` (max 3 levels) looking for `.env` containing `LINEAR_API_KEY=` — flow.sh invoked via `bash` from SKILL.md needs a fresh shell where the key is absent; `.env` walk-up provides automatic fallback without configuration changes.
+- Fix: `lib/env-check.sh` now detects `LINEAR_API_KEY` from `$PROJECT_DIR/.env` in both `full` mode (pipe-delimited output) and `validate` mode (colored output) — emits `auto|(in .env)|.env` when key is read from `.env`, mirroring the existing `TICKET_AUTONOMY` pattern.
+- Fix: `spawn_write_env` in `lib/spawn-helper.sh` now auto-appends `export LINEAR_API_KEY="${LINEAR_API_KEY}"` to the generated env file when the key is available — sub-agents can now access the Linear API directly without re-sourcing `.env`.
+- Test: Added 8 new tests — 5 for `check_api_key` .env walk-up (current dir, parent dir, no key, key already set, wrong key), 1 for `env-check.sh` .env detection, 2 for `spawn_write_env` key propagation (key set, key unset). All 75 tests pass.
+
 ## 0.7.9 (2026-06-02)
 
 - Fix: Added `>/dev/null 2>&1` to `hb_pinger_start` background subshell in `lib/heartbeat.sh` — the pinger inherited stdout from `$(spawn_agent_pre ...)` command substitution, causing bash to wait for ALL pipe writers to close before completing the substitution. This produced a 4+ minute delay on every agent spawn during WIL-39.
