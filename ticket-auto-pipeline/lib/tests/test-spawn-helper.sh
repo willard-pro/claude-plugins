@@ -24,6 +24,7 @@ _run() {
 # ── mocks ──────────────────────────────────────────────────────────────────────
 
 # Mock hb_heartbeat and hb_pinger_start (defined in heartbeat.sh — not available in test)
+# Real pinger stdout isolation is tested in test-heartbeat.sh: test_pinger_no_stdout_output.
 hb_heartbeat() { return 0; }
 hb_pinger_start() { return 0; }
 hb_pinger_stop() { return 0; }
@@ -168,6 +169,34 @@ test_pre_writes_context_file() {
   source "$LIB_DIR/spawn-helper.sh"
   spawn_agent_pre PHASE=APPRAISE STEP=appraise TICKET_ID=TEST-42 SKILL=/ticket-appraise LOG_FILE=/tmp/test.log >/dev/null 2>&1
   grep -q 'APPRAISE|/tmp/test.log' /tmp/ticket-auto-TEST-42-ctx.txt
+}
+
+# ── env file integration tests (Tasks 4.1-4.2) ──────────────────────────────
+
+test_pre_prompt_includes_env_file_path() {
+  # Task 4.1: spawn_write_env then spawn_agent_pre — verify the AGENT_PROMPT
+  # includes the correct env file path.
+  source "$LIB_DIR/spawn-helper.sh"
+  # Write the env file first (simulating orchestrator Step 0.5)
+  spawn_write_env TICKET_ID=TEST-42 \
+    REPOS_ROOT=/home/user/repos \
+    ISSUE_PREFIX=TEST \
+    BE_SERVICES=svc1 >/dev/null 2>&1
+  # Now call spawn_agent_pre and check the prompt
+  local output
+  output=$(spawn_agent_pre PHASE=TEST STEP=test TICKET_ID=TEST-42 SKILL=/ticket-test FLAGS="--from-auto" 2>/dev/null)
+  echo "$output" | grep -q 'source /tmp/ticket-auto-TEST-42-env.sh'
+}
+
+test_pre_completes_when_env_file_missing() {
+  # Task 4.2: spawn_agent_pre must succeed even when the env file doesn't exist.
+  # The AGENT_PROMPT still includes the source command (sub-agent tolerates missing file).
+  rm -f /tmp/ticket-auto-TEST-42-env.sh
+  source "$LIB_DIR/spawn-helper.sh"
+  local output
+  output=$(spawn_agent_pre PHASE=TEST STEP=test TICKET_ID=TEST-42 SKILL=/ticket-test FLAGS="--from-auto" 2>/dev/null)
+  local rc=$?
+  [ "$rc" -eq 0 ] && echo "$output" | grep -q 'source /tmp/ticket-auto-TEST-42-env.sh'
 }
 
 # ── spawn_agent_post tests ─────────────────────────────────────────────────────
@@ -410,6 +439,41 @@ test_watchdog_integrated_into_spawn_agent_post() {
   return 0
 }
 
+# ── Watchdog heartbeat verification test (Task 3.3) ─────────────────────────
+
+test_watchdog_emits_heartbeats() {
+  # Verify spawn_watchdog_start actually writes heartbeat entries when
+  # HB_LOG_FILE is set. Uses sleep_secs=1 to avoid 60s delay.
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local stop_file="$tmpdir/watchdog-stop"
+  local hb_log="$tmpdir/hb.log"
+  # Run in a clean subshell — unset global mocks so spawn-helper.sh loads real heartbeat.sh
+  (
+    export HB_LOG_FILE="$hb_log"
+    unset -f hb_heartbeat hb_pinger_start hb_pinger_stop cl_write 2>/dev/null || true
+    source "$LIB_DIR/spawn-helper.sh"
+    # Initialize the heartbeat log (schema header needed for valid file)
+    hb_init
+    # Start watchdog with 1s interval (instead of default 60s)
+    spawn_watchdog_start "$stop_file" "TEST" 1
+    # Wait up to 3s for at least one heartbeat entry
+    waited=0
+    while [ $waited -lt 6 ]; do
+      sleep 0.5
+      waited=$((waited + 1))
+      [ -f "$hb_log" ] && grep -q 'watchdog' "$hb_log" 2>/dev/null && break
+    done
+    # Stop the watchdog
+    spawn_watchdog_stop "$stop_file"
+    # Verify at least one watchdog heartbeat was written
+    grep -q 'watchdog' "$hb_log"
+  )
+  local rc=$?
+  rm -rf "$tmpdir"
+  return $rc
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -432,6 +496,8 @@ for fn in \
   test_pre_metadata_contains_correct_phase \
   test_pre_printf_q_escapes_shell_metachars \
   test_pre_writes_context_file \
+  test_pre_prompt_includes_env_file_path \
+  test_pre_completes_when_env_file_missing \
   test_post_reads_metadata_file \
   test_post_rejects_missing_ticket_id \
   test_post_rejects_missing_result \
@@ -449,7 +515,8 @@ for fn in \
   test_watchdog_stop_kills_background_process \
   test_watchdog_entries_use_correct_category \
   test_watchdog_integrated_into_spawn_agent_pre \
-  test_watchdog_integrated_into_spawn_agent_post; do
+  test_watchdog_integrated_into_spawn_agent_post \
+  test_watchdog_emits_heartbeats; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done
