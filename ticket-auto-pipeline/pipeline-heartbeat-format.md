@@ -90,6 +90,8 @@ Current schema version: **1**
 | `loop-back` | Orchestrator transitions between loop iterations | `{"attempt":"<N>\|iteration":"<N>"\|...}` |
 | `pipeline-outcome` | Pipeline terminates (complete or stopped) | `{"outcome":"<complete\|stopped: ...>","reason":"<...>"}` |
 | `retro-trigger` | Orchestrator decides whether to invoke retro | `{"gate_stops":"<N>","outcome":"<...>"}` |
+| `fleet-kill` | Fleet controller kills a pipeline | `{"reason":"<auto-kill\|manual-intervention\|...>"}` |
+| `fleet-restart` | Fleet controller restarts a pipeline (kill + spawn new) | `{"reason":"<auto-restart\|manual-restart\|...>"}` |
 
 ### Fallback events (`hb_fallback`)
 
@@ -132,6 +134,7 @@ Current schema version: **1**
 | `verify-exhausted` | Verify attempts reach max (3) | `{"attempts":"<N>"}` |
 | `iteration-exhausted` | PR iterations reach max (3) | `{"iterations":"<N>"}` |
 | `reverify-exhausted` | Re-verify retries reach max (3) | `{"retries":"<N>","iteration":"<N>"}` |
+| `combined-cap` | Combined retry cap (verify + iteration + reverify) reached | `{"total_retries":"<N>"}` |
 | `trigger-dispatch` | Flow trigger decision | `{"trigger":"<name>"}` |
 | `assertion` | Post-trigger state assertion result | `{"trigger":"<name>"}` |
 | `idempotent-skip` | Desired state already matches, no mutation | `{"trigger":"<name>"}` |
@@ -143,6 +146,7 @@ Current schema version: **1**
 | Event | When | DETAIL |
 |-------|------|--------|
 | `classify` | Error classified as transient or permanent | `{"http_code":"<...>","attempt":"<...>"}` |
+| `flow-sh` | flow.sh trigger dispatch failed (exit > 0) | `{"trigger":"<name>","exit_code":"<N>","attempt":"<N>"}` |
 
 ### Source events (`hb_source`)
 
