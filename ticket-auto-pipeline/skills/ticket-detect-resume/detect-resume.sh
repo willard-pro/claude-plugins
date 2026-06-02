@@ -78,8 +78,26 @@ fi
 if [ ! -s "$LOG_FILE" ]; then
   RESUME_STEP="STEP_1"
 else
-  if grep -q '^[^|]*|PR-REVIEW|pr-review|done|' "$LOG_FILE"; then
-    # PR merge-status check: open PR with human comments → STEP_5_5, else STEP_6
+  # Phase order: APPRAISE → REPRODUCE → EXEC → GATE → IMPLEMENT → VERIFY → PR-REVIEW → MAINTENANCE → REPORT
+  # Check from latest phase backward.
+  if grep -q '^[^|]*|MAINTENANCE|maintenance|done|' "$LOG_FILE"; then
+    RESUME_STEP="STEP_6"
+  elif grep -q '^[^|]*|MAINTENANCE|maintenance|fail|' "$LOG_FILE"; then
+    RESUME_STEP="STEP_6"
+  elif grep -q '^[^|]*|MAINTENANCE|maintenance|waiting|' "$LOG_FILE"; then
+    RESUME_STEP="STEP_5"
+  elif grep -q '^[^|]*|MAINTENANCE|document|done|' "$LOG_FILE"; then
+    RESUME_STEP="STEP_5"
+  elif grep -q '^[^|]*|MAINTENANCE|document|fail|' "$LOG_FILE"; then
+    RESUME_STEP="STEP_5"
+  elif grep -q '^[^|]*|MAINTENANCE|document|waiting|' "$LOG_FILE"; then
+    RESUME_STEP="STEP_5"
+  elif grep -q '^[^|]*|MAINTENANCE|maintenance|' "$LOG_FILE"; then
+    RESUME_STEP="STEP_5"
+  elif grep -q '^[^|]*|MAINTENANCE|document|' "$LOG_FILE"; then
+    RESUME_STEP="STEP_5"
+  elif grep -q '^[^|]*|PR-REVIEW|pr-review|done|' "$LOG_FILE"; then
+    # PR merge-status check: merged → STEP_6, open with human comments → STEP_5_5, else → STEP_5
     _pr_number=$(grep '^[^|]*|PR-REVIEW|checkout-pr|done|' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'|' -f5 || true)
     if [ -z "$_pr_number" ]; then
       _pr_number=$(grep -oP 'PR-REVIEW\|pr-review\|done\|.*?\b(\d+)\b' "$LOG_FILE" 2>/dev/null | grep -oP '\d+$' | tail -1 || true)
@@ -104,33 +122,17 @@ else
         if [ "$_has_new_human" = "true" ]; then
           RESUME_STEP="STEP_5_5"
         else
-          RESUME_STEP="STEP_6"
+          RESUME_STEP="STEP_5"
         fi
       fi
     else
-      # gh unavailable or no PR number found — fall back to STEP_6
-      RESUME_STEP="STEP_6"
+      # gh unavailable or no PR number found — fall back to STEP_5 (Document + Wiki)
+      RESUME_STEP="STEP_5"
       if ! $_gh_available; then
-        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|pr-comment-check|warn|gh unavailable — falling back to STEP_6" >>"$LOG_FILE"
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|pr-comment-check|warn|gh unavailable — falling back to STEP_5" >>"$LOG_FILE"
       fi
     fi
   elif grep -q '^[^|]*|VERIFY|verify|done|PASS' "$LOG_FILE"; then
-    RESUME_STEP="STEP_5"
-  elif grep -q '^[^|]*|MAINTENANCE|maintenance|done|' "$LOG_FILE"; then
-    RESUME_STEP="STEP_5"
-  elif grep -q '^[^|]*|MAINTENANCE|maintenance|fail|' "$LOG_FILE"; then
-    RESUME_STEP="STEP_5"
-  elif grep -q '^[^|]*|MAINTENANCE|maintenance|waiting|' "$LOG_FILE"; then
-    RESUME_STEP="STEP_4_7"
-  elif grep -q '^[^|]*|MAINTENANCE|document|done|' "$LOG_FILE"; then
-    RESUME_STEP="STEP_4_7"
-  elif grep -q '^[^|]*|MAINTENANCE|document|fail|' "$LOG_FILE"; then
-    RESUME_STEP="STEP_4_7"
-  elif grep -q '^[^|]*|MAINTENANCE|document|waiting|' "$LOG_FILE"; then
-    RESUME_STEP="STEP_4_6"
-  elif grep -q '^[^|]*|MAINTENANCE|maintenance|' "$LOG_FILE"; then
-    RESUME_STEP="STEP_4_7"
-  elif grep -q '^[^|]*|MAINTENANCE|document|' "$LOG_FILE"; then
     RESUME_STEP="STEP_4_6"
   elif grep -q '^[^|]*|VERIFY|verify|' "$LOG_FILE"; then
     RESUME_STEP="STEP_4_5"

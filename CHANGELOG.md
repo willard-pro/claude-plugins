@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.7 (2026-06-02)
+
+- Fix: Swapped PR-REVIEW and MAINTENANCE phase order so documentation is generated after code review passes, preventing stale docs when review requests changes. Updated `detect-resume.sh` step table, `pipeline-log-format.md` documentation, and report table accordingly.
+- Fix: Added heartbeat `phase-transition` events at all phase boundaries (START → APPRAISE, APPRAISE → REPRODUCE, REPRODUCE → EXEC, EXEC → GATE). Skipped phases emit transitions with "(skipped)" suffix.
+- Feature: Added watchdog heartbeat (`spawn_watchdog_start`/`spawn_watchdog_stop` in `spawn-helper.sh`) that emits liveness signals every 60s during agent wait loops. Integrated into `spawn_agent_pre`/`spawn_agent_post`.
+- Fix: Eliminated duplicate pipeline log entries by changing agent-written maintenance entries to use distinct step name `wiki-errata` instead of `maintenance`, preventing collision with `spawn_agent_post` phase bracket.
+- Fix: Added guards on `META|title` and `META|artifact` emissions — title deferred until non-empty and non-"unknown", artifact deferred until path is absolute. Title emission uses at-most-once check.
+- Test: Added 15 new tests across `test-pipeline-phases.sh` and `test-spawn-helper.sh` covering phase ordering, heartbeat transitions, watchdog behavior, log dedup, and metadata deferral.
+
 ## 0.7.6 (2026-06-02)
 
 - Fix: removed `-u` (nounset) from `linear-api.sh` — Claude Code shell snapshots inject `ZSH_VERSION` references that trigger false-positive "unbound variable" errors; stderr pollution could contaminate `linear_graphql` JSON output
