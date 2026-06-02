@@ -100,8 +100,8 @@ ADD_LABEL_NAMES=()
 while IFS= read -r label; do
   [ -z "$label" ] && continue
   label=$(echo "$label" | sed \
-    "s/{complexity}/${DATA[complexity]:-simple}/g" \
-    "s/{outcome}/${DATA[outcome]:-Smooth}/g")
+    -e "s/{complexity}/${DATA[complexity]:-simple}/g" \
+    -e "s/{outcome}/${DATA[outcome]:-Smooth}/g")
   ADD_LABEL_NAMES+=("$label")
 done < <(echo "$def" | jq -r '.adds[]? // empty')
 
