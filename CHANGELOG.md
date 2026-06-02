@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.1 (2026-06-02)
+
+- Fix: Added missing comma after `version` field in `.claude-plugin/plugin.json` — JSON parse error `Expected '}'` prevented plugin installation.
+
 ## 0.7.10 (2026-06-02)
 
 - Fix: `check_api_key` in `lib/linear-api.sh` now walks up from `$PWD` (max 3 levels) looking for `.env` containing `LINEAR_API_KEY=` — flow.sh invoked via `bash` from SKILL.md needs a fresh shell where the key is absent; `.env` walk-up provides automatic fallback without configuration changes.
