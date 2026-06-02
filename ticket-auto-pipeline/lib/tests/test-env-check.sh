@@ -154,6 +154,21 @@ test_full_mode_local_url_env_priority() {
   echo "$output" | grep 'LOCAL_URL' | grep -q 'http://env-priority.test'
 }
 
+test_full_mode_linear_key_in_dotenv() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  _mk_project_dir "$tmpdir"
+  echo 'LINEAR_API_KEY=my-dotenv-key' >"$tmpdir/.env"
+  local output
+  output=$(
+    unset LINEAR_API_KEY
+    GITHUB_PERSONAL_ACCESS_TOKEN=test \
+      bash "$LIB_DIR/env-check.sh" --mode=full "$tmpdir" 2>/dev/null || true
+  )
+  rm -rf "$tmpdir"
+  echo "$output" | grep 'LINEAR_API_KEY' | grep -q 'auto|(in .env)|.env|key found in project .env'
+}
+
 test_full_mode_ticket_autonomy_warn() {
   local tmpdir
   tmpdir=$(mktemp -d)
@@ -203,6 +218,7 @@ for fn in \
   test_full_mode_rowcount_matches_var_lines \
   test_full_mode_gh_token_derived \
   test_full_mode_local_url_env_priority \
+  test_full_mode_linear_key_in_dotenv \
   test_full_mode_ticket_autonomy_warn \
   test_unknown_mode_exits_1 \
   test_summary_file_flag_writes_to_path; do
