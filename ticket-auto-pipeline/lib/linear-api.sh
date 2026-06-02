@@ -18,8 +18,32 @@ LINEAR_API_URL="${LINEAR_API_URL:-https://api.linear.app/graphql}"
 # Check LINEAR_API_KEY is set
 check_api_key() {
   if [ -z "${LINEAR_API_KEY:-}" ]; then
-    echo "LINEAR_API_KEY not set" >&2
-    exit 4
+    # Walk up from PWD (max 3 levels) looking for .env containing LINEAR_API_KEY=
+    # Use grep extraction rather than 'source' to avoid executing arbitrary code
+    # in .env files. Strips optional single/double quotes from the value.
+    local _dir="$PWD"
+    local _found=false
+    local _key_value
+    for _ in 1 2 3; do
+      if [ -f "$_dir/.env" ] && grep -q '^LINEAR_API_KEY=' "$_dir/.env" 2>/dev/null; then
+        _key_value=$(grep -m1 '^LINEAR_API_KEY=' "$_dir/.env" 2>/dev/null | sed 's/^LINEAR_API_KEY=//')
+        # Strip optional surrounding quotes
+        _key_value="${_key_value#\"}"
+        _key_value="${_key_value%\"}"
+        _key_value="${_key_value#\'}"
+        _key_value="${_key_value%\'}"
+        if [ -n "$_key_value" ]; then
+          export LINEAR_API_KEY="$_key_value"
+          _found=true
+          break
+        fi
+      fi
+      _dir="$(dirname "$_dir")"
+    done
+    if ! $_found; then
+      echo "LINEAR_API_KEY not set and not found in .env" >&2
+      exit 4
+    fi
   fi
 }
 

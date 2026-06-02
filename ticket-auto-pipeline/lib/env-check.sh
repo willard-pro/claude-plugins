@@ -111,6 +111,8 @@ if [ "${_MODE:-full}" = "validate" ]; then
   # LINEAR_API_KEY
   if [ -n "${LINEAR_API_KEY:-}" ]; then
     pass "LINEAR_API_KEY"
+  elif [ -f "$PROJECT_DIR/.env" ] && grep -q '^LINEAR_API_KEY=' "$PROJECT_DIR/.env" 2>/dev/null; then
+    pass "LINEAR_API_KEY (in .env)"
   else
     fail "LINEAR_API_KEY" "add to .claude/settings.local.json env block — required by lib/linear-api.sh"
     failures=$((failures + 1))
@@ -279,6 +281,8 @@ GIT_EMAIL="$(git config user.email 2>/dev/null || true)"
 
 if [ -n "${LINEAR_API_KEY:-}" ]; then
   _var "LINEAR_API_KEY" "ok" "${LINEAR_API_KEY}" "settings.local.json" ""
+elif DOTENV_LINEAR_KEY=$(grep -oP '^LINEAR_API_KEY=\K.*' "$PROJECT_DIR/.env" 2>/dev/null || true) && [ -n "$DOTENV_LINEAR_KEY" ]; then
+  _var "LINEAR_API_KEY" "auto" "(in .env)" ".env" "key found in project .env"
 elif result=$(find_in_settings "LINEAR_API_KEY"); then
   _var "LINEAR_API_KEY" "warn" "(in ${result%%:*} — restart session)" "settings.local.json" "found in file but not loaded"
 else

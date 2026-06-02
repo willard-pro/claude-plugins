@@ -96,6 +96,14 @@ ENVEOF
     -e "s|SLACK_CHANNEL_PLACEHOLDER|$(_sed_escape "$SLACK_CHANNEL")|" \
     "$env_file"
 
+  # Auto-append LINEAR_API_KEY to env file when available
+  if [ -n "${LINEAR_API_KEY:-}" ]; then
+    echo "export LINEAR_API_KEY=\"${LINEAR_API_KEY}\"" >>"$env_file"
+  fi
+
+  # Restrict permissions — env file may contain credentials
+  chmod 600 "$env_file"
+
   echo "spawn_write_env: wrote $env_file"
 
   # Auto-append LINEAR_API_KEY to env file when available
