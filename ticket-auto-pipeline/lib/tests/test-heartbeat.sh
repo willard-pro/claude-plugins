@@ -364,6 +364,32 @@ test_pinger_stops_after_stop_file_appears() {
   [ "$((count_after - count_before))" -le 1 ]
 }
 
+test_pinger_no_stdout_output() {
+  # Verify hb_pinger_start produces no stdout output when called in command substitution.
+  # This test exercises the real function (not a mock) — the pinger writes heartbeats
+  # to HB_LOG_FILE via >>, not stdout, so $() should capture nothing.
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local stop_file="$tmpdir/pinger-stop"
+  local hb_log="$tmpdir/hb.log"
+  local captured=""
+  (
+    export HB_LOG_FILE="$hb_log"
+    source "$LIB_DIR/heartbeat.sh"
+    hb_init
+    # Capture stdout from hb_pinger_start — must be empty
+    captured=$(hb_pinger_start "$stop_file" 1 2)
+    # Stop the pinger so it doesn't linger
+    touch "$stop_file"
+    # Assert captured stdout is empty
+    [ -z "$captured" ]
+  )
+  local rc=$?
+  sleep 2 # let pinger exit cleanly
+  rm -rf "$tmpdir"
+  return $rc
+}
+
 test_pinger_start_removes_stale_stop_file() {
   local tmpdir
   tmpdir=$(mktemp -d)
@@ -413,6 +439,7 @@ for fn in \
   test_pinger_stop_creates_stop_file \
   test_pinger_writes_heartbeat_entries_during_run \
   test_pinger_stops_after_stop_file_appears \
+  test_pinger_no_stdout_output \
   test_pinger_start_removes_stale_stop_file; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
