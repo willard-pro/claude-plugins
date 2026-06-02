@@ -105,6 +105,15 @@ ENVEOF
   chmod 600 "$env_file"
 
   echo "spawn_write_env: wrote $env_file"
+
+  # Auto-append LINEAR_API_KEY to env file when available
+  if [ -n "${LINEAR_API_KEY:-}" ]; then
+    echo "export LINEAR_API_KEY=\"${LINEAR_API_KEY}\"" >>"$env_file"
+  fi
+
+  # Restrict permissions — env file may contain credentials
+  chmod 600 "$env_file"
+
   return 0
 }
 
@@ -173,10 +182,16 @@ spawn_agent_pre() {
   local phase_lower
   phase_lower=$(echo "$STEP" | tr '[:upper:]' '[:lower:]')
 
-  # 1. Write waiting log entry
+  # 1. Write waiting log entry (idempotent: skip if last line already matches)
   if [ -n "$LOG_FILE" ]; then
-    local desc="${DESCRIPTION:-agent for ${TICKET_ID}}"
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|${PHASE}|${phase_lower}|waiting|Agent launched — ${desc}" >>"$LOG_FILE"
+    local last_line
+    last_line=$(tail -1 "$LOG_FILE" 2>/dev/null || true)
+    if echo "$last_line" | grep -q "|${PHASE}|${phase_lower}|waiting|"; then
+      : # already written, skip
+    else
+      local desc="${DESCRIPTION:-agent for ${TICKET_ID}}"
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|${PHASE}|${phase_lower}|waiting|Agent launched — ${desc}" >>"$LOG_FILE"
+    fi
   fi
 
   # 2. Start heartbeat pinger and watchdog
@@ -296,7 +311,13 @@ spawn_agent_post() {
   done)
     if [ -n "${LOG_FILE:-}" ]; then
       local done_msg="${MSG:-agent done}"
-      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|${PHASE:-UNKNOWN}|${phase_lower:-unknown}|done|${done_msg}" >>"$LOG_FILE"
+      local last_line
+      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
+      if echo "$last_line" | grep -q "|${PHASE:-UNKNOWN}|${phase_lower:-unknown}|done|"; then
+        : # already written, skip
+      else
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|${PHASE:-UNKNOWN}|${phase_lower:-unknown}|done|${done_msg}" >>"$LOG_FILE"
+      fi
     fi
     if [ -n "${HB_LOG_FILE:-}" ]; then
       hb_heartbeat "agent-returned" "${phase_lower:-agent} done — ${MSG:-}"
@@ -316,7 +337,13 @@ spawn_agent_post() {
     [ "$fail_action" = "warn-continue" ] && suffix=" — continuing"
 
     if [ -n "${LOG_FILE:-}" ]; then
-      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|${PHASE:-UNKNOWN}|${phase_lower:-unknown}|fail|${fail_msg}${suffix}" >>"$LOG_FILE"
+      local last_line
+      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
+      if echo "$last_line" | grep -q "|${PHASE:-UNKNOWN}|${phase_lower:-unknown}|fail|"; then
+        : # already written, skip
+      else
+        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|${PHASE:-UNKNOWN}|${phase_lower:-unknown}|fail|${fail_msg}${suffix}" >>"$LOG_FILE"
+      fi
     fi
     if [ -n "${HB_LOG_FILE:-}" ]; then
       hb_heartbeat "agent-returned" "${phase_lower:-agent} failed${suffix}"
@@ -337,8 +364,9 @@ spawn_agent_post() {
     ;;
   esac
 
-  # Clean up metadata file
-  rm -f "$meta_file"
+  # Meta file persists until next spawn_agent_pre overwrites it.
+  # This allows duplicate spawn_agent_post calls to read PHASE/STEP
+  # for idempotency guard tail-checks.
 
   return 0
 }
