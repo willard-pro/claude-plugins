@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.5 (2026-06-02)
+
+- Fix: `spawn-helper.sh` now sources `heartbeat.sh` at load time — `hb_*` and `cl_write` calls were silently unresolved when `HB_LOG_FILE`/`CLAUDE_LOG_FILE` were set during real pipeline runs
+- Fix: corrected `get_issue` return-value documentation and error-detection patterns in `ticket-auto/SKILL.md` and `lib/skill-preamble.md` — `get_issue()` returns the unwrapped issue object, not the raw `.data.issue` response; validation check changed from `jq -e '.data.issue'` to `jq -e '.id'`; jq extraction examples and live bug-label detection code updated accordingly
+
 ## 0.6.0 (2026-05-22)
 
 - Feat: unit test suites for all 7 lib scripts (72 tests) — `linear-api.sh`, `env-check.sh`, `notes-parse.sh`, `ticket-dir.sh`, `heartbeat.sh`, `capture-transcript.sh`, `reconcile-comments.sh` — each with a self-contained test harness using `socat` for HTTP stubbing where needed
