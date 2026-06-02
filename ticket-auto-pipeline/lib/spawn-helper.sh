@@ -389,7 +389,7 @@ spawn_watchdog_start() {
       [ -f "$stop_file" ] && break
       hb_heartbeat "watchdog" "alive" "waiting for ${phase_label} agent" || true
     done
-  ) &
+  ) >/dev/null 2>&1 &
   disown
 }
 
