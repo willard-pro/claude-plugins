@@ -22,8 +22,8 @@ if [ -n "$META_FILE" ]; then
   TICKET_ID=$(basename "$META_FILE" | sed 's/ticket-auto-\(.*\)-spawn-meta\.txt/\1/')
   while IFS='=' read -r key val; do
     case "$key" in
-      PHASE) PHASE="$val" ;;
-      LOG_FILE) LOG_FILE="$val" ;;
+    PHASE) PHASE="$val" ;;
+    LOG_FILE) LOG_FILE="$val" ;;
     esac
   done <"$META_FILE"
 fi
