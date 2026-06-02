@@ -148,7 +148,7 @@ Restart Claude Code after adding MCP servers.
 
 ### Supporting
 
-`ticket-batch-appraise`, `ticket-batch-verify`, `ticket-critique`, `ticket-detect-resume`, `ticket-reproduce`, `wiki-maintenance`, `nav-hints`, `app-knowledge`.
+`ticket-batch-appraise`, `ticket-batch-verify`, `ticket-critique`, `ticket-detect-resume`, `ticket-fleet-controller`, `ticket-reproduce`, `wiki-maintenance`, `nav-hints`, `app-knowledge`.
 
 ## Architecture
 
