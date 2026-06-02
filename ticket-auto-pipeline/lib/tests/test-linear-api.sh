@@ -128,6 +128,71 @@ test_check_api_key_exits_4_when_unset() {
   [ "$exit_code" -eq 4 ]
 }
 
+test_check_api_key_finds_key_in_current_dir_dotenv() {
+  local tmpdir exit_code
+  tmpdir=$(mktemp -d)
+  echo 'LINEAR_API_KEY=test-key-from-dotenv' >"$tmpdir/.env"
+  exit_code=0
+  (
+    cd "$tmpdir" || exit 1
+    unset LINEAR_API_KEY
+    source "$LIB_DIR/linear-api.sh"
+    # Call check_api_key directly — should find key from .env and set it
+    check_api_key
+    [ "$LINEAR_API_KEY" = "test-key-from-dotenv" ]
+  ) 2>/dev/null || exit_code=$?
+  rm -rf "$tmpdir"
+  [ "$exit_code" -eq 0 ]
+}
+
+test_check_api_key_finds_key_in_parent_dir_dotenv() {
+  local tmpdir exit_code
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs"
+  echo 'LINEAR_API_KEY=parent-dotenv-key' >"$tmpdir/.env"
+  exit_code=0
+  (
+    cd "$tmpdir/logs" || exit 1
+    unset LINEAR_API_KEY
+    source "$LIB_DIR/linear-api.sh"
+    check_api_key
+    [ "$LINEAR_API_KEY" = "parent-dotenv-key" ]
+  ) 2>/dev/null || exit_code=$?
+  rm -rf "$tmpdir"
+  [ "$exit_code" -eq 0 ]
+}
+
+test_check_api_key_exits_4_when_dotenv_has_no_linear_key() {
+  local tmpdir exit_code
+  tmpdir=$(mktemp -d)
+  echo 'OTHER_KEY=some-value' >"$tmpdir/.env"
+  exit_code=0
+  (
+    cd "$tmpdir" || exit 1
+    unset LINEAR_API_KEY
+    source "$LIB_DIR/linear-api.sh"
+    check_api_key
+  ) 2>/dev/null || exit_code=$?
+  rm -rf "$tmpdir"
+  [ "$exit_code" -eq 4 ]
+}
+
+test_check_api_key_skips_dotenv_when_key_already_set() {
+  local tmpdir exit_code
+  tmpdir=$(mktemp -d)
+  echo 'LINEAR_API_KEY=should-not-use-this' >"$tmpdir/.env"
+  exit_code=0
+  (
+    cd "$tmpdir" || exit 1
+    export LINEAR_API_KEY=already-set
+    source "$LIB_DIR/linear-api.sh"
+    check_api_key
+    [ "$LINEAR_API_KEY" = "already-set" ]
+  ) 2>/dev/null || exit_code=$?
+  rm -rf "$tmpdir"
+  [ "$exit_code" -eq 0 ]
+}
+
 test_get_issue_success() {
   local result
   result=$(bash -c "
@@ -235,6 +300,10 @@ for fn in \
   test_update_issue_all_fields \
   test_get_me_returns_viewer \
   test_check_api_key_exits_4_when_unset \
+  test_check_api_key_finds_key_in_current_dir_dotenv \
+  test_check_api_key_finds_key_in_parent_dir_dotenv \
+  test_check_api_key_exits_4_when_dotenv_has_no_linear_key \
+  test_check_api_key_skips_dotenv_when_key_already_set \
   test_get_issue_success \
   test_graphql_error_in_body_exits_2 \
   test_retry_three_503s_exits_2 \
