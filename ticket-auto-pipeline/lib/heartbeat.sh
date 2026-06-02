@@ -146,7 +146,7 @@ hb_pinger_start() {
       hb_heartbeat "orchestrator-waiting" "pinger ${i}/${max_iter}" || true
       i=$((i + 1))
     done
-  ) &
+  ) >/dev/null 2>&1 &
   disown
 }
 

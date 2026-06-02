@@ -373,19 +373,20 @@ spawn_capture() {
 # Backgrounds a watchdog heartbeat loop that emits hb_heartbeat entries every 60s
 # while the orchestrator waits for a sub-agent. Uses a stop-file to signal shutdown.
 #
-# Usage: spawn_watchdog_start <stop_file> <phase_label>
+# Usage: spawn_watchdog_start <stop_file> <phase_label> [sleep_secs=60]
 spawn_watchdog_start() {
   [ -z "${HB_LOG_FILE:-}" ] && return 0
 
   local stop_file="$1"
   local phase_label="${2:-unknown}"
+  local sleep_secs="${3:-60}"
 
   rm -f "$stop_file"
 
   (
     set +e
     while true; do
-      sleep 60
+      sleep "$sleep_secs"
       [ -f "$stop_file" ] && break
       hb_heartbeat "watchdog" "alive" "waiting for ${phase_label} agent" || true
     done

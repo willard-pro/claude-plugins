@@ -1,6 +1,14 @@
 # Changelog
 
-## 0.7.7 (2026-06-02)
+## 0.7.9 (2026-06-02)
+
+- Fix: Added `>/dev/null 2>&1` to `hb_pinger_start` background subshell in `lib/heartbeat.sh` — the pinger inherited stdout from `$(spawn_agent_pre ...)` command substitution, causing bash to wait for ALL pipe writers to close before completing the substitution. This produced a 4+ minute delay on every agent spawn during WIL-39.
+- Fix: Wired `spawn_write_env` into orchestrator Step 0.5 of `skills/ticket-auto/SKILL.md` — sub-agents now receive project context (`REPOS_ROOT`, `ISSUE_PREFIX`, `BE_SERVICES`, etc.) via `/tmp/ticket-auto-{ID}-env.sh`. Previously the function was defined but never called, so sub-agents operated without project context.
+- Feature: Added optional `sleep_secs` parameter to `spawn_watchdog_start` (default 60s) — matches `hb_pinger_start` API pattern and enables testing without 60s delays.
+- Test: Added 4 new tests — `test_pinger_no_stdout_output` (heartbeat), `test_watchdog_emits_heartbeats` (spawn-helper), `test_pre_prompt_includes_env_file_path` (spawn-helper), `test_pre_completes_when_env_file_missing` (spawn-helper). Total test count: 144 → 148.
+- Test: Updated `hb_pinger_start` mock comment in `test-spawn-helper.sh` to cross-reference the real stdout isolation test in `test-heartbeat.sh`.
+
+## 0.7.8 (2026-06-02)
 
 - Fix: Swapped PR-REVIEW and MAINTENANCE phase order so documentation is generated after code review passes, preventing stale docs when review requests changes. Updated `detect-resume.sh` step table, `pipeline-log-format.md` documentation, and report table accordingly.
 - Fix: Added heartbeat `phase-transition` events at all phase boundaries (START → APPRAISE, APPRAISE → REPRODUCE, REPRODUCE → EXEC, EXEC → GATE). Skipped phases emit transitions with "(skipped)" suffix.
