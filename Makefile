@@ -16,6 +16,8 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-spawn-helper.sh
 	bash ticket-auto-pipeline/lib/tests/test-fleet-detect.sh
 	bash ticket-auto-pipeline/lib/tests/test-fleet-intervene.sh
+	bash ticket-auto-pipeline/lib/tests/test-config.sh
+	bash ticket-auto-pipeline/lib/tests/test-fleet-monitor.sh
 
 test-flow:
 	@echo "=== ticket-flow tests ==="
