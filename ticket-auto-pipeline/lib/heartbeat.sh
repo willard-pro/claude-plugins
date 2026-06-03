@@ -131,6 +131,12 @@ hb_gate() {
   hb_write "gate" "$@"
 }
 
+# Fleet controller action heartbeat. Wraps hb_write with category=fleet.
+# Usage: hb_fleet_action <event> <status> <msg> [detail]
+hb_fleet_action() {
+  hb_write "heartbeat" "$@"
+}
+
 hb_source() {
   [ -z "${HB_LOG_FILE:-}" ] && return 0
   hb_write "source" "$@"

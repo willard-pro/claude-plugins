@@ -490,7 +490,7 @@ fleet_detect_all() {
     --argjson restart "$restart" \
     '{total: $total, healthy: $healthy, warn: $warn, kill: $kill, restart: $restart}')
 
-  jq -n \
+  jq -nc \
     --argjson pipelines "$results" \
     --argjson summary "$summary" \
     '{pipelines: $pipelines, summary: $summary}'
