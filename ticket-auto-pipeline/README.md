@@ -86,6 +86,21 @@ Optional:
 | `REPOS_ROOT` | Workspace root (default: `~/repos`) |
 | `TICKET_AUTONOMY` | Default autonomy mode — `manual` (default), `auto`, or `semi-auto` |
 
+Fleet controller configuration (all optional, safe defaults):
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FLEET_POLL_INTERVAL` | 30 | Seconds between monitor mode cycles |
+| `FLEET_STALL_WARN_SECS` | 300 | Stale heartbeat threshold for WARN |
+| `FLEET_STALL_KILL_SECS` | 900 | Stale heartbeat threshold for KILL |
+| `FLEET_STALL_RESTART_SECS` | 1800 | Stale heartbeat threshold for KILL+RESTART |
+| `FLEET_ABANDON_WARN_HOURS` | 1 | Abandonment threshold for WARN |
+| `FLEET_ABANDON_KILL_HOURS` | 4 | Abandonment threshold for KILL+RESTART |
+| `FLEET_MAX_RESTARTS` | 2 | Max automatic restarts before giving up |
+| `FLEET_AUTO_RESTART` | false | Must be `true` to enable automatic restarts |
+| `FLEET_DRY_RUN` | false | When `true`, interventions are logged not executed |
+| `FLEET_MAX_LOG_AGE_HOURS` | (unset) | Skip pipeline logs older than N hours (unset = scan all) |
+
 ## Required MCP Servers
 
 The pipeline requires three MCP servers configured in `~/.claude.json` (or `.claude.json` in your project root):
@@ -144,7 +159,15 @@ Restart Claude Code after adding MCP servers.
 | `/ticket-flow <id> <trigger>` | State/label mutation executor (wraps `flow.sh`) |
 | `/ticket-setup <id>` | Ticket workspace scaffolding |
 | `/ticket-retro [id]` | Pipeline failure analysis |
-| `/ticket-overseer` | Pipeline queue dashboard report |
+
+### Monitoring & Fleet Control
+
+| Command | What it does |
+|---------|-------------|
+| `/ticket-overseer` | Pipeline queue dashboard report (human-facing) |
+| `/ticket-fleet-controller monitor` | Continuous detection loop with automated kill/restart |
+| `/ticket-fleet-controller status` | One-shot health dashboard + markdown report |
+| `/ticket-fleet-controller intervene <id>` | Manual kill or restart of a specific pipeline |
 
 ### Supporting
 
@@ -196,7 +219,12 @@ Skills plan, reason, and navigate code. `flow.sh` executes mutations with idempo
 | `ticket-dir.sh` | `resolve_ticket_dir <ID>` finds workspace directories matching `{ID}--slug` pattern. |
 | `validate-env.sh` | Validates env vars and CLAUDE.md fields required for the pipeline. |
 | `notes-parse.sh` | Extracts complexity score from `notes.md`. |
+| `config.sh` | Central config with `${VAR:-default}` pattern. Pipeline thresholds, fleet controller settings (`FLEET_STALL_WARN_SECS`, `FLEET_AUTO_RESTART`, etc.), temp file conventions. |
+| `spawn-helper.sh` | Agent spawn infrastructure. `spawn_write_env`, `spawn_agent_pre` (pinger/watchdog start + stop-file guard), `spawn_agent_post` (PID reaping + result logging). |
 | `heartbeat.sh` | Fine-grained operational log library. 7 helpers (`hb_init`, `hb_decision`, `hb_fallback`, `hb_heartbeat`, `hb_api`, `hb_gate`, `hb_retry`, `hb_source`) validate and write 6-field entries. All helpers are no-ops when `HB_LOG_FILE` is unset. |
+| `fleet-detect.sh` | 6 detection engines (phase failures, stalls, zombies, loops, abandonment, flow failures). Aggregator `fleet_detect_all` outputs JSON. |
+| `fleet-intervene.sh` | Intervention executor: `fleet_kill_pipeline`, `fleet_restart_pipeline`, `fleet_can_restart`. flow.sh mutex-aware, `FLEET_DRY_RUN` guard. |
+| `fleet-dashboard.sh` | Dashboard renderer: `fleet_render_dashboard` (terminal) and `fleet_write_report` (markdown). |
 
 ### Pipeline Log Format
 
@@ -226,7 +254,7 @@ Pipe-delimited: `ISO|CATEGORY|EVENT|STATUS|MSG|DETAIL`. Records decisions, fallb
 | `retry` | Error classification and retry decision | `info`, `fired` |
 | `source` | Configuration value provenance (UAT_URL resolution, etc.) | `info` |
 
-`DETAIL` is a flat JSON object with string values (`{"key":"value"}`) or `{}`. Schema version **1** — declared as first line: `ISO|META|schema|info|1|{}`. All writes via `lib/heartbeat.sh` helpers; agents supply values, the library enforces format. Consumers: `dashboard.py` (dual-panel view), `report.py` (stall detection), `retro.sh` (trend aggregation).
+`DETAIL` is a flat JSON object with string values (`{"key":"value"}`) or `{}`. Schema version **1** — declared as first line: `ISO|META|schema|info|1|{}`. All writes via `lib/heartbeat.sh` helpers; agents supply values, the library enforces format. Consumers: `dashboard.py` (dual-panel view), `report.py` (stall detection), `retro.sh` (trend aggregation), `fleet-detect.sh` (flow failure detection, loop detection).
 
 ### Crash Recovery
 
