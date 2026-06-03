@@ -70,6 +70,26 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|plan:/path/to/tickets/pr
 
 `artifact` entries are cumulative — each call adds a file to the dashboard's document list. `MSG` format: `{label}:{absolute path}`. Standard labels: `notes`, `plan`.
 
+### Fleet controller entries
+
+The fleet controller writes these META entries when it intervenes:
+
+```bash
+# Intervention — fleet_kill_pipeline writes this when killing a pipeline
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|fleet-intervention|warn|KILL|reason=auto-kill" >> "$LOG_FILE"
+
+# Outcome — fleet_kill_pipeline finalizes the pipeline with a stopped outcome
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|outcome|info|stopped: fleet-kill|auto-kill" >> "$LOG_FILE"
+
+# Restart — fleet_restart_pipeline writes a restart entry (before restart marker)
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|fleet-restart|info|restart auto-restart" >> "$LOG_FILE"
+
+# Restart marker — signals the skill layer to spawn a new pipeline agent
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|fleet-restart-marker|info|restart-intent auto-restart" >> "$LOG_FILE"
+```
+
+`fleet-restart-marker` entries are scanned by the monitor loop — each one triggers an `ACTION:spawn-restart` directive. `fleet-intervention` and `fleet-restart` entries serve as audit trail; `fleet_can_restart` counts `fleet-restart` entries to enforce the `FLEET_MAX_RESTARTS` circuit breaker.
+
 ## Schema version header
 
 Every new pipeline log begins with a schema declaration as its first line:
