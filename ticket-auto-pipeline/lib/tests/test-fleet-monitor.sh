@@ -138,6 +138,52 @@ test_namespaced_stop_file_uses_instance_id() {
   )
 }
 
+# ── Monitor loop stop-file behavioral tests ───────────────────────────────────
+
+test_monitor_loop_exits_on_namespaced_stop_file() {
+  local instance_id="test-exit-$$"
+  local stop_file="/tmp/fleet-${instance_id}-controller-stop"
+  touch "$stop_file"
+  (
+    export FLEET_INSTANCE_ID="$instance_id"
+    export FLEET_LOG_FILE="/dev/null"
+    export FLEET_HB_LOG_FILE="/dev/null"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    source "$LIB_DIR/fleet-monitor.sh" 2>/dev/null
+    fleet_monitor_loop "$tmpdir" 2>/dev/null
+    rm -rf "$tmpdir"
+  )
+  local rc=$?
+  rm -f "$stop_file"
+  [ "$rc" -eq 0 ]
+}
+
+test_monitor_loop_ignores_legacy_stop_file() {
+  local instance_id="test-legacy-$$"
+  local legacy_stop="/tmp/ticket-fleet-controller-stop"
+  local namespaced_stop="/tmp/fleet-${instance_id}-controller-stop"
+  touch "$legacy_stop"
+  rm -f "$namespaced_stop"
+  ( sleep 2 && touch "$namespaced_stop" ) &
+  local bg_pid=$!
+  (
+    export FLEET_INSTANCE_ID="$instance_id"
+    export FLEET_POLL_INTERVAL=0
+    export FLEET_LOG_FILE="/dev/null"
+    export FLEET_HB_LOG_FILE="/dev/null"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    source "$LIB_DIR/fleet-monitor.sh" 2>/dev/null
+    fleet_monitor_loop "$tmpdir" 2>/dev/null
+    rm -rf "$tmpdir"
+  )
+  local rc=$?
+  wait "$bg_pid" 2>/dev/null || true
+  rm -f "$legacy_stop" "$namespaced_stop"
+  [ "$rc" -eq 0 ]
+}
+
 # ── Sourceable test ────────────────────────────────────────────────────────────
 
 test_fleet_monitor_is_sourceable() {
@@ -169,6 +215,8 @@ for fn in \
   test_spawn_queue_multiple_entries \
   test_interactive_mode_emits_action_line \
   test_namespaced_stop_file_uses_instance_id \
+  test_monitor_loop_exits_on_namespaced_stop_file \
+  test_monitor_loop_ignores_legacy_stop_file \
   test_fleet_monitor_is_sourceable; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"

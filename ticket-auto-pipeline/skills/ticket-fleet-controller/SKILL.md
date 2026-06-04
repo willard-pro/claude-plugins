@@ -1,3 +1,9 @@
+---
+name: ticket-fleet-controller
+description: Monitors all active ticket-auto pipelines using 6 detection engines (phase failures, stalls, zombies, loops, abandonment, flow failures) and escalates autonomously through OBSERVE → WARN → KILL → KILL+RESTART severity levels. All interventions execute through fleet lib functions — no silent mutations outside the declared tool set. In interactive mode (CLAUDE_CODE_SESSION_ID set), spawns restart agents via the Agent tool for KILL+RESTART actions; in cron mode, writes to the spawn queue JSONL for deferred processing.
+allowed-tools: Bash, Read, Agent
+---
+
 # Ticket Fleet Controller — Automated Pipeline Intervention
 
 The fleet controller watches all active ticket-auto pipelines and acts at defined severity thresholds. It complements `ticket-overseer` — overseer is the dashboard, fleet controller is the circuit breaker.
@@ -14,7 +20,7 @@ The fleet controller watches all active ticket-auto pipelines and acts at define
 
 ### Monitor (`monitor`)
 
-Runs detection in a `while true` loop, rendering the dashboard each cycle and executing interventions at KILL and KILL+RESTART severities.
+Runs detection in a continuous loop via `fleet_monitor_loop`, rendering the dashboard each cycle and executing interventions at KILL and KILL+RESTART severities.
 
 ```
 /ticket-fleet-controller monitor
@@ -85,57 +91,29 @@ All settings in `lib/config.sh` with `${VAR:-default}` pattern:
 
 ## Implementation
 
-The skill delegates to bash libraries for all heavy lifting. `fleet-intervene.sh` sources `heartbeat.sh` at file level via the declare-guard pattern (F9 fix in 0.9.1), so `hb_decision` audit calls execute unconditionally — no need for call-site `declare -f` guards.
+The skill delegates to `fleet-monitor.sh` for all heavy lifting. That library sources its dependencies via the declare-guard pattern (F9 fix in 0.9.1), so `hb_decision` audit calls execute unconditionally — no need for call-site `declare -f` guards.
 
 The restart spawn path works as follows:
 1. `fleet_detect_all` returns severity 3 for pipelines needing restart
 2. `fleet_restart_pipeline` kills the old pipeline, writes a `META|fleet-restart-marker` entry
 3. The monitor loop scans for fresh markers and emits `ACTION:spawn-restart tid=<id>`
-4. The skill layer (Claude Code) parses the ACTION line and spawns a `general-purpose` agent for `/ticket-auto {tid} --auto`
+4. The ticket-fleet-controller agent type parses the ACTION line and spawns a `general-purpose` agent for `/ticket-auto {tid} --auto`
 
 This replaces the broken `RESTART_ELIGIBLE=` stdout-echo pattern (F5 fix in 0.9.1).
 
 ```
 # Status mode — one-shot dashboard + report
-source ticket-auto-pipeline/lib/fleet-detect.sh
-source ticket-auto-pipeline/lib/fleet-dashboard.sh
-fleet_render_dashboard ./logs
-fleet_write_report ./logs
+source ticket-auto-pipeline/lib/fleet-monitor.sh
+data=$(fleet_detect_all ./logs)
+fleet_render_dashboard_from_data "$data"
+fleet_write_report_from_data "$data" ./logs
 
-# Monitor mode — continuous loop
-source ticket-auto-pipeline/lib/fleet-detect.sh
-source ticket-auto-pipeline/lib/fleet-intervene.sh
-source ticket-auto-pipeline/lib/fleet-dashboard.sh
-while true; do
-  [ -f /tmp/ticket-fleet-controller-stop ] && break
-  data=$(fleet_detect_all ./logs)
-  fleet_render_dashboard ./logs
-  fleet_write_report ./logs
-  # Save detection data for restart-marker scanning
-  data_file=$(mktemp)
-  echo "$data" >"$data_file"
-  # Execute interventions for KILL and KILL+RESTART severities
-  echo "$data" | jq -r '.pipelines[] | select(.severity >= 2) | "\(.tid) \(.severity)"' | while read -r tid sev; do
-    if [ "$sev" -eq 3 ]; then
-      fleet_restart_pipeline "$tid" "auto-restart" ./logs || true
-      # Capture restart intent: fleet_restart_pipeline writes META|fleet-restart-marker
-      # to the pipeline log. Scan for fresh markers and spawn new pipeline.
-      if grep -q "META|fleet-restart-marker|info|restart-intent" "./logs/${tid}-pipeline.log" 2>/dev/null; then
-        echo "FLEET: spawning restart for ${tid}"
-        # The skill layer (Claude Code) spawns the agent, not bash.
-        # Emit structured output for the orchestrator to parse.
-        echo "ACTION:spawn-restart tid=${tid}"
-      fi
-    else
-      fleet_kill_pipeline "$tid" "auto-kill" ./logs || true
-    fi
-  done
-  rm -f "$data_file"
-  sleep "${FLEET_POLL_INTERVAL:-30}"
-done
+# Monitor mode — continuous detection loop
+source ticket-auto-pipeline/lib/fleet-monitor.sh
+fleet_monitor_loop ./logs
 
 # Intervene mode — manual kill/restart
-source ticket-auto-pipeline/lib/fleet-intervene.sh
+source ticket-auto-pipeline/lib/fleet-monitor.sh
 fleet_kill_pipeline "$TICKET_ID" "manual-intervention" ./logs
 # Or: fleet_restart_pipeline "$TICKET_ID" "manual-restart" ./logs
 ```
