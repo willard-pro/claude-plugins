@@ -305,7 +305,7 @@ All spawn boilerplate is handled by `lib/spawn-helper.sh`. Each spawn site follo
      INSTRUCTIONS="<additional skill-specific instructions>")
    ```
 
-2. **Spawn** — pass `$_prompt` to a `general-purpose` agent.
+2. **Spawn** — pass `$_prompt` to the phase-appropriate agent (e.g., `ticket-appraise-agent`).
 
 3. **Post-spawn** — `spawn_capture` persists output, then `spawn_agent_post` writes done/fail log entries, stops pinger, and writes heartbeat transitions:
    ```bash
@@ -412,7 +412,7 @@ _appraise_prompt=$(spawn_agent_pre \
   INSTRUCTIONS="Follow the skill exactly. When you hit Resume mode and the workspace already exists, if asked 'continue or re-investigate?', choose 'continue' — do not prompt. Report only the final handoff output.")
 ```
 
-Spawn a `general-purpose` agent with `$_appraise_prompt` as the instruction.
+Spawn a `ticket-appraise-agent` with `$_appraise_prompt` as the instruction.
 
 Wait for the agent. Persist:
 ```bash
@@ -488,7 +488,7 @@ _reproduce_prompt=$(spawn_agent_pre \
   INSTRUCTIONS="Follow the skill exactly. Report only the final handoff output.")
 ```
 
-Spawn a `general-purpose` agent with `$_reproduce_prompt` as the instruction.
+Spawn a `ticket-appraise-agent` with `$_reproduce_prompt` as the instruction.
 
 Wait for the agent. Persist:
 ```bash
@@ -558,7 +558,7 @@ _exec_prompt=$(spawn_agent_pre \
   INSTRUCTIONS="Follow the skill exactly. Report only the final handoff output.")
 ```
 
-Spawn a `general-purpose` agent with `$_exec_prompt` as the instruction.
+Spawn a `ticket-appraise-agent` with `$_exec_prompt` as the instruction.
 
 Wait for the agent. Persist:
 ```bash
@@ -874,7 +874,7 @@ _implement_prompt=$(spawn_agent_pre \
   INSTRUCTIONS="Follow the skill exactly. Use Serena for all code navigation — mandatory. Commit and push. Report the final output including branch name.")
 ```
 
-Spawn a `general-purpose` agent with `$_implement_prompt` as the instruction.
+Spawn a `ticket-implement-agent` with `$_implement_prompt` as the instruction.
 After this agent returns, clear `{IMPLEMENT_FROM}` (set to empty) — loop re-invocations in Step 5d always start fresh.
 
 Wait for the agent. Persist:
@@ -931,7 +931,7 @@ _verify_prompt=$(spawn_agent_pre \
   INSTRUCTIONS="Follow the skill exactly. Run Playwright UAT against localhost. Report only the final handoff output.")
 ```
 
-Spawn a `general-purpose` agent with `$_verify_prompt` as the instruction.
+Spawn a `ticket-verify-agent` with `$_verify_prompt` as the instruction.
 After this agent returns, clear `{VERIFY_FROM}` (set to empty) — retry re-invocations always start fresh.
 
 Wait for the agent. Persist (attempt number tracks retries):
@@ -1010,7 +1010,7 @@ _pr_review_prompt=$(spawn_agent_pre \
   INSTRUCTIONS="Follow the skill exactly. Validate the PR diff against the ticket requirements. Post findings. If all requirements addressed (verdict ✅), merge via squash. Report the final output.")
 ```
 
-Spawn a `general-purpose` agent with `$_pr_review_prompt` as the instruction.
+Spawn a `ticket-pr-review-agent` with `$_pr_review_prompt` as the instruction.
 After this agent returns, clear `{PR_REVIEW_FROM}` — subsequent iterations start fresh.
 
 Wait for the agent. Persist:
@@ -1111,7 +1111,7 @@ _pr_iterate_prompt=$(spawn_agent_pre \
   INSTRUCTIONS="Follow the skill exactly. Parse the PR review findings, append a PR Review #{ITERATION} section to the plan, update Linear to Ready + approved. Report the final output.")
 ```
 
-Spawn a `general-purpose` agent with `$_pr_iterate_prompt` as the instruction.
+Spawn a `ticket-pr-review-agent` with `$_pr_iterate_prompt` as the instruction.
 After this agent returns, clear `{PR_ITERATE_FROM}`.
 
 Wait for the agent. Persist:
@@ -1184,7 +1184,7 @@ _reimplement_prompt=$(spawn_agent_pre \
   INSTRUCTIONS="Follow the skill exactly. Read the updated plan (including the PR Review #{ITERATION} section), implement the changes, write tests, commit, and push. Report the final output including branch name.")
 ```
 
-Spawn a `general-purpose` agent with `$_reimplement_prompt` as the instruction.
+Spawn a `ticket-implement-agent` with `$_reimplement_prompt` as the instruction.
 
 Wait for the agent. Persist:
 ```bash
@@ -1317,7 +1317,7 @@ ai_context_findings={N}
 === END MAINTENANCE_RESULT ===")
 ```
 
-Spawn a `general-purpose` agent with `$_maintenance_prompt` as the instruction.
+Spawn a `ticket-maintenance-agent` with `$_maintenance_prompt` as the instruction.
 
 Wait for the agent. Persist:
 ```bash
@@ -1624,7 +1624,7 @@ _fb_implement_prompt=$(spawn_agent_pre \
   INSTRUCTIONS="Follow the skill exactly. Read the updated plan (including the PR Feedback #{PR_FEEDBACK_N} section), implement the changes, write tests, commit, and push. Report the final output including branch name.")
 ```
 
-Spawn a `general-purpose` agent with `$_fb_implement_prompt` as the instruction.
+Spawn a `ticket-implement-agent` with `$_fb_implement_prompt` as the instruction.
 
 Wait for the agent. Persist:
 ```bash
@@ -1687,7 +1687,7 @@ SUB-TASK 2 — Wiki Maintenance:
 Emit MAINTENANCE_RESULT block as in Step 4.6.")
 ```
 
-Spawn a `general-purpose` agent with `$_fb_maintenance_prompt`. Wait, persist:
+Spawn a `ticket-maintenance-agent` with `$_fb_maintenance_prompt`. Wait, persist:
 ```bash
 spawn_capture TICKET_ID={TICKET-ID} PHASE=maintenance-feedback RESULT="$AGENT_RESULT" ATTEMPT="{PR_FEEDBACK_N}"
 ```
@@ -1724,7 +1724,7 @@ _fb_pr_review_prompt=$(spawn_agent_pre \
   INSTRUCTIONS="Follow the skill exactly. Validate the PR diff against the ticket requirements (including PR Feedback #{PR_FEEDBACK_N} amendments). Post a fresh ## Ticket alignment review comment with updated coverage table. If all requirements addressed (verdict ✅), merge via squash. Report the final output.")
 ```
 
-Spawn a `general-purpose` agent with `$_fb_pr_review_prompt` as the instruction.
+Spawn a `ticket-pr-review-agent` with `$_fb_pr_review_prompt` as the instruction.
 
 Wait for the agent. Persist:
 ```bash

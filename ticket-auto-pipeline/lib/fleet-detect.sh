@@ -328,6 +328,45 @@ detect_flow_failures() {
   fi
 }
 
+# 7. Auto-mode block detection — scans pipeline log for check-approval|fail
+#    entries and agent output logs for denial patterns.
+#    Severity: 0 = none, 1 = WARN (1 block), 2 = KILL (2+ blocks).
+detect_auto_mode_blocks() {
+  local tid="$1"
+  local workspace="${2:-./logs}"
+  local log_file="${workspace}/${tid}-pipeline.log"
+
+  if [ ! -f "$log_file" ]; then
+    echo "0"
+    return
+  fi
+
+  local block_count=0
+
+  # Source 1: check-approval|fail entries in pipeline log
+  local pipeline_blocks
+  pipeline_blocks=$(grep -c '|check-approval|fail|' "$log_file" 2>/dev/null || true)
+  pipeline_blocks=$((pipeline_blocks + 0))
+  block_count=$((block_count + pipeline_blocks))
+
+  # Source 2: agent output logs for auto-mode denial patterns
+  for agent_log in "${workspace}/${tid}"-*-agent.log; do
+    [ -f "$agent_log" ] || continue
+    local agent_blocks
+    agent_blocks=$(grep -c "Permission for this action was denied" "$agent_log" 2>/dev/null || true)
+    agent_blocks=$((agent_blocks + 0))
+    block_count=$((block_count + agent_blocks))
+  done
+
+  if [ "$block_count" -ge 2 ]; then
+    echo "2"
+  elif [ "$block_count" -ge 1 ]; then
+    echo "1"
+  else
+    echo "0"
+  fi
+}
+
 # ── Diagnostic context extraction ────────────────────────────────────────────────
 # Reads: last 3 fail entries + last 5 RETRO hints from Claude log,
 #        last 20 lines from agent output log if it exists.
@@ -374,7 +413,7 @@ extract_diagnostics() {
 }
 
 # ── Aggregator ───────────────────────────────────────────────────────────────────
-# Enumerates active pipeline logs, runs all 5 detectors per pipeline,
+# Enumerates active pipeline logs, runs all 7 detectors per pipeline,
 # outputs JSON results array.
 # Usage: fleet_detect_all <workspace>
 fleet_detect_all() {
@@ -415,19 +454,20 @@ fleet_detect_all() {
 
     total=$((total + 1))
 
-    # Run all 6 detectors, collect max severity
-    local s1 s2 s3 s4 s5 s6 max_sev anomaly_types
+    # Run all 7 detectors, collect max severity
+    local s1 s2 s3 s4 s5 s6 s7 max_sev anomaly_types
     s1=$(detect_phase_failures "$tid" "$workspace")
     s2=$(detect_stalls "$tid" "$workspace")
     s3=$(detect_zombies "$tid" "$workspace")
     s4=$(detect_loops "$tid" "$workspace")
     s5=$(detect_abandoned "$tid" "$workspace")
     s6=$(detect_flow_failures "$tid" "$workspace")
+    s7=$(detect_auto_mode_blocks "$tid" "$workspace")
 
     max_sev=0
     anomaly_types=""
 
-    for s in "$s1" "$s2" "$s3" "$s4" "$s5" "$s6"; do
+    for s in "$s1" "$s2" "$s3" "$s4" "$s5" "$s6" "$s7"; do
       [ "$s" -gt "$max_sev" ] && max_sev="$s"
     done
 
@@ -438,6 +478,7 @@ fleet_detect_all() {
     [ "$s4" -ge 1 ] && anomaly_types="${anomaly_types} loop(S${s4})"
     [ "$s5" -ge 1 ] && anomaly_types="${anomaly_types} abandoned(S${s5})"
     [ "$s6" -ge 1 ] && anomaly_types="${anomaly_types} flow-failure(S${s6})"
+    [ "$s7" -ge 1 ] && anomaly_types="${anomaly_types} auto-block(S${s7})"
     anomaly_types=$(echo "$anomaly_types" | sed 's/^ //')
 
     # Cap severity at 2 (KILL) when auto-restart is disabled
