@@ -1,6 +1,6 @@
 {
   "name": "ticket-auto-pipeline",
-"version": "0.12.0",
+  "version": "0.12.1",
   "description": "Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. Includes 20+ slash commands, state-machine-driven flow control, safety gates, and retrospective analysis.",
   "author": {
     "name": "John Willard"
@@ -14,6 +14,38 @@
     "automation",
     "project-management"
   ],
+  "agentTypes": {
+    "ticket-appraise-agent": {
+      "description": "Read-only investigation agent for the APPRAISE and EXEC pipeline phases. Analyzes tickets, traces code, scores complexity, and creates artifacts.",
+      "tools": ["Bash", "Read", "Grep", "Glob", "Write"],
+      "destructive": false,
+      "systemPrompt": "You are a ticket appraisal agent in the ticket-auto-pipeline. Your scope is investigation and artifact creation only. You may read any file and search the codebase, but you MUST NOT modify source code, create branches, or commit. Write only to the ticket workspace directory (notes.md, simple-fix.md, OpenSpec artifacts). Failures go to the pipeline log — never attempt Linear API mutations directly."
+    },
+    "ticket-implement-agent": {
+      "description": "Code implementation agent for the IMPLEMENT pipeline phase. Makes code changes, writes tests, commits, and pushes branches.",
+      "tools": ["Bash", "Read", "Write", "Edit", "Grep", "Glob"],
+      "destructive": true,
+      "systemPrompt": "You are a ticket implementation agent in the ticket-auto-pipeline. Your scope is code changes within the ticket workspace directory. You may read, write, and edit files, run tests, commit, and push branches. You MUST NOT merge PRs or modify Linear issue state directly. All Linear mutations go through flow.sh. Restrict file modifications to the repositories referenced in the ticket workspace."
+    },
+    "ticket-verify-agent": {
+      "description": "Browser testing agent for the VERIFY pipeline phase. Runs Playwright user-acceptance tests against localhost.",
+      "tools": ["Bash", "Read", "mcp__plugin_playwright_playwright__browser_navigate", "mcp__plugin_playwright_playwright__browser_snapshot", "mcp__plugin_playwright_playwright__browser_click", "mcp__plugin_playwright_playwright__browser_take_screenshot", "mcp__plugin_playwright_playwright__browser_evaluate", "mcp__plugin_playwright_playwright__browser_type", "mcp__plugin_playwright_playwright__browser_wait_for"],
+      "destructive": true,
+      "systemPrompt": "You are a ticket verification agent in the ticket-auto-pipeline. Your scope is browser-based UAT testing via Playwright. You may navigate, interact with pages, and capture screenshots. You MUST NOT modify code or Linear issue state. Report verification results (PASS/FAIL) to the pipeline log."
+    },
+    "ticket-pr-review-agent": {
+      "description": "PR review and merge agent for the PR-REVIEW pipeline phase. Reviews pull request diffs, posts findings, and merges passing PRs.",
+      "tools": ["Bash", "Read", "Grep", "mcp__plugin_github_github__pull_request_read", "mcp__plugin_github_github__add_comment_to_pending_review", "mcp__plugin_github_github__pull_request_review_write", "mcp__plugin_github_github__merge_pull_request", "mcp__plugin_github_github__get_commit", "mcp__plugin_github_github__search_code"],
+      "destructive": true,
+      "systemPrompt": "You are a PR review agent in the ticket-auto-pipeline. Your scope is reviewing pull request diffs against ticket requirements. You may read PRs, post review comments, and merge PRs. You MUST NOT directly modify code files. Only merge when all requirements are addressed and pipeline safety gates have passed. Failures go to the pipeline log."
+    },
+    "ticket-maintenance-agent": {
+      "description": "Documentation and wiki maintenance agent for the MAINTENANCE pipeline phase. Generates ai-context.md and processes wiki errata.",
+      "tools": ["Bash", "Read", "Write", "Grep", "Glob"],
+      "destructive": true,
+      "systemPrompt": "You are a maintenance agent in the ticket-auto-pipeline. Your scope is documentation generation and wiki errata processing. You may read and write files, but MUST NOT modify source code, create branches, or make commits. Documentation changes are scoped to the wiki root directory and the ticket workspace. Failures are non-blocking — log warnings to the pipeline log and continue."
+    }
+  },
   "hooks": {
     "SessionStart": [
       {

@@ -786,22 +786,97 @@ METAEOF
   return 0
 }
 
-test_spawn_agent_pre_stop_file_blocks_spawn() {
+test_f10_guard_clears_stale_stop_files_from_prior_phase() {
   local tmpdir
   tmpdir=$(mktemp -d)
-  # Create a stop file before calling spawn_agent_pre
-  touch "/tmp/ticket-auto-TEST-STOP-pinger-stop"
+  # Simulate a prior phase: create both pinger and watchdog stop files
+  touch "/tmp/ticket-auto-TEST-F10A-pinger-stop"
+  touch "/tmp/ticket-auto-TEST-F10A-watchdog-stop"
   (
     source "$LIB_DIR/spawn-helper.sh"
-    if spawn_agent_pre PHASE=TEST STEP=stop-test TICKET_ID=TEST-STOP \
-      SKILL=/ticket-test HB_LOG_FILE="$tmpdir/hb.log" 2>&1; then
-      false # should have been aborted
-    else
-      true
-    fi
+    # The guard should rm -f both stale files and succeed
+    spawn_agent_pre PHASE=TEST STEP=f10-clear TICKET_ID=TEST-F10A \
+      SKILL=/ticket-test HB_LOG_FILE="$tmpdir/hb.log" >/dev/null 2>&1
   )
   local rc=$?
-  rm -rf "$tmpdir" "/tmp/ticket-auto-TEST-STOP-pinger-stop"
+  # Verify stale files were removed
+  [ ! -f "/tmp/ticket-auto-TEST-F10A-pinger-stop" ] && local cleared_pinger=1 || local cleared_pinger=0
+  [ ! -f "/tmp/ticket-auto-TEST-F10A-watchdog-stop" ] && local cleared_watchdog=1 || local cleared_watchdog=0
+  rm -rf "$tmpdir" "/tmp/ticket-auto-TEST-F10A-pinger-stop" "/tmp/ticket-auto-TEST-F10A-watchdog-stop" 2>/dev/null || true
+  [ "$rc" -eq 0 ] && [ "$cleared_pinger" -eq 1 ] && [ "$cleared_watchdog" -eq 1 ]
+}
+
+test_f10_guard_still_blocks_external_kill() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    # First call: clean state, should succeed (and clear any stale files)
+    spawn_agent_pre PHASE=TEST STEP=f10-kill-1 TICKET_ID=TEST-F10B \
+      SKILL=/ticket-test HB_LOG_FILE="$tmpdir/hb.log" >/dev/null 2>&1 || exit 1
+    # Race: background loop touches the stop file to simulate fleet
+    # controller creating it between rm -f and [ -f ] inside the guard.
+    (while true; do touch "/tmp/ticket-auto-TEST-F10B-pinger-stop" 2>/dev/null; done) &
+    local racer_pid=$!
+    sleep 0.1
+    # Second call: racer should recreate the file in the guard window
+    if spawn_agent_pre PHASE=TEST STEP=f10-kill-2 TICKET_ID=TEST-F10B \
+      SKILL=/ticket-test HB_LOG_FILE="$tmpdir/hb.log" 2>&1; then
+      kill "$racer_pid" 2>/dev/null || true
+      wait "$racer_pid" 2>/dev/null || true
+      exit 1 # should have been aborted
+    fi
+    kill "$racer_pid" 2>/dev/null || true
+    wait "$racer_pid" 2>/dev/null || true
+  )
+  local rc=$?
+  rm -rf "$tmpdir" "/tmp/ticket-auto-TEST-F10B-pinger-stop" "/tmp/ticket-auto-TEST-F10B-watchdog-stop" 2>/dev/null || true
+  [ "$rc" -eq 0 ]
+}
+
+test_f10_guard_succeeds_when_no_stop_files_exist() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # Ensure clean state
+  rm -f "/tmp/ticket-auto-TEST-F10C-pinger-stop" "/tmp/ticket-auto-TEST-F10C-watchdog-stop"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    spawn_agent_pre PHASE=TEST STEP=f10-clean TICKET_ID=TEST-F10C \
+      SKILL=/ticket-test HB_LOG_FILE="$tmpdir/hb.log" >/dev/null 2>&1
+  )
+  local rc=$?
+  rm -rf "$tmpdir"
+  [ "$rc" -eq 0 ]
+}
+
+test_f10_guard_idempotent_across_multiple_spawns() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    # Two sequential spawn_agent_pre calls with same TICKET_ID, both should succeed
+    spawn_agent_pre PHASE=TEST STEP=f10-idem-1 TICKET_ID=TEST-F10D \
+      SKILL=/ticket-test HB_LOG_FILE="$tmpdir/hb.log" >/dev/null 2>&1 || exit 1
+    spawn_agent_pre PHASE=TEST STEP=f10-idem-2 TICKET_ID=TEST-F10D \
+      SKILL=/ticket-test HB_LOG_FILE="$tmpdir/hb.log" >/dev/null 2>&1 || exit 1
+  )
+  local rc=$?
+  rm -rf "$tmpdir"
+  [ "$rc" -eq 0 ]
+}
+
+test_f10_guard_handles_hb_log_file_unset_path() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  # HB_LOG_FILE="" path: the guard should still clear stale files and succeed
+  # (no heartbeat pinger/watchdog launched, but the guard check runs regardless)
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    HB_LOG_FILE="" spawn_agent_pre PHASE=TEST STEP=f10-nohb TICKET_ID=TEST-F10E \
+      SKILL=/ticket-test >/dev/null 2>&1
+  )
+  local rc=$?
+  rm -rf "$tmpdir"
   [ "$rc" -eq 0 ]
 }
 
@@ -857,7 +932,11 @@ for fn in \
   test_watchdog_integrated_into_spawn_agent_post \
   test_watchdog_emits_heartbeats \
   test_spawn_agent_post_waits_for_captured_pids \
-  test_spawn_agent_pre_stop_file_blocks_spawn; do
+  test_f10_guard_clears_stale_stop_files_from_prior_phase \
+  test_f10_guard_still_blocks_external_kill \
+  test_f10_guard_succeeds_when_no_stop_files_exist \
+  test_f10_guard_idempotent_across_multiple_spawns \
+  test_f10_guard_handles_hb_log_file_unset_path; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done
