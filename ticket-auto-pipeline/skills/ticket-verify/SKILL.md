@@ -266,7 +266,7 @@ If `--from-auto` IS set:
 ### 3a — Navigate to the app
 
 ```playwright
-mcp__playwright__browser_navigate: {base URL from --env}
+mcp__plugin_playwright_playwright__browser_navigate: {base URL from --env}
 ```
 
 Take a snapshot. If the nav already shows an authenticated user name, skip 3b.
@@ -360,13 +360,13 @@ Tell the user: `"Saved navigation hint for '{feature area}' to nav-hints.md for 
 With the browser now on the correct page, work through each remaining step in the Verification Plan sequentially. For **every step**:
 
 1. Perform the Playwright action (navigate, click, fill, select, etc.)
-2. Take a snapshot with `mcp__playwright__browser_snapshot`
+2. Take a snapshot with `mcp__plugin_playwright_playwright__browser_snapshot`
 3. Record the **observed result** — what you see in the snapshot
 
 Capture after each step:
 - The snapshot YAML (accessibility tree)
 - The current URL
-- Any new console errors: `mcp__playwright__browser_console_messages`
+- Any new console errors: `mcp__plugin_playwright_playwright__browser_console_messages`
 
 At any point, if the observed result contradicts a pass criterion, mark that criterion **FAIL** and record:
 - The step number
@@ -502,7 +502,7 @@ This moves state → `Done` and removes `claimed` + `reviewed`.
 
 ### 7a — Collect diagnostics
 
-1. **Console errors** — `mcp__playwright__browser_console_messages` (errors only, not warnings)
+1. **Console errors** — `mcp__plugin_playwright_playwright__browser_console_messages` (errors only, not warnings)
 2. **Current URL** — from the last snapshot
 3. **Last snapshot YAML** — accessibility tree at the point of failure
 4. **Failed step** — step number, expected vs. observed

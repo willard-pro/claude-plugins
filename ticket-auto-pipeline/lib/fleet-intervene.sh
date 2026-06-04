@@ -13,9 +13,8 @@ if [ -f "$_INTERVENE_DIR/config.sh" ]; then
 fi
 
 # Source heartbeat library (provides hb_decision, hb_heartbeat for audit entries)
-if ! declare -f hb_heartbeat >/dev/null 2>&1; then
-  _HB_LIB="$_INTERVENE_DIR/heartbeat.sh"
-  [ -f "$_HB_LIB" ] && source "$_HB_LIB"
+if ! declare -f _plog >/dev/null 2>&1; then
+  [ -f "$_INTERVENE_DIR/heartbeat.sh" ] && source "$_INTERVENE_DIR/heartbeat.sh"
 fi
 
 # ── Helpers ──────────────────────────────────────────────────────────────────────
@@ -23,9 +22,7 @@ fi
 # Write a timestamped entry to the pipeline log. Creates directory if needed.
 # Args: log_file, phase, step, status, message
 _log_pipeline() {
-  local file="$1" phase="$2" step="$3" status="$4" msg="$5"
-  mkdir -p "$(dirname "$file")" 2>/dev/null || true
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|${phase}|${step}|${status}|${msg}" >>"$file"
+  _plog "$@"  # file phase step status msg → delegates to shared log writer
 }
 
 # Check if a flock mutex is held by flow.sh for a given ticket ID.

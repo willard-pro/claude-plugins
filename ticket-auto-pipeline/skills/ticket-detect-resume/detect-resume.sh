@@ -56,8 +56,8 @@ EOF
   else
     # No schema line in a non-empty log — apply v0 grace if entries look valid
     if grep -qP '^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\|[A-Z-]+\|[^|]+\|[^|]+\|' "$LOG_FILE" 2>/dev/null; then
-      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$LOG_FILE"
-      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|migration|info|v0-grace-applied" >>"$LOG_FILE"
+      _plog "$LOG_FILE" "META" "schema" "info" "1"
+      _plog "$LOG_FILE" "META" "migration" "info" "v0-grace-applied"
       hb_gate "schema-check" "ok" "v0-grace applied — no schema header, entries look valid"
     else
       cat <<EOF
@@ -129,7 +129,7 @@ else
       # gh unavailable or no PR number found — fall back to STEP_5 (Document + Wiki)
       RESUME_STEP="STEP_5"
       if ! $_gh_available; then
-        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|pr-comment-check|warn|gh unavailable — falling back to STEP_5" >>"$LOG_FILE"
+        _plog "$LOG_FILE" "META" "pr-comment-check" "warn" "gh unavailable — falling back to STEP_5"
       fi
     fi
   elif grep -q '^[^|]*|VERIFY|verify|done|PASS' "$LOG_FILE"; then

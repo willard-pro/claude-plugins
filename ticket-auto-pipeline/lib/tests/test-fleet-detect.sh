@@ -500,43 +500,30 @@ test_awk_last_field_single_field() {
 
 # ── Severity label/icon cap display ─────────────────────────────────────────────
 
-test_severity_label_capped_when_auto_restart_off() {
+test_severity_info_capped_when_auto_restart_off() {
   local ws
   ws=$(_setup_workspace)
   source "$LIB_DIR/fleet-detect.sh"
   source "$LIB_DIR/fleet-dashboard.sh"
   (
     export FLEET_AUTO_RESTART=false
-    local label
-    label=$(_severity_label 3)
+    local icon label
+    IFS='|' read -r icon label <<<"$(_severity_info 3)"
     rm -rf "$ws"
-    [ "$label" = "KILL (auto-restart off)" ]
+    [ "$icon" = "🔴" ] && [ "$label" = "KILL (auto-restart off)" ]
   )
 }
 
-test_severity_icon_capped_when_auto_restart_off() {
-  local ws
-  ws=$(_setup_workspace)
-  source "$LIB_DIR/fleet-dashboard.sh"
-  (
-    export FLEET_AUTO_RESTART=false
-    local icon
-    icon=$(_severity_icon 3)
-    rm -rf "$ws"
-    [ "$icon" = "🔴" ]
-  )
-}
-
-test_severity_label_shows_restart_when_auto_restart_on() {
+test_severity_info_shows_restart_when_auto_restart_on() {
   local ws
   ws=$(_setup_workspace)
   source "$LIB_DIR/fleet-dashboard.sh"
   (
     export FLEET_AUTO_RESTART=true
-    local label
-    label=$(_severity_label 3)
+    local icon label
+    IFS='|' read -r icon label <<<"$(_severity_info 3)"
     rm -rf "$ws"
-    [ "$label" = "RESTART" ]
+    [ "$icon" = "💀" ] && [ "$label" = "RESTART" ]
   )
 }
 
@@ -789,9 +776,8 @@ for fn in \
   test_detect_all_caps_severity_when_auto_restart_off \
   test_last_field_rejects_high_index \
   test_last_field_safe_indices_still_work \
-  test_severity_label_capped_when_auto_restart_off \
-  test_severity_icon_capped_when_auto_restart_off \
-  test_severity_label_shows_restart_when_auto_restart_on \
+  test_severity_info_capped_when_auto_restart_off \
+  test_severity_info_shows_restart_when_auto_restart_on \
   test_jq_compact_output_in_fleet_detect_all \
   test_detect_all_empty_workspace_returns_zero \
   test_detect_all_no_directory_returns_zero \
