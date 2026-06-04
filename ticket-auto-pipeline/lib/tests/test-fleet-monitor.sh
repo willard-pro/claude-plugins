@@ -165,7 +165,7 @@ test_monitor_loop_ignores_legacy_stop_file() {
   local namespaced_stop="/tmp/fleet-${instance_id}-controller-stop"
   touch "$legacy_stop"
   rm -f "$namespaced_stop"
-  ( sleep 2 && touch "$namespaced_stop" ) &
+  (sleep 2 && touch "$namespaced_stop") &
   local bg_pid=$!
   (
     export FLEET_INSTANCE_ID="$instance_id"
