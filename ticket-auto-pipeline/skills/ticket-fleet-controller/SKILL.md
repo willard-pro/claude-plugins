@@ -51,7 +51,7 @@ Manual kill or restart for a specific ticket. Useful for operator-driven recover
 
 ## Detection Rules
 
-The fleet controller runs 6 detection engines against every active pipeline:
+The fleet controller runs 7 detection engines against every active pipeline:
 
 | Detector | What it catches | Severity |
 |----------|----------------|----------|
@@ -61,6 +61,7 @@ The fleet controller runs 6 detection engines against every active pipeline:
 | Loops | Excessive `decision\|loop-back` counts vs configured caps | KILL+RESTART for rogue loops and exhaustion gates |
 | Abandonment | Pipeline log exists but no `META\|outcome` after threshold | WARN → KILL+RESTART based on elapsed time |
 | Flow failures | `retry\|flow-sh\|fail` entries in heartbeat log | WARN (1 failure) → KILL (2+ failures) |
+| Auto-mode blocks | `check-approval\|fail` in pipeline log + denial patterns in agent output logs | WARN (1 block) → KILL (2+ blocks) |
 
 ## Escalation Path
 

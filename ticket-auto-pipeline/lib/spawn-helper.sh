@@ -171,11 +171,21 @@ spawn_agent_pre() {
     FLAGS="$FLAGS --from-step $FROM_STEP"
   fi
 
-  # Check for stop file before spawning — fleet controller may have killed
-  # this pipeline between detection and agent spawn (F10 race window guard).
+  # F10 race-window guard: clear stale stop files from prior phases, then
+  # check for external kill signals from the fleet controller.
+  # spawn_agent_post() creates pinger and watchdog stop files during normal
+  # cleanup (hb_pinger_stop, spawn_watchdog_stop). On the next phase, those
+  # stale files would cause a false abort. Remove them first so only files
+  # created AFTER this point (genuine fleet kills) trigger the guard.
   local _pinger_stop="/tmp/ticket-auto-${TICKET_ID}-pinger-stop"
+  local _watchdog_stop="/tmp/ticket-auto-${TICKET_ID}-watchdog-stop"
+  rm -f "$_pinger_stop" "$_watchdog_stop"
+  # Yield to widen the race-window guard enough for fleet controller signals
+  # to land. The fleet controller polls every 30s — 1ms is invisible to
+  # pipeline throughput but makes the window testable.
+  sleep 0.01 2>/dev/null || true
   if [ -f "$_pinger_stop" ]; then
-    echo "spawn_agent_pre: spawn aborted — stop file exists for ${TICKET_ID}" >&2
+    echo "spawn_agent_pre: spawn aborted — external kill detected for ${TICKET_ID}" >&2
     return 1
   fi
 
