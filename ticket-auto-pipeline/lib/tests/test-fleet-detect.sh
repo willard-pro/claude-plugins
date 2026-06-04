@@ -664,6 +664,94 @@ test_awk_last_msg_preserves_pipes() {
   echo "$msg" | grep -q "complex reason | with | pipes"
 }
 
+# ── Auto-mode block detection (7th detector) ─────────────────────────────────────
+
+test_auto_mode_blocks_no_file_returns_ok() {
+  local ws
+  ws=$(_setup_workspace)
+  source "$LIB_DIR/fleet-detect.sh"
+  local r
+  r=$(detect_auto_mode_blocks "NOEXIST-99" "$ws")
+  rm -rf "$ws"
+  [ "$r" -eq 0 ]
+}
+
+test_auto_mode_blocks_clean_pipeline_returns_ok() {
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-47" "IMPLEMENT" "implement" "done" "all good"
+  source "$LIB_DIR/fleet-detect.sh"
+  local r
+  r=$(detect_auto_mode_blocks "CRE-47" "$ws")
+  rm -rf "$ws"
+  [ "$r" -eq 0 ]
+}
+
+test_auto_mode_blocks_single_block_returns_warn() {
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-47" "GATE" "check-approval" "fail" "auto-mode blocked approval"
+  source "$LIB_DIR/fleet-detect.sh"
+  local r
+  r=$(detect_auto_mode_blocks "CRE-47" "$ws")
+  rm -rf "$ws"
+  [ "$r" -eq 1 ]
+}
+
+test_auto_mode_blocks_multiple_blocks_returns_kill() {
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-47" "GATE" "check-approval" "fail" "blocked #1"
+  _plog "$ws" "CRE-47" "GATE" "check-approval" "fail" "blocked #2"
+  source "$LIB_DIR/fleet-detect.sh"
+  local r
+  r=$(detect_auto_mode_blocks "CRE-47" "$ws")
+  rm -rf "$ws"
+  [ "$r" -eq 2 ]
+}
+
+test_auto_mode_blocks_agent_log_denial_pattern() {
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-47" "IMPLEMENT" "implement" "done" "ok"
+  mkdir -p "$ws"
+  echo "Permission for this action was denied" >"${ws}/CRE-47-implement-agent.log"
+  source "$LIB_DIR/fleet-detect.sh"
+  local r
+  r=$(detect_auto_mode_blocks "CRE-47" "$ws")
+  rm -rf "$ws"
+  [ "$r" -eq 1 ]
+}
+
+test_auto_mode_blocks_combined_pipeline_and_agent_blocks() {
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-47" "GATE" "check-approval" "fail" "blocked"
+  mkdir -p "$ws"
+  echo "Permission for this action was denied" >"${ws}/CRE-47-implement-agent.log"
+  source "$LIB_DIR/fleet-detect.sh"
+  local r
+  r=$(detect_auto_mode_blocks "CRE-47" "$ws")
+  rm -rf "$ws"
+  [ "$r" -eq 2 ]
+}
+
+test_auto_mode_blocks_integrated_in_fleet_detect_all() {
+  local ws
+  ws=$(_setup_workspace)
+  local now
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  _plog "$ws" "CRE-47" "GATE" "check-approval" "fail" "auto-mode blocked" "$now"
+  source "$LIB_DIR/fleet-detect.sh"
+  local r
+  r=$(fleet_detect_all "$ws")
+  local sev anomalies
+  sev=$(echo "$r" | jq -r '.pipelines[0].severity')
+  anomalies=$(echo "$r" | jq -r '.pipelines[0].anomalies')
+  rm -rf "$ws"
+  [ "$sev" -eq 1 ] && echo "$anomalies" | grep -q "auto-block(S1)"
+}
+
 # ── Dispatcher ──────────────────────────────────────────────────────────────────
 FILTER="${1:-}"
 
@@ -713,7 +801,14 @@ for fn in \
   test_diagnostics_no_files_produces_output \
   test_diagnostics_with_claude_log \
   test_awk_last_msg_preserves_pipes \
-  test_awk_last_field_single_field; do
+  test_awk_last_field_single_field \
+  test_auto_mode_blocks_no_file_returns_ok \
+  test_auto_mode_blocks_clean_pipeline_returns_ok \
+  test_auto_mode_blocks_single_block_returns_warn \
+  test_auto_mode_blocks_multiple_blocks_returns_kill \
+  test_auto_mode_blocks_agent_log_denial_pattern \
+  test_auto_mode_blocks_combined_pipeline_and_agent_blocks \
+  test_auto_mode_blocks_integrated_in_fleet_detect_all; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done
