@@ -29,7 +29,10 @@ _log_pipeline() {
 # Returns 0 if mutex is held (should defer), 1 otherwise.
 _flow_mutex_held() {
   local tid="$1"
-  local lockfile="./logs/.ticket-flow-${tid}.lock"
+  # Lock file lives in the same directory as pipeline logs — flow.sh creates
+  # locks relative to its CWD, which is the same directory pipeline logs go to.
+  local logs_dir="${FLEET_PIPELINE_LOG_DIR:-./logs}"
+  local lockfile="${logs_dir}/.ticket-flow-${tid}.lock"
   # Try to acquire the same lock flow.sh holds. If we can't get it
   # (exit 42 = EWOULDBLOCK), flow.sh is mid-mutation.
   if [ -f "$lockfile" ]; then
@@ -70,7 +73,7 @@ fleet_stop_background() {
 fleet_kill_pipeline() {
   local tid="$1"
   local reason="${2:-fleet-kill}"
-  local workspace="${3:-./logs}"
+  local workspace="${3:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local log_file="${workspace}/${tid}-pipeline.log"
   local hb_file="${workspace}/${tid}-heartbeat.log"
 
@@ -115,7 +118,7 @@ fleet_kill_pipeline() {
 # Usage: fleet_can_restart <tid> [workspace]
 fleet_can_restart() {
   local tid="$1"
-  local workspace="${2:-./logs}"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local log_file="${workspace}/${tid}-pipeline.log"
 
   # Check auto-restart enabled
@@ -151,7 +154,7 @@ fleet_can_restart() {
 fleet_restart_pipeline() {
   local tid="$1"
   local reason="${2:-fleet-restart}"
-  local workspace="${3:-./logs}"
+  local workspace="${3:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local log_file="${workspace}/${tid}-pipeline.log"
   local hb_file="${workspace}/${tid}-heartbeat.log"
 

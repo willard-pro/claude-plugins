@@ -10,7 +10,10 @@
 #   --mode full|validate  Output mode: full=pipe-delimited (default), validate=colored pass/fail
 #   --summary-file PATH   Write delimited block to PATH; print only "Written to PATH"
 #   --show                Also print a human-readable table to stdout
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
 
 SUMMARY_FILE=""
 SHOW=""

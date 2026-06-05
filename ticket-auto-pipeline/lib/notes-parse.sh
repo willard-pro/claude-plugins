@@ -3,7 +3,10 @@
 # Reads the ## Complexity section's **Score:** value from notes.md.
 # Emits "simple", "complex", or empty string if absent.
 # Exit codes: 0 = found, 1 = file unreadable, 2 = section not found
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
 
 get_complexity() {
   local ticket_dir="$1"

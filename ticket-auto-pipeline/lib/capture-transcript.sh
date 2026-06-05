@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # Shared agent transcript persistence helpers. Source this file from skill scripts.
 # All functions return 0 silently if ticket_id is empty.
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
 
 # Persist raw agent output to disk for deep-dive debugging.
 #

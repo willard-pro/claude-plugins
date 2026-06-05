@@ -9,7 +9,10 @@
 #   retro.sh --window 7d
 #   retro.sh --window 1 --force ./logs/CRE-47-pipeline.log
 
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Claude Log Scan Helpers (sourced by ticket-retro SKILL.md)

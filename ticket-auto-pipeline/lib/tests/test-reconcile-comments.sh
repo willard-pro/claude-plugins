@@ -3,7 +3,10 @@
 # reconcile-comments.sh is a standalone script: args <ticket_id> <log_file>, stdin = comments JSON.
 # It sources linear-api.sh internally for normalize_comments.
 # Usage: bash test-reconcile-comments.sh [test_name_filter]
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"

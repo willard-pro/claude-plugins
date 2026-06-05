@@ -99,10 +99,13 @@ If no PR is found → stop and tell the user:
 > "No open PR found for {TICKET-ID}. Open a PR first, then re-run."
 
 Capture: `number`, `headRefName`, `baseRefName`, `url`.
+Extract `owner` and `repo` from the PR URL (`https://github.com/{owner}/{repo}/pull/{number}`) for REST API calls in subsequent steps.
 
 Resolve the repo path from the CLAUDE.md codebase map based on the affected service.
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|find-pr|done|PR #{number}" >> "$LOG_FILE"
+# Write PR number to pipeline log for detect-resume.sh (primary lookup, not fallback)
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|checkout-pr|done|{number}" >> "$LOG_FILE"
 
 ---
 
@@ -162,7 +165,7 @@ Build a requirements coverage table:
 Format the findings as a GitHub comment and post:
 
 ```bash
-gh pr comment {number} --body "$(cat <<'EOF'
+gh api "repos/{owner}/{repo}/issues/{number}/comments" -f body="$(cat <<'EOF'
 ## Ticket alignment review — {TICKET-ID}
 
 **Ticket:** {Linear URL}
@@ -191,6 +194,7 @@ gh pr comment {number} --body "$(cat <<'EOF'
 EOF
 )"
 ```
+**Why REST API:** `gh pr comment` uses GraphQL which has eventual consistency — a newly created PR may not be queryable for several seconds. The REST `/issues/{number}/comments` endpoint is immediately consistent.
 
 ### Step 6a — Update Linear label
 
@@ -298,8 +302,14 @@ Post the same message as a PR comment.
 **If no conflict markers found:**
 
 ```bash
-gh pr merge {number} --squash --delete-branch
+gh api "repos/{owner}/{repo}/pulls/{number}/merge" -X PUT -f merge_method=squash 2>&1 || {
+  echo "ERROR: REST API merge failed for PR #{number}" >&2
+  hb_retry "pr-merge" "fail" "REST API merge failed for PR #{number}" \
+    "{\"pr_number\":\"{number}\",\"owner\":\"{owner}\",\"repo\":\"{repo}\"}"
+  [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|merge-decision|fail|gh api merge failed for PR #{number}" >> "$LOG_FILE"
+}
 ```
+**Why REST API:** `gh pr merge` uses GraphQL which has eventual consistency — a newly created PR may not be immediately queryable. The REST `/pulls/{number}/merge` endpoint is immediately consistent and avoids the "Could not resolve to a PullRequest" error.
 
 If the merge fails (conflicts, branch protection, etc.), report it to the user — do not force-merge.
 
