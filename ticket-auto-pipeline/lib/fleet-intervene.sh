@@ -22,7 +22,7 @@ fi
 # Write a timestamped entry to the pipeline log. Creates directory if needed.
 # Args: log_file, phase, step, status, message
 _log_pipeline() {
-  _plog "$@"  # file phase step status msg → delegates to shared log writer
+  _plog "$@" # file phase step status msg → delegates to shared log writer
 }
 
 # Check if a flock mutex is held by flow.sh for a given ticket ID.
