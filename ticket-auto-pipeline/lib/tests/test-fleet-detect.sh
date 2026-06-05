@@ -742,6 +742,55 @@ test_auto_mode_blocks_integrated_in_fleet_detect_all() {
   [ "$sev" -eq 1 ] && echo "$anomalies" | grep -q "auto-block(S1)"
 }
 
+# ── Gate-hold lifecycle detection (gate-check.sh compatibility) ───────────────────
+
+test_gate_held_fresh_not_stall() {
+  # Gate-held entry is a fresh gate event, not a stall — recent gate-held should not trigger stall
+  local ws
+  ws=$(_setup_workspace)
+  local recent
+  recent=$(date -u -d '30 seconds ago' +%Y-%m-%dT%H:%M:%SZ)
+  _plog "$ws" "CRE-47" "GATE" "gate" "fail" "held: complex ticket" "$recent"
+  _hblog "$ws" "CRE-47" "gate" "entry-gate" "fail" "held: complex ticket" "$recent"
+  source "$LIB_DIR/fleet-detect.sh"
+  local r
+  r=$(detect_stalls "CRE-47" "$ws")
+  rm -rf "$ws"
+  [ "$r" -eq 0 ]
+}
+
+test_gate_held_abandoned_detected() {
+  # Gate-held entry with no recent activity should be detected as abandoned
+  local ws
+  ws=$(_setup_workspace)
+  local old
+  old=$(date -u -d '6 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+  _plog "$ws" "CRE-47" "GATE" "gate" "fail" "held: complex ticket" "$old"
+  (
+    export FLEET_ABANDON_WARN_HOURS=1 FLEET_ABANDON_KILL_HOURS=4
+    source "$LIB_DIR/fleet-detect.sh"
+    local r
+    r=$(detect_abandoned "CRE-47" "$ws")
+    rm -rf "$ws"
+    [ "$r" -ge 1 ]
+  )
+}
+
+test_gate_stop_from_gate_check_detected() {
+  # gate-check.sh gate-stop events (EXEC_NO_ARTIFACT, COMPLEXITY_ARTIFACT_MISMATCH, APPROVAL_REVOKED)
+  # should be detected as phase failures
+  local ws
+  ws=$(_setup_workspace)
+  local now
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  _plog "$ws" "CRE-47" "META" "gate-stop" "fail" "EXEC_NO_ARTIFACT" "$now"
+  source "$LIB_DIR/fleet-detect.sh"
+  local r
+  r=$(detect_phase_failures "CRE-47" "$ws")
+  rm -rf "$ws"
+  [ "$r" -eq 1 ]
+}
+
 # ── Dispatcher ──────────────────────────────────────────────────────────────────
 FILTER="${1:-}"
 
@@ -797,7 +846,10 @@ for fn in \
   test_auto_mode_blocks_multiple_blocks_returns_kill \
   test_auto_mode_blocks_agent_log_denial_pattern \
   test_auto_mode_blocks_combined_pipeline_and_agent_blocks \
-  test_auto_mode_blocks_integrated_in_fleet_detect_all; do
+  test_auto_mode_blocks_integrated_in_fleet_detect_all \
+  test_gate_held_fresh_not_stall \
+  test_gate_held_abandoned_detected \
+  test_gate_stop_from_gate_check_detected; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

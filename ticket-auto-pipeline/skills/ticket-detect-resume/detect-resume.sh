@@ -150,7 +150,7 @@ else
     RESUME_STEP="STEP_2"
     hb_gate "resume-point" "ok" "EXEC_NO_ARTIFACT detected — resuming at STEP_2 (re-run EXEC)"
   elif grep -q '^[^|]*|EXEC|exec|done|' "$LOG_FILE"; then
-    RESUME_STEP="STEP_3"
+    RESUME_STEP="STEP_2_5"
   elif grep -q '^[^|]*|REPRODUCE|reproduce|' "$LOG_FILE" && ! grep -q '^[^|]*|REPRODUCE|reproduce|done|' "$LOG_FILE"; then
     RESUME_STEP="STEP_1_5"
   elif grep -q '^[^|]*|APPRAISE|appraise|done|' "$LOG_FILE"; then
@@ -262,6 +262,9 @@ if [ "$RESUME_STEP" != "STEP_1" ] && [ "$RESUME_STEP" != "GATE_STILL_HELD" ]; th
     TICKET_TITLE=$(grep '^[^|]*|META|title|info|' "$LOG_FILE" 2>/dev/null |
       tail -1 | cut -d'|' -f5- | sed 's/^[^:]*: //' || true)
 
+    AUTONOMY=$(grep '^[^|]*|META|autonomy|info|' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'|' -f5- || true)
+    AUTONOMY=${AUTONOMY:-manual}
+
     VERIFY_ATTEMPTS=$(grep -c '^[^|]*|VERIFY|[^|]*|fail|' "$LOG_FILE" 2>/dev/null || true)
     VERIFY_ATTEMPTS=${VERIFY_ATTEMPTS:-0}
 
@@ -273,6 +276,28 @@ if [ "$RESUME_STEP" != "STEP_1" ] && [ "$RESUME_STEP" != "GATE_STILL_HELD" ]; th
 fi
 
 # ── Output ──────────────────────────────────────────────────────────────────
+#
+# DETECT_RESUME_RESULT block fields:
+#   RESUME_STEP       — next step to execute (STEP_1 through STEP_6, STEP_*_*, GATE_*)
+#   APPRAISE_FROM     — sub-step within APPRAISE phase (or empty)
+#   REPRODUCE_FROM    — sub-step within REPRODUCE phase (or empty)
+#   EXEC_FROM         — sub-step within EXEC phase (or empty)
+#   IMPLEMENT_FROM    — sub-step within IMPLEMENT phase (or empty)
+#   MAINTENANCE_FROM  — sub-step within MAINTENANCE phase (or empty)
+#   DOCUMENT_FROM     — sub-step within document phase (or empty)
+#   VERIFY_FROM       — sub-step within VERIFY phase (or empty)
+#   PR_REVIEW_FROM    — sub-step within PR-REVIEW phase (or empty)
+#   PR_ITERATE_FROM   — sub-step within PR-ITERATE phase (or empty)
+#   TICKET_DIR        — workspace directory for the ticket (or empty)
+#   COMPLEXITY        — simple|complex (from notes.md)
+#   AUTONOMY          — auto|semi-auto|manual (from pipeline log META|autonomy, defaults to manual)
+#   ARTIFACT_TYPE     — simple-fix|openspec (from EXEC phase completion line)
+#   BRANCH            — git branch name (from IMPLEMENT checkout)
+#   TICKET_TITLE      — human-readable ticket title
+#   VERIFY_ATTEMPTS   — count of verify FAIL entries in pipeline log
+#   ITERATION         — count of PR review ⚠️ verdicts in pipeline log
+#   RECONCILE_CYCLE   — count of gate reconcile done entries
+#   PR_FEEDBACK_CYCLE — count of pr-reconcile done entries
 
 cat <<EOF
 DETECT_RESUME_RESULT
@@ -288,6 +313,7 @@ DETECT_RESUME_RESULT
   PR_ITERATE_FROM:    ${PR_ITERATE_FROM:-}
   TICKET_DIR:         ${TICKET_DIR:-}
   COMPLEXITY:         ${COMPLEXITY:-}
+  AUTONOMY:           ${AUTONOMY:-manual}
   ARTIFACT_TYPE:      ${ARTIFACT_TYPE:-}
   BRANCH:             ${BRANCH:-}
   TICKET_TITLE:       ${TICKET_TITLE:-}
