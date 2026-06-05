@@ -367,6 +367,48 @@ detect_auto_mode_blocks() {
   fi
 }
 
+# 8. Tool error detection — scans {tid}-tool-errors.log for agent tool-call failures.
+#    Deduplicates by TOOL_NAME+ERROR_TYPE within FLEET_TOOL_ERROR_WINDOW seconds.
+#    Severity scales with distinct error count.
+detect_tool_errors() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local err_file="${workspace}/${tid}-tool-errors.log"
+
+  if [ ! -f "$err_file" ] || [ ! -s "$err_file" ]; then
+    echo "0"
+    return
+  fi
+
+  local unique_errors=0
+  local prev_key="" prev_epoch=0
+  local window="${FLEET_TOOL_ERROR_WINDOW:-300}"
+
+  while IFS='|' read -r iso tool type phase msg; do
+    [ -z "$iso" ] && continue
+    # Skip corrupt lines: empty tool/type or unparseable date
+    [ -z "$tool" ] || [ -z "$type" ] && continue
+    local key="${tool}|${type}"
+    local epoch
+    epoch=$(date -d "$iso" +%s 2>/dev/null || echo "0")
+    [ "$epoch" = "0" ] && continue
+
+    if [ "$key" != "$prev_key" ] || [ $((epoch - prev_epoch)) -ge "$window" ]; then
+      unique_errors=$((unique_errors + 1))
+    fi
+    prev_key="$key"
+    prev_epoch="$epoch"
+  done <"$err_file"
+
+  if [ "$unique_errors" -ge 3 ]; then
+    echo "2"   # KILL — persistent failure pattern
+  elif [ "$unique_errors" -ge 1 ]; then
+    echo "1"   # WARN — transient errors seen
+  else
+    echo "0"
+  fi
+}
+
 # ── Diagnostic context extraction ────────────────────────────────────────────────
 # Reads: last 3 fail entries + last 5 RETRO hints from Claude log,
 #        last 20 lines from agent output log if it exists.
@@ -454,8 +496,8 @@ fleet_detect_all() {
 
     total=$((total + 1))
 
-    # Run all 7 detectors, collect max severity
-    local s1 s2 s3 s4 s5 s6 s7 max_sev anomaly_types
+    # Run all 8 detectors, collect max severity
+    local s1 s2 s3 s4 s5 s6 s7 s8 max_sev anomaly_types
     s1=$(detect_phase_failures "$tid" "$workspace")
     s2=$(detect_stalls "$tid" "$workspace")
     s3=$(detect_zombies "$tid" "$workspace")
@@ -463,11 +505,12 @@ fleet_detect_all() {
     s5=$(detect_abandoned "$tid" "$workspace")
     s6=$(detect_flow_failures "$tid" "$workspace")
     s7=$(detect_auto_mode_blocks "$tid" "$workspace")
+    s8=$(detect_tool_errors "$tid" "$workspace")
 
     max_sev=0
     anomaly_types=""
 
-    for s in "$s1" "$s2" "$s3" "$s4" "$s5" "$s6" "$s7"; do
+    for s in "$s1" "$s2" "$s3" "$s4" "$s5" "$s6" "$s7" "$s8"; do
       [ "$s" -gt "$max_sev" ] && max_sev="$s"
     done
 
@@ -479,6 +522,7 @@ fleet_detect_all() {
     [ "$s5" -ge 1 ] && anomaly_types="${anomaly_types} abandoned(S${s5})"
     [ "$s6" -ge 1 ] && anomaly_types="${anomaly_types} flow-failure(S${s6})"
     [ "$s7" -ge 1 ] && anomaly_types="${anomaly_types} auto-block(S${s7})"
+    [ "$s8" -ge 1 ] && anomaly_types="${anomaly_types} tool-errors(S${s8})"
     anomaly_types=$(echo "$anomaly_types" | sed 's/^ //')
 
     # Cap severity at 2 (KILL) when auto-restart is disabled
