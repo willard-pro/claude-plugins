@@ -91,7 +91,7 @@ _spawn_restart() {
 # Returns JSON detection results to stdout.
 # Usage: fleet_monitor_cycle <workspace>
 fleet_monitor_cycle() {
-  local workspace="${1:-./logs}"
+  local workspace="${1:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
 
   fl_write "INFO" "monitor" "Starting monitor cycle"
 
@@ -150,7 +150,7 @@ fleet_monitor_cycle() {
 # gating. Exits cleanly when the namespaced stop file exists.
 # Usage: fleet_monitor_loop <workspace>
 fleet_monitor_loop() {
-  local workspace="${1:-./logs}"
+  local workspace="${1:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local instance_id="${FLEET_INSTANCE_ID:-default}"
   local stop_file="/tmp/fleet-${instance_id}-controller-stop"
   local poll_interval="${FLEET_POLL_INTERVAL:-30}"
@@ -214,6 +214,6 @@ fleet_monitor_loop() {
 # When executed directly (not sourced), run the monitor loop.
 # ${BASH_SOURCE[0]} == "$0" means this script is the entry point.
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
-  WORKSPACE="${1:-./logs}"
+  WORKSPACE="${1:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   fleet_monitor_loop "$WORKSPACE"
 fi

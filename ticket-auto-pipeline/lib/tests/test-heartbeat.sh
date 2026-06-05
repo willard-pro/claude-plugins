@@ -3,7 +3,10 @@
 # No socat needed — heartbeat.sh has no network calls.
 # Uses HB_LOG_FILE and CLAUDE_LOG_FILE env vars to toggle behavior.
 # Usage: bash test-heartbeat.sh [test_name_filter]
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -79,6 +82,21 @@ test_hb_write_rejects_bad_status() {
   ) 2>/dev/null || exit_code=$?
   rm -f "$tmpfile"
   [ "$exit_code" -ne 0 ]
+}
+
+test_hb_write_accepts_skip_status() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  local exit_code=0
+  (
+    export HB_LOG_FILE="$tmpfile"
+    source "$LIB_DIR/heartbeat.sh"
+    hb_write "decision" "test-event" "skip" "skipped for testing"
+  ) || exit_code=$?
+  local line
+  line=$(cat "$tmpfile")
+  rm -f "$tmpfile"
+  [ "$exit_code" -eq 0 ] && echo "$line" | grep -q '|decision|test-event|skip|'
 }
 
 test_hb_write_rejects_camelCase_event() {
@@ -499,6 +517,7 @@ for fn in \
   test_hb_write_valid_entry_format \
   test_hb_write_rejects_bad_category \
   test_hb_write_rejects_bad_status \
+  test_hb_write_accepts_skip_status \
   test_hb_write_rejects_camelCase_event \
   test_hb_write_rejects_pipe_in_msg \
   test_hb_write_rejects_nested_json_detail \

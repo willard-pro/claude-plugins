@@ -4,7 +4,10 @@
 # a stable per-spawn snapshot — avoids the race where the ctx file is overwritten by
 # the next phase's spawn_agent_pre before this async hook fires.
 # Reads start timestamp written by token-tracker-start.sh to compute elapsed_ms.
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
 
 read -r hook_json
 AGENT_TRANSCRIPT=$(echo "$hook_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('agent_transcript_path',''))")

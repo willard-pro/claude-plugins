@@ -2,13 +2,33 @@
 # Shared agent spawn helpers. Source this file from the ticket-auto orchestrator.
 # These functions handle the repeatable boilerplate around agent spawns —
 # logging, heartbeat pinger, phase context file, and result capture.
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
 
 # Source heartbeat library (provides _plog, _iso_now, hb_* and cl_write)
 # unless already loaded (e.g. test mocks)
 if ! declare -f _plog >/dev/null 2>&1; then
   _HB_LIB="$(dirname "${BASH_SOURCE[0]}")/heartbeat.sh"
   [ -f "$_HB_LIB" ] && source "$_HB_LIB"
+fi
+
+# ── Diagnostic ERR trap ────────────────────────────────────────────────────────────
+# Logs crash location before exiting. Opt-in via SPAWN_DIAGNOSTICS=true to avoid
+# log noise in normal operation. When a pipeline crashes at an agent-spawn boundary,
+# enable this to capture the exact line and command that triggered the exit.
+_spawn_err_trap() {
+  local _rc=$?
+  echo "SPAWN_CRASH: rc=${_rc} func=${FUNCNAME[1]:-toplevel} line=${BASH_LINENO[0]:-?} cmd=${BASH_COMMAND:-?}" >&2
+  # Write crash marker to pipeline log when LOG_FILE is available
+  if [ -n "${LOG_FILE:-}" ]; then
+    _plog "$LOG_FILE" "META" "spawn-crash" "fail" "rc=${_rc} func=${FUNCNAME[1]:-toplevel} line=${BASH_LINENO[0]:-?}"
+  fi
+  exit "$_rc"
+}
+if [ "${SPAWN_DIAGNOSTICS:-false}" = "true" ]; then
+  trap '_spawn_err_trap' ERR
 fi
 
 # ── spawn_write_env ──────────────────────────────────────────────────────────────
@@ -193,12 +213,12 @@ spawn_agent_pre() {
   local phase_lower
   phase_lower=$(echo "$STEP" | tr '[:upper:]' '[:lower:]')
 
-  # 1. Write waiting log entry (idempotent: skip if last line already matches)
+  # 1. Write waiting log entry (idempotent: tail-check — allows retries after fail)
   if [ -n "$LOG_FILE" ]; then
     local last_line
     last_line=$(tail -1 "$LOG_FILE" 2>/dev/null || true)
     if echo "$last_line" | grep -q "|${PHASE}|${phase_lower}|waiting|"; then
-      : # already written, skip
+      : # already written, skip (back-to-back duplicate)
     else
       local desc="${DESCRIPTION:-agent for ${TICKET_ID}}"
       _plog "$LOG_FILE" "$PHASE" "$phase_lower" "waiting" "Agent launched — ${desc}"
@@ -362,9 +382,7 @@ spawn_agent_post() {
   done)
     if [ -n "${LOG_FILE:-}" ]; then
       local done_msg="${MSG:-agent done}"
-      local last_line
-      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
-      if echo "$last_line" | grep -q "|${PHASE:-UNKNOWN}|${phase_lower:-unknown}|done|"; then
+      if grep -q "|${PHASE:-UNKNOWN}|${phase_lower:-unknown}|done|" "${LOG_FILE}" 2>/dev/null; then
         : # already written, skip
       else
         _plog "$LOG_FILE" "${PHASE:-UNKNOWN}" "${phase_lower:-unknown}" "done" "${done_msg}"
@@ -388,9 +406,7 @@ spawn_agent_post() {
     [ "$fail_action" = "warn-continue" ] && suffix=" — continuing"
 
     if [ -n "${LOG_FILE:-}" ]; then
-      local last_line
-      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
-      if echo "$last_line" | grep -q "|${PHASE:-UNKNOWN}|${phase_lower:-unknown}|fail|"; then
+      if grep -q "|${PHASE:-UNKNOWN}|${phase_lower:-unknown}|fail|" "${LOG_FILE}" 2>/dev/null; then
         : # already written, skip
       else
         _plog "$LOG_FILE" "${PHASE:-UNKNOWN}" "${phase_lower:-unknown}" "fail" "${fail_msg}${suffix}"
