@@ -3,7 +3,10 @@
 # Reads normalized comments JSON array from stdin.
 # Args: <ticket_id> <log_file>
 # Outputs structured key:value data for the orchestrator to parse.
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
 
 TICKET_ID="${1:-}"
 LOG_FILE="${2:-}"

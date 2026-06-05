@@ -3,7 +3,10 @@
 # Detects host-side ticket-* skill directories and prompts to archive them.
 # Non-destructive: never deletes, only moves to an archive location.
 
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
 
 HOST_SKILLS="$HOME/.claude/skills"
 ARCHIVE_DIR="$HOME/.claude/skills-archived-$(date +%Y%m%d-%H%M%S)"

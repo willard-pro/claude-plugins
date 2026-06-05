@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # ticket-detect-resume: parse pipeline log, determine resume point.
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}"
@@ -100,7 +103,7 @@ else
     # PR merge-status check: merged → STEP_6, open with human comments → STEP_5_5, else → STEP_5
     _pr_number=$(grep '^[^|]*|PR-REVIEW|checkout-pr|done|' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'|' -f5 || true)
     if [ -z "$_pr_number" ]; then
-      _pr_number=$(grep -oP 'PR-REVIEW\|pr-review\|done\|.*?\b(\d+)\b' "$LOG_FILE" 2>/dev/null | grep -oP '\d+$' | tail -1 || true)
+      _pr_number=$(grep -oP 'PR-REVIEW\|pr-review\|done\|PR #\K\d+' "$LOG_FILE" 2>/dev/null | tail -1 || true)
     fi
     _gh_available=false
     if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then

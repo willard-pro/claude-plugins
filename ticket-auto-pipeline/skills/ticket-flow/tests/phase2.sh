@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # phase2.sh — integration tests for add-stop-on-ambiguity-gates.
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
 
 PASS=0
 FAIL=0

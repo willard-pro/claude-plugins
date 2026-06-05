@@ -81,12 +81,12 @@ _last_msg() {
 
 # ── Detection functions ─────────────────────────────────────────────────────────
 # Each takes (tid, workspace_dir) and prints severity to stdout.
-# workspace_dir is optional — defaults to ./logs.
+# workspace_dir is optional — defaults to FLEET_PIPELINE_LOG_DIR, then ./logs.
 
 # 1. Phase failure detection
 detect_phase_failures() {
   local tid="$1"
-  local workspace="${2:-./logs}"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local log_file="${workspace}/${tid}-pipeline.log"
 
   if [ ! -f "$log_file" ]; then
@@ -130,7 +130,7 @@ detect_phase_failures() {
 # 2. Stall detection via stale heartbeats
 detect_stalls() {
   local tid="$1"
-  local workspace="${2:-./logs}"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local hb_file="${workspace}/${tid}-heartbeat.log"
 
   if [ ! -f "$hb_file" ]; then
@@ -184,7 +184,7 @@ detect_stalls() {
 # 3. Zombie step detection — unresolved |waiting| entries
 detect_zombies() {
   local tid="$1"
-  local workspace="${2:-./logs}"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local log_file="${workspace}/${tid}-pipeline.log"
 
   if [ ! -f "$log_file" ]; then
@@ -237,7 +237,7 @@ detect_zombies() {
 # 4. Loop detection via excessive retries
 detect_loops() {
   local tid="$1"
-  local workspace="${2:-./logs}"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local hb_file="${workspace}/${tid}-heartbeat.log"
 
   if [ ! -f "$hb_file" ]; then
@@ -275,7 +275,7 @@ detect_loops() {
 # 5. Abandonment detection — pipeline log exists but no outcome
 detect_abandoned() {
   local tid="$1"
-  local workspace="${2:-./logs}"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local log_file="${workspace}/${tid}-pipeline.log"
 
   if [ ! -f "$log_file" ]; then
@@ -307,7 +307,7 @@ detect_abandoned() {
 # 6. Flow failure detection — scan heartbeat log for retry|flow-sh|fail entries
 detect_flow_failures() {
   local tid="$1"
-  local workspace="${2:-./logs}"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local hb_file="${workspace}/${tid}-heartbeat.log"
 
   if [ ! -f "$hb_file" ]; then
@@ -333,7 +333,7 @@ detect_flow_failures() {
 #    Severity: 0 = none, 1 = WARN (1 block), 2 = KILL (2+ blocks).
 detect_auto_mode_blocks() {
   local tid="$1"
-  local workspace="${2:-./logs}"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local log_file="${workspace}/${tid}-pipeline.log"
 
   if [ ! -f "$log_file" ]; then
@@ -374,7 +374,7 @@ detect_auto_mode_blocks() {
 extract_diagnostics() {
   local tid="$1"
   local phase="${2:-}"
-  local workspace="${3:-./logs}"
+  local workspace="${3:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local claude_log="${workspace}/${tid}-claude.log"
   local agent_log=""
 
@@ -417,7 +417,7 @@ extract_diagnostics() {
 # outputs JSON results array.
 # Usage: fleet_detect_all <workspace>
 fleet_detect_all() {
-  local workspace="${1:-./logs}"
+  local workspace="${1:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
 
   if [ ! -d "$workspace" ]; then
     echo '{"pipelines":[],"summary":{"total":0,"healthy":0,"warn":0,"kill":0,"restart":0}}'

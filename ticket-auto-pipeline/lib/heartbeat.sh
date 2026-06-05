@@ -1,12 +1,20 @@
 #!/usr/bin/env bash
 # Shared heartbeat log helpers. Source this file from skill scripts.
 # All functions return 0 silently if HB_LOG_FILE is unset.
-set -euo pipefail
+# Shell flags intentionally NOT set here — this is a sourceable library.
+# Setting -e, -u, or -o pipefail would poison every consumer that sources
+# this file (fleet-monitor.sh, fleet-detect.sh, fleet-intervene.sh,
+# spawn-helper.sh). Callers that want strict mode (flow.sh, spawn-helper.sh)
+# set it themselves.
+#
+# -u (nounset) is especially problematic: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
 
 # Valid category enum values
 _HB_CATEGORIES="decision fallback heartbeat api gate retry source"
 # Valid status enum values
-_HB_STATUSES="ok warn fail info fired"
+_HB_STATUSES="ok warn fail info fired skip"
 # Schema version
 _HB_SCHEMA_VERSION="1"
 
@@ -149,9 +157,15 @@ hb_gate() {
   hb_write "gate" "$@"
 }
 
-# Fleet controller action heartbeat. Wraps hb_write with category=fleet.
+# Fleet controller action heartbeat. Wraps hb_write with category=heartbeat.
 # Usage: hb_fleet_action <event> <status> <msg> [detail]
 hb_fleet_action() {
+  hb_write "heartbeat" "$@"
+}
+
+# Fleet controller scan/lifecycle heartbeat. Wraps hb_write with category=heartbeat.
+# Usage: hb_fleet_scan <event> <status> <msg> [detail]
+hb_fleet_scan() {
   hb_write "heartbeat" "$@"
 }
 

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # ticket-flow: deterministic Linear state/label executor.
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}"
@@ -228,7 +231,23 @@ if [ "$SET_ASSIGNEE_ME" = "true" ]; then
   ASSIGNEE_ARG=$(get_me 2>/dev/null | jq -r '.id // empty')
 fi
 
-RESULT=$(update_issue "$TICKET_ID" "${NEW_STATE_ID:-}" "$LABEL_IDS_ARG" "${ASSIGNEE_ARG:-}" 2>&1)
+# Capture stderr alongside stdout so we can diagnose the root cause
+# when update_issue returns non-JSON output (stderr contamination, curl
+# failure, GraphQL error response, network timeout, etc.).
+_update_stderr=$(mktemp)
+RESULT=$(update_issue "$TICKET_ID" "${NEW_STATE_ID:-}" "$LABEL_IDS_ARG" "${ASSIGNEE_ARG:-}" 2>"$_update_stderr")
+_update_rc=$?
+
+if ! echo "$RESULT" | jq empty 2>/dev/null; then
+  _stderr_head=$(head -5 "$_update_stderr" 2>/dev/null || echo "(empty)")
+  rm -f "$_update_stderr"
+  echo "flow.sh: invalid JSON from update_issue for ticket $TICKET_ID" >&2
+  echo "flow.sh: update_issue exit code: ${_update_rc}" >&2
+  echo "flow.sh: update_issue stderr (first 5 lines): ${_stderr_head}" >&2
+  hb_retry "flow-sh" "fail" "update_issue returned non-JSON" "{\"ticket\":\"$TICKET_ID\",\"rc\":$_update_rc}"
+  exit 5
+fi
+rm -f "$_update_stderr"
 SUCCESS=$(echo "$RESULT" | jq -r '.success // false')
 
 if [ "$SUCCESS" != "true" ]; then

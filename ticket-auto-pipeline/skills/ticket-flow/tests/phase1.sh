@@ -2,7 +2,10 @@
 # phase1.sh — unit tests for harden-ticket-auto-pipeline changes.
 # Requires: bash, jq, socat, flock (all present in Dexter image).
 # Usage: bash phase1.sh [test_name]
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SKILLS_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
