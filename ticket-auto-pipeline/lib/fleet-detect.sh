@@ -43,7 +43,7 @@ _count_in_file() {
     echo "0"
     return
   fi
-  grep -c "$pattern" "$file" 2>/dev/null || true
+  command grep -c "$pattern" "$file" 2>/dev/null || true
 }
 
 # Extract a field from the last line of a file using awk -F'|'.
@@ -98,7 +98,7 @@ detect_phase_failures() {
 
   # Check for gate-stop codes first (separate classification)
   local gate_stop
-  gate_stop=$(grep '|META|gate-stop|fail|' "$log_file" 2>/dev/null | tail -1 || true)
+  gate_stop=$(command grep '|META|gate-stop|fail|' "$log_file" 2>/dev/null | tail -1 || true)
 
   if [ -n "$gate_stop" ]; then
     local code
@@ -117,7 +117,7 @@ detect_phase_failures() {
 
   # Check for general phase failures (non-MAINTENANCE, non-META)
   local phase_failures
-  phase_failures=$(grep -v '|MAINTENANCE|' "$log_file" | grep -v '|META|' | grep -c '|fail|' 2>/dev/null || true)
+  phase_failures=$(command grep -v '|MAINTENANCE|' "$log_file" | command grep -v '|META|' | command grep -c '|fail|' 2>/dev/null || true)
 
   if [ "$phase_failures" -gt 0 ]; then
     # First occurrence → WARN
@@ -140,7 +140,7 @@ detect_stalls() {
 
   # Find last orchestrator-waiting or watchdog|alive entry
   local last_hb
-  last_hb=$(grep -E '\|orchestrator-waiting\||\|watchdog\|alive\|' "$hb_file" 2>/dev/null | tail -1 || true)
+  last_hb=$(command grep -E '\|orchestrator-waiting\||\|watchdog\|alive\|' "$hb_file" 2>/dev/null | tail -1 || true)
 
   if [ -z "$last_hb" ]; then
     echo "0"
@@ -156,7 +156,7 @@ detect_stalls() {
 
   # Get pinger iteration count from last pinger entry
   local pinger_iter
-  pinger_iter=$(grep '|orchestrator-waiting|.*pinger ' "$hb_file" 2>/dev/null | tail -1 | awk -F'|' '{print $5}' | grep -oP '\d+(?=/)' || echo "0")
+  pinger_iter=$(command grep '|orchestrator-waiting|.*pinger ' "$hb_file" 2>/dev/null | tail -1 | awk -F'|' '{print $5}' | command grep -oP '\d+(?=/)' || echo "0")
   pinger_iter="${pinger_iter:-0}"
 
   local severity=0
@@ -194,7 +194,7 @@ detect_zombies() {
 
   # Find all |waiting| lines
   local lines
-  lines=$(grep '|waiting|' "$log_file" 2>/dev/null || true)
+  lines=$(command grep '|waiting|' "$log_file" 2>/dev/null || true)
 
   if [ -z "$lines" ]; then
     echo "0"
@@ -221,7 +221,7 @@ detect_zombies() {
 
     # Check if this waiting entry has a matching done/fail/skip
     local has_terminal
-    has_terminal=$(grep -E -c "\|${phase}\|${step}\|(done|fail|skip)\|" "$log_file" 2>/dev/null || true)
+    has_terminal=$(command grep -E -c "\|${phase}\|${step}\|(done|fail|skip)\|" "$log_file" 2>/dev/null || true)
 
     if [ "$has_terminal" -eq 0 ] && [ "$age" -ge "$zombie_threshold" ]; then
       severity=2 # KILL
@@ -249,7 +249,7 @@ detect_loops() {
 
   # Check for terminal exhaustion gates first (these are KILL+RESTART)
   local exhaustion
-  exhaustion=$(grep -E '\|gate\|(verify-exhausted|iteration-exhausted|reverify-exhausted|combined-cap)\|' "$hb_file" 2>/dev/null | tail -1 || true)
+  exhaustion=$(command grep -E '\|gate\|(verify-exhausted|iteration-exhausted|reverify-exhausted|combined-cap)\|' "$hb_file" 2>/dev/null | tail -1 || true)
   if [ -n "$exhaustion" ]; then
     echo "3"
     return
@@ -257,9 +257,9 @@ detect_loops() {
 
   # Count loop-back events by type
   local verify_loops
-  verify_loops=$(grep -c "decision|loop-back|fired|verify fail" "$hb_file" 2>/dev/null || true)
+  verify_loops=$(command grep -c "decision|loop-back|fired|verify fail" "$hb_file" 2>/dev/null || true)
   local pr_loops
-  pr_loops=$(grep -c "decision|loop-back|fired|PR review" "$hb_file" 2>/dev/null || true)
+  pr_loops=$(command grep -c "decision|loop-back|fired|PR review" "$hb_file" 2>/dev/null || true)
 
   local max_verify="${MAX_VERIFY_ATTEMPTS:-3}"
   local max_pr="${MAX_PR_ITERATIONS:-3}"
@@ -284,7 +284,7 @@ detect_abandoned() {
   fi
 
   # Check if pipeline has an outcome (completed normally)
-  if grep -q '|META|outcome|' "$log_file" 2>/dev/null; then
+  if command grep -q '|META|outcome|' "$log_file" 2>/dev/null; then
     echo "0"
     return
   fi
@@ -316,7 +316,7 @@ detect_flow_failures() {
   fi
 
   local failures
-  failures=$(grep -c 'retry|flow-sh|fail' "$hb_file" 2>/dev/null || true)
+  failures=$(command grep -c 'retry|flow-sh|fail' "$hb_file" 2>/dev/null || true)
   failures="${failures:-0}"
 
   if [ "$failures" -ge 2 ]; then
@@ -345,7 +345,7 @@ detect_auto_mode_blocks() {
 
   # Source 1: check-approval|fail entries in pipeline log
   local pipeline_blocks
-  pipeline_blocks=$(grep -c '|check-approval|fail|' "$log_file" 2>/dev/null || true)
+  pipeline_blocks=$(command grep -c '|check-approval|fail|' "$log_file" 2>/dev/null || true)
   pipeline_blocks=$((pipeline_blocks + 0))
   block_count=$((block_count + pipeline_blocks))
 
@@ -353,7 +353,7 @@ detect_auto_mode_blocks() {
   for agent_log in "${workspace}/${tid}"-*-agent.log; do
     [ -f "$agent_log" ] || continue
     local agent_blocks
-    agent_blocks=$(grep -c "Permission for this action was denied" "$agent_log" 2>/dev/null || true)
+    agent_blocks=$(command grep -c "Permission for this action was denied" "$agent_log" 2>/dev/null || true)
     agent_blocks=$((agent_blocks + 0))
     block_count=$((block_count + agent_blocks))
   done
@@ -388,7 +388,7 @@ extract_diagnostics() {
   # Last 3 fail entries from Claude log
   if [ -f "$claude_log" ]; then
     echo "  last_fail_entries:"
-    grep '|fail|' "$claude_log" 2>/dev/null | tail -3 | while IFS= read -r l; do
+    command grep '|fail|' "$claude_log" 2>/dev/null | tail -3 | while IFS= read -r l; do
       echo "    - $l"
     done || echo "    (none)"
   fi
@@ -396,7 +396,7 @@ extract_diagnostics() {
   # Last 5 RETRO hints
   if [ -f "$claude_log" ]; then
     echo "  retro_hints:"
-    grep '|RETRO|hint|' "$claude_log" 2>/dev/null | tail -5 | while IFS= read -r l; do
+    command grep '|RETRO|hint|' "$claude_log" 2>/dev/null | tail -5 | while IFS= read -r l; do
       echo "    - $l"
     done || echo "    (none)"
   fi
@@ -448,7 +448,7 @@ fleet_detect_all() {
     fi
 
     # Skip pipelines that already have an outcome (completed)
-    if grep -q '|META|outcome|' "$log_file" 2>/dev/null; then
+    if command grep -q '|META|outcome|' "$log_file" 2>/dev/null; then
       continue
     fi
 
