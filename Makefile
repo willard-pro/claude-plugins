@@ -18,6 +18,9 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-fleet-intervene.sh
 	bash ticket-auto-pipeline/lib/tests/test-config.sh
 	bash ticket-auto-pipeline/lib/tests/test-fleet-monitor.sh
+	bash ticket-auto-pipeline/lib/tests/test-gate-check.sh
+	bash ticket-auto-pipeline/lib/tests/test-outcome-label-check.sh
+	bash ticket-auto-pipeline/lib/tests/test-pipeline-phases.sh
 
 test-flow:
 	@echo "=== ticket-flow tests ==="
