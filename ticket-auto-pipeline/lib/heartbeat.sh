@@ -10,6 +10,30 @@ _HB_STATUSES="ok warn fail info fired"
 # Schema version
 _HB_SCHEMA_VERSION="1"
 
+# ISO-8601 UTC timestamp. Single canonical source — use everywhere instead of
+# inlining `date -u +%Y-%m-%dT%H:%M:%SZ`.
+_iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+
+# Ensure the parent directory of a file exists.
+_ensure_dir_for() { mkdir -p "$(dirname "$1")" 2>/dev/null || true; }
+
+# Source a file only if a function is not already defined.
+# Usage: _source_if_missing <func_name> <path>
+# Returns 0 if the function is defined (already or via sourcing), non-zero if
+# the source file doesn't exist and the function is still missing.
+_source_if_missing() { declare -f "$1" >/dev/null 2>&1 || source "$2"; }
+
+# Canonical pipe-delimited pipeline log entry: ISO|PHASE|STEP|STATUS|MSG.
+# Automatically ensures the log file's parent directory exists.
+# Usage: _plog <file> <phase> <step> <status> <msg>
+# No-op when file is empty/unset.
+_plog() {
+  local file="$1"
+  [ -z "$file" ] && return 0
+  _ensure_dir_for "$file"
+  echo "$(_iso_now)|${2:-}|${3:-}|${4:-}|${5:-}" >>"$file"
+}
+
 # Write a heartbeat log entry.
 # Args: category event status msg [detail]
 # detail defaults to empty ({}). Must be flat JSON or empty.
@@ -87,15 +111,9 @@ hb_write() {
     echo "hb_write: WARNING — called from outside heartbeat.sh (${BASH_SOURCE[0]}). Ensure this is a legitimate hb_* function call, not a raw echo to HB_LOG_FILE." >&2
   fi
 
-  # Ensure directory exists
-  local dir
-  dir=$(dirname "$HB_LOG_FILE")
-  mkdir -p "$dir"
+  _ensure_dir_for "$HB_LOG_FILE"
 
-  local iso
-  iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
-  echo "$iso|$category|$event|$status|$msg|$detail" >>"$HB_LOG_FILE"
+  echo "$(_iso_now)|$category|$event|$status|$msg|$detail" >>"$HB_LOG_FILE"
 }
 
 # Semantic helpers — each delegates to hb_write with a fixed category
@@ -295,9 +313,8 @@ hb_init() {
   mkdir -p "$dir"
 
   if [ ! -f "$HB_LOG_FILE" ] || [ ! -s "$HB_LOG_FILE" ]; then
-    local iso
-    iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    echo "$iso|META|schema|info|$_HB_SCHEMA_VERSION|{}" >"$HB_LOG_FILE"
+    _ensure_dir_for "$HB_LOG_FILE"
+    echo "$(_iso_now)|META|schema|info|$_HB_SCHEMA_VERSION|{}" >"$HB_LOG_FILE"
   fi
 }
 
@@ -316,24 +333,15 @@ hb_init() {
 #   cl_write RETRO hint info "EXEC artifact path hardcoded — breaks if WORKSPACE_ROOT changes"
 cl_write() {
   [ -z "${CLAUDE_LOG_FILE:-}" ] && return 0
-  local phase="$1"
-  local step="$2"
-  local status="$3"
-  local msg="$4"
-  local dir
-  dir=$(dirname "$CLAUDE_LOG_FILE")
-  mkdir -p "$dir"
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|${phase}|${step}|${status}|${msg}" >>"$CLAUDE_LOG_FILE"
+  _plog "$CLAUDE_LOG_FILE" "$@"
 }
 
 # Initialize the claude log file. Idempotent — only writes schema header if
 # the file is empty or doesn't exist.
 cl_init() {
   [ -z "${CLAUDE_LOG_FILE:-}" ] && return 0
-  local dir
-  dir=$(dirname "$CLAUDE_LOG_FILE")
-  mkdir -p "$dir"
+  _ensure_dir_for "$CLAUDE_LOG_FILE"
   if [ ! -f "$CLAUDE_LOG_FILE" ] || [ ! -s "$CLAUDE_LOG_FILE" ]; then
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >"$CLAUDE_LOG_FILE"
+    echo "$(_iso_now)|META|schema|info|1" >"$CLAUDE_LOG_FILE"
   fi
 }

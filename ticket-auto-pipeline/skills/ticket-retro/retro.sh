@@ -290,6 +290,20 @@ declare -A TICKET_ERROR_EVENTS=() # ticket_id -> newline-delimited JSON event ob
 TOTAL_ERROR_COUNT=0
 declare -A ERROR_CATEGORY_HIST=() # event_name -> count
 
+# ── _build_error_event ──────────────────────────────────────────────────────────
+# Build a single JSON error event object for retro diagnostics.
+# Usage: _build_error_event <category> <event> <message> <timestamp> [detail]
+_build_error_event() {
+  local category="$1" event="$2" msg="$3" ts="$4" detail="$5"
+  local _detail_obj="{}"
+  [ -n "$detail" ] && [ "$detail" != "{}" ] && _detail_obj=$(echo "$detail" | jq -c '.' 2>/dev/null || echo "{}")
+  jq -c -n \
+    --arg category "$category" --arg event "$event" \
+    --arg message "$msg" --arg timestamp "$ts" \
+    --argjson detail "$_detail_obj" \
+    '{category: $category, event: $event, message: $message, timestamp: $timestamp, detail: $detail}'
+}
+
 for log_file in "${LOG_FILES[@]}"; do
   stem=$(basename "$log_file" .log)
   ticket_id="${stem%-pipeline}"
@@ -329,18 +343,7 @@ for log_file in "${LOG_FILES[@]}"; do
 
       # Capture retry errors for diagnostics (task 4.1)
       if [ "$status" = "fail" ]; then
-        _detail_obj="{}"
-        if [ -n "$detail" ] && [ "$detail" != "{}" ]; then
-          _detail_obj=$(echo "$detail" | jq -c '.' 2>/dev/null || echo "{}")
-        fi
-        _event_obj=$(jq -c -n \
-          --arg category "retry" \
-          --arg event "$event" \
-          --arg message "$msg" \
-          --arg timestamp "$ts" \
-          --argjson detail "$_detail_obj" \
-          '{category: $category, event: $event, message: $message, timestamp: $timestamp, detail: $detail}')
-        TICKET_ERROR_EVENTS["$ticket_id"]+="$_event_obj"$'\n'
+        TICKET_ERROR_EVENTS["$ticket_id"]+=$(_build_error_event "retry" "$event" "$msg" "$ts" "$detail")$'\n'
         TOTAL_ERROR_COUNT=$((TOTAL_ERROR_COUNT + 1))
         ERROR_CATEGORY_HIST["$event"]=$((${ERROR_CATEGORY_HIST["$event"]:-0} + 1))
       fi
@@ -348,36 +351,14 @@ for log_file in "${LOG_FILES[@]}"; do
     # Capture api errors for diagnostics (task 4.2)
     elif [ "$category" = "api" ] && [ "$status" = "fail" ]; then
       local_has_hb=1
-      _detail_obj="{}"
-      if [ -n "$detail" ] && [ "$detail" != "{}" ]; then
-        _detail_obj=$(echo "$detail" | jq -c '.' 2>/dev/null || echo "{}")
-      fi
-      _event_obj=$(jq -c -n \
-        --arg category "api" \
-        --arg event "$event" \
-        --arg message "$msg" \
-        --arg timestamp "$ts" \
-        --argjson detail "$_detail_obj" \
-        '{category: $category, event: $event, message: $message, timestamp: $timestamp, detail: $detail}')
-      TICKET_ERROR_EVENTS["$ticket_id"]+="$_event_obj"$'\n'
+      TICKET_ERROR_EVENTS["$ticket_id"]+=$(_build_error_event "api" "$event" "$msg" "$ts" "$detail")$'\n'
       TOTAL_ERROR_COUNT=$((TOTAL_ERROR_COUNT + 1))
       ERROR_CATEGORY_HIST["$event"]=$((${ERROR_CATEGORY_HIST["$event"]:-0} + 1))
 
     # Capture gate errors for diagnostics (task 4.2, gate events with fail status)
     elif [ "$category" = "gate" ] && [ "$status" = "fail" ]; then
       local_has_hb=1
-      _detail_obj="{}"
-      if [ -n "$detail" ] && [ "$detail" != "{}" ]; then
-        _detail_obj=$(echo "$detail" | jq -c '.' 2>/dev/null || echo "{}")
-      fi
-      _event_obj=$(jq -c -n \
-        --arg category "gate" \
-        --arg event "$event" \
-        --arg message "$msg" \
-        --arg timestamp "$ts" \
-        --argjson detail "$_detail_obj" \
-        '{category: $category, event: $event, message: $message, timestamp: $timestamp, detail: $detail}')
-      TICKET_ERROR_EVENTS["$ticket_id"]+="$_event_obj"$'\n'
+      TICKET_ERROR_EVENTS["$ticket_id"]+=$(_build_error_event "gate" "$event" "$msg" "$ts" "$detail")$'\n'
       TOTAL_ERROR_COUNT=$((TOTAL_ERROR_COUNT + 1))
       ERROR_CATEGORY_HIST["$event"]=$((${ERROR_CATEGORY_HIST["$event"]:-0} + 1))
     fi
@@ -507,7 +488,7 @@ _CURSOR_JSON="{"
 _CURSOR_FIRST=1
 for tid in "${!SCANNED_MTIMES[@]}"; do
   _mtime="${SCANNED_MTIMES[$tid]}"
-  _now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  _now=$(_iso_now)
   [ "$_CURSOR_FIRST" -eq 1 ] && _CURSOR_FIRST=0 || _CURSOR_JSON+=","
   _CURSOR_JSON+="\"$tid\":{\"scanned_at\":\"$_now\",\"log_mtime\":$_mtime}"
 done

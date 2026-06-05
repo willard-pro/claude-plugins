@@ -4,8 +4,9 @@
 # logging, heartbeat pinger, phase context file, and result capture.
 set -euo pipefail
 
-# Source heartbeat library (provides hb_* and cl_write) unless already loaded (e.g. test mocks)
-if ! declare -f hb_heartbeat >/dev/null 2>&1; then
+# Source heartbeat library (provides _plog, _iso_now, hb_* and cl_write)
+# unless already loaded (e.g. test mocks)
+if ! declare -f _plog >/dev/null 2>&1; then
   _HB_LIB="$(dirname "${BASH_SOURCE[0]}")/heartbeat.sh"
   [ -f "$_HB_LIB" ] && source "$_HB_LIB"
 fi
@@ -200,7 +201,7 @@ spawn_agent_pre() {
       : # already written, skip
     else
       local desc="${DESCRIPTION:-agent for ${TICKET_ID}}"
-      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|${PHASE}|${phase_lower}|waiting|Agent launched — ${desc}" >>"$LOG_FILE"
+      _plog "$LOG_FILE" "$PHASE" "$phase_lower" "waiting" "Agent launched — ${desc}"
     fi
   fi
 
@@ -366,7 +367,7 @@ spawn_agent_post() {
       if echo "$last_line" | grep -q "|${PHASE:-UNKNOWN}|${phase_lower:-unknown}|done|"; then
         : # already written, skip
       else
-        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|${PHASE:-UNKNOWN}|${phase_lower:-unknown}|done|${done_msg}" >>"$LOG_FILE"
+        _plog "$LOG_FILE" "${PHASE:-UNKNOWN}" "${phase_lower:-unknown}" "done" "${done_msg}"
       fi
     fi
     if [ -n "${HB_LOG_FILE:-}" ]; then
@@ -392,7 +393,7 @@ spawn_agent_post() {
       if echo "$last_line" | grep -q "|${PHASE:-UNKNOWN}|${phase_lower:-unknown}|fail|"; then
         : # already written, skip
       else
-        echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|${PHASE:-UNKNOWN}|${phase_lower:-unknown}|fail|${fail_msg}${suffix}" >>"$LOG_FILE"
+        _plog "$LOG_FILE" "${PHASE:-UNKNOWN}" "${phase_lower:-unknown}" "fail" "${fail_msg}${suffix}"
       fi
     fi
     if [ -n "${HB_LOG_FILE:-}" ]; then

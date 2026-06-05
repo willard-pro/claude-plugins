@@ -577,9 +577,10 @@ test_heartbeat_sourced_when_not_predefined() {
 }
 
 test_heartbeat_not_sourced_when_already_defined() {
-  # When hb_heartbeat is already defined (e.g. test mocks), spawn-helper.sh
-  # must not overwrite it with the real heartbeat.sh implementation.
+  # When _plog and hb_heartbeat are already defined (e.g. test mocks),
+  # spawn-helper.sh must not overwrite them with the real heartbeat.sh implementation.
   bash -c "
+    _plog() { return 0; }
     hb_heartbeat() { echo MOCK; }
     source '${LIB_DIR}/spawn-helper.sh'
     [ \"\$(hb_heartbeat)\" = 'MOCK' ]
@@ -720,7 +721,7 @@ test_watchdog_emits_heartbeats() {
   # Run in a clean subshell — unset global mocks so spawn-helper.sh loads real heartbeat.sh
   (
     export HB_LOG_FILE="$hb_log"
-    unset -f hb_heartbeat hb_pinger_start hb_pinger_stop cl_write 2>/dev/null || true
+    unset -f hb_heartbeat hb_pinger_start hb_pinger_stop cl_write _plog _iso_now 2>/dev/null || true
     source "$LIB_DIR/spawn-helper.sh"
     # Initialize the heartbeat log (schema header needed for valid file)
     hb_init
