@@ -20,24 +20,17 @@ if [ -f "$_MONITOR_DIR/config.sh" ]; then
   source "$_MONITOR_DIR/config.sh"
 fi
 
-if ! declare -f fleet_detect_all >/dev/null 2>&1; then
-  [ -f "$_MONITOR_DIR/fleet-detect.sh" ] && source "$_MONITOR_DIR/fleet-detect.sh"
-fi
-
-if ! declare -f fleet_kill_pipeline >/dev/null 2>&1; then
-  [ -f "$_MONITOR_DIR/fleet-intervene.sh" ] && source "$_MONITOR_DIR/fleet-intervene.sh"
-fi
-
-if ! declare -f fleet_render_dashboard_from_data >/dev/null 2>&1; then
-  [ -f "$_MONITOR_DIR/fleet-dashboard.sh" ] && source "$_MONITOR_DIR/fleet-dashboard.sh"
-fi
-
 # Bridge: heartbeat.sh uses HB_LOG_FILE; fleet controller uses FLEET_HB_LOG_FILE.
 [ -z "${HB_LOG_FILE:-}" ] && HB_LOG_FILE="${FLEET_HB_LOG_FILE:-}"
 
-if ! declare -f hb_fleet_action >/dev/null 2>&1; then
+# Source heartbeat for _plog (and _source_if_missing) — must be first
+if ! declare -f _plog >/dev/null 2>&1; then
   [ -f "$_MONITOR_DIR/heartbeat.sh" ] && source "$_MONITOR_DIR/heartbeat.sh"
 fi
+
+_source_if_missing fleet_detect_all "$_MONITOR_DIR/fleet-detect.sh"
+_source_if_missing fleet_kill_pipeline "$_MONITOR_DIR/fleet-intervene.sh"
+_source_if_missing fleet_render_dashboard_from_data "$_MONITOR_DIR/fleet-dashboard.sh"
 
 # ── Fleet controller log writer ───────────────────────────────────────────────────
 # Write a timestamped entry to the fleet controller's own log file.
@@ -50,10 +43,8 @@ fl_write() {
   if [ "${FLEET_LOG_FILE:-}" = "/dev/null" ]; then
     return 0
   fi
-  mkdir -p "$(dirname "$log_file")" 2>/dev/null || true
-  local iso
-  iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-  echo "${iso}|${level}|${component}|${msg}" >>"$log_file"
+  _ensure_dir_for "$log_file"
+  echo "$(_iso_now)|${level}|${component}|${msg}" >>"$log_file"
 }
 
 # ── Spawn helpers ────────────────────────────────────────────────────────────────
@@ -67,14 +58,11 @@ _spawn_queue_write() {
   local restarts="${3:-0}"
   local instance_id="${FLEET_INSTANCE_ID:-default}"
   local queue_file="/tmp/fleet-${instance_id}-spawn-queue.jsonl"
-  local iso
-  iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
   local entry
   entry=$(jq -nc \
     --arg tid "$tid" \
     --arg reason "$reason" \
-    --arg timestamp "$iso" \
+    --arg timestamp "$(_iso_now)" \
     --argjson restarts "$restarts" \
     '{tid: $tid, reason: $reason, timestamp: $timestamp, restarts: $restarts}')
 

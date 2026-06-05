@@ -58,7 +58,9 @@ done
 
 _log() {
   [ -n "${LOG_FILE:-}" ] || return 0
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|$1" >>"$LOG_FILE"
+  # $1 is the pipe-delimited suffix: "PHASE|STEP|STATUS|MSG"
+  IFS='|' read -r _ph _st _status _msg <<<"$1"
+  _plog "$LOG_FILE" "$_ph" "$_st" "$_status" "$_msg"
 }
 
 _emit_schema_header() {
