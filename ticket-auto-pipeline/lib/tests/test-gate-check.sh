@@ -26,9 +26,9 @@ _run() {
 
 # ── Mock framework ──────────────────────────────────────────────────────────────
 
-_ws=""         # workspace dir
-_tid=""        # ticket ID
-_flow_log=""   # tracks flow.sh calls
+_ws=""       # workspace dir
+_tid=""      # ticket ID
+_flow_log="" # tracks flow.sh calls
 _fake_issue="null"
 _fake_complexity="simple"
 
@@ -57,7 +57,7 @@ _teardown() {
 _plog_raw() {
   local phase="$1" step="$2" status="$3" msg="$4"
   local iso="${5:-2026-06-05T10:00:00Z}"
-  echo "${iso}|${phase}|${step}|${status}|${msg}" >> "$LOG_FILE"
+  echo "${iso}|${phase}|${step}|${status}|${msg}" >>"$LOG_FILE"
 }
 
 # ── Mock overrides (installed AFTER sourcing gate-check.sh) ─────────────────────
@@ -74,7 +74,7 @@ _install_mocks() {
   FLOW_SH="${_ws}/mock-flow.sh"
 
   # Create a stub flow.sh that records calls
-  cat > "${_ws}/mock-flow.sh" << FLOWEOF
+  cat >"${_ws}/mock-flow.sh" <<FLOWEOF
 #!/usr/bin/env bash
 echo "flow-sh-called|\$*" >> "${_ws}/flow-calls.log"
 exit 0
@@ -135,7 +135,10 @@ test_entry_artifact_missing_gate_stop() {
   local rc=$?
 
   _teardown
-  [ "$rc" -eq 2 ] || { echo "expected exit 2, got $rc"; return 1; }
+  [ "$rc" -eq 2 ] || {
+    echo "expected exit 2, got $rc"
+    return 1
+  }
 }
 
 # 2. Complexity mismatch (complex complexity + simple-fix artifact) → gate-stop
@@ -147,7 +150,10 @@ test_entry_complexity_artifact_mismatch() {
   local rc=$?
 
   _teardown
-  [ "$rc" -eq 2 ] || { echo "expected exit 2, got $rc"; return 1; }
+  [ "$rc" -eq 2 ] || {
+    echo "expected exit 2, got $rc"
+    return 1
+  }
 }
 
 # 3. Simple + auto mode → calls flow.sh human-approve (exit 0)
@@ -162,8 +168,14 @@ test_entry_simple_auto_calls_flow_human_approve() {
   flow_calls=$(cat "$_flow_log" 2>/dev/null || true)
 
   _teardown
-  [ "$rc" -eq 0 ] || { echo "expected exit 0, got $rc"; return 1; }
-  echo "$flow_calls" | grep -q "human-approve" || { echo "flow.sh human-approve not called"; return 1; }
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0, got $rc"
+    return 1
+  }
+  echo "$flow_calls" | grep -q "human-approve" || {
+    echo "flow.sh human-approve not called"
+    return 1
+  }
 }
 
 # 4. Simple + semi-auto mode → calls flow.sh human-approve (exit 0)
@@ -178,8 +190,14 @@ test_entry_simple_semi_auto_calls_flow_human_approve() {
   flow_calls=$(cat "$_flow_log" 2>/dev/null || true)
 
   _teardown
-  [ "$rc" -eq 0 ] || { echo "expected exit 0, got $rc"; return 1; }
-  echo "$flow_calls" | grep -q "human-approve" || { echo "flow.sh human-approve not called"; return 1; }
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0, got $rc"
+    return 1
+  }
+  echo "$flow_calls" | grep -q "human-approve" || {
+    echo "flow.sh human-approve not called"
+    return 1
+  }
 }
 
 # 5. Simple + manual → held (exit 1)
@@ -191,7 +209,10 @@ test_entry_simple_manual_held() {
   local rc=$?
 
   _teardown
-  [ "$rc" -eq 1 ] || { echo "expected exit 1, got $rc"; return 1; }
+  [ "$rc" -eq 1 ] || {
+    echo "expected exit 1, got $rc"
+    return 1
+  }
 }
 
 # 6. Complex → held regardless of autonomy (exit 1)
@@ -203,7 +224,10 @@ test_entry_complex_held() {
   local rc=$?
 
   _teardown
-  [ "$rc" -eq 1 ] || { echo "expected exit 1, got $rc"; return 1; }
+  [ "$rc" -eq 1 ] || {
+    echo "expected exit 1, got $rc"
+    return 1
+  }
 }
 
 # 7. Gate start event written
@@ -217,7 +241,10 @@ test_entry_gate_start_event_written() {
   has_start=$(grep -c '|GATE|gate|start|' "$LOG_FILE" 2>/dev/null || true)
 
   _teardown
-  [ "${has_start:-0}" -ge 1 ] || { echo "gate start event not found"; return 1; }
+  [ "${has_start:-0}" -ge 1 ] || {
+    echo "gate start event not found"
+    return 1
+  }
 }
 
 # 8. Autonomy from pipeline log (crash recovery — detects auto correctly)
@@ -229,7 +256,10 @@ test_entry_autonomy_from_log() {
   local rc=$?
 
   _teardown
-  [ "$rc" -eq 0 ] || { echo "expected exit 0 for auto mode, got $rc"; return 1; }
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0 for auto mode, got $rc"
+    return 1
+  }
 }
 
 # 9. Complexity from notes.md
@@ -241,7 +271,10 @@ test_entry_complexity_from_notes() {
   local rc=$?
 
   _teardown
-  [ "$rc" -eq 0 ] || { echo "expected exit 0 for simple, got $rc"; return 1; }
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0 for simple, got $rc"
+    return 1
+  }
 }
 
 # 10. Artifact path from log
@@ -250,13 +283,20 @@ test_entry_artifact_path_from_log() {
   _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
 
   # Artifact file exists → check passes
-  [ -f "${_ws}/simple-fix.md" ] || { echo "artifact file not scaffolded"; _teardown; return 1; }
+  [ -f "${_ws}/simple-fix.md" ] || {
+    echo "artifact file not scaffolded"
+    _teardown
+    return 1
+  }
 
   _gate_entry
   local rc=$?
 
   _teardown
-  [ "$rc" -eq 0 ] || { echo "expected exit 0, got $rc"; return 1; }
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0, got $rc"
+    return 1
+  }
 }
 
 # 11. Fleet-detect format: held log entry matches |GATE|gate|fail|held:
@@ -270,7 +310,10 @@ test_entry_fleet_detect_format() {
   held_line=$(grep '|GATE|gate|fail|held:' "$LOG_FILE" 2>/dev/null || true)
 
   _teardown
-  [ -n "$held_line" ] || { echo "no gate-held line with held: prefix"; return 1; }
+  [ -n "$held_line" ] || {
+    echo "no gate-held line with held: prefix"
+    return 1
+  }
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -286,7 +329,10 @@ test_reapprove_approved_and_ready_passes() {
   local rc=$?
 
   _teardown
-  [ "$rc" -eq 0 ] || { echo "expected exit 0, got $rc"; return 1; }
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0, got $rc"
+    return 1
+  }
 }
 
 # 13. Label missing → APPROVAL_REVOKED (exit 2)
@@ -298,7 +344,10 @@ test_reapprove_label_missing_gate_stop() {
   local rc=$?
 
   _teardown
-  [ "$rc" -eq 2 ] || { echo "expected exit 2, got $rc"; return 1; }
+  [ "$rc" -eq 2 ] || {
+    echo "expected exit 2, got $rc"
+    return 1
+  }
 }
 
 # 14. Wrong state → APPROVAL_REVOKED (exit 2)
@@ -310,7 +359,10 @@ test_reapprove_wrong_state_gate_stop() {
   local rc=$?
 
   _teardown
-  [ "$rc" -eq 2 ] || { echo "expected exit 2, got $rc"; return 1; }
+  [ "$rc" -eq 2 ] || {
+    echo "expected exit 2, got $rc"
+    return 1
+  }
 }
 
 # 15. Both state and label wrong — single gate-stop entry
@@ -325,8 +377,14 @@ test_reapprove_both_wrong_single_gate_stop() {
   gate_stop_count=$(grep -c 'APPROVAL_REVOKED' "$LOG_FILE" 2>/dev/null || true)
 
   _teardown
-  [ "$rc" -eq 2 ] || { echo "expected exit 2, got $rc"; return 1; }
-  [ "${gate_stop_count:-0}" -eq 1 ] || { echo "expected 1 APPROVAL_REVOKED, got ${gate_stop_count:-0}"; return 1; }
+  [ "$rc" -eq 2 ] || {
+    echo "expected exit 2, got $rc"
+    return 1
+  }
+  [ "${gate_stop_count:-0}" -eq 1 ] || {
+    echo "expected 1 APPROVAL_REVOKED, got ${gate_stop_count:-0}"
+    return 1
+  }
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
