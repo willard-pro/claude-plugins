@@ -215,7 +215,7 @@ hb_validate_line() {
   local line="$1"
 
   # Schema header line
-  if echo "$line" | grep -q '|META|schema|'; then
+  if echo "$line" | command grep -q '|META|schema|'; then
     local fields
     fields=$(echo "$line" | awk -F'|' '{print NF}')
     if [ "$fields" -lt 5 ]; then
@@ -293,7 +293,7 @@ hb_validate_file() {
   first_line=$(head -1 "$file")
 
   # Check schema header
-  if ! echo "$first_line" | grep -q '|META|schema|'; then
+  if ! echo "$first_line" | command grep -q '|META|schema|'; then
     echo "hb_validate_file: missing schema header" >&2
     return 1
   fi
