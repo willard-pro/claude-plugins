@@ -142,8 +142,13 @@ source ~/.claude/skills/lib/heartbeat.sh
 source ~/.claude/skills/lib/capture-transcript.sh
 export HB_LOG_FILE="$HB_LOG_FILE"
 hb_init
-hb_heartbeat "pipeline-start" "pipeline starting — autonomy={AUTONOMY}, ticket={TICKET-ID}"
-hb_decision "autonomy-resolution" "fired" "autonomy set to {AUTONOMY}" '{"mode":"{AUTONOMY}"}'
+# Idempotency guards: skip if already written (prevents duplication on resume)
+if ! grep -q '|heartbeat|pipeline-start|' "$HB_LOG_FILE" 2>/dev/null; then
+  hb_heartbeat "pipeline-start" "pipeline starting — autonomy={AUTONOMY}, ticket={TICKET-ID}"
+fi
+if ! grep -q '|decision|autonomy-resolution|' "$HB_LOG_FILE" 2>/dev/null; then
+  hb_decision "autonomy-resolution" "fired" "autonomy set to {AUTONOMY}" '{"mode":"{AUTONOMY}"}'
+fi
 ```
 
 ---
@@ -1063,9 +1068,33 @@ Extract `{VERDICT}` from that line and proceed.
 - **Verdict ✅** → check auto-merge conditions:
   - If `{AUTONOMY}` = `semi-auto` AND `{COMPLEXITY}` = `simple` AND `{OUTCOME}` = `Smooth`:
     ```bash
-    gh pr merge --squash --auto {PR_URL}
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|done|Verdict: ✅, merged: auto-merged (semi-auto, simple+Smooth)" >> {LOG_FILE}
-    hb_decision "merge-decision" "fired" "auto-merged" '{"reason":"semi-auto+simple+Smooth","verdict":"✅"}'
+    # Capture stderr for diagnostics on merge failure.
+    # gh pr merge exit codes: 0=merged, 1=generic fail (transient), 2=conflict,
+    # 3=already merged (idempotent), 4=branch protection (transient).
+    _merge_stderr=$(mktemp)
+    if gh pr merge --squash --auto {PR_URL} 2>"$_merge_stderr"; then
+      _merge_rc=0
+    else
+      _merge_rc=$?
+    fi
+    _merge_stderr_head=$(head -5 "$_merge_stderr" 2>/dev/null || echo "(empty)")
+    rm -f "$_merge_stderr"
+
+    if [ "$_merge_rc" -eq 0 ] || [ "$_merge_rc" -eq 3 ]; then
+      # 0 = merged, 3 = already merged (idempotent success)
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|done|Verdict: ✅, merged: auto-merged (semi-auto, simple+Smooth)" >> {LOG_FILE}
+      hb_decision "merge-decision" "fired" "auto-merged" '{"reason":"semi-auto+simple+Smooth","verdict":"✅","rc":'"$_merge_rc"'}'
+    elif [ "$_merge_rc" -eq 2 ]; then
+      # Merge conflict — permanent, needs human intervention
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|merge-decision|fail|merge conflict (exit $_merge_rc): ${_merge_stderr_head}" >> {LOG_FILE}
+      hb_decision "merge-decision" "fail" "merge conflict" "{\"rc\":$_merge_rc}"
+      # Do NOT set MERGED — flow to human-intervention path
+    else
+      # Exit 1 (generic) or 4 (branch protection) — transient, retry-able
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|merge-decision|fail|merge failed (exit $_merge_rc): ${_merge_stderr_head}" >> {LOG_FILE}
+      hb_retry "merge" "fail" "gh pr merge exit $_merge_rc" "{\"rc\":$_merge_rc,\"stderr\":\"${_merge_stderr_head}\"}"
+      # Set {MERGED} = retry — caller should retry with backoff
+    fi
     ```
     Set `{MERGED}` = `auto-merged`.
     ```bash

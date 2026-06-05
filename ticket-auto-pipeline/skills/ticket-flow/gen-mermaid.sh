@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # gen-mermaid.sh — generate a stateDiagram-v2 block from state-machine.json.
 # Outputs only the diagram content (no markdown fence) for embedding.
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SM="$SCRIPT_DIR/state-machine.json"

@@ -1,7 +1,20 @@
 #!/usr/bin/env bash
 # test-spawn-helper.sh — unit tests for lib/spawn-helper.sh
 # Usage: bash test-spawn-helper.sh [test_name_filter]
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
+
+# Reap all child processes on exit. Tests that background pingers and
+# watchdogs use disown, but any residual children from test setup/teardown
+# would otherwise accumulate as zombies.
+_cleanup_test_children() {
+  local _pids
+  _pids=$(jobs -p 2>/dev/null || true)
+  [ -n "$_pids" ] && kill $_pids 2>/dev/null || true
+}
+trap _cleanup_test_children EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"

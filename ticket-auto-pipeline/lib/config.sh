@@ -25,6 +25,11 @@ UAT_TEST_PASSWORD="${UAT_TEST_PASSWORD:-admin}"
 PIPELINE_LOGS_DIR="${PIPELINE_LOGS_DIR:-./logs}"
 SENTINEL_DIR="${SENTINEL_DIR:-./logs}"
 
+# Pipeline log directory scanned by fleet controller. Override when pipeline
+# logs live in a different directory than the fleet controller's own logs.
+# Defaults to PIPELINE_LOGS_DIR, then ./logs as final fallback.
+FLEET_PIPELINE_LOG_DIR="${FLEET_PIPELINE_LOG_DIR:-${PIPELINE_LOGS_DIR:-./logs}}"
+
 # ── Git defaults ──────────────────────────────────────────────────────────────
 
 BASE_BRANCH="${BASE_BRANCH:-develop}"

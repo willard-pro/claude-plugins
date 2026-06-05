@@ -2,7 +2,10 @@
 # test-ticket-dir.sh — unit tests for lib/ticket-dir.sh
 # Covers resolve_ticket_dir and the 3-tier resolve_plan_path fallback chain.
 # Usage: bash test-ticket-dir.sh [test_name_filter]
-set -euo pipefail
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
