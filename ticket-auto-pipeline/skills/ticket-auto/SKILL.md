@@ -347,6 +347,24 @@ After state detection, enter the stateless dispatch loop. Re-run `detect-resume.
 
 ### STEP_1 — Appraise
 
+**Before the agent spawn, claim the ticket immediately** so Linear reflects that work has started. Complexity defaults to `simple` — the appraise agent corrects it in Step 4 when the real score is known. `flow.sh` is idempotent: re-calling with the same params is a no-op.
+
+```bash
+_flow_sh="${HOME}/.claude/skills/ticket-flow/flow.sh"
+[ -f "$_flow_sh" ] || _flow_sh=$(find "${HOME}/.claude/plugins/cache" -name "flow.sh" -path "*/ticket-auto-pipeline/*/skills/ticket-flow/flow.sh" 2>/dev/null | sort | tail -1)
+
+bash "$_flow_sh" "{TICKET-ID}" "appraise-start" --data complexity=simple 2>&1
+_rc=$?
+if [ $_rc -ne 0 ]; then
+  hb_retry "flow-sh" "fail" "flow.sh appraise-start failed (exit ${_rc})" \
+    "{\"trigger\":\"appraise-start\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: appraise-start" >> {LOG_FILE}
+  exit 1
+fi
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|ticket-claimed|info|{TICKET-ID} claimed → Todo" >> {LOG_FILE}
+hb_gate "ticket-claimed" "ok" "ticket claimed — Todo + claimed label + assigned"
+```
+
 ```
 STEP=appraise PHASE=APPRAISE SKILL=/ticket-appraise FROM_STEP={APPRAISE_FROM}
 DESCRIPTION="Investigate the ticket and produce complexity score"
@@ -424,6 +442,12 @@ _outcome_sh="${HOME}/.claude/skills/lib/outcome-label-check.sh"
 bash "$_outcome_sh" "{TICKET_ID}" "{LOG_FILE}"
 ```
 
+Then transition from Ready → Review via implement-complete:
+```bash
+flow_sh=$(find "$HOME/.claude/skills" -name "flow.sh" -path "*/ticket-flow/*" 2>/dev/null | head -1)
+[ -n "$flow_sh" ] && bash "$flow_sh" "{TICKET_ID}" "implement-complete" || true
+```
+
 ### STEP_4_5 — Verify (with retry sub-loop)
 
 The router manages the verify→implement→verify retry loop.
@@ -465,7 +489,7 @@ NEXT_PHASE=PR-REVIEW
 
 ```bash
 # ✅ → proceed to STEP_5 (Document + Wiki)
-# ⚠️ AND ITERATION < 3 → run gate-check.sh --mode reapprove, spawn pr-iterate → implement → outcome-check → verify → loop back to pr-review
+# ⚠️ AND ITERATION < 3 → run gate-check.sh --mode reapprove, spawn pr-iterate → implement → outcome-check → implement-complete → verify → loop back to pr-review
 # ❌ OR ITERATION >= 3 → gate-stop
 ```
 
@@ -534,6 +558,14 @@ fi
 # Condition 2: did the ticket NOT reach a successful outcome?
 if ! grep -q '|META|outcome|info|completed:' "{LOG_FILE}"; then
   NEEDS_RETRO=true
+fi
+# Condition 3: did any heartbeat fallback event fire?
+# Fallback events signal degraded paths — missing tools, unconfigured services,
+# path resolution failures. Even if the pipeline "succeeded," fallbacks mean
+# something is drifting and needs attention.
+if grep -q '|fallback|' "{HB_LOG_FILE}" 2>/dev/null; then
+  NEEDS_RETRO=true
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|drift|warn|drift detected — heartbeat fallback events present" >> "{LOG_FILE}"
 fi
 ```
 

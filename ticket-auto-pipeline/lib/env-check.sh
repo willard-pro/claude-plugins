@@ -234,6 +234,38 @@ if [ "${_MODE:-full}" = "validate" ]; then
   fi
 
   echo ""
+  say "check" "spawn permissions"
+
+  # Check project-level settings first (preferred — scoped to this repo), then user-level
+  PERMS_FOUND=false
+  PERMS_LEVEL=""
+  for SETTINGS_FILE in "$PROJECT_DIR/.claude/settings.json" "$HOME/.claude/settings.json"; do
+    [ -f "$SETTINGS_FILE" ] || continue
+    SPAWN_OK=false
+    HB_OK=false
+    LOGS_OK=false
+    jq -e '.permissions.allow // [] | map(select(. | test("spawn-helper\\.sh"))) | length > 0' "$SETTINGS_FILE" >/dev/null 2>&1 && SPAWN_OK=true
+    jq -e '.permissions.allow // [] | map(select(. | test("heartbeat\\.sh"))) | length > 0' "$SETTINGS_FILE" >/dev/null 2>&1 && HB_OK=true
+    jq -e '.permissions.allow // [] | map(select(. | test("Write.*logs/\\*\\*"))) | length > 0' "$SETTINGS_FILE" >/dev/null 2>&1 && LOGS_OK=true
+    if $SPAWN_OK && $HB_OK && $LOGS_OK; then
+      PERMS_FOUND=true
+      PERMS_LEVEL="$SETTINGS_FILE"
+      break
+    fi
+  done
+
+  if $PERMS_FOUND; then
+    if [[ "$PERMS_LEVEL" == "$PROJECT_DIR/.claude/settings.json" ]]; then
+      pass "Bash(spawn-helper.sh) + Bash(heartbeat.sh) + Write(logs/**) (project-level)"
+    else
+      warn "Bash(spawn-helper.sh) + Bash(heartbeat.sh) + Write(logs/**) (user-level — consider moving to project .claude/settings.json)"
+    fi
+  else
+    fail "spawn permissions not configured" "add Bash(spawn-helper.sh), Bash(heartbeat.sh), Write(logs/**) to project .claude/settings.json"
+    failures=$((failures + 1))
+  fi
+
+  echo ""
   if [ "$failures" -eq 0 ]; then
     echo "${GREEN}${BOLD}All required values present.${RESET}"
     exit 0
@@ -455,6 +487,34 @@ elif ! $START_OK && $STOP_OK; then
   issues=$((issues + 1))
 else
   _var "HOOKS_CONFIGURED" "missing" "" "project .claude/settings.json" "add SubagentStart→token-tracker-start.sh + SubagentStop→token-tracker.sh"
+  issues=$((issues + 1))
+fi
+
+# ── Spawn permissions ────────────────────────────────────────────────────────
+
+SPAWN_OK=false
+HB_OK=false
+LOGS_OK=false
+PERMS_LEVEL=""
+for SETTINGS_FILE in "$PROJECT_DIR/.claude/settings.json" "$HOME/.claude/settings.json"; do
+  [ -f "$SETTINGS_FILE" ] || continue
+  jq -e '.permissions.allow // [] | map(select(. | test("spawn-helper\\.sh"))) | length > 0' "$SETTINGS_FILE" >/dev/null 2>&1 && SPAWN_OK=true
+  jq -e '.permissions.allow // [] | map(select(. | test("heartbeat\\.sh"))) | length > 0' "$SETTINGS_FILE" >/dev/null 2>&1 && HB_OK=true
+  jq -e '.permissions.allow // [] | map(select(. | test("Write.*logs/\\*\\*"))) | length > 0' "$SETTINGS_FILE" >/dev/null 2>&1 && LOGS_OK=true
+  if $SPAWN_OK && $HB_OK && $LOGS_OK; then
+    PERMS_LEVEL="$SETTINGS_FILE"
+    break
+  fi
+done
+
+if $SPAWN_OK && $HB_OK && $LOGS_OK; then
+  if [[ "$PERMS_LEVEL" == "$PROJECT_DIR/.claude/settings.json" ]]; then
+    _var "SPAWN_PERMISSIONS" "ok" "spawn-helper + heartbeat + logs/**" "project .claude/settings.json" ""
+  else
+    _var "SPAWN_PERMISSIONS" "warn" "spawn-helper + heartbeat + logs/**" "~/.claude/settings.json" "permissions fire globally — consider moving to project .claude/settings.json"
+  fi
+else
+  _var "SPAWN_PERMISSIONS" "missing" "" "project .claude/settings.json" "add Bash(spawn-helper.sh), Bash(heartbeat.sh), Write(logs/**)"
   issues=$((issues + 1))
 fi
 

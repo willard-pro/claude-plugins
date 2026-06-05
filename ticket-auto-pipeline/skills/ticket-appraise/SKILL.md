@@ -419,7 +419,9 @@ Answer each question below with specific file paths and line numbers. If you can
 
 ## Step 4 — Update ticket in Linear
 
-Delegate to the flow executor:
+When called via `/ticket-auto`, the ticket was already claimed (Backlog → Todo + `claimed`) before the appraise agent spawned. This call is a **corrective idempotent pass** — it ensures the complexity label matches the actual investigation result. When called standalone (not via ticket-auto), this is the initial claim.
+
+Delegate to the flow executor (safe to re-call — `flow.sh` skips if nothing changed):
 
 ```
 /ticket-flow {TICKET-ID} appraise-start --data complexity={simple|complex}
@@ -431,7 +433,7 @@ if [ "$_rc" -ne 0 ]; then
 fi
 ```
 
-This sets state → `Todo`, assignee → `me`, and adds `claimed` + the complexity label in a single atomic call.
+This sets state → `Todo`, assignee → `me`, and adds `claimed` + the complexity label. If the ticket was already claimed by the router, only the complexity label is corrected (if different from the default `simple`).
 
 ---
 
