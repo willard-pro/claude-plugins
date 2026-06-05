@@ -100,7 +100,7 @@ if [ -f "$SENTINEL" ] && ! $FORCE; then
   stored_hash=$(grep '^sm_hash=' "$SENTINEL" | cut -d= -f2 || true)
   if [ "$stored_hash" = "$SM_HASH" ]; then
     echo "sentinel-valid: team=$TEAM_NAME hash=$SM_HASH"
-    _plog "$LOG_FILE" "META" "preflight" "skip" "sentinel-valid"
+    _plog "${LOG_FILE:-}" "META" "preflight" "skip" "sentinel-valid"
     exit 0
   fi
 fi
@@ -188,6 +188,6 @@ states=${states_found}
 labels=${labels_found}
 EOF
 
-_plog "$LOG_FILE" "META" "preflight" "ok" "${states_found}/${total_states} states, ${labels_found}/${total_labels} labels"
+_plog "${LOG_FILE:-}" "META" "preflight" "ok" "${states_found}/${total_states} states, ${labels_found}/${total_labels} labels"
 
 exit 0
