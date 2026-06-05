@@ -1,6 +1,15 @@
 # Pipeline Skill Preamble (--from-auto)
 
-Trimmed preamble for ticket-auto-pipeline sub-agents launched with `--from-auto`. This is a SUBSET of `lib/skill-preamble.md` — keep in sync. Sections excluded (handled by the orchestrator): guard, project context detection, step dispatch, task tracker.
+Trimmed preamble for ticket-auto-pipeline sub-agents launched with `--from-auto`. This is a SUBSET of `lib/skill-preamble.md` — keep in sync. Sections excluded (handled by the thin router): guard, project context detection, step dispatch, task tracker.
+
+### Architecture note: Thin Router
+
+The orchestrator (`ticket-auto`) is now a **thin stateless dispatch router** — it reads pipeline log state via `detect-resume.sh`, dispatches to the correct phase agent or bash gate, waits for completion, and re-reads state. Key properties:
+
+- **No inline LLM reasoning between phases** — every conditional is a bash comparison
+- **Bash gates** (`gate-check.sh`, `outcome-label-check.sh`) run deterministically between agent spawns — no Claude agent for gate decisions
+- **Router-managed loops** — verify retry (up to 3 attempts) and PR iteration (up to 3 cycles) are managed by the router tracking counters from the pipeline log
+- **Fresh context per phase** — each agent spawns in an isolated session with clean context; the router does not accumulate phase output in working memory
 
 ## Parameters
 
