@@ -127,7 +127,7 @@ fleet_monitor_cycle() {
         # KILL+RESTART
         if fleet_restart_pipeline "$tid" "auto-restart" "$workspace" 2>/dev/null; then
           # Scan for fresh restart-intent markers
-          if grep -q "META|fleet-restart-marker|info|restart-intent" "${workspace}/${tid}-pipeline.log" 2>/dev/null; then
+          if command grep -q "META|fleet-restart-marker|info|restart-intent" "${workspace}/${tid}-pipeline.log" 2>/dev/null; then
             fl_write "INFO" "monitor" "Spawning restart for ${tid}"
             _spawn_restart "$tid" "auto-restart" 0
           fi
