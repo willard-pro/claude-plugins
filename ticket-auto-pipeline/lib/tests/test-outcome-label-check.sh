@@ -26,9 +26,9 @@ _run() {
 
 # ── Mock framework ──────────────────────────────────────────────────────────────
 
-_ws=""         # workspace dir
-_tid=""        # ticket ID
-_flow_log=""   # tracks flow.sh calls
+_ws=""       # workspace dir
+_tid=""      # ticket ID
+_flow_log="" # tracks flow.sh calls
 _fake_issue="null"
 
 _setup() {
@@ -53,7 +53,7 @@ _install_mocks() {
   _resolve_flow_sh() { echo "${_ws}/mock-flow.sh"; }
   FLOW_SH="${_ws}/mock-flow.sh"
 
-  cat > "${_ws}/mock-flow.sh" << FLOWEOF
+  cat >"${_ws}/mock-flow.sh" <<FLOWEOF
 #!/usr/bin/env bash
 echo "flow-sh-called|\$*" >> "${_ws}/flow-calls.log"
 exit 0
@@ -66,7 +66,7 @@ FLOWEOF
 _plog_raw() {
   local phase="$1" step="$2" status="$3" msg="$4"
   local iso="${5:-2026-06-05T10:00:00Z}"
-  echo "${iso}|${phase}|${step}|${status}|${msg}" >> "$LOG_FILE"
+  echo "${iso}|${phase}|${step}|${status}|${msg}" >>"$LOG_FILE"
 }
 
 # ── Source outcome-label-check.sh ──────────────────────────────────────────────
@@ -89,8 +89,14 @@ test_outcome_smooth_present_exits_0() {
   flow_calls=$(cat "$_flow_log" 2>/dev/null || true)
 
   _teardown
-  [ "$rc" -eq 0 ] || { echo "expected exit 0, got $rc"; return 1; }
-  [ -z "$flow_calls" ] || { echo "flow.sh should not be called"; return 1; }
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0, got $rc"
+    return 1
+  }
+  [ -z "$flow_calls" ] || {
+    echo "flow.sh should not be called"
+    return 1
+  }
 }
 
 # 2. Rough label already present → exit 0, no flow.sh call
@@ -103,7 +109,10 @@ test_outcome_rough_present_exits_0() {
   local rc=$?
 
   _teardown
-  [ "$rc" -eq 0 ] || { echo "expected exit 0, got $rc"; return 1; }
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0, got $rc"
+    return 1
+  }
 }
 
 # 3. Hard label already present → exit 0, no flow.sh call
@@ -116,7 +125,10 @@ test_outcome_hard_present_exits_0() {
   local rc=$?
 
   _teardown
-  [ "$rc" -eq 0 ] || { echo "expected exit 0, got $rc"; return 1; }
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0, got $rc"
+    return 1
+  }
 }
 
 # 4. Label missing → calls flow.sh implement-outcome
@@ -131,9 +143,18 @@ test_outcome_label_missing_calls_flow() {
   flow_calls=$(cat "$_flow_log" 2>/dev/null || true)
 
   _teardown
-  [ "$rc" -eq 0 ] || { echo "expected exit 0, got $rc"; return 1; }
-  echo "$flow_calls" | grep -q "implement-outcome" || { echo "flow.sh implement-outcome not called"; return 1; }
-  echo "$flow_calls" | grep -q "outcome=Rough" || { echo "outcome=Rough not found in flow.sh args"; return 1; }
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0, got $rc"
+    return 1
+  }
+  echo "$flow_calls" | grep -q "implement-outcome" || {
+    echo "flow.sh implement-outcome not called"
+    return 1
+  }
+  echo "$flow_calls" | grep -q "outcome=Rough" || {
+    echo "outcome=Rough not found in flow.sh args"
+    return 1
+  }
 }
 
 # 5. Outcome read from pipeline log
@@ -148,8 +169,14 @@ test_outcome_read_from_pipeline_log() {
   flow_calls=$(cat "$_flow_log" 2>/dev/null || true)
 
   _teardown
-  [ "$rc" -eq 0 ] || { echo "expected exit 0, got $rc"; return 1; }
-  echo "$flow_calls" | grep -q "outcome=Smooth" || { echo "outcome=Smooth not found in flow.sh args"; return 1; }
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0, got $rc"
+    return 1
+  }
+  echo "$flow_calls" | grep -q "outcome=Smooth" || {
+    echo "outcome=Smooth not found in flow.sh args"
+    return 1
+  }
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════

@@ -180,8 +180,11 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   shift 3 2>/dev/null || true
   while [ $# -gt 0 ]; do
     case "$1" in
-      --mode) MODE="$2"; shift 2 ;;
-      *) usage ;;
+    --mode)
+      MODE="$2"
+      shift 2
+      ;;
+    *) usage ;;
     esac
   done
 
@@ -196,8 +199,8 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   hb_init
 
   case "$MODE" in
-    entry)    _gate_entry ;;
-    reapprove) _gate_reapprove ;;
-    *)        usage ;;
+  entry) _gate_entry ;;
+  reapprove) _gate_reapprove ;;
+  *) usage ;;
   esac
 fi
