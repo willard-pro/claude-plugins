@@ -87,6 +87,14 @@ FLEET_AUTO_RESTART="${FLEET_AUTO_RESTART:-false}"
 # empty to disable the filter, not set it to 0.
 FLEET_MAX_LOG_AGE_HOURS="${FLEET_MAX_LOG_AGE_HOURS:-}"
 
+# Tool error capture — dedup window in seconds. Same tool+error_type on the
+# same ticket within this window produces at most one log entry.
+TOOL_ERROR_DEDUP_WINDOW="${TOOL_ERROR_DEDUP_WINDOW:-300}"
+
+# Tool error detector — dedup window in seconds. Errors with the same
+# TOOL_NAME|ERROR_TYPE key separated by less than this window count as one.
+FLEET_TOOL_ERROR_WINDOW="${FLEET_TOOL_ERROR_WINDOW:-300}"
+
 # ── Conventions for lib/ scripts ────────────────────────────────────────────────
 # Temp files: always pair mktemp with trap cleanup:
 #   TEMP_FILE=$(mktemp)

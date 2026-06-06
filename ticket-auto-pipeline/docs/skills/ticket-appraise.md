@@ -1,51 +1,67 @@
 # ticket-appraise
 
-> Investigation planner for a Linear ticket. Fetches the issue, creates the local directory structure, runs a complexity sweep, searches prior art, and traces the full codebase call chain. Writes findings to notes.md.
+> Investigation planner for a Linear ticket. Fetches the issue, creates the local directory structure, runs a complexity sweep, searches prior art, and traces the full codebase call chain. Writes findings to notes.md. Use when the user says "appraise ticket <ID>", "/ticket-appraise <ID>", or "take on ticket <ID>". After this completes, run /ticket-appraise-exec to create artifacts and update Linear.
 
 ## What it does
 
-`ticket-appraise` is the investigation phase of the pipeline. It fetches the Linear ticket, sets up the local workspace, scores the ticket's complexity across multiple axes (blast radius, prior art, interdependency), and traces the relevant call chains in the codebase. All findings are written to `notes.md` in the ticket's workspace directory. It does not touch Linear state — that is handled by the subsequent `/ticket-appraise-exec`.
+Investigates a Linear ticket end-to-end before any code is written. Sets up the local workspace via ticket-setup, scores complexity on three axes (multi-service, cross-layer, prior rejection), searches claude-mem and local tickets for prior art, runs a readiness critique, performs GitNexus blast-radius analysis, and traces the full codebase call chain. All findings are written to notes.md for the executor phase to consume.
 
 ## Trigger
 
-**Slash command:** `/ticket-appraise <TICKET-ID>`
+**Slash command:** `/ticket-appraise <ID>`
 
-**Natural language:** "appraise ticket WIL-42", "take on ticket WIL-42", "investigate WIL-42"
+**Natural language:** appraise ticket <ID>, take on ticket <ID>
 
 ## Inputs
 
 | Input | Source | Required |
 |-------|--------|----------|
 | Ticket ID | CLI argument | Yes |
-| `LINEAR_API_KEY` | Environment variable | Yes |
-| `REPOS_ROOT` | CLAUDE.md field | Yes |
-| `ISSUE_PREFIX` | CLAUDE.md field | Yes |
-| `WIKI_ROOT` | CLAUDE.md field | No (falls back to default path) |
+| LINEAR_API_KEY | Environment variable | Yes |
+| REPOS_ROOT | CLAUDE.md | Yes |
+| ISSUE_PREFIX | CLAUDE.md | Yes |
+| BE_SERVICES | CLAUDE.md | No |
+| WIKI_ROOT | CLAUDE.md | No |
+| --from-auto flag | CLI (set by ticket-auto) | No |
+| --from-step flag | CLI (crash recovery) | No |
 
 ## Outputs / Artifacts
 
 | Artifact | Location | Description |
 |----------|----------|-------------|
-| `notes.md` | `tickets/<ID>--slug/` | Full investigation findings: complexity score, prior art, codebase trace, regression verdict |
-| `context.md` | `tickets/<ID>--slug/` | Raw ticket data (title, description, acceptance criteria, comments) |
+| notes.md | {ticket-dir}/notes.md | Complexity score, initial investigation, prior art, blast radius, open questions |
+| context.md | {ticket-dir}/context.md | Ticket metadata snapshot (via ticket-setup) |
+| Complexity label | Linear | simple or complex label applied |
+| Pipeline log entries | $LOG_FILE | Phase progress tracked at step boundaries |
 
 ## How it works
 
 ```mermaid
 flowchart TD
-    A([Start]) --> B[Setup workspace\nticket-setup]
-    B --> C[Complexity sweep\nscore 8 axes\nresult: simple or complex]
-    C --> D[Prior art search\npast tickets + PRs]
-    D --> E[Codebase investigation\ncall chain trace]
-    E --> F[Regression check\nblast radius]
-    F --> G[Critique check\nticket-critique]
-    G --> H[Write notes.md\nfindings + complexity score]
-    H --> I([Done — run /ticket-appraise-exec])
+    A[Start: /ticket-appraise] --> B[Step 1: ticket-setup]
+    B --> C{Workspace exists?}
+    C -->|Yes| R[Resume mode]
+    C -->|No| D[Step 2: Expand notes.md]
+    D --> E[Step 2.5: Complexity sweep]
+    E --> F{2+ axes fire?}
+    F -->|No| G[Step 2.6: Prior-art search]
+    F -->|Yes| G
+    G --> H[Step 2.7: Readiness critique]
+    H --> I{BLOCKED?}
+    I -->|Yes| STOP[Stop: needs-info]
+    I -->|No| J[Step 2.8: Blast radius]
+    J --> K{Complexity}
+    K -->|simple| L[Step 3: Inline trace]
+    K -->|complex| M[Step 3-Agent: Explore subagent]
+    L --> N[Step 4: Update Linear]
+    M --> N
+    N --> O[Step 5: Handoff]
+    R --> O
 ```
 
 ## Related skills
 
-- [`/ticket-appraise-exec`](ticket-appraise-exec.md) — must run after this to create artifacts and update Linear
-- [`/ticket-setup`](ticket-setup.md) — called internally at Step 1 to create the workspace
-- [`/ticket-critique`](ticket-critique.md) — called internally at Step 2.7 to validate ticket completeness
-- [`/ticket-auto`](ticket-auto.md) — orchestrator that drives this skill automatically
+- [`/ticket-appraise-exec`](ticket-appraise-exec.md) — creates artifacts from appraisal findings
+- [`/ticket-setup`](ticket-setup.md) — workspace scaffolding (called internally at Step 1)
+- [`/ticket-critique`](ticket-critique.md) — readiness validation (called at Step 2.7)
+- [`/ticket-flow`](ticket-flow.md) — Linear state transitions (called at Step 4)

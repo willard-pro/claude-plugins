@@ -1,6 +1,6 @@
 {
   "name": "ticket-auto-pipeline",
-  "version": "0.12.6",
+  "version": "0.12.7",
   "description": "Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. Includes 20+ slash commands, state-machine-driven flow control, safety gates, and retrospective analysis.",
   "author": {
     "name": "John Willard"
@@ -83,6 +83,18 @@
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/token-tracker.sh",
             "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/tool-error-capture.sh",
+            "timeout": 3
           }
         ]
       }

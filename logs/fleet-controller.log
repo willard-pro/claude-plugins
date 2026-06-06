@@ -1,0 +1,19 @@
+2026-06-03T20:03:28Z|META|schema|info|1
+2026-06-03T20:03:28Z|INFO|detect|Starting detection cycle
+2026-06-03T20:03:28Z|INFO|detect|Detection cycle complete (duration_ms=8, pipelines=0)
+2026-06-03T20:03:28Z|INFO|detect|Starting detection cycle
+2026-06-03T20:03:28Z|INFO|detect|Detection cycle complete (duration_ms=8, pipelines=0)
+2026-06-03T20:03:28Z|INFO|detect|Starting detection cycle
+2026-06-03T20:03:28Z|INFO|detect|Detection cycle complete (duration_ms=26, pipelines=1)
+2026-06-03T20:03:28Z|INFO|detect|Starting detection cycle
+2026-06-03T20:03:28Z|INFO|detect|Detection cycle complete (duration_ms=31, pipelines=1)
+2026-06-03T20:03:28Z|INFO|detect|Starting detection cycle
+2026-06-03T20:03:28Z|INFO|detect|Detection cycle complete (duration_ms=5, pipelines=0)
+2026-06-03T20:03:28Z|INFO|detect|Starting detection cycle
+2026-06-03T20:03:28Z|INFO|detect|Detection cycle complete (no workspace)
+2026-06-03T20:03:29Z|INFO|detect|Starting detection cycle
+2026-06-03T20:03:29Z|INFO|detect|Detection cycle complete (duration_ms=7, pipelines=0)
+2026-06-03T20:03:29Z|INFO|detect|Starting detection cycle
+2026-06-03T20:03:29Z|INFO|detect|Detection cycle complete (duration_ms=77, pipelines=3)
+2026-06-03T20:03:29Z|INFO|detect|Starting detection cycle
+2026-06-03T20:03:29Z|INFO|detect|Detection cycle complete (duration_ms=30, pipelines=1)

@@ -1,50 +1,50 @@
 # app-knowledge
 
-> Reference knowledge base for app business rules, user roles, UI behaviour, and system conventions. A lookup reference — not an interactive skill.
+> Reference knowledge base for Credit Network app business rules, user roles, UI behaviour, and system conventions. Use this as a lookup when browsing the site via Playwright or when reasoning about role-based behaviour. Not an interactive skill -- read this file directly when you need context about how the app works. Companion: /nav-hints for click-by-click navigation paths.
 
 ## What it does
 
-`app-knowledge` is a living reference file rather than an interactive skill — agents read it directly to look up domain facts rather than invoking it as a command. It records business rules, user role definitions, UI behaviour patterns, and system conventions discovered during Playwright sessions and ticket work. Instead of re-deriving the same "what does this role see?" or "what does this field mean?" logic on every ticket, agents consult this file first. New learnings get appended to the relevant section over time so the file grows more useful with each ticket processed.
+Provides a living reference of business rules, user role profiles, handover state mappings, navigation patterns, and role-based UI rules for the Credit Network application. Used by ticket-verify and ticket-reproduce as a lookup to interpret Playwright snapshots correctly and to derive navigation without guessing. Documents confirmed behaviours with source ticket references, known quirks (like the intermittent nav bar bug), and environment URLs.
 
-## How to use
+## Trigger
 
-Read the file directly when you need domain context — no slash command required:
+**Slash command:** None -- read the SKILL.md file directly as a reference lookup.
 
-```bash
-cat ~/.claude/skills/app-knowledge/SKILL.md
-```
-
-To add a new learning, append it under the relevant section at the bottom.
-
-Referenced automatically by: `/ticket-verify`, `/ticket-reproduce`.
+**Natural language:** (loaded automatically by ticket-verify and ticket-reproduce)
 
 ## Inputs
 
 | Input | Source | Required |
 |-------|--------|----------|
-| N/A | This skill is read-only reference material | — |
+| (none) | Read-only reference file | N/A |
 
 ## Outputs / Artifacts
 
 | Artifact | Location | Description |
 |----------|----------|-------------|
-| N/A | — | No active output; content is the artifact |
+| (none) | Read-only | Knowledge is consumed in-memory by calling skills |
 
 ## How it works
 
 ```mermaid
 flowchart TD
-    A([Agent needs domain knowledge]) --> B[Read app-knowledge/SKILL.md\ndirectly]
-    B --> C{Knowledge found?}
-    C -- yes --> D[Apply to current task\nrole / behaviour / convention]
-    C -- no --> E[Derive from Playwright\nobservation]
-    E --> F[Append new learning\nto app-knowledge]
-    D --> G([Continue task])
-    F --> G
+    A[Skill loaded by caller] --> B[Environments table]
+    A --> C[User Roles and Profiles]
+    A --> D[Handover States]
+    A --> E[Navigation Patterns]
+    A --> F[Role-Based UI Rules]
+    A --> G[Known Quirks]
+    B --> H{Caller context}
+    C --> H
+    D --> H
+    E --> H
+    F --> H
+    G --> H
+    H --> I[Caller uses matching rules]
 ```
 
 ## Related skills
 
-- [`/nav-hints`](nav-hints.md) — click-by-click navigation companion
-- [`/ticket-verify`](ticket-verify.md) — primary consumer during UAT sessions
-- [`/ticket-reproduce`](ticket-reproduce.md) — reads app-knowledge during bug reproduction
+- [`/nav-hints`](nav-hints.md) -- click-by-click navigation paths (companion reference)
+- [`/ticket-verify`](ticket-verify.md) -- uses app-knowledge to interpret snapshots and navigate
+- [`/ticket-reproduce`](ticket-reproduce.md) -- uses app-knowledge to derive reproduction steps

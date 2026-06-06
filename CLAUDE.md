@@ -29,9 +29,9 @@ ticket-auto-pipeline/
 
 Skills are Claude Code `.md` files with YAML frontmatter. Claude Code runs them as slash commands. There are two categories:
 
-**Pipeline skills** (the core workflow): `ticket-auto` (orchestrator), `ticket-appraise` (investigation + complexity scoring), `ticket-appraise-exec` (artifact creation), `ticket-implement` (code changes), `ticket-verify` (Playwright UAT), `ticket-flow` (state/label mutations), `ticket-pr-review`, `ticket-pr-iterate`, `ticket-setup`, `ticket-retro`.
+**Pipeline skills** (the core workflow): `ticket-auto` (thin stateless dispatch router), `ticket-appraise` (investigation + complexity scoring), `ticket-appraise-exec` (artifact creation), `ticket-implement` (code changes), `ticket-verify` (Playwright UAT), `ticket-flow` (state/label mutations), `ticket-pr-review`, `ticket-pr-iterate`, `ticket-setup`, `ticket-retro`.
 
-**Support skills**: `ticket-critique`, `ticket-detect-resume`, `ticket-document`, `ticket-overseer`, `ticket-fleet-controller`, `ticket-batch-appraise`, `ticket-batch-verify`, `ticket-reproduce`, `wiki-maintenance`, `nav-hints`, `app-knowledge`.
+**Support skills**: `ticket-critique`, `ticket-detect-resume`, `ticket-document`, `ticket-overseer`, `ticket-fleet-controller`, `ticket-batch-appraise`, `ticket-batch-verify`, `ticket-reproduce`, `ticket-gate-reconcile`, `wiki-maintenance`, `nav-hints`, `app-knowledge`.
 
 ## Plan/file name matching — no guessing
 
@@ -47,6 +47,9 @@ All Linear API mutations flow through `flow.sh` (the `ticket-flow` skill executo
 - `ticket-dir.sh` — `resolve_ticket_dir <ID>` finds workspace directories matching `{ID}--slug`.
 - `validate-env.sh` — Validates `LINEAR_API_KEY`, `GITHUB_PERSONAL_ACCESS_TOKEN`, and CLAUDE.md fields (`REPOS_ROOT`, `LOCAL_URL`, `UAT_URL`, optional `BE_TEST_CMD`, `SLACK_CHANNEL`, `WIKI_ROOT`).
 - `notes-parse.sh` — Extracts complexity score from `notes.md` `## Complexity` section.
+- `gate-check.sh` — Deterministic bash gate logic (entry + reapprove modes). Replaces inline LLM reasoning at the gate step.
+- `outcome-label-check.sh` — Bash-only post-implement guard for Smooth/Rough/Hard outcome label.
+- `detect-resume.sh` — Pipeline log state parser. Called directly as bash by the thin router (not via Claude skill spawn). Outputs 19 routing variables.
 
 ## Pipeline log format
 
@@ -54,9 +57,11 @@ Pipe-delimited: `ISO|PHASE|STEP|STATUS|MSG`. Statuses: `start`, `done`, `fail`, 
 
 ## Key design decisions
 
-- **Crash recovery**: `ticket-detect-resume` reads the pipeline log to find the last completed step and resumes from there. The log is the checkpoint mechanism.
-- **Sub-agent isolation**: The orchestrator spawns `general-purpose` agents for each phase. Agents write progress entries directly to `$LOG_FILE`. Each agent spawn is bracketed by a `|waiting|`/`|done|` pair the orchestrator writes.
+- **Crash recovery**: `detect-resume.sh` reads the pipeline log to find the last completed step. The thin router calls it directly as bash (no Claude agent spawn) and resumes from there. The log is the checkpoint mechanism.
+- **Sub-agent isolation**: The thin router spawns named agent types (`ticket-appraise-agent`, `ticket-implement-agent`, `ticket-verify-agent`, `ticket-pr-review-agent`, `ticket-maintenance-agent`, `ticket-gate-reconcile-agent`) for each phase. Each agent runs in a fresh isolated session with clean context. Agents write progress entries directly to `$LOG_FILE`. Each agent spawn is bracketed by a 3-step pattern: `spawn_agent_pre` → agent spawn → `spawn_capture` → `spawn_agent_post`.
+- **Bash gates**: Gate decisions (artifact existence, complexity coherence, autonomy routing, outcome labels) are deterministic bash scripts — zero Claude agent involvement, zero tokens burned on deterministic comparisons.
+- **Router-managed retry loops**: Verify retry (max 3) and PR iteration (max 3) are managed by the router tracking counters from the pipeline log. Each iteration spawns a fresh agent with clean context.
 - **Complexity gating**: Simple tickets auto-approve in `auto`/`semi-auto` mode. Complex tickets always gate (require human `approved` label). The `manual` mode gates everything.
-- **Phase context file**: Before each agent spawn, the orchestrator writes `echo "PHASE|{LOG_FILE}" > /tmp/ticket-auto-{ID}-ctx.txt` so the token-tracker hook knows which phase is active.
+- **Phase context file**: Before each agent spawn, the router writes both a ctx file (`/tmp/ticket-auto-{ID}-ctx.txt`) and a spawn-meta file (`/tmp/ticket-auto-{ID}-spawn-meta.txt`). The token-tracker hook reads PHASE from the spawn-meta file (stable per-spawn snapshot) with fallback to the ctx file (legacy).
 - **Post-trigger assertions**: After every Linear mutation, `flow.sh` re-fetches the issue and asserts the state/labels match expectations. Mismatch → exit 7 with `STATE_ASSERTION_FAILED`.
 - **Idempotency**: `flow.sh` computes the desired end state from current + adds - removes. If nothing would change, it exits 0 without a mutation call.
