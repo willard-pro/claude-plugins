@@ -85,7 +85,7 @@ TRACE
 
 ## Step 2 — State already set
 
-Ticket was already moved to `Todo` with `claimed` label and `assignee: "me"` by `ticket-appraise`. No action needed — proceed to Step 3.
+Ticket was already moved to `Todo` with `claimed` label and `assignee: "me"` by the router (or `ticket-appraise` when run standalone). No action needed — proceed to Step 3.
 
 ---
 

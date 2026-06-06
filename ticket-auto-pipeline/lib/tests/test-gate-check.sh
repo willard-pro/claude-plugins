@@ -116,6 +116,24 @@ _scaffold_exec_done() {
   fi
 }
 
+# Like _scaffold_exec_done but omits META|artifact|info|plan: and writes
+# EXEC|create-artifact|done| instead of EXEC|exec|done| — matching the actual
+# ticket-appraise-exec log format. Exercises the fallback path in _get_artifact_path.
+_scaffold_no_meta_artifact() {
+  local complexity="${1:-simple}"
+  local autonomy="${2:-auto}"
+  local artifact_type="${3:-simple-fix}"
+
+  _fake_complexity="$complexity"
+
+  _plog_raw "META" "schema" "info" "1"
+  _plog_raw "META" "title" "info" "ID:${_tid} -- Test Ticket"
+  _plog_raw "META" "autonomy" "info" "${autonomy}"
+  _plog_raw "APPRAISE" "appraise" "done" "complexity=${complexity}"
+  # No META|artifact|info|plan: — forces fallback to EXEC|create-artifact|done|
+  _plog_raw "EXEC" "create-artifact" "done" "${artifact_type}"
+}
+
 # ── Source gate-check.sh (its main is guarded, functions load into this shell) ──
 
 source "$LIB_DIR/gate-check.sh"
@@ -299,6 +317,28 @@ test_entry_artifact_path_from_log() {
   }
 }
 
+# 10b. Artifact path fallback — only EXEC|create-artifact|done|, no META|artifact
+test_entry_artifact_path_fallback_from_create_artifact() {
+  _setup
+  # Scaffold WITHOUT the META|artifact entry — only EXEC|create-artifact|done|
+  _scaffold_no_meta_artifact "simple" "auto" "simple-fix"
+
+  # Create the artifact file at the ticket dir path that resolve_ticket_dir returns
+  local td
+  td=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || echo "$_ws")
+  mkdir -p "$td" 2>/dev/null || true
+  touch "$td/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  _teardown
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0, got $rc"
+    return 1
+  }
+}
+
 # 11. Fleet-detect format: held log entry matches |GATE|gate|fail|held:
 test_entry_fleet_detect_format() {
   _setup
@@ -404,6 +444,7 @@ for fn in \
   test_entry_autonomy_from_log \
   test_entry_complexity_from_notes \
   test_entry_artifact_path_from_log \
+  test_entry_artifact_path_fallback_from_create_artifact \
   test_entry_fleet_detect_format \
   test_reapprove_approved_and_ready_passes \
   test_reapprove_label_missing_gate_stop \

@@ -1,52 +1,69 @@
 # ticket-appraise-exec
 
-> Artifact creator and Linear updater for an appraised ticket. Reads notes.md, creates the plan artifact, updates Linear state and complexity label, and posts a summary comment.
+> Artifact executor for a Linear ticket that has already been investigated by /ticket-appraise. Reads the complexity score from notes.md, creates either simple-fix.md or an openspec change, assigns the ticket in Linear, posts the appraisal comment, and moves to Approve state. Run after /ticket-appraise has fully populated notes.md.
 
 ## What it does
 
-`ticket-appraise-exec` is the second half of the appraisal phase. It picks up where `/ticket-appraise` left off: reads the completed `notes.md`, determines the artifact type (simple-fix or openspec plan), writes the plan file to the ticket workspace, transitions Linear to the `Appraised` state, applies the correct complexity label, and posts a summary comment to the issue. This skill is the bridge between investigation and approval/implementation.
+Consumes the investigation findings from notes.md and produces the implementation artifact. For simple tickets it writes a concrete simple-fix.md with affected files and step-by-step instructions. For complex tickets it spawns an openspec change via `/opsx:propose`. Runs a regression guard to cross-reference the plan against prior art, and for complex tickets spawns an adversarial review agent to find gaps before implementation begins. Posts a summary comment to Linear and moves the ticket to the Approve state.
 
 ## Trigger
 
-**Slash command:** `/ticket-appraise-exec <TICKET-ID>`
+**Slash command:** `/ticket-appraise-exec <ID>`
 
-**Natural language:** "exec appraise for WIL-42", "create artifacts for WIL-42" (typically called by `/ticket-auto` or right after `/ticket-appraise`)
+**Natural language:** (called after /ticket-appraise completes)
 
 ## Inputs
 
 | Input | Source | Required |
 |-------|--------|----------|
 | Ticket ID | CLI argument | Yes |
-| `notes.md` | Ticket workspace (written by ticket-appraise) | Yes |
-| `LINEAR_API_KEY` | Environment variable | Yes |
-| `ISSUE_PREFIX` | CLAUDE.md field | Yes |
+| notes.md | {ticket-dir}/notes.md | Yes (must contain ## Complexity with Score) |
+| context.md | {ticket-dir}/context.md | Yes |
+| LINEAR_API_KEY | Environment variable | Yes |
+| REPOS_ROOT | CLAUDE.md | Yes |
+| BE_SERVICES | CLAUDE.md | No |
+| --from-auto flag | CLI (set by ticket-auto) | No |
+| --from-step flag | CLI (crash recovery) | No |
 
 ## Outputs / Artifacts
 
 | Artifact | Location | Description |
 |----------|----------|-------------|
-| Plan artifact | `tickets/<ID>--slug/simple-fix.md` or `plan.md` | Implementation blueprint (simple-fix or openspec format) |
-| Linear state | Linear issue | Transitioned to `Appraised` |
-| Complexity label | Linear issue | `complexity:simple` or `complexity:complex` applied |
-| Linear comment | Linear issue | Summary of findings and next steps |
+| simple-fix.md | {ticket-dir}/simple-fix.md | Implementation plan for simple tickets |
+| openspec change | openspec/changes/{name}/ | Design, tasks, and specs for complex tickets |
+| Adversarial review | notes.md (## Adversarial Review) | Gap analysis from adversarial agent (complex only) |
+| Regression risk table | notes.md (## Regression Risk) | Conflict detection against prior art |
+| Linear comment | Linear ticket | Appraisal summary posted to ticket |
+| Linear state | Linear | Ticket moved to Approve + claimed |
 
 ## How it works
 
 ```mermaid
 flowchart TD
-    A([Start]) --> B[Read notes.md\ncomplexity score]
-    B --> C{Artifact type}
-    C -- simple --> D[Write simple-fix.md\nproblem + solution steps]
-    C -- complex --> E[Write plan.md\nopenspec format]
-    D --> F[ticket-flow: Appraised\n+ complexity label]
-    E --> F
-    F --> G[Post Linear comment\nfindings summary]
-    G --> H([Done])
+    A[Start: /ticket-appraise-exec] --> B[Step 1: Load workspace]
+    B --> C{## Complexity in notes.md?}
+    C -->|No| STOP1[Stop: run ticket-appraise first]
+    C -->|Yes| D[Step 3: Create artifact]
+    D --> E{COMPLEXITY}
+    E -->|simple| F[Write simple-fix.md]
+    E -->|complex| G[Spawn openspec change]
+    F --> H[Step 3.4: Coherence gate]
+    G --> H
+    H --> I{Artifact matches complexity?}
+    I -->|No| STOP2[Gate-stop: MISMATCH]
+    I -->|Yes| J[Step 3.5: Regression guard]
+    J --> K{COMPLEXITY}
+    K -->|complex| L[Step 3.6: Adversarial review]
+    K -->|simple| M[Step 4: Re-appraisal check]
+    L --> N{BLOCKED?}
+    N -->|Yes| STOP3[Gate-stop: ADVERSARIAL_BLOCKED]
+    N -->|No| M
+    M --> O[Step 5: Post Linear comment]
+    O --> P[Step 6: Set Approve state]
 ```
 
 ## Related skills
 
-- [`/ticket-appraise`](ticket-appraise.md) — must run first to populate notes.md
-- [`/ticket-flow`](ticket-flow.md) — handles all Linear state and label mutations
-- [`/ticket-implement`](ticket-implement.md) — next step after approval
-- [`/ticket-auto`](ticket-auto.md) — orchestrator that drives this skill automatically
+- [`/ticket-appraise`](ticket-appraise.md) — investigation phase (must run first)
+- [`/ticket-flow`](ticket-flow.md) — state transitions (called at Step 6)
+- [`/ticket-implement`](ticket-implement.md) — consumes the artifact produced here

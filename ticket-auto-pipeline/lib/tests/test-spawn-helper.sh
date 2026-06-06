@@ -32,6 +32,11 @@ _run() {
     echo "FAIL: $name"
     ((FAIL++)) || true
   fi
+  # Clean up any background processes the test may have left behind.
+  # Watchdog tests spawn disowned loops; racer tests fork kill-file writers.
+  # Accumulated stale processes cause later tests to hang or false-fail.
+  _cleanup_test_children
+  sleep 0.05 2>/dev/null || true
 }
 
 # ── mocks ──────────────────────────────────────────────────────────────────────
@@ -491,7 +496,7 @@ test_pre_duplicate_waiting_suppressed() {
   spawn_agent_pre PHASE=TEST STEP=test_step TICKET_ID=TEST-DUP \
     SKILL=/ticket-test LOG_FILE="$log_file" >/dev/null 2>&1
   local count
-  count=$(grep -c '|TEST|test_step|waiting|' "$log_file" 2>/dev/null || echo 0)
+  count=$(grep -c '|TEST|test_step|waiting|' "$log_file" 2>/dev/null || true)
   rm -rf "$tmpdir"
   [ "$count" -eq 1 ]
 }
@@ -514,9 +519,38 @@ META
   # Second call: should skip
   spawn_agent_post TICKET_ID=TEST-DUP2 RESULT=done MSG="second done" >/dev/null 2>&1
   local count
-  count=$(grep -c '|TEST|test_step|done|' "$log_file" 2>/dev/null || echo 0)
+  count=$(grep -c '|TEST|test_step|done|' "$log_file" 2>/dev/null || true)
   rm -rf "$tmpdir"
   [ "$count" -eq 1 ]
+}
+
+test_post_phase_uppercase_in_log() {
+  # spawn_agent_post must uppercase the phase before writing to the pipeline log.
+  # detect-resume.sh compares against uppercase phase constants (APPRAISE, IMPLEMENT, etc.)
+  # and will silently fall through to STEP_1 if the phase is lowercase.
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local log_file="$tmpdir/test.log"
+  local hb_file="$tmpdir/test.hb"
+  cat >/tmp/ticket-auto-TEST-CASE-spawn-meta.txt <<'META'
+PHASE=appraise
+STEP=appraise
+TICKET_ID=TEST-CASE
+LOG_FILE=LOG_FILE_PLACEHOLDER
+HB_LOG_FILE=HB_FILE_PLACEHOLDER
+PINGER_PID=
+WATCHDOG_PID=
+META
+  sed -i "s|LOG_FILE_PLACEHOLDER|$log_file|" /tmp/ticket-auto-TEST-CASE-spawn-meta.txt
+  sed -i "s|HB_FILE_PLACEHOLDER|$hb_file|" /tmp/ticket-auto-TEST-CASE-spawn-meta.txt
+  source "$LIB_DIR/spawn-helper.sh"
+  spawn_agent_post TICKET_ID=TEST-CASE RESULT=done MSG="phase casing test" >/dev/null 2>&1
+  local has_upper
+  has_upper=$(grep -c '|APPRAISE|appraise|done|' "$log_file" 2>/dev/null || true)
+  local has_lower
+  has_lower=$(grep -c '|appraise|appraise|done|' "$log_file" 2>/dev/null || true)
+  rm -rf "$tmpdir"
+  [ "$has_upper" -eq 1 ] && [ "$has_lower" -eq 0 ]
 }
 
 test_post_retry_after_fail_writes_new_bracket() {
@@ -543,8 +577,8 @@ META
   spawn_agent_pre PHASE=TEST STEP=test_step TICKET_ID=TEST-RETRY \
     SKILL=/ticket-test LOG_FILE="$log_file" >/dev/null 2>&1
   local waiting_count fail_count
-  waiting_count=$(grep -c '|TEST|test_step|waiting|' "$log_file" 2>/dev/null || echo 0)
-  fail_count=$(grep -c '|TEST|test_step|fail|' "$log_file" 2>/dev/null || echo 0)
+  waiting_count=$(grep -c '|TEST|test_step|waiting|' "$log_file" 2>/dev/null || true)
+  fail_count=$(grep -c '|TEST|test_step|fail|' "$log_file" 2>/dev/null || true)
   rm -rf "$tmpdir"
   [ "$waiting_count" -eq 2 ] && [ "$fail_count" -eq 1 ]
 }
@@ -933,6 +967,7 @@ for fn in \
   test_post_warn_continue_stops_pinger_but_does_not_exit \
   test_pre_duplicate_waiting_suppressed \
   test_post_duplicate_done_suppressed \
+  test_post_phase_uppercase_in_log \
   test_post_retry_after_fail_writes_new_bracket \
   test_capture_rejects_missing_phase \
   test_capture_calls_through_with_all_params \

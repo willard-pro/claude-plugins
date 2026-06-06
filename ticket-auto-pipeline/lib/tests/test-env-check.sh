@@ -39,6 +39,13 @@ EOF
   "hooks": {
     "SubagentStart": [{"hooks": [{"command": "token-tracker-start.sh"}]}],
     "SubagentStop":  [{"hooks": [{"command": "token-tracker.sh"}]}]
+  },
+  "permissions": {
+    "allow": [
+      "Bash(source /home/mortal/.claude/skills/lib/spawn-helper.sh *)",
+      "Bash(source /home/mortal/.claude/skills/lib/heartbeat.sh *)",
+      "Write(/tmp/test-repos/logs/**)"
+    ]
   }
 }
 EOF

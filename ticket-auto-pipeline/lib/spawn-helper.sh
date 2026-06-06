@@ -210,8 +210,10 @@ spawn_agent_pre() {
     return 1
   fi
 
-  local phase_lower
+  local phase_lower phase_upper
   phase_lower=$(echo "$STEP" | tr '[:upper:]' '[:lower:]')
+  # Normalize phase to uppercase for detect-resume.sh compatibility
+  phase_upper=$(echo "$PHASE" | tr '[:lower:]' '[:upper:]')
 
   # 1. Write waiting log entry (idempotent: tail-check — allows retries after fail)
   if [ -n "$LOG_FILE" ]; then
@@ -221,7 +223,7 @@ spawn_agent_pre() {
       : # already written, skip (back-to-back duplicate)
     else
       local desc="${DESCRIPTION:-agent for ${TICKET_ID}}"
-      _plog "$LOG_FILE" "$PHASE" "$phase_lower" "waiting" "Agent launched — ${desc}"
+      _plog "$LOG_FILE" "$phase_upper" "$phase_lower" "waiting" "Agent launched — ${desc}"
     fi
   fi
 
@@ -337,8 +339,11 @@ spawn_agent_post() {
     return 1
   fi
 
-  local phase_lower=""
+  local phase_lower="" phase_upper=""
   [ -n "${STEP:-}" ] && phase_lower=$(echo "${STEP:-}" | tr '[:upper:]' '[:lower:]')
+  # Normalize phase to uppercase for detect-resume.sh compatibility
+  [ -n "${PHASE:-}" ] && phase_upper=$(echo "${PHASE:-}" | tr '[:lower:]' '[:upper:]')
+  phase_upper="${phase_upper:-UNKNOWN}"
 
   # Stop watchdog and heartbeat pinger
   if [ -n "${HB_LOG_FILE:-}" ]; then
@@ -382,10 +387,10 @@ spawn_agent_post() {
   done)
     if [ -n "${LOG_FILE:-}" ]; then
       local done_msg="${MSG:-agent done}"
-      if grep -q "|${PHASE:-UNKNOWN}|${phase_lower:-unknown}|done|" "${LOG_FILE}" 2>/dev/null; then
+      if grep -q "|$phase_upper|${phase_lower:-unknown}|done|" "${LOG_FILE}" 2>/dev/null; then
         : # already written, skip
       else
-        _plog "$LOG_FILE" "${PHASE:-UNKNOWN}" "${phase_lower:-unknown}" "done" "${done_msg}"
+        _plog "$LOG_FILE" "$phase_upper" "${phase_lower:-unknown}" "done" "${done_msg}"
       fi
     fi
     if [ -n "${HB_LOG_FILE:-}" ]; then
@@ -395,7 +400,7 @@ spawn_agent_post() {
       fi
     fi
     if [ -n "${CLAUDE_LOG_FILE:-}" ]; then
-      cl_write "${PHASE:-UNKNOWN}" "${phase_lower:-unknown}" "done" "${MSG:-agent done}"
+      cl_write "$phase_upper" "${phase_lower:-unknown}" "done" "${MSG:-agent done}"
     fi
     ;;
 
@@ -406,10 +411,10 @@ spawn_agent_post() {
     [ "$fail_action" = "warn-continue" ] && suffix=" — continuing"
 
     if [ -n "${LOG_FILE:-}" ]; then
-      if grep -q "|${PHASE:-UNKNOWN}|${phase_lower:-unknown}|fail|" "${LOG_FILE}" 2>/dev/null; then
+      if grep -q "|$phase_upper|${phase_lower:-unknown}|fail|" "${LOG_FILE}" 2>/dev/null; then
         : # already written, skip
       else
-        _plog "$LOG_FILE" "${PHASE:-UNKNOWN}" "${phase_lower:-unknown}" "fail" "${fail_msg}${suffix}"
+        _plog "$LOG_FILE" "$phase_upper" "${phase_lower:-unknown}" "fail" "${fail_msg}${suffix}"
       fi
     fi
     if [ -n "${HB_LOG_FILE:-}" ]; then
@@ -418,9 +423,9 @@ spawn_agent_post() {
     if [ -n "${CLAUDE_LOG_FILE:-}" ]; then
       local last_hb="unknown"
       [ -n "${HB_LOG_FILE:-}" ] && [ -f "$HB_LOG_FILE" ] && last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
-      cl_write "${PHASE:-UNKNOWN}" "context" "fail" "${phase_lower:-agent} agent failed (${fail_action}) — last_hb: ${last_hb}"
+      cl_write "$phase_upper" "context" "fail" "${phase_lower:-agent} agent failed (${fail_action}) — last_hb: ${last_hb}"
       if [ "$fail_action" = "stop" ]; then
-        cl_write RETRO hint info "sub-agent spawn failure in ${PHASE:-UNKNOWN} phase — check agent isolation, tool availability, and CLAUDE_LOG_FILE export for diagnostics"
+        cl_write RETRO hint info "sub-agent spawn failure in $phase_upper phase — check agent isolation, tool availability, and CLAUDE_LOG_FILE export for diagnostics"
       fi
     fi
     ;;

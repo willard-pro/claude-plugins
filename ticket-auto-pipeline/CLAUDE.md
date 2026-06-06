@@ -30,7 +30,7 @@ ticket-auto-pipeline/
 - `ticket-verify` — Playwright UAT verification
 - `ticket-pr-review` — PR code review pass
 - `ticket-pr-iterate` — iteration on PR feedback
-- `ticket-auto` — orchestrator, spawns sub-agents for each phase
+- `ticket-auto` — thin stateless dispatch router (zero inline LLM reasoning, bash-only gates, named agent types)
 - `ticket-flow` — state/label mutation executor (wraps flow.sh)
 - `ticket-setup` — workspace scaffolding
 
@@ -42,6 +42,7 @@ ticket-auto-pipeline/
 - `ticket-fleet-controller` — automated pipeline intervention (fleet controller with detect/kill/restart)
 - `ticket-batch-appraise` / `ticket-batch-verify` — batch operations
 - `ticket-reproduce` — bug reproduction (Step 1.5 for bug tickets)
+- `ticket-gate-reconcile` — post-gate-hold comment reconciliation (isolated agent, spawned by router at STEP_3_5)
 - `ticket-critique` — code/PR critique
 - `ticket-env-check` — environment validation
 - `wiki-maintenance` — wiki documentation maintenance
@@ -63,7 +64,11 @@ ticket-auto-pipeline/
 | `fleet-detect.sh` | 6 detection engines: phase failures, stalls, zombies, loops, abandonment, flow failures. Aggregator `fleet_detect_all` outputs JSON. |
 | `fleet-intervene.sh` | Intervention executor: `fleet_kill_pipeline`, `fleet_restart_pipeline`, `fleet_can_restart`. flow.sh mutex-aware, `FLEET_DRY_RUN` guard. |
 | `fleet-dashboard.sh` | Dashboard renderer: `fleet_render_dashboard` (terminal) and `fleet_write_report` (markdown). |
+| `gate-check.sh` | Deterministic bash gate logic. `--mode entry` checks artifact existence, complexity-artifact coherence, autonomy routing. `--mode reapprove` checks live Linear state for re-approval integrity. Replaces inline LLM gate reasoning. |
+| `outcome-label-check.sh` | Bash-only post-implement guard. Verifies Smooth/Rough/Hard outcome label is present on the Linear ticket, applying it if missing via flow.sh. |
+| `detect-resume.sh` | Pipeline log state parser. Called directly as bash by the thin router (not via `/ticket-detect-resume` skill). Outputs 19 routing variables (RESUME_STEP, COMPLEXITY, AUTONOMY, VERIFY_ATTEMPTS, ITERATION, etc.). |
 | `skill-preamble.md` | Shared preamble referenced by all pipeline skill SKILL.md files. Defines parameters and common guard patterns. |
+| `skill-preamble-auto.md` | Thin router variant of skill-preamble. Used by agents spawned from the thin router. Excludes guard, project context detection, step dispatch, and task tracker sections (handled by the router). |
 
 ## State machine
 
@@ -99,8 +104,11 @@ Consumers: `skills/ticket-auto/dashboard.py` (dual-panel), `skills/ticket-overse
 ## Key design decisions
 
 - **Determinism boundary**: AI skills never call Linear mutation endpoints directly. All mutations go through `flow.sh`. Skills plan/reason/navigate; flow.sh executes with idempotency and assertions.
-- **Crash recovery**: Pipeline log is the checkpoint. `ticket-detect-resume` reads last completed step. Orchestrator resumes from there.
-- **Sub-agent isolation**: Orchestrator spawns `general-purpose` agents per phase. Each writes to `$LOG_FILE`. Orchestrator brackets each spawn with `|waiting|`/`|done|`.
+- **Crash recovery**: Pipeline log is the checkpoint. `detect-resume.sh` is called directly as bash by the thin router (no Claude agent spawn). Router re-reads state after every dispatch and resumes from the last completed step.
+- **Sub-agent isolation**: Thin router spawns named agent types (`ticket-appraise-agent`, `ticket-implement-agent`, `ticket-verify-agent`, `ticket-pr-review-agent`, `ticket-maintenance-agent`, `ticket-gate-reconcile-agent`) per phase. Each agent runs in a fresh isolated session. Router brackets each spawn with `|waiting|`/`|done|` via the 3-step pattern (`spawn_agent_pre` → agent spawn → `spawn_capture` → `spawn_agent_post`).
+- **Bash gates**: Gate decisions (artifact existence, complexity coherence, autonomy routing, outcome labels) are deterministic bash scripts (`gate-check.sh`, `outcome-label-check.sh`) — zero Claude agent involvement, zero tokens burned on deterministic comparisons.
+- **Router-managed retry loops**: Verify retry (up to 3 attempts) and PR iteration (up to 3 cycles) are managed by the router tracking counters (`VERIFY_ATTEMPTS`, `ITERATION`) from the pipeline log. Each iteration spawns a fresh agent with clean context — no accumulated output from prior attempts.
+- **Stateless routing**: Router reads all state from pipeline log via `detect-resume.sh` (direct bash invocation, not a Claude skill spawn). After every phase dispatch, router re-reads state. Zero in-memory state between dispatches.
 - **Complexity gating**: Simple tickets auto-approve in `auto`/`semi-auto` mode. Complex tickets always gate (require human `approved` label). `manual` mode gates everything.
 - **Phase context**: Before each agent spawn, orchestrator writes both a ctx file (`/tmp/ticket-auto-{ID}-ctx.txt`) and a spawn-meta file (`/tmp/ticket-auto-{ID}-spawn-meta.txt`). The token-tracker hook reads PHASE from the spawn-meta file (stable per-spawn snapshot) with fallback to the ctx file (legacy). The spawn-meta file persists until the next `spawn_agent_pre` call overwrites it — this avoids a race where the ctx file shows the next phase before the async SubagentStop hook fires.
 - **Safety gates**: Six structural invariants (artifact existence, complexity coherence, adversarial review, re-approval integrity, remediation brief integrity, PR verdict integrity). Violations emit `|META|gate-stop|fail|<CODE>`.

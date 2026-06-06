@@ -1,59 +1,72 @@
 # ticket-implement
 
-> Full implementation workflow for an approved Linear ticket. Loads the workspace, sets up branches, runs the implementation, commits, and pushes. PR creation is gated by /ticket-verify.
+> Full implementation workflow for a Linear ticket that has been approved. Loads the ticket workspace, moves to Ready, sets up branches on affected repos, runs the implementation (simple-fix or openspec), commits, and pushes. PR creation and close-out are gated by /ticket-verify. Use when the user says "/ticket-implement <ID>", "implement ticket <ID>", "start implementing <ID>", or "work on <ID>" after appraisal/approval is done.
 
 ## What it does
 
-`ticket-implement` executes the code changes for a ticket that has been appraised and approved. It reads the plan artifact (simple-fix or openspec), sets up feature branches across all affected repos, makes the required code changes, runs tests, commits, and pushes. It does not create the PR — that happens after verification passes. If the implementation involves wiki call chains, it appends errata entries for gaps found during the work.
+Executes the implementation plan produced during appraisal. Checks the approval guard (requires `approved` or `rejected` label for UAT rework), identifies the implementation path (simple-fix.md for simple tickets, openspec change for complex), creates branches on all affected repos (branching from develop), runs the code changes, writes and runs tests, performs code review via spawned agent, rates actual complexity against the prediction (Smooth/Rough/Hard), and commits/pushes. Handles verification re-runs by reading remediation briefs from prior failures and appending verification sections to the plan.
 
 ## Trigger
 
-**Slash command:** `/ticket-implement <TICKET-ID>`
+**Slash command:** `/ticket-implement <ID>`
 
-**Natural language:** "implement ticket WIL-42", "start implementing WIL-42", "work on WIL-42"
+**Natural language:** implement ticket <ID>, start implementing <ID>, work on <ID>
 
 ## Inputs
 
 | Input | Source | Required |
 |-------|--------|----------|
 | Ticket ID | CLI argument | Yes |
-| Plan artifact | `tickets/<ID>--slug/simple-fix.md` or `plan.md` | Yes |
-| `REPOS_ROOT` | CLAUDE.md field | Yes |
-| `BE_TEST_CMD` | CLAUDE.md field | No (skips test run if absent) |
-| `FE_TEST_CMD` | CLAUDE.md field | No |
-| `LINEAR_API_KEY` | Environment variable | Yes |
+| notes.md | {ticket-dir}/notes.md | Yes |
+| context.md | {ticket-dir}/context.md | Yes |
+| Plan artifact | simple-fix.md or openspec tasks.md | Yes |
+| LINEAR_API_KEY | Environment variable | Yes |
+| REPOS_ROOT | CLAUDE.md | Yes |
+| BE_TEST_CMD | CLAUDE.md | No |
+| FE_TEST_CMD | CLAUDE.md | No |
+| --from-auto flag | CLI (set by ticket-auto) | No |
+| --from-step flag | CLI (crash recovery) | No |
 
 ## Outputs / Artifacts
 
 | Artifact | Location | Description |
 |----------|----------|-------------|
-| Feature branches | Each affected repo | `<ID>--slug` branch pushed to origin |
-| Code changes | Affected repos | All changes committed per plan |
-| Wiki errata | `WIKI_ROOT/<flow-file>.md` | Gap entries appended if wiki mismatches found |
-| Linear state | Linear issue | Transitioned to `In Progress` → `In Review` |
+| Code changes | Affected repos | Implemented fix on feature branch |
+| Unit tests | Affected repos | New/modified tests for changed logic |
+| Outcome label | Linear | Smooth/Rough/Hard applied |
+| Commit + push | Remote branch | Changes pushed to origin |
+| Wiki errata | WIKI_ROOT flow files | Errata appended on complexity mismatch |
+| Feedback memory | claude-mem | Pattern recorded for mismatch analysis |
 
 ## How it works
 
 ```mermaid
 flowchart TD
-    A([Start]) --> B[Load plan artifact\nsimple-fix or openspec]
-    B --> C[Set up branches\nall affected repos]
-    C --> D{Implementation path}
-    D -- simple-fix --> E[Apply targeted fix\nper simple-fix steps]
-    D -- openspec --> F[Execute openspec tasks\nphase by phase]
-    E --> G[Run tests\nBE_TEST_CMD / FE_TEST_CMD]
-    F --> G
-    G --> H{Tests pass?}
-    H -- yes --> I[Commit & push\nall repos]
-    H -- no --> J[Fix test failures\nretry]
-    J --> G
-    I --> K[ticket-flow: In Review\n+ label update]
-    K --> L([Done — run /ticket-verify])
+    A[Start: /ticket-implement] --> B[Step 1: Approval guard]
+    B --> C{approved or rejected?}
+    C -->|No| STOP1[Stop: not approved]
+    C -->|Yes| D[Step 2: Detect path]
+    D --> E{simple-fix.md exists?}
+    E -->|Yes| F[Mode: simple-fix]
+    E -->|No| G[Mode: openspec]
+    F --> H[Step 2.5: Verify re-run check]
+    G --> H
+    H --> I[Step 3: Checkout + branch]
+    I --> J[Step 4: Implement changes]
+    J --> K[Step 4b: Write + run tests]
+    K --> L{Tests pass?}
+    L -->|No| J
+    L -->|Yes| M[Step 4b: Code review]
+    M --> N{Clean?}
+    N -->|No| J
+    N -->|Yes| O[Step 4c: Rate complexity]
+    O --> P[Step 5: Commit + push]
 ```
 
 ## Related skills
 
-- [`/ticket-appraise-exec`](ticket-appraise-exec.md) — creates the plan artifact this skill reads
-- [`/ticket-verify`](ticket-verify.md) — next step: validates the implementation via Playwright
-- [`/ticket-pr-iterate`](ticket-pr-iterate.md) — reruns this skill after PR review gaps are addressed
-- [`/ticket-auto`](ticket-auto.md) — orchestrator that drives this skill automatically
+- [`/ticket-appraise`](ticket-appraise.md) -- produces the investigation notes consumed here
+- [`/ticket-appraise-exec`](ticket-appraise-exec.md) -- produces the plan artifact consumed here
+- [`/ticket-verify`](ticket-verify.md) -- UAT verification that may trigger re-implementation
+- [`/ticket-pr-review`](ticket-pr-review.md) -- PR alignment review after verification
+- [`/ticket-flow`](ticket-flow.md) -- outcome label and state transitions

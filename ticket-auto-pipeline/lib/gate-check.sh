@@ -37,8 +37,15 @@ _get_artifact_path() {
   # Prefer explicit META|artifact entry
   artifact_path=$(grep '^[^|]*|META|artifact|info|plan:' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'|' -f5- | sed 's/^plan://' || true)
   if [ -z "$artifact_path" ]; then
-    # Fall back to EXEC|exec|done| line
-    artifact_path=$(grep '^[^|]*|EXEC|exec|done|' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'|' -f5- | sed 's/^plan://' || true)
+    # Fall back to EXEC|create-artifact|done| line — the value field there may
+    # be a type like "simple-fix", not a path.  Resolve it relative to the
+    # ticket directory.
+    local artifact_type td
+    artifact_type=$(grep '^[^|]*|EXEC|create-artifact|done|' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'|' -f5- || true)
+    if [ -n "$artifact_type" ] && command -v resolve_ticket_dir &>/dev/null; then
+      td=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || true)
+      [ -n "$td" ] && artifact_path="$td/${artifact_type}.md"
+    fi
   fi
   echo "$artifact_path"
 }
