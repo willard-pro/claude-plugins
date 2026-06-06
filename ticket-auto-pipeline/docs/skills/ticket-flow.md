@@ -1,57 +1,60 @@
 # ticket-flow
 
-> Centralized Linear state/label executor. Every pipeline skill delegates state transitions and label changes here — no skill calls Linear for mutations directly.
+> ticket-flow
+
+**Private helper** -- not intended for direct invocation. Called internally by every pipeline skill that mutates Linear state.
 
 ## What it does
 
-`ticket-flow` is the single point of truth for all Linear mutations in the pipeline. Skills never call Linear state or label endpoints directly — they invoke `/ticket-flow` with a trigger name and optional data. `ticket-flow` reads `state-machine.json` to resolve the correct state, labels to add/remove, and expected post-state, then calls `flow.sh` to execute the mutation idempotently. After every mutation it re-fetches the issue and asserts the result matches expectations (exit 7 on mismatch).
+Centralized Linear state and label executor. Wraps the deterministic `flow.sh` bash script which reads the state machine definition from `state-machine.json`, computes the desired end state from current state plus requested additions and removals, and calls the Linear API only when a mutation is needed. Provides idempotency (no-op if nothing would change) and post-trigger assertions (re-fetches issue, exits 7 on mismatch). Every pipeline skill delegates state transitions and label changes here -- no skill calls Linear mutation endpoints directly.
 
 ## Trigger
 
 **Slash command:** `/ticket-flow <TICKET-ID> <TRIGGER> [--data key=value] [--dry-run]`
 
-**Natural language:** Not user-facing — called internally by all pipeline skills.
+**Natural language:** (called programmatically by other skills)
 
 ## Inputs
 
 | Input | Source | Required |
 |-------|--------|----------|
 | Ticket ID | CLI argument | Yes |
-| Trigger name | CLI argument | Yes |
-| `--data` key=value pairs | CLI flags | Trigger-dependent |
-| `--dry-run` | CLI flag | No |
-| `LINEAR_API_KEY` | Environment variable | Yes |
-| `state-machine.json` | Plugin root | Yes |
+| Trigger name | CLI argument (e.g. appraise-start, implement-complete) | Yes |
+| --data | CLI (trigger-specific values like complexity=simple) | No |
+| --dry-run | CLI (preview without mutation) | No |
+| LINEAR_API_KEY | Environment variable | Yes |
+| state-machine.json | Plugin directory | Yes |
 
 ## Outputs / Artifacts
 
 | Artifact | Location | Description |
 |----------|----------|-------------|
-| Linear state | Linear issue | Transitioned to the state defined by the trigger |
-| Linear labels | Linear issue | Labels added/removed per state machine definition |
-| Post-trigger assertion | Exit code | Exit 7 if resulting state does not match expectations |
+| State transition | Linear | Ticket state changed per state machine rules |
+| Label changes | Linear | Labels added/removed per transition definition |
+| Assignee change | Linear | Assignee set on appraise-start |
+| Sentinel file | ~/.claude/state/ticket-flow/validated-{TEAM_ID} | Config validation cache |
 
 ## How it works
 
 ```mermaid
 stateDiagram-v2
-    [*] --> ReadTrigger: /ticket-flow called
-    ReadTrigger --> ResolveState: load state-machine.json
-    ResolveState --> IdempotencyCheck: compute desired end state
-    IdempotencyCheck --> NoOp: already in desired state
-    IdempotencyCheck --> Mutate: state differs
-    Mutate --> Assert: Linear API call made
-    Assert --> Done: state matches expected
-    Assert --> Error: state mismatch → exit 7
-    NoOp --> Done
-    Done --> [*]
-    Error --> [*]
+    [*] --> Backlog
+    Backlog --> Todo : appraise-start\n+claimed, +/-complexity
+    Todo --> Approve : appraise-complete
+    Approve --> Ready : human-approve\n+approved, -rejected
+    Approve --> Todo : human-reject
+    Ready --> Review : implement-complete\n-approved
+    Review --> Done : pr-review-pass-done\n+reviewed, -rejected, -claimed
+    Review --> UAT : pr-review-pass-uat\n+reviewed, -rejected
+    Review --> Ready : pr-iterate\n+approved, -reviewed, -rejected
+    UAT --> Done : uat-pass\n-claimed, -reviewed
+    UAT --> Ready : uat-fail\n+rejected, -reviewed
 ```
 
 ## Related skills
 
-- [`/ticket-auto`](ticket-auto.md) — orchestrator; all phase transitions go via ticket-flow
-- [`/ticket-appraise-exec`](ticket-appraise-exec.md) — triggers: `appraised`, complexity label
-- [`/ticket-implement`](ticket-implement.md) — triggers: `in-progress`, `in-review`
-- [`/ticket-verify`](ticket-verify.md) — triggers: `uat`, PR open
-- [`/ticket-pr-review`](ticket-pr-review.md) — triggers: `merge`, `needs-work`
+- [`/ticket-auto`](ticket-auto.md) -- orchestrator that calls flow.sh at multiple dispatch points
+- [`/ticket-appraise`](ticket-appraise.md) -- calls appraise-start trigger
+- [`/ticket-appraise-exec`](ticket-appraise-exec.md) -- calls appraise-complete trigger
+- [`/ticket-implement`](ticket-implement.md) -- calls implement-outcome and implement-complete
+- [`/ticket-verify`](ticket-verify.md) -- calls uat-pass, uat-fail, and implement-complete

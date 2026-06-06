@@ -1,50 +1,56 @@
 # ticket-critique
 
-> Validates a Linear ticket's requirements for completeness before implementation begins. Checks for credential gaps, untestable criteria, missing test data, and scope ambiguity.
+> Validates a Linear ticket's requirements for completeness before implementation begins. Checks for multi-role credential gaps, untestable acceptance criteria, missing test data, and scope ambiguity. Posts a Linear comment and adds `needs-info` label if blockers are found. Called automatically by ticket-appraise Step 2.7.
+
+**Private helper** -- not intended for direct invocation. Called internally by [`/ticket-appraise`](ticket-appraise.md) at Step 2.7.
 
 ## What it does
 
-`ticket-critique` reads a ticket's acceptance criteria and description, then checks for common blockers that would cause implementation or verification to fail: missing role credentials, acceptance criteria that cannot be tested by Playwright, absent test data, and scope that is too ambiguous to implement. If blockers are found it posts a Linear comment and applies the `needs-info` label so the ticket bounces back to the requester before any implementation work begins. Called automatically by `/ticket-appraise` at Step 2.7.
+Runs five completeness checks on a ticket before codebase investigation begins: multi-role credential completeness (are test credentials available for all required roles?), acceptance criteria testability (are ACs written as observable outcomes?), test data assumptions (is prerequisite state described?), scope identifiability (can the ticket be mapped to a known service?), and bug reproduction steps (are numbered steps present for bug tickets?). Classifies each finding as BLOCKER (must resolve) or WARNING (record and continue). On BLOCKER, posts a comment to Linear, adds the `needs-info` label, and halts the pipeline.
 
 ## Trigger
 
-**Slash command:** `/ticket-critique <TICKET-ID>`
+**Slash command:** `/ticket-critique <ID> [--from-appraise]`
 
-**Natural language:** "critique WIL-42", "validate requirements for WIL-42" (typically called internally by ticket-appraise)
+**Natural language:** (called automatically by ticket-appraise)
 
 ## Inputs
 
 | Input | Source | Required |
 |-------|--------|----------|
 | Ticket ID | CLI argument | Yes |
-| `context.md` | Ticket workspace | Yes |
-| `CLAUDE.md` | Project root | Yes (for known test users / environments) |
+| context.md | {ticket-dir}/context.md | Yes |
+| CLAUDE.md | Project root | Yes |
+| --from-appraise flag | CLI | No |
 
 ## Outputs / Artifacts
 
 | Artifact | Location | Description |
 |----------|----------|-------------|
-| Linear comment | Linear issue | Blocker list with specific questions (only if blockers found) |
-| `needs-info` label | Linear issue | Applied if blockers found |
-| No-op | — | Silent pass if requirements are complete |
+| Readiness Critique | notes.md (## Readiness Critique) | BLOCKED/WARNINGS/CLEAR status with findings |
+| Linear comment | Linear ticket | Blocker details (if BLOCKED) |
+| needs-info label | Linear | Applied on BLOCKER |
 
 ## How it works
 
 ```mermaid
 flowchart TD
-    A([Start]) --> B[Read context.md\n+ CLAUDE.md]
-    B --> C[Check credential gaps\nmulti-role flows]
-    C --> D[Check testability\nPlaywright-navigable?]
-    D --> E[Check test data\nspecific values needed?]
-    E --> F[Check scope\nunambiguous enough?]
-    F --> G{Blockers found?}
-    G -- none --> H([Pass — appraise continues])
-    G -- yes --> I[Post comment\nblocker list + questions]
-    I --> J[Apply needs-info label\nticket-flow]
-    J --> K([Blocked — awaiting ticket update])
+    A[Start: /ticket-critique] --> B[Load context.md + CLAUDE.md]
+    B --> C[Check 1: Credential completeness]
+    C --> D[Check 2: AC testability]
+    D --> E[Check 3: Test data assumptions]
+    E --> F[Check 4: Scope identifiable]
+    F --> G[Check 5: Bug repro steps]
+    G --> H{Any BLOCKERs?}
+    H -->|Yes| I[Post Linear comment]
+    I --> J[flow.sh needs-info]
+    J --> STOP1[Stop: BLOCKED]
+    H -->|No| K{Any WARNINGs?}
+    K -->|Yes| L[Report warnings, continue]
+    K -->|No| M[Report CLEAR, continue]
 ```
 
 ## Related skills
 
-- [`/ticket-appraise`](ticket-appraise.md) — calls this skill at Step 2.7
-- [`/ticket-flow`](ticket-flow.md) — applies the `needs-info` label
+- [`/ticket-appraise`](ticket-appraise.md) -- primary caller at Step 2.7
+- [`/ticket-flow`](ticket-flow.md) -- needs-info label via flow.sh

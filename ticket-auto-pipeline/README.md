@@ -200,13 +200,14 @@ The two rework loops are `pr-iterate` (code review found gaps) and `uat-fail` (a
 ### Determinism Boundary
 
 ```
-AI (skills/*.md)           Deterministic (flow.sh + lib/*.sh)
-├─ /ticket-appraise         ├─ linear-api.sh (GraphQL client)
-├─ /ticket-appraise-exec    ├─ flow.sh (state machine executor)
-├─ /ticket-implement        ├─ validate-linear-config.sh
-├─ /ticket-verify           ├─ ticket-dir.sh
-├─ /ticket-pr-review        ├─ validate-env.sh
-└─ /ticket-auto (orchestrator) └─ notes-parse.sh
+AI (named agent types)       Deterministic (flow.sh + lib/*.sh)
+├─ ticket-appraise-agent      ├─ linear-api.sh (GraphQL client)
+├─ ticket-implement-agent     ├─ flow.sh (state machine executor)
+├─ ticket-verify-agent        ├─ gate-check.sh (bash gate logic)
+├─ ticket-pr-review-agent     ├─ outcome-label-check.sh (outcome guard)
+├─ ticket-maintenance-agent   ├─ detect-resume.sh (state parser)
+├─ ticket-gate-reconcile-agent├─ validate-linear-config.sh
+└─ ticket-auto (thin router)  └─ notes-parse.sh
 ```
 
 Skills plan, reason, and navigate code. `flow.sh` executes mutations with idempotency checks and post-trigger state assertions — if the live Linear state doesn't match expectations after a mutation, it exits 7.
@@ -225,6 +226,9 @@ Skills plan, reason, and navigate code. `flow.sh` executes mutations with idempo
 | `fleet-detect.sh` | 6 detection engines (phase failures, stalls, zombies, loops, abandonment, flow failures). Aggregator `fleet_detect_all` outputs JSON. |
 | `fleet-intervene.sh` | Intervention executor: `fleet_kill_pipeline`, `fleet_restart_pipeline`, `fleet_can_restart`. flow.sh mutex-aware, `FLEET_DRY_RUN` guard. |
 | `fleet-dashboard.sh` | Dashboard renderer: `fleet_render_dashboard` (terminal) and `fleet_write_report` (markdown). |
+| `gate-check.sh` | Deterministic bash gate logic. `--mode entry` checks artifact, complexity, autonomy. `--mode reapprove` checks live Linear state. Replaces inline LLM reasoning. |
+| `outcome-label-check.sh` | Bash-only post-implement guard for Smooth/Rough/Hard outcome label. |
+| `detect-resume.sh` | Pipeline log state parser. Called directly as bash by the thin router — outputs 19 routing variables including counters (VERIFY_ATTEMPTS, ITERATION). |
 
 ### Pipeline Log Format
 
@@ -258,7 +262,7 @@ Pipe-delimited: `ISO|CATEGORY|EVENT|STATUS|MSG|DETAIL`. Records decisions, fallb
 
 ### Crash Recovery
 
-`/ticket-detect-resume` reads the pipeline log to find the last completed step. The orchestrator resumes from that point — the log is the checkpoint. Schema versioning (currently v1) protects against log format drift. Heartbeat log entries provide additional operational context for diagnosing failures during recovery.
+The thin router calls `detect-resume.sh` directly as bash (no Claude agent spawn) to read the pipeline log and find the last completed step. The router resumes from that point — the log is the checkpoint. After every phase dispatch, the router re-reads state from the log via `detect-resume.sh`. Schema versioning (currently v1) protects against log format drift. Heartbeat log entries provide additional operational context for diagnosing failures during recovery.
 
 ## Ticket Auto — Autonomy Modes
 
@@ -274,16 +278,18 @@ Semi-auto auto-merge only fires when all three hold: `--semi-auto` flag, complex
 
 ## Pipeline Safety Gates
 
-During execution, `ticket-auto` checks structural invariants and halts if violated:
+During execution, the thin router runs deterministic bash gate checks (`gate-check.sh`, `outcome-label-check.sh`) — zero Claude agent involvement. Gate violations halt the pipeline:
 
-| Gate | Step | Code |
-|------|------|------|
-| Artifact existence | 2.5 | `EXEC_NO_ARTIFACT` |
-| Complexity-artifact coherence | 2 | `COMPLEXITY_ARTIFACT_MISMATCH` |
-| Adversarial review blocked | 2 | `ADVERSARIAL_BLOCKED` |
-| Re-approval integrity | 5d | `APPROVAL_REVOKED` |
-| Remediation brief integrity | 2.5 | `REMEDIATION_BRIEF_TRUNCATED` |
-| PR verdict integrity | 5a | `PR_REVIEW_VERDICT_UNPARSEABLE` |
+| Gate | Checked by | Code |
+|------|-----------|------|
+| Artifact existence | `gate-check.sh --mode entry` | `EXEC_NO_ARTIFACT` |
+| Complexity-artifact coherence | `gate-check.sh --mode entry` | `COMPLEXITY_ARTIFACT_MISMATCH` |
+| Autonomy-based routing | `gate-check.sh --mode entry` | (held or auto-approved) |
+| Adversarial review blocked | `ticket-appraise-exec` agent | `ADVERSARIAL_BLOCKED` |
+| Re-approval integrity | `gate-check.sh --mode reapprove` | `APPROVAL_REVOKED` |
+| Remediation brief integrity | `gate-check.sh --mode entry` | `REMEDIATION_BRIEF_TRUNCATED` |
+| Outcome label present | `outcome-label-check.sh` | (applies missing label) |
+| PR verdict integrity | `ticket-pr-review-agent` | `PR_REVIEW_VERDICT_UNPARSEABLE` |
 
 Each gate-stop emits a `|META|gate-stop|fail|<CODE>` line into the pipeline log. The retro skill reads these to classify failures and propose skill-file fixes.
 
