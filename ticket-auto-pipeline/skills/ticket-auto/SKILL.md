@@ -257,11 +257,19 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|autonomy|info|{AUTONOMY}" >> {LOG_FILE
 hb_gate "phase-transition" "ok" "START → APPRAISE"
 ```
 
+### :rotating_light: CRITICAL — Agent isolation requirement
+
+**Every phase agent MUST run in an isolated Agent invocation, never inline.** The `Skill` tool runs skills INLINE in the router's context window — it burns tokens on phase-internal details that the router should never see. The `Agent` tool spawns an isolated subagent that returns only its final result.
+
+**Absolute rule:** After `spawn_agent_pre` produces `$_prompt`, you MUST use the `Agent` tool. You MUST NOT use the `Skill` tool for phase dispatch. The `Skill` tool is for running skills inline; the `Agent` tool is for spawning isolated subagents. Phase dispatch requires isolation.
+
+If you use `Skill` instead of `Agent`, every phase's full context (code reads, file writes, test output, internal reasoning) burns tokens in the router's window. A 4-phase pipeline will consume 150k–300k tokens instead of ~15k for the router + per-agent summaries.
+
 ### Agent spawn template
 
 Every agent spawn follows this 3-step pattern:
 
-1. **Pre-spawn** — `spawn_agent_pre` handles the waiting log entry, heartbeat pinger start, phase context file, cl_write handoff, and prints the full agent prompt:
+1. **Pre-spawn** — `spawn_agent_pre` prints the `AGENT_PROMPT` line. Capture it:
    ```bash
    source ~/.claude/skills/lib/spawn-helper.sh
    _prompt=$(spawn_agent_pre \
@@ -272,8 +280,16 @@ Every agent spawn follows this 3-step pattern:
      DESCRIPTION="<what the agent does>" \
      INSTRUCTIONS="<additional skill-specific instructions>")
    ```
+   `spawn_agent_pre` outputs a line starting with `AGENT_PROMPT=`. Everything after `AGENT_PROMPT=` is the exact prompt the agent needs.
 
-2. **Spawn** — pass `$_prompt` to the phase-appropriate agent (e.g., `ticket-appraise` agent type).
+2. **Spawn** — invoke the `Agent` tool with the prompt from `$_prompt`. Extract the text after `AGENT_PROMPT=` and pass it as the `prompt` parameter:
+   ```
+   Agent tool call:
+     description: "<phase> agent for {TICKET-ID}"
+     prompt: <content after AGENT_PROMPT= from step 1>
+     subagent_type: "general-purpose"
+   ```
+   **NEVER use `Skill` tool here.** `Skill` runs inline and defeats isolation. Always `Agent` with `subagent_type: "general-purpose"`.
 
 3. **Post-spawn** — `spawn_capture` persists agent output to `-{phase}-agent.log`, then `spawn_agent_post` writes done/fail log entries, stops pinger, and writes heartbeat transitions:
    ```bash
@@ -285,6 +301,13 @@ Every agent spawn follows this 3-step pattern:
    # On failure (non-blocking, e.g. document/wiki):
    FAIL_ACTION=warn-continue spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail MSG="<reason>"
    ```
+
+### Self-check after each spawn
+
+Before proceeding to the next dispatch, verify:
+- [ ] I used `Agent` tool (not `Skill`) for the phase agent
+- [ ] I ran `spawn_agent_post` after the agent returned
+- [ ] I re-ran `detect-resume.sh` to get fresh state
 
 ---
 
@@ -326,6 +349,10 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|recovery|info|Resuming from {RESUME_ST
 ## Dispatch Loop
 
 After state detection, enter the stateless dispatch loop. Re-run `detect-resume.sh` before each dispatch decision to get current state from the pipeline log.
+
+**At every agent dispatch site:** Run `spawn_agent_pre` → spawn via `Agent` tool (NOT `Skill`) → `spawn_capture` → `spawn_agent_post` → re-run `detect-resume.sh`. See "Agent spawn template" above for the exact 3-step pattern.
+
+**`Skill` tool is BANNED at all agent dispatch sites.** The `Skill` tool runs skills inline in the router's context. The `Agent` tool spawns isolated subagents. Every phase dispatch MUST use `Agent`.
 
 ### Dispatch table
 
