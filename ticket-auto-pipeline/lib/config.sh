@@ -40,15 +40,15 @@ BRANCH_PREFIX="${BRANCH_PREFIX:-feat/}"
 # Instance identity — derived from git remote when available, falls back to PWD basename.
 # Env override: FLEET_INSTANCE_ID
 if [ -z "${FLEET_INSTANCE_ID:-}" ]; then
-  _fleet_git_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
-  if [ -n "$_fleet_git_root" ]; then
-    _fleet_git_remote=$(git -C "$_fleet_git_root" remote get-url origin 2>/dev/null || true)
-    if [ -n "$_fleet_git_remote" ]; then
-      # github.com:owner/repo.git → owner-repo
-      FLEET_INSTANCE_ID=$(echo "$_fleet_git_remote" | sed 's|.*[:/]\([^/]*/[^/]*\)\.git.*|\1|' | tr '/' '-')
-    fi
-  fi
-  FLEET_INSTANCE_ID="${FLEET_INSTANCE_ID:-$(basename "$PWD")}"
+	_fleet_git_root=$(git rev-parse --show-toplevel 2>/dev/null || true)
+	if [ -n "$_fleet_git_root" ]; then
+		_fleet_git_remote=$(git -C "$_fleet_git_root" remote get-url origin 2>/dev/null || true)
+		if [ -n "$_fleet_git_remote" ]; then
+			# github.com:owner/repo.git → owner-repo
+			FLEET_INSTANCE_ID=$(echo "$_fleet_git_remote" | sed 's|.*[:/]\([^/]*/[^/]*\)\.git.*|\1|' | tr '/' '-')
+		fi
+	fi
+	FLEET_INSTANCE_ID="${FLEET_INSTANCE_ID:-$(basename "$PWD")}"
 fi
 
 # Debug flag — enables verbose logging when true.
