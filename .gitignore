@@ -1,5 +1,9 @@
 openspec/
 
+# Runtime logs and lock files
+logs/
+ticket-auto-pipeline/logs/
+
 # Downloaded Claude Code artifacts
 anthropic-ai-claude-code-*.tgz
 claude-binary
