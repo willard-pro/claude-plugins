@@ -21,64 +21,71 @@ Maintainer-facing overview of the ticket-auto-pipeline plugin. Read this before 
 | Interactive diagram | `docs/pipeline-diagram.html` | Visual state diagram with drill-down (GitHub Pages) |
 | Linear config validator | `validate-linear-config.sh` | Asserts team states/labels match state machine |
 
-### Core pipeline (sequential phases)
-| Phase | Skill | Step | Agent spawn |
-|-------|-------|------|-------------|
-| Appraise | `ticket-appraise` | 1 | Yes — investigates ticket, scores complexity |
-| Execute | `ticket-appraise-exec` | 2 | Yes — creates artifact, regression guard, adversarial review (complex) |
-| Gate | (inline in orchestrator) | 2.5 | No — structural invariant checks |
-| Reproduce | `ticket-reproduce` | 1.5 | Yes — bug reproduction (bug tickets only) |
-| Implement | `ticket-implement` | 3 | Yes — code changes |
-| Verify | `ticket-verify` | 4 | Yes — Playwright UAT |
-| Document | `ticket-document` | 4.6 | Yes — post-implement ai-context.md generation |
-| Maintenance | `wiki-maintenance` | 4.7 | Yes — errata incorporation, ai-context synthesis |
-| PR Review | `ticket-pr-review` | 5 | Yes — code review pass |
-| PR Iterate | `ticket-pr-iterate` | 5c | Yes — iteration on feedback |
-| Comment reconcile | (inline) | 5.5 | No — PR comment cross-reference |
-| PR Feedback (retry) | (inline) | 5.5-post | No — post-feedback re-invoke pipeline steps |
+### Core pipeline (thin router dispatch)
+
+The orchestrator (`ticket-auto`) is a **thin stateless dispatch router** — it reads pipeline log state via `detect-resume.sh`, dispatches to the correct phase agent or bash gate, and re-reads state. Zero inline LLM reasoning between phases.
+
+| Step | Phase | Dispatches | Type |
+|------|-------|------------|------|
+| 1 | Appraise | `ticket-appraise-agent` | Named agent — investigates ticket, scores complexity |
+| 1.5 | Reproduce | `ticket-appraise-agent` | Named agent — bug reproduction (bug tickets only) |
+| 2 | Exec | `ticket-appraise-agent` | Named agent — creates artifact, regression guard, adversarial review (complex) |
+| 2.5 | Gate | `bash gate-check.sh --mode entry` | **Bash only** — artifact existence, complexity coherence, autonomy routing |
+| 3.5 | Reconcile | `ticket-gate-reconcile-agent` | Named agent — post-gate-hold comment reconciliation (only when held ticket re-approved) |
+| 4 | Implement | `ticket-implement-agent` | Named agent — code changes, then `bash outcome-label-check.sh` |
+| 4.5 | Verify | `ticket-verify-agent` | Named agent — Playwright UAT, router-managed retry loop (max 3 attempts) |
+| 4.6 | PR Review | `ticket-pr-review-agent` | Named agent — code review pass, router-managed iteration loop (max 3 cycles) |
+| 5 | Maintenance | `ticket-maintenance-agent` | Named agent — document (ai-context.md) + wiki-maintenance (errata) |
+| 5.5 | PR Reconcile | `ticket-pr-review-agent` | Named agent — PR comment cross-reference |
+| 6 | Report | `bash` + optional `ticket-retro` skill | Bash check (gate-stop / fallback detection) + optional retro agent |
 
 ### Support systems
 | System | Components | Purpose |
 |--------|-----------|---------|
 | Logging | `pipeline-log-format.md`, `pipeline-heartbeat-format.md`, `lib/heartbeat.sh` | Dual-stream progress + operational logging |
-| Crash recovery | `ticket-detect-resume`, pipeline log | Resumes from last completed step |
+| Bash gates | `lib/gate-check.sh`, `lib/outcome-label-check.sh` | Deterministic gate decisions (no Claude agent) — artifact, complexity, autonomy, outcome labels |
+| Crash recovery | `lib/detect-resume.sh`, pipeline log | Direct bash invocation by router — reads last completed step, outputs routing variables |
+| Comment reconciliation | `ticket-gate-reconcile` | Isolated agent for post-gate-hold comment reconciliation |
 | Failure analysis | `ticket-retro`, retro templates | Post-mortem classification + fix proposals |
 | Monitoring | `ticket-overseer`, `dashboard.py`, `report.py` | Queue status, stall detection (human-facing) |
 | Fleet control | `ticket-fleet-controller`, `lib/fleet-detect.sh`, `lib/fleet-intervene.sh`, `lib/fleet-dashboard.sh` | Automated intervention — detect, kill, restart pipelines |
 | Validation | `ticket-env-check`, `validate-linear-config.sh` | Pre-flight checks |
 | Batch ops | `ticket-batch-appraise`, `ticket-batch-verify` | Bulk ticket processing |
 
-## Skill dependency graph
+## Architecture: Thin Router Dispatch
 
 ```
-ticket-auto (orchestrator)
-  ├─ ticket-setup (scaffolding)
-  ├─ ticket-appraise (investigation)
-  │   └─ ticket-flow (state mutations)
-  ├─ ticket-appraise-exec (artifact creation)
-  │   └─ ticket-flow
-  ├─ ticket-reproduce (bug reproduction, Step 1.5)
-  ├─ ticket-implement (code changes)
-  │   └─ ticket-flow
-  ├─ ticket-verify (UAT)
-  │   └─ ticket-flow
-  ├─ ticket-document (post-implement ai-context.md)
-  ├─ wiki-maintenance (errata + ai-context synthesis)
-  ├─ ticket-pr-review (code review)
-  │   ├─ ticket-flow
-  │   └─ ticket-pr-iterate (feedback loop)
-  │       └─ ticket-flow
-  └─ ticket-flow (maintenance cleanup)
+ticket-auto (thin stateless dispatch router)
+  │
+  ├─ Bash gates (no Claude agent):
+  │   ├─ lib/gate-check.sh          ── entry mode (artifact, complexity, autonomy)
+  │   │   └─ ticket-flow (state mutations)
+  │   ├─ lib/outcome-label-check.sh  ── post-implement outcome label guard
+  │   │   └─ ticket-flow
+  │   └─ lib/detect-resume.sh       ── direct bash invocation (not skill spawn)
+  │
+  ├─ Named agent spawns (3-step pattern: pre → spawn → capture → post):
+  │   ├─ ticket-appraise-agent       ── Step 1 (appraise) + Step 1.5 (reproduce) + Step 2 (exec)
+  │   ├─ ticket-gate-reconcile-agent ── Step 3.5 (post-hold comment reconciliation)
+  │   ├─ ticket-implement-agent      ── Step 4 (code changes)
+  │   ├─ ticket-verify-agent         ── Step 4.5 (Playwright UAT, router-managed retry)
+  │   ├─ ticket-pr-review-agent      ── Step 4.6 (code review, router-managed iteration)
+  │   └─ ticket-maintenance-agent    ── Step 5 (document + wiki)
+  │
+  └─ Router-managed loops (counters from pipeline log):
+      ├─ Verify retry: FAIL → re-implement → outcome-check → re-verify (max 3)
+      └─ PR iteration: ⚠️ → reapprove-check → pr-iterate → re-implement → verify → pr-review (max 3)
 
 Support (invoked independently):
-  ticket-detect-resume ── reads pipeline log
+  ticket-detect-resume ── reads pipeline log (also called as bash by router)
   ticket-retro ── reads pipeline + heartbeat logs
   ticket-overseer ── reads pipeline logs
   ticket-fleet-controller ── reads pipeline + heartbeat logs, writes interventions
   ticket-env-check ── validates environment
+  ticket-flow ── all Linear state/label mutations (deterministic bash)
 ```
 
-All pipeline skills source their preamble from `lib/skill-preamble.md`. All bash operations source from `lib/*.sh` (synced to `~/.claude/skills/lib/` by the SessionStart hook).
+All pipeline agents use `lib/skill-preamble-auto.md` (thin router variant). All bash operations source from `lib/*.sh` (synced to `~/.claude/skills/lib/` by the SessionStart hook).
 
 ## Data flow
 
@@ -93,25 +100,28 @@ All pipeline skills source their preamble from `lib/skill-preamble.md`. All bash
               │             │             │
               ▼             ▼             ▲
     ┌─────────────┐  ┌───────────┐  ┌────┴──────┐
-    │ Appraise    │  │ PR Review │  │ flow.sh   │
-    │ Implement   │  │ Retro     │  │ (idempotent
-    │ Verify      │  │           │  │  mutations)│
-    └──────┬──────┘  └───────────┘  └───────────┘
+    │ Phase Agents│  │ Gate      │  │ flow.sh   │
+    │ (appraise,  │  │ Reconcile │  │ (idempotent
+    │  implement, │  │ PR Review │  │  mutations)│
+    │  verify,    │  │ Retro     │  └───────────┘
+    │  maintenance│  └───────────┘
+    └──────┬──────┘
            │
            ▼
-    ┌──────────────┐
-    │ Pipeline Log │◄── all phases write progress
-    │ Heartbeat Log│◄── all phases write decisions
-    └──────┬───────┘
-           │
-    ┌──────┴───────┐
+    ┌──────────────┐     ┌─────────────────┐
+    │ Pipeline Log │◄────│ Bash Gates      │
+    │ Heartbeat Log│     │ gate-check.sh   │
+    └──────┬───────┘     │ outcome-label-  │
+           │             │ check.sh        │
+    ┌──────┴───────┐     └─────────────────┘
     │              │
     ▼              ▼
 ├────────┐  ┌──────────┐
-│Detect  │  │ Retro    │
-│Resume  │  │ (post-   │
-│(crash  │  │ mortem)  │
-│recovery│  │          │
+│detect- │  │ Retro    │
+│resume  │  │ (post-   │
+│(bash — │  │ mortem)  │
+│no agent│  │          │
+│spawn)  │  │          │
 ├────────┘  └──────────┘
 │              │
 ▼              ▼
@@ -135,12 +145,15 @@ All pipeline skills source their preamble from `lib/skill-preamble.md`. All bash
 
 1. Create skill directory: `skills/ticket-<name>/SKILL.md`
 2. Add slash command definition in SKILL.md frontmatter
-3. Reference `lib/skill-preamble.md` for shared parameter patterns
-4. Register the phase in `ticket-auto/SKILL.md` orchestrator step sequence
-5. Add any new state transitions to `state-machine.json`
-6. Add corresponding trigger to `flow.sh` if needed
-7. Add phase to `pipeline-log-format.md` if it writes log entries
-8. Regenerate state diagram: `bash skills/ticket-flow/gen-mermaid.sh`
+3. Reference `lib/skill-preamble-auto.md` for shared parameter patterns (thin router variant)
+4. Register a new agent type in `.claude-plugin/plugin.json` under `agentTypes`
+5. Add dispatch case to `ticket-auto/SKILL.md` dispatch table (new RESUME_STEP)
+6. Add any new state transitions to `state-machine.json`
+7. Add corresponding trigger to `flow.sh` if needed
+8. Add phase to `pipeline-log-format.md` if it writes log entries
+9. Regenerate state diagram: `bash skills/ticket-flow/gen-mermaid.sh`
+10. Regenerate skill docs: run `/skill-docs`
+11. Update this document (plugin-overview.md) with the new phase
 
 ## How to modify the state machine
 
@@ -187,6 +200,7 @@ The state machine JSON structure:
 
 Active and recently archived changes that affect this plugin:
 
+- `ticket-auto-thin-router` — Thin stateless dispatch router with bash gates (active, tasks 0–12 complete)
 - `pr-comment-reconciliation` — PR comment cross-referencing (active)
 - `reproduce-pipeline-integration` — Bug reproduction phase (active)
 - `ticket-pipeline-cleanup` — Code quality and safety (active)

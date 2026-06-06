@@ -1,62 +1,68 @@
 # ticket-auto
 
-> Fully autonomous ticket pipeline — appraise, exec, implement, PR review, merge. Requires zero user input beyond the ticket ID. Stops only for complex tickets at the approve gate.
+> Fully autonomous ticket pipeline — appraise, exec, implement, PR review, merge. Thin stateless router that dispatches to per-phase agents. No inline LLM reasoning between phases. Requires zero user input beyond the ticket ID. Stops only for complex tickets at the approve gate. Use when the user says "/ticket-auto <ID>", "auto <ID>", "process ticket <ID>", or "run ticket <ID> end to end".
 
 ## What it does
 
-`ticket-auto` is the top-level orchestrator for the entire ticket lifecycle. It accepts a single ticket ID, then drives every downstream skill in sequence — appraise, implement, verify, PR review, and merge — with no user interaction required. For complex tickets it pauses at the approval gate and waits for a human to add the `approved` label before continuing.
+The orchestrator that drives the entire ticket lifecycle from Backlog to Done. It is a thin stateless router: reads pipeline log state via detect-resume.sh (direct bash invocation, not a Claude agent), dispatches named agent types for each phase, runs deterministic bash gates for approval and coherence checks, and manages retry loops for verification (up to 3 attempts) and PR iteration (up to 3 cycles). Every conditional between dispatches is a deterministic bash comparison -- zero inline LLM reasoning. All state lives in the pipeline log; the router re-reads it before every dispatch decision.
 
 ## Trigger
 
-**Slash command:** `/ticket-auto <TICKET-ID>`
+**Slash command:** `/ticket-auto <ID> [--auto|--semi-auto|--manual]`
 
-**Natural language:** "auto WIL-42", "process ticket WIL-42", "run ticket WIL-42 end to end"
+**Natural language:** auto <ID>, process ticket <ID>, run ticket <ID> end to end
 
 ## Inputs
 
 | Input | Source | Required |
 |-------|--------|----------|
 | Ticket ID | CLI argument | Yes |
-| `LINEAR_API_KEY` | Environment variable | Yes |
-| `GITHUB_PERSONAL_ACCESS_TOKEN` | Environment variable | Yes |
-| `REPOS_ROOT`, `LOCAL_URL`, `UAT_URL` | CLAUDE.md fields | Yes |
+| Autonomy mode | --auto/--semi-auto/--manual or TICKET_AUTONOMY env | No (defaults to manual) |
+| LINEAR_API_KEY | Environment variable | Yes |
+| REPOS_ROOT | CLAUDE.md | Yes |
+| ISSUE_PREFIX | CLAUDE.md | Yes |
+| CLAUDE.md fields | BE_SERVICES, WIKI_ROOT, UAT_URL, LOCAL_URL, etc. | No |
 
 ## Outputs / Artifacts
 
 | Artifact | Location | Description |
 |----------|----------|-------------|
-| Pipeline log | `tickets/<ID>--slug/logs/pipeline.log` | Pipe-delimited event stream for every phase |
-| Heartbeat log | `tickets/<ID>--slug/logs/heartbeat.log` | Decision and gate events |
-| Per-phase agent logs | `tickets/<ID>--slug/logs/<phase>-agent.log` | Full agent transcript per phase |
-| PR | GitHub | Opened and merged automatically on success |
-| Linear state/labels | Linear issue | Updated at each pipeline gate |
+| Pipeline log | ./logs/{ID}-pipeline.log | Full phase-by-phase event stream |
+| Heartbeat log | ./logs/{ID}-heartbeat.log | Decisions, fallbacks, gate results |
+| Agent output logs | ./logs/{ID}-{phase}-agent.log | Per-phase agent transcripts |
+| Ticket workspace | {ticket-dir}/ | Complete investigation and implementation artifacts |
+| Linear state | Linear | Ticket advanced through full lifecycle |
 
 ## How it works
 
 ```mermaid
 stateDiagram-v2
-    [*] --> Detect: ticket-auto starts
-    Detect --> Appraise: Step 0.7 — detect-resume (crash recovery)
-    Appraise --> Exec: notes.md complete
-    Exec --> ComplexityGate: artifacts written
-    ComplexityGate --> Implement: simple ticket (auto-approved)
-    ComplexityGate --> WaitApproval: complex ticket
-    WaitApproval --> Implement: human adds 'approved' label
-    Implement --> Document: code committed & pushed
-    Document --> Verify: ai-context.md written
-    Verify --> PRReview: Playwright UAT passed
-    PRReview --> Merge: review verdict ✅
-    PRReview --> Iterate: review verdict ⚠️ gaps found
-    Iterate --> Implement: plan updated with gaps
-    Merge --> [*]: ticket Done in Linear
+    [*] --> Preflight
+    Preflight --> StateDetection
+    StateDetection --> STEP_1_Appraise
+    STEP_1_Appraise --> STEP_2_Exec
+    STEP_2_Exec --> STEP_2_5_GateCheck
+    STEP_2_5_GateCheck --> STEP_4_Implement : auto-approved
+    STEP_2_5_GateCheck --> STEP_3_5_Reconcile : held→re-approved
+    STEP_2_5_GateCheck --> [*] : gate-stop
+    STEP_3_5_Reconcile --> STEP_4_Implement : clean pass
+    STEP_3_5_Reconcile --> [*] : re-held
+    STEP_4_Implement --> STEP_4_5_Verify
+    STEP_4_5_Verify --> STEP_4_Implement : fail, retry<3
+    STEP_4_5_Verify --> STEP_4_6_PRReview : pass
+    STEP_4_6_PRReview --> STEP_4_Implement : gaps, iterate<3
+    STEP_4_6_PRReview --> STEP_5_Document : clean
+    STEP_5_Document --> STEP_6_Report
+    STEP_6_Report --> [*]
 ```
 
 ## Related skills
 
-- [`/ticket-appraise`](ticket-appraise.md) — phase 1: investigation and complexity scoring
-- [`/ticket-appraise-exec`](ticket-appraise-exec.md) — phase 2: artifact creation and Linear update
-- [`/ticket-implement`](ticket-implement.md) — phase 3: code changes and PR
-- [`/ticket-verify`](ticket-verify.md) — phase 4: Playwright UAT
-- [`/ticket-pr-review`](ticket-pr-review.md) — phase 5: PR validation
-- [`/ticket-detect-resume`](ticket-detect-resume.md) — crash recovery helper
-- [`/ticket-flow`](ticket-flow.md) — all Linear state/label mutations
+- [`/ticket-appraise`](ticket-appraise.md) -- investigation phase agent
+- [`/ticket-appraise-exec`](ticket-appraise-exec.md) -- artifact creation agent
+- [`/ticket-implement`](ticket-implement.md) -- implementation phase agent
+- [`/ticket-verify`](ticket-verify.md) -- Playwright UAT verification agent
+- [`/ticket-pr-review`](ticket-pr-review.md) -- PR alignment review agent
+- [`/ticket-flow`](ticket-flow.md) -- deterministic state machine executor
+- [`/ticket-detect-resume`](ticket-detect-resume.md) -- pipeline log state parser (called as bash)
+- [`/ticket-gate-reconcile`](ticket-gate-reconcile.md) -- post-hold comment reconciliation agent

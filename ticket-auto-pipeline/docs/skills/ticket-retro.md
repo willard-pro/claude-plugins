@@ -1,53 +1,58 @@
 # ticket-retro
 
-> Post-pipeline retrospection — aggregates pipeline log failures and produces a dated proposal with unified diffs for skill-file fixes.
+> Post-pipeline retrospection -- aggregates pipeline log failures and produces a dated proposal with unified diffs for skill-file fixes. Use when the user says "/ticket-retro", "/ticket-retro --window 7d", "run retro", or "retrospect the pipeline".
 
 ## What it does
 
-`ticket-retro` scans pipeline logs across a configurable time window, classifies recurring failure patterns (by phase and step), and writes a dated proposal file to `~/.claude/state/ticket-retro/proposals/` containing unified diffs that fix the implicated skill files. It never modifies skill files directly — it only writes proposals for a human to review and apply. Optionally posts a summary to a configured Linear retro issue.
+Aggregates pipeline log failures across a configurable time window, classifies recurring patterns (gate-stops, flow errors, complexity mismatches), and generates minimal unified diffs targeting the specific skill file sections where failures originate. Also scans the Claude log for failure signals, improvement hints, and insight blocks. Writes a dated proposal to `~/.claude/state/ticket-retro/proposals/` with a failure histogram, complexity prediction accuracy table, per-failure-class pattern analysis, and apply instructions. Never modifies skill files directly.
 
 ## Trigger
 
-**Slash command:** `/ticket-retro [--window Nd] [--post-to-linear]`
+**Slash command:** `/ticket-retro [--window Nd] [--post-to-linear] [--force]`
 
-**Natural language:** "run retro", "retrospect the pipeline", "ticket-retro --window 14d"
+**Natural language:** run retro, retrospect the pipeline
 
 ## Inputs
 
 | Input | Source | Required |
 |-------|--------|----------|
-| `--window` | CLI flag (default: `7d`) | No |
-| `--post-to-linear` | CLI flag | No |
-| Pipeline logs | `tickets/*/logs/pipeline.log` | Yes |
-| `RETRO_LINEAR_ISSUE` | CLAUDE.md field | Only with `--post-to-linear` |
-| `LINEAR_API_KEY` | Environment variable | Only with `--post-to-linear` |
+| --window Nd | CLI (default: 7d) | No |
+| --post-to-linear | CLI flag | No |
+| --force | CLI flag (bypass cursor dedup) | No |
+| Pipeline logs | ./logs/*-pipeline.log | Yes |
+| Heartbeat logs | ./logs/*-heartbeat.log | Yes |
+| RETRO_LINEAR_ISSUE | Environment variable | No |
 
 ## Outputs / Artifacts
 
 | Artifact | Location | Description |
 |----------|----------|-------------|
-| Retro proposal | `~/.claude/state/ticket-retro/proposals/<date>-retro.md` | Dated report with failure patterns and unified diffs |
-| Linear comment | Retro issue | Summary posted if `--post-to-linear` is set |
+| Retro proposal | ~/.claude/state/ticket-retro/proposals/{date}-retro.md | Failure histogram, pattern analysis, diffs |
+| Linear comment | RETRO_LINEAR_ISSUE | Summary comment (if --post-to-linear) |
+| Cursor file | ~/.claude/state/ticket-retro/retro-cursor.json | Tracks last-scanned log mtimes |
 
 ## How it works
 
 ```mermaid
 flowchart TD
-    A([Start]) --> B[Scan pipeline logs\n--window days back]
-    B --> C[Extract fail entries\nfrom log stream]
-    C --> D[Classify patterns\nby phase + step + error]
-    D --> E{Patterns found?}
-    E -- none --> F([Done — all green])
-    E -- yes --> G[Map patterns\nto skill files]
-    G --> H[Generate unified diffs\nfor each implicated skill]
-    H --> I[Write dated proposal\nto proposals/]
-    I --> J{--post-to-linear?}
-    J -- yes --> K[Post summary\nto Linear retro issue]
-    J -- no --> L([Done])
-    K --> L
+    A[Start: /ticket-retro] --> B[Step 1: retro.sh aggregate]
+    B --> C{Any failures?}
+    C -->|No| D[Write clean window report]
+    C -->|Yes| E[Step 1.5: Scan Claude log]
+    E --> F[Step 2: Load prior proposal]
+    F --> G[Step 3: Per-failure-class diffs]
+    G --> H[Load template for code]
+    H --> I[Read implicated skill file]
+    I --> J[Generate unified diff]
+    J --> K[Step 4: Write proposal]
+    K --> L{--post-to-linear?}
+    L -->|Yes| M[Post to RETRO_LINEAR_ISSUE]
+    L -->|No| N[Report completion]
+    M --> N
 ```
 
 ## Related skills
 
-- [`/ticket-auto`](ticket-auto.md) — generates the pipeline logs this skill reads
-- [`/ticket-overseer`](ticket-overseer.md) — real-time observability; retro is retrospective
+- [`/ticket-fleet-controller`](ticket-fleet-controller.md) -- real-time intervention (complementary to retro's post-hoc analysis)
+- [`/ticket-detect-resume`](ticket-detect-resume.md) -- crash recovery from pipeline log
+- [`/ticket-overseer`](ticket-overseer.md) -- human-facing pipeline dashboard

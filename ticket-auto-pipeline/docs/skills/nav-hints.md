@@ -1,55 +1,51 @@
 # nav-hints
 
-> Navigation hint lookup for browser-based ticket work. Returns exact click-by-click paths to reach feature areas without direct URL navigation (which breaks Angular session state).
+> Navigation hint lookup for browser-based ticket work. Returns exact click-by-click paths to reach feature areas without direct URL navigation (which breaks Angular session state). Use when ticket-verify or ticket-reproduce needs to navigate the app, or when the user asks "how do I get to X in the app".
 
 ## What it does
 
-`nav-hints` is a lookup utility for Playwright sessions. Angular SPAs lose session state on full-page reloads triggered by `page.goto()`, so `/ticket-verify` and `/ticket-reproduce` must always navigate by clicking through the UI. `nav-hints` stores known click-by-click paths for each feature area and returns the correct path on demand. It also supports adding new hints and listing all known areas for the current project.
+Manages a project-scoped knowledge base of click-by-click UI navigation paths. Supports three modes: lookup (fuzzy matches an area name and returns the exact click path), add (records a new navigation path after successful discovery), and list (prints all known areas). Every hint records its source ticket and date for staleness detection. The central rule is no direct URLs for in-app navigation -- Angular loses session state on full page reload, so every path is click-by-click through the UI.
 
 ## Trigger
 
-**Slash command:**
-- `/nav-hints <area>` — return click path for a feature area
-- `/nav-hints add` — record a new navigation hint
-- `/nav-hints list` — list all known areas
+**Slash command:** `/nav-hints <area|add|list>`
 
-**Natural language:** "how do I get to payments in the app", "nav-hints progress"
+**Natural language:** how do I get to X in the app
 
 ## Inputs
 
 | Input | Source | Required |
 |-------|--------|----------|
-| Area name | CLI argument | Yes (fuzzy matched) |
-| Project hints file | `REPOS_ROOT/<project>/nav-hints.md` | Yes |
+| Area name | CLI argument (for lookup) | Yes (for lookup mode) |
+| nav-hints.md | {TICKETS_ROOT}/nav-hints.md | Yes |
 
 ## Outputs / Artifacts
 
 | Artifact | Location | Description |
 |----------|----------|-------------|
-| Click path | Stdout | Ordered list of UI clicks to reach the area |
-| Updated hints file | Project hints file | New entry appended (add mode only) |
+| Navigation path | stdout | Click-by-click instructions for the matched area |
+| New hint entry | {TICKETS_ROOT}/nav-hints.md | Appended hint with path, steps, source, date |
+| Area listing | stdout | All known areas with one-line summaries |
 
 ## How it works
 
 ```mermaid
 flowchart TD
-    A([Start]) --> B{Mode?}
-    B -- lookup --> C[Load project hints file]
-    B -- add --> D[Prompt for area name\npath + click steps]
-    B -- list --> E[Load hints file\nprint all areas]
-    C --> F[Fuzzy match area name\nto known entries]
-    F --> G{Match found?}
-    G -- yes --> H[Return click path]
-    G -- no --> I[Return closest match\nwith suggestion]
-    D --> J[Append new hint\nto hints file]
-    H --> K([Done])
-    I --> K
-    J --> K
-    E --> K
+    A[Start: /nav-hints] --> B{Mode?}
+    B -->|<area>| C[Load nav-hints.md]
+    B -->|add| D[Prompt for area details]
+    B -->|list| E[Print all known areas]
+    C --> F{Exact match?}
+    F -->|Yes| G[Return click path]
+    F -->|Fuzzy| H[List candidates]
+    F -->|No match| I[Suggest /nav-hints add]
+    H --> J[Ask user to pick]
+    D --> K[Append to nav-hints.md]
+    K --> L[Confirm saved]
 ```
 
 ## Related skills
 
-- [`/ticket-verify`](ticket-verify.md) — uses nav-hints for Playwright navigation
-- [`/ticket-reproduce`](ticket-reproduce.md) — uses nav-hints during bug reproduction
-- [`/app-knowledge`](app-knowledge.md) — business rules companion to nav-hints
+- [`/app-knowledge`](app-knowledge.md) -- business rules reference (companion lookup)
+- [`/ticket-verify`](ticket-verify.md) -- primary consumer; saves new hints after successful navigation
+- [`/ticket-reproduce`](ticket-reproduce.md) -- secondary consumer; uses hints for bug reproduction

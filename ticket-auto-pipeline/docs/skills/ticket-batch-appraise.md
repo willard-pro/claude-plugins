@@ -1,53 +1,56 @@
 # ticket-batch-appraise
 
-> Parallel appraisal and artifact creation for multiple Linear tickets. Spawns one agent per ticket — each runs appraise then exec. Reports a summary when all are done.
+> Parallel appraisal + artifact creation for multiple Linear tickets. Spawns one agent per ticket -- each runs appraise then exec. Use when the user says "/ticket-batch-appraise <ID1>, <ID2>, ..." or "batch appraise these: <list>". Also supports Linear queries: "/ticket-batch-appraise --from project:<name> state:Backlog".
 
 ## What it does
 
-`ticket-batch-appraise` accepts a list of ticket IDs (or a Linear query) and runs the full appraise → exec sequence for each ticket in parallel. Each ticket gets its own isolated agent so tickets do not interfere with each other. When all agents complete, it prints a summary table showing which tickets were appraised, their complexity scores, and any failures. Useful for processing a sprint backlog or a batch of newly triaged tickets.
+Runs the full appraise-then-exec sequence for multiple tickets in parallel. Resolves ticket IDs from explicit lists or Linear queries (up to 10), quick-fetches titles for display, then spawns one agent per ticket in a single message. Each agent independently runs `/ticket-appraise` followed by `/ticket-appraise-exec`. The orchestrator collects results as agents return, reports a summary table with complexity, artifact type, and key findings, and notes any failures.
 
 ## Trigger
 
-**Slash command:** `/ticket-batch-appraise <ID1>, <ID2>, ...` or `/ticket-batch-appraise --from project:<name> state:Backlog`
+**Slash command:** `/ticket-batch-appraise <ID1>, <ID2>, ...` or `/ticket-batch-appraise --from project:<name> state:<state>`
 
-**Natural language:** "batch appraise WIL-1, WIL-2, WIL-3", "appraise all backlog tickets in project X"
+**Natural language:** batch appraise these: <list>
 
 ## Inputs
 
 | Input | Source | Required |
 |-------|--------|----------|
-| Ticket IDs | CLI argument (comma-separated) | Yes (or `--from` query) |
-| `--from` query | CLI flag | Yes (if no explicit IDs) |
-| `LINEAR_API_KEY` | Environment variable | Yes |
-| `REPOS_ROOT`, `ISSUE_PREFIX` | CLAUDE.md fields | Yes |
+| Ticket IDs or --from query | CLI argument | Yes |
+| LINEAR_API_KEY | Environment variable | Yes |
+| REPOS_ROOT | CLAUDE.md | Yes |
+| ISSUE_PREFIX | CLAUDE.md | Yes |
 
 ## Outputs / Artifacts
 
 | Artifact | Location | Description |
 |----------|----------|-------------|
-| Per-ticket workspace | `tickets/<ID>--slug/` | One workspace per ticket (notes.md, context.md, plan) |
-| Summary report | Stdout | Table of ticket → complexity → status for the batch |
-| Linear updates | Each Linear issue | Same state/label updates as individual ticket-appraise-exec |
+| Ticket workspaces | tickets/{ID}--slug/ | Per-ticket directories with notes.md and plan artifacts |
+| Batch trace | tickets/batch-appraise-{timestamp}.md | Summary of all results |
+| Linear state | Linear | All successful tickets -> Approve + claimed |
 
 ## How it works
 
 ```mermaid
 flowchart TD
-    A([Start]) --> B[Parse ticket list\nor --from query]
-    B --> C[Resolve IDs from Linear\nif --from query used]
-    C --> D[Spawn parallel agents\none per ticket]
-    D --> E1[Agent: WIL-1\nappraise → exec]
-    D --> E2[Agent: WIL-2\nappraise → exec]
-    D --> E3[Agent: WIL-N\nappraise → exec]
-    E1 --> F[Collect results]
-    E2 --> F
-    E3 --> F
-    F --> G[Print summary table\nID / complexity / status]
-    G --> H([Done])
+    A[Start: /ticket-batch-appraise] --> B[Step 1: Resolve ticket IDs]
+    B --> C{--from flag?}
+    C -->|Yes| D[Query Linear for matching issues]
+    C -->|No| E[Parse comma-separated IDs]
+    D --> F[Quick-fetch titles]
+    E --> F
+    F --> G[Step 2: Spawn parallel agents]
+    G --> H[Agent 1: appraise + exec]
+    G --> I[Agent 2: appraise + exec]
+    G --> J[Agent N: appraise + exec]
+    H --> K[Step 3: Collect results]
+    I --> K
+    J --> K
+    K --> L[Step 4: Report summary table]
 ```
 
 ## Related skills
 
-- [`/ticket-appraise`](ticket-appraise.md) — what each spawned agent runs
-- [`/ticket-appraise-exec`](ticket-appraise-exec.md) — second step each agent runs
-- [`/ticket-batch-verify`](ticket-batch-verify.md) — parallel equivalent for UAT verification
+- [`/ticket-appraise`](ticket-appraise.md) -- investigation phase run by each agent
+- [`/ticket-appraise-exec`](ticket-appraise-exec.md) -- artifact creation run by each agent
+- [`/ticket-batch-verify`](ticket-batch-verify.md) -- parallel UAT verification (complementary batch operation)

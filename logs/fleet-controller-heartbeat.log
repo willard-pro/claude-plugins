@@ -1,0 +1,25 @@
+2026-06-03T20:03:28Z|META|schema|info|1
+2026-06-03T20:03:28Z|fleet-scan|cycle-start|ok|Detection cycle started|{}
+2026-06-03T20:03:28Z|fleet-scan|cycle-end|ok|Detection cycle complete|{"duration_ms":8}
+2026-06-03T20:03:28Z|fleet-scan|cycle-start|ok|Detection cycle started|{}
+2026-06-03T20:03:28Z|fleet-scan|cycle-end|ok|Detection cycle complete|{"duration_ms":8}
+2026-06-03T20:03:28Z|fleet-scan|cycle-start|ok|Detection cycle started|{}
+2026-06-03T20:03:28Z|fleet-scan|pipeline-scanned|info|Pipeline evaluated|{"tid":"CRE-47","severity":2,"phase":"APPRAISE"}
+2026-06-03T20:03:28Z|fleet-scan|cycle-end|ok|Detection cycle complete|{"duration_ms":26}
+2026-06-03T20:03:28Z|fleet-scan|cycle-start|ok|Detection cycle started|{}
+2026-06-03T20:03:28Z|fleet-scan|pipeline-scanned|info|Pipeline evaluated|{"tid":"CRE-47","severity":2,"phase":"IMPLEMENT"}
+2026-06-03T20:03:28Z|fleet-scan|cycle-end|ok|Detection cycle complete|{"duration_ms":31}
+2026-06-03T20:03:28Z|fleet-scan|cycle-start|ok|Detection cycle started|{}
+2026-06-03T20:03:28Z|fleet-scan|cycle-end|ok|Detection cycle complete|{"duration_ms":5}
+2026-06-03T20:03:28Z|fleet-scan|cycle-start|ok|Detection cycle started|{}
+2026-06-03T20:03:28Z|fleet-scan|cycle-end|ok|No workspace directory|{"duration_ms":0}
+2026-06-03T20:03:29Z|fleet-scan|cycle-start|ok|Detection cycle started|{}
+2026-06-03T20:03:29Z|fleet-scan|cycle-end|ok|Detection cycle complete|{"duration_ms":7}
+2026-06-03T20:03:29Z|fleet-scan|cycle-start|ok|Detection cycle started|{}
+2026-06-03T20:03:29Z|fleet-scan|pipeline-scanned|info|Pipeline evaluated|{"tid":"CRE-01","severity":0,"phase":"IMPLEMENT"}
+2026-06-03T20:03:29Z|fleet-scan|pipeline-scanned|info|Pipeline evaluated|{"tid":"CRE-02","severity":1,"phase":"VERIFY"}
+2026-06-03T20:03:29Z|fleet-scan|pipeline-scanned|info|Pipeline evaluated|{"tid":"CRE-03","severity":2,"phase":"META"}
+2026-06-03T20:03:29Z|fleet-scan|cycle-end|ok|Detection cycle complete|{"duration_ms":77}
+2026-06-03T20:03:29Z|fleet-scan|cycle-start|ok|Detection cycle started|{}
+2026-06-03T20:03:29Z|fleet-scan|pipeline-scanned|info|Pipeline evaluated|{"tid":"CRE-47","severity":2,"phase":"IMPLEMENT"}
+2026-06-03T20:03:29Z|fleet-scan|cycle-end|ok|Detection cycle complete|{"duration_ms":30}
