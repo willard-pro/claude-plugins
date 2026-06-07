@@ -1,6 +1,6 @@
 # Skill Reference
 
-The ticket-auto-pipeline ships 21 skills that automate the full Linear ticket lifecycle — from investigation through implementation, verification, and merge. **Pipeline Skills** form the core end-to-end workflow driven by `/ticket-auto`. **Support Skills** provide targeted utilities that can be called independently or are invoked internally by the pipeline.
+The ticket-auto-pipeline ships 25 skills that automate the full Linear ticket lifecycle — from investigation through implementation, verification, and merge. **Pipeline Skills** form the core end-to-end workflow driven by `/ticket-auto`. **Support Skills** provide targeted utilities that can be called independently or are invoked internally by the pipeline.
 
 ## Pipeline Skills
 
@@ -23,12 +23,16 @@ The ticket-auto-pipeline ships 21 skills that automate the full Linear ticket li
 |-------|---------|
 | [app-knowledge](app-knowledge.md) | Living reference for app business rules, roles, and UI conventions |
 | [nav-hints](nav-hints.md) | Click-by-click navigation paths for Playwright browser sessions |
+| [ticket-audit](ticket-audit.md) | Cross-ticket audit — detects duplicates, overlaps, stale tickets, and split candidates |
+| [ticket-audit-exec](ticket-audit-exec.md) | Two-phase apply agent for audit recommendation checklists |
 | [ticket-batch-appraise](ticket-batch-appraise.md) | Parallel appraisal and artifact creation for multiple tickets at once |
 | [ticket-batch-verify](ticket-batch-verify.md) | Parallel Playwright UAT verification across multiple tickets |
 | [ticket-critique](ticket-critique.md) | Validates ticket completeness before implementation begins |
 | [ticket-detect-resume](ticket-detect-resume.md) | *(Private)* Reads pipeline log to find crash recovery restart point |
 | [ticket-document](ticket-document.md) | Generates ai-context.md after implementation for future agents |
 | [ticket-env-check](ticket-env-check.md) | Validates all env vars and CLAUDE.md fields required by the pipeline |
+| [ticket-fleet-controller](ticket-fleet-controller.md) | Automated pipeline intervention — detect, kill, and restart stalled pipelines |
+| [ticket-gate-reconcile](ticket-gate-reconcile.md) | Post-gate-hold comment reconciliation for re-approved tickets |
 | [ticket-overseer](ticket-overseer.md) | Produces standup and in-flight status reports from pipeline logs |
 | [ticket-reproduce](ticket-reproduce.md) | Confirms a bug exists via Playwright before implementation starts |
 | [wiki-maintenance](wiki-maintenance.md) | Incorporates ticket-implement errata entries into wiki flow files |

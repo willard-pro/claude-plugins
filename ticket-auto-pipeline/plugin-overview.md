@@ -51,6 +51,7 @@ The orchestrator (`ticket-auto`) is a **thin stateless dispatch router** — it 
 | Fleet control | `ticket-fleet-controller`, `lib/fleet-detect.sh`, `lib/fleet-intervene.sh`, `lib/fleet-dashboard.sh` | Automated intervention — detect, kill, restart pipelines |
 | Validation | `ticket-env-check`, `validate-linear-config.sh` | Pre-flight checks |
 | Batch ops | `ticket-batch-appraise`, `ticket-batch-verify` | Bulk ticket processing |
+| Audit | `ticket-audit`, `ticket-audit-exec`, `lib/audit-size-check.sh`, `lib/audit-drift-check.sh`, `lib/audit-title-similarity.sh`, `lib/audit-scope-check.sh`, `lib/audit-repro-check.sh`, `lib/audit-ac-testability.sh`, `lib/audit-test-data-check.sh`, `lib/audit-overlap-check.sh`, `lib/audit-comment-guard.sh`, `lib/ticket-audit-exec.sh` | Cross-ticket audit within milestone/parent — detects duplicates, overlaps, empty tickets, goal misalignment, stale tickets, split candidates, wiki misalignment. Two-phase apply agent delegates needs-info to ticket-critique, posts structural comments. |
 
 ## Architecture: Thin Router Dispatch
 

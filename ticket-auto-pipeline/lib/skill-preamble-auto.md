@@ -40,7 +40,7 @@ Source the env file before any other operations:
 source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true
 ```
 
-Available variables: `$REPOS_ROOT`, `$ISSUE_PREFIX`, `$BE_SERVICES`, `$WIKI_ROOT`, `$BE_TEST_CMD`, `$FE_TEST_CMD`, `$LOCAL_URL`, `$UAT_URL`.
+Available variables: `$REPOS_ROOT`, `$ISSUE_PREFIX`, `$BE_SERVICES`, `$WIKI_ROOT`, `$BE_TEST_CMD`, `$BE_TEST_RUNNER`, `$FE_TEST_CMD`, `$LOCAL_URL`, `$UAT_URL`.
 
 Do NOT read CLAUDE.md to extract project context fields — they are already in the environment.
 ```

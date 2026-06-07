@@ -11,10 +11,10 @@ You have been given a ticket ID as the argument (e.g. `WIL-42`). Execute the ful
 
 ## Pipeline Preamble
 
-If `--from-auto` is present in the arguments, follow the auto-pipeline preamble in `~/.claude/skills/lib/skill-preamble-auto.md` with parameters: TICKET_ID=<from args>, PHASE=IMPLEMENT, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_LOGGING=true, HAS_HEARTBEAT=true. Before starting, source the project context: `source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true`. Otherwise, follow the full pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=IMPLEMENT, FROM_FLAG=none, EXTRA_GUARD=base-branch, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=REPOS_ROOT,ISSUE_PREFIX,BE_SERVICES,BE_TEST_CMD,FE_TEST_CMD, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
+If `--from-auto` is present in the arguments, follow the auto-pipeline preamble in `~/.claude/skills/lib/skill-preamble-auto.md` with parameters: TICKET_ID=<from args>, PHASE=IMPLEMENT, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_LOGGING=true, HAS_HEARTBEAT=true. Before starting, source the project context: `source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true`. Otherwise, follow the full pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=IMPLEMENT, FROM_FLAG=none, EXTRA_GUARD=base-branch, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=REPOS_ROOT,ISSUE_PREFIX,BE_SERVICES,BE_TEST_CMD,BE_TEST_RUNNER,FE_TEST_CMD, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
 
 ### Heartbeat points
-- **Test command**: if BE_TEST_CMD found, write `hb_heartbeat "test-command" "BE_TEST_CMD configured" '{"cmd":"<cmd>"}'`; if absent, write `hb_heartbeat "test-command" "skip" "no BE_TEST_CMD"`
+- **Test command**: if BE_TEST_RUNNER found, write `hb_heartbeat "test-command" "BE_TEST_RUNNER configured" '{"cmd":"<cmd>"}'`; elif BE_TEST_CMD found, write `hb_heartbeat "test-command" "BE_TEST_CMD configured" '{"cmd":"<cmd>"}'`; if absent, write `hb_heartbeat "test-command" "skip" "no BE_TEST_CMD or BE_TEST_RUNNER"`
 - **Artifact path**: after detecting the plan artifact, write `hb_decision "artifact-path" "info" "artifact detected" '{"type":"simple-fix|openspec"}'`
 - **Implementation mode**: after detect-path, write `hb_decision "implementation-mode" "fired" "simple|openspec" '{"mode":"..."}'`
 
@@ -314,7 +314,7 @@ When complete, return ONLY this JSON (no other text):
 
 **After implementation is complete, write tests covering the changed logic.** This is mandatory — do not skip.
 
-- **If `{BE_TEST_CMD}` is defined and the ticket touches a BE repo:** Write tests in the repo's test directory. Create `tests/` if it doesn't exist. Test any new or modified functions/methods, including error paths. Install the test framework if needed (e.g. `pip install pytest`).
+- **If `{BE_TEST_CMD}` is defined and the ticket touches a BE repo:** Write tests in the repo's test directory. Create `tests/` if it doesn't exist. Test any new or modified functions/methods, including error paths. Install the test framework if needed (e.g. `pip install pytest`). Use `{BE_TEST_RUNNER}` as the test invocation if defined (e.g., `~/.pyenv/versions/3.13.12/bin/pytest`), otherwise fall back to `{BE_TEST_CMD}`.
 - **If `{FE_TEST_CMD}` is defined and the ticket touches a non-BE repo:** Write tests alongside the changed files or in `__tests__/`. Test new or modified components, API routes, and utility functions. Install the test framework if needed.
 - **If neither is defined:** Skip all tests. Do not invent or install a test framework. Note "no test command configured" in the session log and move on.
 - **DB migrations:** If the change includes a migration, write a test that verifies the new schema (column exists, index exists, constraint works).
@@ -325,7 +325,10 @@ When complete, return ONLY this JSON (no other text):
 
 ```bash
 # BE repos (only if BE_TEST_CMD is defined)
-cd {repo-path} && {BE_TEST_CMD}
+# BE_TEST_RUNNER takes precedence over BE_TEST_CMD for pyenv/pipenv environments
+# where the bare command (e.g. "pytest") is not on PATH.
+_test_cmd="{BE_TEST_RUNNER:-{BE_TEST_CMD}}"
+cd {repo-path} && $_test_cmd
 
 # FE repos (only if FE_TEST_CMD is defined)
 cd {repo-path} && {FE_TEST_CMD}
@@ -373,6 +376,10 @@ if [ "$_rc" -ne 0 ]; then
     "{\"trigger\":\"implement-outcome\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: implement-outcome" >> {LOG_FILE}
 fi
+# Write outcome to pipeline log so post-implement guards can verify it.
+# outcome-label-check.sh reads this dedicated entry — not the general
+# implement|done| line which may contain prose like "2 files changed".
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement-outcome|info|{Smooth|Rough|Hard}" >> {LOG_FILE}
 ```
 
 This adds the outcome label while preserving all existing labels including `simple`/`complex`. The pairing of predicted complexity and actual outcome is preserved for training and history.
