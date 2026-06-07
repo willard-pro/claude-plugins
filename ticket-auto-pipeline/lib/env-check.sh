@@ -67,6 +67,7 @@ esac
 RED=$(tput setaf 1 2>/dev/null || echo "")
 GREEN=$(tput setaf 2 2>/dev/null || echo "")
 YELLOW=$(tput setaf 3 2>/dev/null || echo "")
+BLUE=$(tput setaf 4 2>/dev/null || echo "")
 BOLD=$(tput bold 2>/dev/null || echo "")
 RESET=$(tput sgr0 2>/dev/null || echo "")
 
@@ -74,6 +75,7 @@ say() { echo "${BOLD}${1}${RESET}: ${2}"; }
 pass() { echo "  ${GREEN}ok${RESET}  ${1}"; }
 fail() { echo "  ${RED}MISS${RESET} ${1} — ${2}"; }
 warn() { echo "  ${YELLOW}warn${RESET} ${1} — ${2}"; }
+info() { echo "  ${BLUE}info${RESET} ${1} — ${2}"; }
 
 # Walk ancestors from start_dir; emit the first dir with ≥2 child repos on stdout.
 # Returns empty string (exit 0) when no qualifying ancestor is found.

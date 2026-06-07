@@ -62,7 +62,7 @@ _outcome_label_check() {
   # Read outcome from pipeline log
   outcome=$(_get_outcome_from_log)
   if [ -z "$outcome" ]; then
-    echo "No IMPLEMENT|implement|done| line found in pipeline log" >&2
+    echo "No IMPLEMENT|implement-outcome|info| line found in pipeline log" >&2
     return 1
   fi
 
