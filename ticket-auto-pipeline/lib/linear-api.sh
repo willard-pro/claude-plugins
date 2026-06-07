@@ -237,6 +237,53 @@ get_me() {
   echo "$resp" | jq '.data.viewer'
 }
 
+# ── Audit / milestone / parent-child queries ──────────────────────────────────────
+
+# Fetch milestones for a project. Returns JSON array on stdout.
+# Each milestone: {id, name, description, targetDate, status}
+get_project_milestones() {
+  local project_id="$1"
+  local query
+  query=$(jq -n --arg pid "$project_id" '{
+    query: "query($pid: String!) { project(id: $pid) { milestones { nodes { id name description targetDate status } } } }",
+    variables: {pid: $pid}
+  }')
+  local resp
+  resp=$(linear_graphql "$query")
+  echo "$resp" | jq '.data.project.milestones.nodes'
+}
+
+# Fetch issues under a milestone. Returns JSON: {meta: {name, description}, issues: [...]}
+# Each issue includes: id, identifier, title, description, state {id, name, type},
+# labels {nodes: [{id, name}]}, parent {id, identifier, title}, assignee {id, name},
+# createdAt, updatedAt
+get_milestone_issues() {
+  local milestone_id="$1"
+  local query
+  query=$(jq -n --arg mid "$milestone_id" '{
+    query: "query($mid: String!) { milestone: node(id: $mid) { ... on Milestone { name description issues { nodes { id identifier title description state { id name type } labels { nodes { id name } } parent { id identifier title } assignee { id name } createdAt updatedAt } } } } }",
+    variables: {mid: $mid}
+  }')
+  local resp
+  resp=$(linear_graphql "$query")
+  echo "$resp" | jq '{meta: {name: .data.milestone.name, description: .data.milestone.description}, issues: (.data.milestone.issues.nodes // [])}'
+}
+
+# Fetch a parent issue with all its children. Returns JSON: {parent: {...}, children: [...]}
+# Parent includes: id, identifier, title, description
+# Children include same issue fields as get_milestone_issues
+get_parent_with_children() {
+  local parent_id="$1"
+  local query
+  query=$(jq -n --arg pid "$parent_id" '{
+    query: "query($pid: String!) { issue(id: $pid) { id identifier title description children { nodes { id identifier title description state { id name type } labels { nodes { id name } } parent { id identifier title } assignee { id name } createdAt updatedAt } } } }",
+    variables: {pid: $pid}
+  }')
+  local resp
+  resp=$(linear_graphql "$query")
+  echo "$resp" | jq '{parent: {id: .data.issue.id, identifier: .data.issue.identifier, title: .data.issue.title, description: .data.issue.description}, children: (.data.issue.children.nodes // [])}'
+}
+
 # Post a comment to an issue. Returns comment JSON: {id, body}
 save_comment() {
   local issue_id="$1"

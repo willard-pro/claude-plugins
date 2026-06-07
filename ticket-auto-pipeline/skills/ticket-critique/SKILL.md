@@ -1,6 +1,6 @@
 ---
 name: ticket-critique
-description: Validates a Linear ticket's requirements for completeness before implementation begins. Checks for multi-role credential gaps, untestable acceptance criteria, missing test data, and scope ambiguity. Posts a Linear comment and adds `needs-info` label if blockers are found. Called automatically by ticket-appraise Step 2.7.
+description: Validates a Linear ticket's requirements for completeness before implementation begins. Checks for multi-role credential gaps, untestable acceptance criteria, missing test data, and scope ambiguity. Posts a Linear comment and adds `needs-info` label if blockers are found. Called automatically by ticket-appraise Step 2.7. Supports --from-appraise (workspace guaranteed), --from-audit (fetches from Linear API, includes Source: marker).
 ---
 
 # Ticket Critique
@@ -15,12 +15,51 @@ Follow the pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with pa
 
 ## Input
 
-Read from the local workspace (already created by ticket-setup):
-- `context.md` — description, acceptance criteria, labels, comments
-- `CLAUDE.md` — known environments (LOCAL_URL, UAT_URL), any documented test users
+### If `--from-audit` is in the arguments
 
-If `--from-appraise` is in the arguments, the workspace is guaranteed to exist.
-Otherwise, find it:
+No workspace is guaranteed — fetch everything from the Linear API directly.
+
+1. Source `lib/linear-api.sh` and `lib/config.sh`:
+   ```bash
+   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && cd ../../lib && pwd || echo "$HOME/.claude/skills/lib")"
+   source "$SCRIPT_DIR/linear-api.sh"
+   source "$SCRIPT_DIR/config.sh"
+   ```
+
+2. Fetch the ticket from Linear:
+   ```bash
+   ISSUE_JSON=$(get_issue "{TICKET_ID}")
+   TITLE=$(echo "$ISSUE_JSON" | jq -r '.title')
+   DESCRIPTION=$(echo "$ISSUE_JSON" | jq -r '.description // ""')
+   LABELS=$(echo "$ISSUE_JSON" | jq -r '[.labels[]?.name] | join(", ")')
+   STATE=$(echo "$ISSUE_JSON" | jq -r '.state.name')
+   ```
+
+3. Fetch comments for additional context:
+   ```bash
+   COMMENTS_JSON=$(get_comments "{TICKET_ID}")
+   COMMENT_BODIES=$(echo "$COMMENTS_JSON" | jq -r '.[]?.body // ""' | head -5)
+   ```
+
+4. Build analysis context from API data (no workspace files needed):
+   - **Title**: `$TITLE`
+   - **Description**: `$DESCRIPTION`
+   - **Labels**: `$LABELS`
+   - **State**: `$STATE`
+   - **Recent comments**: `$COMMENT_BODIES`
+   - **Acceptance criteria**: extracted from description (look for numbered lists, "AC:", "Acceptance Criteria:" sections)
+
+5. Read CLAUDE.md for known test users/environments (same as standard path):
+   ```bash
+   if [ -f "CLAUDE.md" ]; then
+     cat CLAUDE.md | grep -A5 "test users\|UAT_URL\|LOCAL_URL" || true
+   fi
+   ```
+
+Proceed to Checklist — same checks apply regardless of input source.
+
+### If `--from-appraise` is in the arguments, the workspace is guaranteed to exist.
+Otherwise (no recognized flag), find it:
 ```bash
 find . -type d -name "{TICKET-ID}*"
 ```
@@ -135,8 +174,27 @@ If no findings: write `**Status:** CLEAR` with no findings list.
 
 ### If any BLOCKERs found
 
-1. Post a Linear comment via `mcp__linear-server__save_comment`:
+1. Post a Linear comment via the Linear MCP comment tool. The comment body depends on invocation source:
 
+**If `--from-audit` (with optional `--source-marker <key>`):**
+```
+**Ticket flagged — audit found missing information.**
+
+The audit identified this ticket as needing additional information:
+
+{audit finding detail — extracted from args or the checklist item}
+
+The following issues were confirmed by ticket-critique:
+
+{bulleted list of BLOCKER items with plain-language description}
+
+Please update the ticket description or add a comment with the missing details.
+Source: {--source-marker value}
+```
+
+If `--source-marker` is not provided, derive it from the audit context: `ticket-audit:{TICKET-ID}:needs-info`.
+
+**If `--from-appraise` (standard pipeline flow):**
 ```
 **Ticket blocked — missing information required for implementation.**
 
