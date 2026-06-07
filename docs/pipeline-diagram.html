@@ -83,6 +83,19 @@
     border-top: 2px dashed currentColor;
     height: 0;
   }
+  header.app button.toolbar-btn {
+    background: var(--bg-3);
+    color: var(--fg);
+    border: 1px solid var(--line-2);
+    border-radius: 6px;
+    padding: 6px 12px;
+    font-size: 12px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+  }
+  header.app button.toolbar-btn:hover { background: #242c36; border-color: #4a5563; }
+  header.app button.toolbar-btn.active { background: var(--auto); color: #000; border-color: var(--auto); }
   header.app button.back {
     background: var(--bg-3);
     color: var(--fg);
@@ -181,6 +194,11 @@
     text-transform: uppercase;
   }
   .node.clickable { cursor: pointer; }
+  .node.clickable:focus { outline: none; }
+  .node.clickable:focus rect {
+    stroke: var(--auto);
+    stroke-width: 2.5;
+  }
   .node.clickable:hover rect {
     fill: #1c242e;
     stroke: var(--auto);
@@ -239,6 +257,12 @@
   .phase-badge:hover rect {
     fill: #232b35;
     stroke: var(--auto);
+  }
+  .phase-badge:focus { outline: none; }
+  .phase-badge:focus rect {
+    fill: #232b35;
+    stroke: var(--auto);
+    stroke-width: 2;
   }
   .phase-badge text.name {
     fill: var(--auto);
@@ -669,6 +693,11 @@
   }
   .side-effects ul li .ann { color: var(--fg-mute); font-size: 12px; }
 
+  /* ---------- Phase chip additions ---------- */
+  .chip-agent { font-size: 9px; fill: var(--fg-mute); font-family: ui-monospace, "SF Mono", Menlo, monospace; text-anchor: middle; }
+  .chip-steps { visibility: hidden; opacity: 0; transition: opacity 200ms ease, visibility 0s 200ms; }
+  .steps-on .chip-steps { visibility: visible; opacity: 1; transition: opacity 200ms ease, visibility 0s 0s; }
+  .chip-steps text { font-size: 9px; fill: var(--fg); font-family: ui-monospace, "SF Mono", Menlo, monospace; }
   /* Footer */
   footer.foot {
     color: var(--fg-dim);
@@ -698,6 +727,7 @@
     <span class="swatch dashed" style="color: var(--auto)"><i></i> loop-back</span>
     <span class="swatch dashed" style="color: var(--fg-mute)"><i></i> side transition</span>
   </div>
+  <button class="toolbar-btn" id="btn-steps">Show Steps</button>
   <button class="back" id="back-btn">← back to full view</button>
 </header>
 
@@ -712,7 +742,7 @@
     <div class="helptext">Click any <span class="mono" style="color:var(--auto)">phase chip</span> below the flow to drill into its steps, gates and stop codes. Hover an edge for trigger details.</div>
 
     <div class="diagram-wrap">
-      <svg class="diagram" id="diagram" viewBox="0 0 1960 600" preserveAspectRatio="xMinYMid meet">
+      <svg class="diagram" id="diagram" viewBox="0 0 1960 640" preserveAspectRatio="xMinYMid meet">
         <defs>
           <marker id="arrow-auto" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
             <path d="M0,0 L10,5 L0,10 Z" fill="var(--auto)"></path>
@@ -756,6 +786,10 @@
       <div class="transition-card">
         <div class="tc-label">transition</div>
         <div class="tc-flow" id="ph-transition"></div>
+        <div class="tc-agent-row" id="ph-agent" style="margin-top:10px; padding-top:10px; border-top:1px dashed var(--line);">
+          <span class="tc-label">agent</span>
+          <span class="tc-agent-val mono" style="font-size:11px; color:var(--auto);"></span>
+        </div>
       </div>
     </div>
 
@@ -781,7 +815,7 @@
   <span>·</span>
   <span>states: 7</span>
   <span>·</span>
-  <span>phases: 7</span>
+  <span>phases: 8</span>
   <span>·</span>
   <span>transitions: 10 + 2 side</span>
 </footer>
@@ -804,7 +838,7 @@ const DATA = {
   // 7 nodes laid out across the canvas; columns are spaced
   layout: {
     width: 1800,
-    height: 540,
+    height: 640,
     nodeWidth: 120,
     nodeHeight: 64,
     rowY: 170,
@@ -849,11 +883,13 @@ const DATA = {
     { phase: "IMPLEMENT",  between: ["ready", "review"],    side: "below" },
     { phase: "PR-REVIEW",  between: ["review", "uat"],      side: "below" },
     { phase: "VERIFY",     between: ["ready", "review"],    side: "below", chipY: 340, tickFromY: 282, note: "localhost" },
+    { phase: "MAINTENANCE", between: ["review", "done"],   side: "below", chipY: 420, tickFromY: 282, note: "post-merge" },
   ],
 
   phases: {
     "APPRAISE": {
       transition: ["Backlog", "Todo"],
+      agentType: "ticket-appraise-agent",
       description: "Reads the ticket, sets up a sandboxed workspace, sizes the work, gathers prior art and codebase context, then hands off an artifact summarising the plan and complexity.",
       labelsActive: [
         { name: "claimed",    note: "added on start" },
@@ -872,6 +908,7 @@ const DATA = {
 
     "REPRODUCE": {
       transition: null,
+      agentType: "ticket-reproduce-agent",
       description: "Bug tickets only. Launches a browser on UAT, navigates step-by-step through the reproduction plan, and confirms whether the bug manifests. Blocks the pipeline if the bug cannot be reproduced or the ticket lacks sufficient detail.",
       labelsActive: [
         { name: "bug",      note: "entry condition — phase skipped if absent" },
@@ -897,6 +934,7 @@ const DATA = {
 
     "EXEC": {
       transition: ["Todo", "Approve"],
+      agentType: "ticket-appraise-exec-agent",
       description: "Loads the saved appraisal workspace, produces the canonical execution artifact, posts it back to Linear as a structured comment, and hands off to the gate.",
       labelsActive: [
         { name: "claimed",      note: "present from APPRAISE" },
@@ -904,8 +942,10 @@ const DATA = {
       ],
       steps: [
         { name: "load-workspace",  desc: "Re-attaches to the APPRAISE workspace so context carries forward without re-fetching." },
-        { name: "create-artifact", desc: "Generates the formal execution artifact — scope, approach, file plan, test plan." },
-        { name: "post-linear",     desc: "Posts the artifact to the Linear ticket as a structured comment for reviewers." },
+        { name: "create-artifact",    desc: "Generates the formal execution artifact — scope, approach, file plan, test plan." },
+        { name: "regression-guard",   desc: "Scans the execution artifact against the existing test suite to flag tests the proposed changes are likely to break before a line of code is written." },
+        { name: "adversarial-review", desc: "Red-team pass on the artifact — challenges assumptions, pokes at edge cases, flags plan gaps before implementation begins." },
+        { name: "post-linear",        desc: "Posts the artifact to the Linear ticket as a structured comment for reviewers." },
         { name: "handoff",         desc: "Marks the ticket ready for the gate and exits cleanly." },
       ],
       gateText: null,
@@ -917,6 +957,7 @@ const DATA = {
 
     "GATE": {
       transition: ["Approve", "Ready"],
+      agentType: "bash: gate-check.sh",
       description: "The decision point. Simple tickets pass through autonomously; complex tickets hold for a human reviewer to add the approved label before continuing.",
       labelsActive: [
         { name: "claimed",      note: "present" },
@@ -924,7 +965,9 @@ const DATA = {
         { name: "{complexity}", note: "drives auto vs hold" },
       ],
       steps: [
-        { name: "gate", desc: "Inspects the complexity label and either auto-approves or waits for the human approved label." },
+        { name: "gate-check",        desc: "Bash-only gate (gate-check.sh --mode entry). Checks artifact existence, complexity-artifact coherence, autonomy mode routing. No LLM involved." },
+        { name: "complexity-routing", desc: "simple + auto|semi-auto → auto-approve immediately. complex OR manual mode → hold in Approve, wait for human approved label. Autonomy resolved once at startup." },
+        { name: "gate-reconcile",    desc: "When a held ticket is re-approved, a gate-reconcile agent (STEP_3_5) fetches Linear comments, evaluates open questions, and either passes clean or re-holds with an amendment cycle." },
       ],
       gateText: {
         title: "Complexity gate",
@@ -942,6 +985,7 @@ const DATA = {
 
     "IMPLEMENT": {
       transition: ["Ready", "Review"],
+      agentType: "ticket-implement-agent",
       description: "Writes the code. Verifies the approval still holds, branches, implements against the execution artifact, runs the test suite, performs a self-review, then commits and pushes a PR.",
       labelsActive: [
         { name: "approved",     note: "required entry condition" },
@@ -963,6 +1007,7 @@ const DATA = {
 
     "PR-REVIEW": {
       transition: ["Review", "Done / UAT / Ready"],
+      agentType: "ticket-pr-review-agent",
       description: "Reads the opened PR, extracts requirements from the ticket, validates the diff against them and posts findings. The verdict decides whether the work merges, escalates to UAT, or loops back for iteration.",
       labelsActive: [
         { name: "claimed",  note: "present" },
@@ -980,7 +1025,7 @@ const DATA = {
       outcomes: [
         { verdict: "pass", label: "✅ pass — done",     desc: "Diff fully satisfies requirements. Transitions Review → Done." },
         { verdict: "warn", label: "⚠ pass — uat",      desc: "Diff looks right but warrants live verification. Transitions Review → UAT." },
-        { verdict: "fail", label: "❌ fail — iterate", desc: "One or more requirements unmet. Adds rejected, loops Review → Ready." },
+        { verdict: "fail", label: "❌ fail — iterate", desc: "One or more requirements unmet. Adds rejected, loops Review → Ready. (max 3 iterations — ITERATION counter in pipeline log)" },
       ],
       stopCodes: [
         { code: "PR_REVIEW_VERDICT_UNPARSEABLE", desc: "Reviewer output did not match the expected verdict schema — halts for human inspection." },
@@ -989,6 +1034,7 @@ const DATA = {
 
     "VERIFY": {
       transition: ["UAT", "Done / Ready"],
+      agentType: "ticket-verify-agent",
       description: "Live user-acceptance verification. Launches a real browser, walks through the requirements as a user would, evaluates outcomes against the spec, and reports back to Linear.",
       labelsActive: [
         { name: "claimed",  note: "present" },
@@ -1004,17 +1050,33 @@ const DATA = {
       ],
       outcomes: [
         { verdict: "pass", label: "uat-pass", desc: "All checks green. Transitions UAT → Done; removes claimed and reviewed." },
-        { verdict: "fail", label: "uat-fail", desc: "One or more checks failed. Adds rejected, loops UAT → Ready for fixes." },
+        { verdict: "fail", label: "uat-fail", desc: "One or more checks failed. Adds rejected, loops UAT → Ready for fixes. (max 3 attempts — VERIFY_ATTEMPTS counter in pipeline log)" },
       ],
       stopCodes: [
         { code: "REMEDIATION_BRIEF_TRUNCATED", desc: "The remediation brief written back to the ticket was cut off — risk that fixes miss context." },
       ],
     },
+
+    "MAINTENANCE": {
+      transition: null,
+      agentType: "document + wiki agents",
+      description: "Post-implementation documentation and wiki maintenance. Two agents run sequentially after the ticket reaches Done: ticket-document-agent generates ai-context.md; wiki-maintenance-agent processes wiki errata. Non-blocking — failures are warn-continue.",
+      labelsActive: [],
+      steps: [
+        { name: "document",    desc: "ticket-document-agent writes ai-context.md capturing implementation decisions, touched files, and test coverage notes." },
+        { name: "maintenance", desc: "wiki-maintenance-agent processes wiki errata flagged during implementation (missing pages, stale service docs)." },
+      ],
+      gateText: null,
+      stopCodes: [],
+    },
   },
 };
 
 // Phase order, used by the sub-nav in detail view
-const PHASE_ORDER = ["APPRAISE", "REPRODUCE", "EXEC", "GATE", "IMPLEMENT", "PR-REVIEW", "VERIFY"];
+const PHASE_ORDER = ["APPRAISE", "REPRODUCE", "EXEC", "GATE", "IMPLEMENT", "PR-REVIEW", "VERIFY", "MAINTENANCE"];
+
+// Steps toggle state
+let stepsVisible = false;
 
 // =========================================================================
 //  RENDER  — View 1: full pipeline SVG
@@ -1050,6 +1112,15 @@ function renderNodes() {
     // Clicking on a node jumps to the OUTGOING phase from that state, if any
     const outPhaseChip = DATA.phaseChips.find(p => p.between[0] === s.id);
     if (outPhaseChip) {
+      node.setAttribute("tabindex", "0");
+      node.setAttribute("role", "button");
+      node.setAttribute("aria-label", `${s.label} → ${outPhaseChip.phase}`);
+      node.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          navigateToPhase(outPhaseChip.phase);
+        }
+      });
       node.addEventListener("click", () => navigateToPhase(outPhaseChip.phase));
     } else if (s.id === "done") {
       // Done has no outgoing phase
@@ -1153,15 +1224,32 @@ function renderPhaseChips() {
     const b = nodeRect(ch.between[1]);
     const cx = (a.cx + b.cx) / 2;
     const cy = ch.chipY !== undefined ? ch.chipY : (a.bottom + 58);
-    const w = 132, h = 44;
+    const w = 132, h = 58;
 
     const grp = svgEl("g", { class: "phase-badge", "data-phase": ch.phase, transform: `translate(${cx - w/2}, ${cy - h/2})` });
     const rect = svgEl("rect", { x: 0, y: 0, width: w, height: h, rx: 6, ry: 6 });
     const name = svgEl("text", { x: w/2, y: 17, class: "name" });
     name.textContent = ch.phase;
     const tag = svgEl("text", { x: w/2, y: 32, class: "tag" });
-    tag.textContent = ch.note || "phase →";
-    grp.appendChild(rect); grp.appendChild(name); grp.appendChild(tag);
+    tag.textContent = (ch.note || "phase →") + ` · ${(DATA.phases[ch.phase]?.steps ?? []).length} steps`;
+    grp.appendChild(rect);
+    grp.appendChild(name);
+    grp.appendChild(tag);
+
+    // agent badge — always visible, small monospace below the phase name
+    const agentText = svgEl("text", { x: w/2, y: h - 10, class: "chip-agent" });
+    agentText.textContent = DATA.phases[ch.phase]?.agentType ?? "";
+    grp.appendChild(agentText);
+
+    // step bullets — hidden by default, revealed when Steps toggle is active
+    const stepsGroup = svgEl("g", { class: "chip-steps" });
+    const steps = DATA.phases[ch.phase]?.steps ?? [];
+    steps.slice(0, 4).forEach((s, i) => {
+      const stepText = svgEl("text", { x: 8, y: h + 13 + i * 12 });
+      stepText.textContent = `· ${s.name}`;
+      stepsGroup.appendChild(stepText);
+    });
+    grp.appendChild(stepsGroup);
 
     // tick: from node bottom by default, or tickFromY anchor (e.g. another chip's bottom)
     const tickY1 = ch.tickFromY !== undefined ? ch.tickFromY : a.bottom;
@@ -1169,6 +1257,20 @@ function renderPhaseChips() {
     g.appendChild(tick);
     g.appendChild(grp);
 
+    // keyboard accessibility & tooltip
+    const numSteps = (DATA.phases[ch.phase]?.steps ?? []).length;
+    grp.setAttribute("tabindex", "0");
+    grp.setAttribute("role", "button");
+    grp.setAttribute("aria-label", `${ch.phase}: ${numSteps} steps`);
+    const title = document.createElementNS(NS, "title");
+    title.textContent = `${ch.phase} — ${numSteps} steps · ${DATA.phases[ch.phase]?.agentType ?? "no agent"}`;
+    grp.appendChild(title);
+    grp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        navigateToPhase(ch.phase);
+      }
+    });
     grp.addEventListener("click", () => navigateToPhase(ch.phase));
   });
 }
@@ -1227,24 +1329,41 @@ function renderPhaseDetail(phaseName) {
 
   document.getElementById("ph-kicker").textContent = "phase · " + phaseName.toLowerCase();
   document.getElementById("ph-name").textContent = phaseName;
-  document.getElementById("ph-title").textContent = d.transition ? " · " + d.transition.join(" → ") : " · pipeline‑internal phase (bug only, no state change)";
+  document.getElementById("ph-title").textContent = d.transition ? " · " + d.transition.join(" → ") : " · pipeline‑internal phase (no state transition)";
   document.getElementById("ph-desc").textContent = d.description;
+
+  // agent type
+  const agentEl = document.getElementById("ph-agent");
+  const agentVal = agentEl.querySelector(".tc-agent-val");
+  if (d.agentType) {
+    agentVal.textContent = d.agentType;
+    agentEl.style.display = "";
+  } else {
+    agentEl.style.display = "none";
+  }
 
   // transition card
   const tc = document.getElementById("ph-transition");
   tc.innerHTML = "";
-  if (d.transition) d.transition.forEach((s, i) => {
-    if (i > 0) {
-      const a = document.createElement("span");
-      a.className = "arrow";
-      a.textContent = "→";
-      tc.appendChild(a);
-    }
-    const st = document.createElement("span");
-    st.className = "st";
-    st.textContent = s;
-    tc.appendChild(st);
-  });
+  if (d.transition && d.transition.length) {
+    d.transition.forEach((s, i) => {
+      if (i > 0) {
+        const a = document.createElement("span");
+        a.className = "arrow";
+        a.textContent = "→";
+        tc.appendChild(a);
+      }
+      const st = document.createElement("span");
+      st.className = "st";
+      st.textContent = s;
+      tc.appendChild(st);
+    });
+  } else {
+    const na = document.createElement("span");
+    na.style.cssText = "font-size:11px; color:var(--fg-dim); font-style:italic;";
+    na.textContent = "no state transition (internal phase)";
+    tc.appendChild(na);
+  }
 
   // steps
   const stepsEl = document.getElementById("ph-steps");
@@ -1377,6 +1496,22 @@ function navigateToPhase(phaseName) {
 backBtn.addEventListener("click", navigateToPipeline);
 crumbRoot.addEventListener("click", () => { if (viewPhase.classList.contains("active")) navigateToPipeline(); });
 crumbRoot.style.cursor = "pointer";
+
+// Steps toggle — expands/collapses step bullets on phase chips
+const btnSteps = document.getElementById("btn-steps");
+const svgWrap = document.getElementById("diagram");
+btnSteps.addEventListener("click", () => {
+  stepsVisible = !stepsVisible;
+  if (stepsVisible) {
+    svgWrap.classList.add("steps-on");
+    btnSteps.classList.add("active");
+    btnSteps.textContent = "Hide Steps";
+  } else {
+    svgWrap.classList.remove("steps-on");
+    btnSteps.classList.remove("active");
+    btnSteps.textContent = "Show Steps";
+  }
+});
 
 // Allow deep-link via #PHASE
 window.addEventListener("hashchange", () => {
