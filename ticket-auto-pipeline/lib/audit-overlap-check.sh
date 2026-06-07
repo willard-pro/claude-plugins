@@ -23,15 +23,15 @@ set -eo pipefail
 
 # Tokenize text for Jaccard: lowercase, strip punctuation, split, dedup, filter short words
 _tokenize_ac() {
-  echo "$1" \
-    | tr '[:upper:]' '[:lower:]' \
-    | sed 's/[^a-z0-9[:space:]]/ /g' \
-    | tr -s '[:space:]' '\n' \
-    | grep -vE '^(the|a|an|is|are|be|to|of|in|for|on|and|or|it|at|by|as|with|can|has|will)$' \
-    | grep -vE '^[0-9]+$' \
-    | grep -vE '^.{1,2}$' \
-    | sort -u \
-    | grep -v '^$' || true
+  echo "$1" |
+    tr '[:upper:]' '[:lower:]' |
+    sed 's/[^a-z0-9[:space:]]/ /g' |
+    tr -s '[:space:]' '\n' |
+    grep -vE '^(the|a|an|is|are|be|to|of|in|for|on|and|or|it|at|by|as|with|can|has|will)$' |
+    grep -vE '^[0-9]+$' |
+    grep -vE '^.{1,2}$' |
+    sort -u |
+    grep -v '^$' || true
 }
 
 audit_overlap_check() {

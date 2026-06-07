@@ -33,7 +33,7 @@ setup_test_file() {
   export AUDIT_DIR="$_TEST_TMPDIR"
 
   local recfile="$_TEST_TMPDIR/recommendations/test-audit-$(date +%s).md"
-  cat > "$recfile" <<'EOF'
+  cat >"$recfile" <<'EOF'
 # Audit Recommendations: test-audit (2026-06-07)
 Source: test-milestone-abc
 Generated: 2026-06-07T12:00:00Z
@@ -93,7 +93,8 @@ test_resumed_item_is_parsed_as_pending() {
   state101=$(echo "$checklist" | jq -r '.needs_info_items[] | select(.ticket_id == "WIL-101") | .state')
   if [ "$state101" != "resumed" ]; then
     echo "expected resumed, got $state101"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 
   # WIL-101 should count toward pending
@@ -101,10 +102,12 @@ test_resumed_item_is_parsed_as_pending() {
   pending=$(echo "$checklist" | jq -r '.pending_needs_info')
   if [ "$pending" -lt 1 ]; then
     echo "expected >=1 pending, got $pending"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 
-  cleanup; return 0
+  cleanup
+  return 0
 }
 
 test_pending_item_parsed_correctly() {
@@ -119,10 +122,12 @@ test_pending_item_parsed_correctly() {
   state100=$(echo "$checklist" | jq -r '.needs_info_items[] | select(.ticket_id == "WIL-100") | .state')
   if [ "$state100" != "pending" ]; then
     echo "expected pending, got $state100"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 
-  cleanup; return 0
+  cleanup
+  return 0
 }
 
 test_complete_item_is_skipped() {
@@ -137,7 +142,8 @@ test_complete_item_is_skipped() {
   state102=$(echo "$checklist" | jq -r '.needs_info_items[] | select(.ticket_id == "WIL-102") | .state')
   if [ "$state102" != "complete" ]; then
     echo "expected complete, got $state102"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 
   # Complete + failed items should NOT count toward pending
@@ -146,10 +152,12 @@ test_complete_item_is_skipped() {
   # WIL-100 pending + WIL-101 resumed = 2; WIL-102 complete + WIL-103 failed don't count
   if [ "$pending" -ne 2 ]; then
     echo "expected 2 pending, got $pending"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 
-  cleanup; return 0
+  cleanup
+  return 0
 }
 
 test_failed_item_is_skipped() {
@@ -164,10 +172,12 @@ test_failed_item_is_skipped() {
   state103=$(echo "$checklist" | jq -r '.needs_info_items[] | select(.ticket_id == "WIL-103") | .state')
   if [ "$state103" != "failed" ]; then
     echo "expected failed, got $state103"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 
-  cleanup; return 0
+  cleanup
+  return 0
 }
 
 # ── Write-ahead mark tests ─────────────────────────────────────────────────────
@@ -180,10 +190,12 @@ test_write_ahead_marks_pending_as_resumed() {
   write_ahead_mark "$recfile" "WIL-100"
 
   if grep -q "\- \[>\] WIL-100 " "$recfile"; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "WIL-100 not marked [>]"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -196,10 +208,12 @@ test_write_ahead_is_idempotent_on_resumed() {
   write_ahead_mark "$recfile" "WIL-101"
 
   if grep -q "\- \[>\] WIL-101 " "$recfile"; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "WIL-101 should remain [>]"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -211,10 +225,12 @@ test_mark_done_sets_complete() {
   mark_item_done "$recfile" "WIL-100"
 
   if grep -q "\- \[x\] WIL-100 " "$recfile"; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "WIL-100 not marked [x]"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -226,10 +242,12 @@ test_mark_failed_sets_failed() {
   mark_item_failed "$recfile" "WIL-100"
 
   if grep -q "\- \[!\] WIL-100 " "$recfile"; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "WIL-100 not marked [!]"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -252,17 +270,20 @@ test_failed_does_not_block_archive() {
   # No pending items should remain
   if has_pending_items "$recfile"; then
     echo "should have no pending items"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 
   # Archive should succeed
   local archive_result
   archive_result=$(archive_checklist "$recfile")
   if echo "$archive_result" | grep -q "ARCHIVE_PATH="; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "archive failed: $archive_result"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -273,10 +294,12 @@ test_pending_items_block_archive() {
 
   # WIL-100 and WIL-200 are still [ ] — should have pending items
   if has_pending_items "$recfile"; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "should have pending items"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -290,10 +313,12 @@ test_advance_phase_needs_info_to_done() {
   advance_phase "$recfile" "needs-info-done"
 
   if grep -q '^Phase: needs-info-done' "$recfile"; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "phase not advanced to needs-info-done"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -305,10 +330,12 @@ test_advance_phase_to_structural_done() {
   advance_phase "$recfile" "structural-done"
 
   if grep -q '^Phase: structural-done' "$recfile"; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "phase not advanced to structural-done"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -319,10 +346,12 @@ test_advance_phase_rejects_invalid_phase() {
 
   if advance_phase "$recfile" "bogus-phase" 2>/dev/null; then
     echo "should have rejected bogus phase"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 
-  cleanup; return 0
+  cleanup
+  return 0
 }
 
 # ── dispatch ──────────────────────────────────────────────────────────────────

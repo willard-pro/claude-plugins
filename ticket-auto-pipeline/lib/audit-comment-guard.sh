@@ -34,9 +34,9 @@ audit_comment_guard() {
   # Search for the source marker in comment bodies
   local marker="Source: ${source_id}"
   if echo "$comments" | jq -e --arg marker "$marker" '.[] | select(.body | contains($marker))' >/dev/null 2>&1; then
-    exit 0  # Found — skip
+    exit 0 # Found — skip
   else
-    exit 1  # Not found — safe to post
+    exit 1 # Not found — safe to post
   fi
 }
 
