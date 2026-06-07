@@ -208,7 +208,7 @@ hb_source "linear-auth" "ok" "authenticated as $(echo "$me" | jq -r '.name // "u
 
 ## Step 0.5 — Detect project context
 
-Read `CLAUDE.md` and extract ALL available project-context fields: `{REPOS_ROOT}`, `{ISSUE_PREFIX}`, `{BE_SERVICES}`, `{WIKI_ROOT}`, `{BE_TEST_CMD}`, `{FE_TEST_CMD}`, `{LOCAL_URL}`, `{UAT_URL}`, `{SLACK_CHANNEL}`.
+Read `CLAUDE.md` and extract ALL available project-context fields: `{REPOS_ROOT}`, `{ISSUE_PREFIX}`, `{BE_SERVICES}`, `{WIKI_ROOT}`, `{BE_TEST_CMD}`, `{BE_TEST_RUNNER}`, `{FE_TEST_CMD}`, `{LOCAL_URL}`, `{UAT_URL}`, `{SLACK_CHANNEL}`.
 
 After extraction, write the env file that sub-agents source for project context:
 
@@ -221,6 +221,7 @@ spawn_write_env \
   BE_SERVICES="{BE_SERVICES}" \
   WIKI_ROOT="{WIKI_ROOT}" \
   BE_TEST_CMD="{BE_TEST_CMD}" \
+  BE_TEST_RUNNER="{BE_TEST_RUNNER}" \
   FE_TEST_CMD="{FE_TEST_CMD}" \
   LOCAL_URL="{LOCAL_URL}" \
   UAT_URL="{UAT_URL}" \
@@ -362,6 +363,7 @@ After state detection, enter the stateless dispatch loop. Re-run `detect-resume.
 | `STEP_1_5` | Spawn `ticket-reproduce` agent | Agent |
 | `STEP_2` | Spawn `ticket-appraise-exec` agent | Agent |
 | `STEP_2_5` | Run `bash gate-check.sh --mode entry` | **Bash only** |
+| `STEP_3` | Alias for `STEP_2_5` — run `bash gate-check.sh --mode entry` | **Bash only** |
 | `STEP_3_5` | Spawn `ticket-gate-reconcile` agent | Agent |
 | `STEP_4` | Spawn `ticket-implement` agent, then run `outcome-label-check.sh` | Agent + Bash |
 | `STEP_4_5` | Verify retry sub-loop (see below) | Router-managed loop |
@@ -439,6 +441,10 @@ else
   exit 1
 fi
 ```
+
+### STEP_3 — Gate Check (alias for STEP_2_5)
+
+STEP_3 is a legacy/inferred step emitted in some recovery paths (e.g., after a fleet-kill in the EXEC phase). It maps to the same gate check as STEP_2_5. Execute identically to STEP_2_5 above.
 
 ### STEP_3_5 — Gate Reconcile
 

@@ -189,6 +189,13 @@ if [ "${_MODE:-full}" = "validate" ]; then
     warn "BE_TEST_CMD" "missing — ticket-implement will skip BE tests"
   fi
 
+  # BE_TEST_RUNNER (optional) — exact test invocation for pyenv/pipenv environments
+  if grep -q 'BE_TEST_RUNNER' "$CLAUDE_MD" 2>/dev/null; then
+    pass "BE_TEST_RUNNER (present)"
+  else
+    info "BE_TEST_RUNNER" "not set — will use BE_TEST_CMD directly"
+  fi
+
   # SLACK_CHANNEL (optional)
   if grep -q 'SLACK_CHANNEL' "$CLAUDE_MD" 2>/dev/null; then
     pass "SLACK_CHANNEL (present)"
@@ -443,6 +450,12 @@ else
     _var "BE_TEST_CMD" "ok" "present" "CLAUDE.md" ""
   else
     _var "BE_TEST_CMD" "warn" "" "CLAUDE.md" "backend test command — ticket-implement skips BE tests if absent"
+  fi
+
+  if grep -q 'BE_TEST_RUNNER' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
+    _var "BE_TEST_RUNNER" "ok" "present" "CLAUDE.md" "exact test runner path (e.g., ~/.pyenv/versions/3.13.12/bin/pytest)"
+  else
+    _var "BE_TEST_RUNNER" "info" "" "CLAUDE.md" "optional — falls back to BE_TEST_CMD when not set"
   fi
 
   if grep -q 'SLACK_CHANNEL' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then

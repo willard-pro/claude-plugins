@@ -31,10 +31,14 @@ FLOW_SH=$(_resolve_flow_sh)
 
 OUTCOME_LABELS="Smooth Rough Hard"
 
-# Extract OUTCOME from pipeline log IMPLEMENT|implement|done| line
+# Extract OUTCOME from pipeline log IMPLEMENT|implement-outcome| line.
+# This is written by the implement agent after flow.sh applies the label.
+# Tightened from IMPLEMENT|implement|done| to avoid matching prose lines
+# like "2 files changed" that share the same phase/step prefix but are not
+# the outcome declaration.
 _get_outcome_from_log() {
   local outcome
-  outcome=$(grep '^[^|]*|IMPLEMENT|implement|done|' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'|' -f5- || true)
+  outcome=$(grep '^[^|]*|IMPLEMENT|implement-outcome|info|' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'|' -f5- || true)
   echo "$outcome"
 }
 
