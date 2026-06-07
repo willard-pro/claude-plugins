@@ -25,7 +25,7 @@ _run() {
 test_checklist_has_required_sections() {
   local tmpfile
   tmpfile=$(mktemp)
-  cat > "$tmpfile" <<'EOF'
+  cat >"$tmpfile" <<'EOF'
 # Audit Recommendations: milestone-sprint1 (2026-06-07)
 Source: milestone-abc123
 Generated: 2026-06-07T12:00:00Z
@@ -51,12 +51,12 @@ Found 3 issues across 10 tickets.
 EOF
 
   local valid=0
-  grep -q '## Audit Summary' "$tmpfile" && \
-  grep -q '## Goal Context' "$tmpfile" && \
-  grep -q '## Ticket Inventory' "$tmpfile" && \
-  grep -q '## Needs Info' "$tmpfile" && \
-  grep -q '## Structural' "$tmpfile" && \
-  valid=1
+  grep -q '## Audit Summary' "$tmpfile" &&
+    grep -q '## Goal Context' "$tmpfile" &&
+    grep -q '## Ticket Inventory' "$tmpfile" &&
+    grep -q '## Needs Info' "$tmpfile" &&
+    grep -q '## Structural' "$tmpfile" &&
+    valid=1
 
   rm -f "$tmpfile"
   [ "$valid" -eq 1 ]

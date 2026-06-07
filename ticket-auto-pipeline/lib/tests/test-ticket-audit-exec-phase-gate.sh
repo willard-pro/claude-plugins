@@ -38,7 +38,7 @@ make_file() {
   export AUDIT_DIR="$_TEST_TMPDIR"
 
   local recfile="$_TEST_TMPDIR/recommendations/test-phase-$(date +%s).md"
-  cat > "$recfile" <<HEADER
+  cat >"$recfile" <<HEADER
 # Audit Recommendations: test-phase
 Source: test-phase-source
 Generated: 2026-06-07T12:00:00Z
@@ -89,10 +89,12 @@ test_blank_phase_treated_as_needs_info() {
   phase=$(echo "$checklist" | jq -r '.phase')
 
   if [ "$phase" = "needs-info" ]; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "expected needs-info, got $phase"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -101,7 +103,7 @@ test_unknown_phase_treated_as_needs_info() {
   mkdir -p "$_TEST_TMPDIR/recommendations" "$_TEST_TMPDIR/archive"
   export AUDIT_DIR="$_TEST_TMPDIR"
 
-  cat > "$_TEST_TMPDIR/recommendations/test-bad.md" <<'EOF'
+  cat >"$_TEST_TMPDIR/recommendations/test-bad.md" <<'EOF'
 # Audit
 Source: test
 Phase: bogus-value
@@ -117,10 +119,12 @@ EOF
   phase=$(echo "$checklist" | jq -r '.phase')
 
   if [ "$phase" = "needs-info" ]; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "expected needs-info for bogus, got $phase"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -135,10 +139,12 @@ test_needs_info_phase_parsed_correctly() {
   phase=$(echo "$checklist" | jq -r '.phase')
 
   if [ "$phase" = "needs-info" ]; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "expected needs-info, got $phase"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -153,10 +159,12 @@ test_needs_info_done_phase_parsed_correctly() {
   phase=$(echo "$checklist" | jq -r '.phase')
 
   if [ "$phase" = "needs-info-done" ]; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "expected needs-info-done, got $phase"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -171,10 +179,12 @@ test_structural_done_phase_parsed_correctly() {
   phase=$(echo "$checklist" | jq -r '.phase')
 
   if [ "$phase" = "structural-done" ]; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "expected structural-done, got $phase"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -192,10 +202,12 @@ test_needs_info_phase_blocks_structural() {
   pst=$(echo "$checklist" | jq -r '.pending_structural')
 
   if [ "$phase" = "needs-info" ] && [ "$pst" -gt 0 ]; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "expected needs-info phase with >0 pending structural"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -211,10 +223,12 @@ test_needs_info_done_permits_structural() {
   pst=$(echo "$checklist" | jq -r '.pending_structural')
 
   if [ "$phase" = "needs-info-done" ] && [ "$pst" -gt 0 ]; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "expected needs-info-done with >0 pending structural"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -230,10 +244,12 @@ test_structural_done_no_reprocessing() {
   pst=$(echo "$checklist" | jq -r '.pending_structural')
 
   if [ "$phase" = "structural-done" ] && [ "$pst" -eq 0 ]; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "expected structural-done with 0 pending"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -251,10 +267,12 @@ test_empty_needs_info_fast_path() {
   pst=$(echo "$checklist" | jq -r '.pending_structural')
 
   if [ "$pni" -eq 0 ] && [ "$pst" -gt 0 ]; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "expected 0 pending needs-info, >0 structural"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -269,10 +287,12 @@ test_empty_structural_fast_path() {
   pst=$(echo "$checklist" | jq -r '.pending_structural')
 
   if [ "$pst" -eq 0 ]; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "expected 0 pending structural, got $pst"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -289,17 +309,20 @@ test_both_sections_empty_proceeds_to_archive() {
 
   if [ "$pni" -ne 0 ] || [ "$pst" -ne 0 ]; then
     echo "expected 0 pending in both sections"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 
   # Should be able to archive
   advance_phase "$recfile" "structural-done"
   if has_pending_items "$recfile"; then
     echo "should have no pending items"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 
-  cleanup; return 0
+  cleanup
+  return 0
 }
 
 # ── dispatch ──────────────────────────────────────────────────────────────────

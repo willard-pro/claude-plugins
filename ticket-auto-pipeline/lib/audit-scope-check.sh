@@ -44,7 +44,7 @@ audit_scope_check() {
   if [ -n "$wiki_csv" ]; then
     local IFS=','
     for svc in $wiki_csv; do
-      svc=$(echo "$svc" | xargs | tr '[:upper:]' '[:lower:]')  # trim + lowercase
+      svc=$(echo "$svc" | xargs | tr '[:upper:]' '[:lower:]') # trim + lowercase
       [ -z "$svc" ] && continue
 
       # Match service name (with hyphen/underscore variants)
@@ -80,7 +80,7 @@ audit_scope_check() {
       if echo "$lower_text" | grep -qiE "(^|[^a-z])${indicator}($|[^a-z])" 2>/dev/null; then
         MATCHED_PATTERNS="${MATCHED_PATTERNS}${indicator} "
         SCOPE_FOUND="true"
-        break  # One indicator is enough to show scope is identifiable
+        break # One indicator is enough to show scope is identifiable
       fi
     done
     MATCHED_PATTERNS=$(echo "$MATCHED_PATTERNS" | xargs)

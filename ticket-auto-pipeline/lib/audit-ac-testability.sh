@@ -87,7 +87,7 @@ audit_ac_testability() {
       fi
       ALL_CLEAR="false"
     fi
-  done <<< "$ac_lines"
+  done <<<"$ac_lines"
 
   echo "VAGUE_AC_COUNT=$VAGUE_AC_COUNT"
   echo "VAGUE_ACS=\"$VAGUE_ACS\""

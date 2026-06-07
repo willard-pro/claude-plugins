@@ -34,8 +34,8 @@ test_changed_ticket_triggers_drift() {
   local snapshot="$tmpdir/snapshot.json"
   local current="$tmpdir/current.json"
 
-  echo '[{"id":"i1","updatedAt":"2026-06-01T00:00:00Z"}]' > "$snapshot"
-  echo '[{"id":"i1","updatedAt":"2026-06-07T00:00:00Z"}]' > "$current"
+  echo '[{"id":"i1","updatedAt":"2026-06-01T00:00:00Z"}]' >"$snapshot"
+  echo '[{"id":"i1","updatedAt":"2026-06-07T00:00:00Z"}]' >"$current"
 
   local output
   output=$(audit_drift_check "$snapshot" "$current" 2>/dev/null)
@@ -52,8 +52,8 @@ test_new_ticket_triggers_drift() {
   local snapshot="$tmpdir/snapshot.json"
   local current="$tmpdir/current.json"
 
-  echo '[{"id":"i1","updatedAt":"2026-06-01T00:00:00Z"}]' > "$snapshot"
-  echo '[{"id":"i1","updatedAt":"2026-06-01T00:00:00Z"},{"id":"i2","updatedAt":"2026-06-07T00:00:00Z"}]' > "$current"
+  echo '[{"id":"i1","updatedAt":"2026-06-01T00:00:00Z"}]' >"$snapshot"
+  echo '[{"id":"i1","updatedAt":"2026-06-01T00:00:00Z"},{"id":"i2","updatedAt":"2026-06-07T00:00:00Z"}]' >"$current"
 
   local output
   output=$(audit_drift_check "$snapshot" "$current" 2>/dev/null)
@@ -70,8 +70,8 @@ test_no_change_no_drift() {
   local snapshot="$tmpdir/snapshot.json"
   local current="$tmpdir/current.json"
 
-  echo '[{"id":"i1","updatedAt":"2026-06-01T00:00:00Z"}]' > "$snapshot"
-  echo '[{"id":"i1","updatedAt":"2026-06-01T00:00:00Z"}]' > "$current"
+  echo '[{"id":"i1","updatedAt":"2026-06-01T00:00:00Z"}]' >"$snapshot"
+  echo '[{"id":"i1","updatedAt":"2026-06-01T00:00:00Z"}]' >"$current"
 
   local output
   output=$(audit_drift_check "$snapshot" "$current" 2>/dev/null)
@@ -88,8 +88,8 @@ test_older_timestamp_not_changed() {
   local snapshot="$tmpdir/snapshot.json"
   local current="$tmpdir/current.json"
 
-  echo '[{"id":"i1","updatedAt":"2026-06-07T00:00:00Z"}]' > "$snapshot"
-  echo '[{"id":"i1","updatedAt":"2026-06-01T00:00:00Z"}]' > "$current"
+  echo '[{"id":"i1","updatedAt":"2026-06-07T00:00:00Z"}]' >"$snapshot"
+  echo '[{"id":"i1","updatedAt":"2026-06-01T00:00:00Z"}]' >"$current"
 
   local output
   output=$(audit_drift_check "$snapshot" "$current" 2>/dev/null)

@@ -38,7 +38,7 @@ setup_mock_env() {
   export AUDIT_DIR="$_TEST_TMPDIR"
 
   # Create a mock audit-comment-guard.sh that we control
-  cat > "$_TEST_TMPDIR/lib/audit-comment-guard.sh" <<'MOCK'
+  cat >"$_TEST_TMPDIR/lib/audit-comment-guard.sh" <<'MOCK'
 #!/usr/bin/env bash
 resp_file="${_TEST_GUARD_RESPONSE:-/tmp/guard-response}"
 if [ -f "$resp_file" ]; then
@@ -63,7 +63,7 @@ MOCK
 setup_test_recfile() {
   local tmpdir="$1"
   local recfile="$tmpdir/recommendations/test-dedup-$(date +%s).md"
-  cat > "$recfile" <<'EOF'
+  cat >"$recfile" <<'EOF'
 # Audit Recommendations: dedup-test
 Source: dedup-test-source
 Generated: 2026-06-07T12:00:00Z
@@ -111,7 +111,7 @@ test_guard_exit_0_item_marked_done() {
   recfile=$(setup_test_recfile "$_TEST_TMPDIR")
 
   # Set guard to return "found" (exit 0)
-  echo "found" > "$_TEST_GUARD_RESPONSE"
+  echo "found" >"$_TEST_GUARD_RESPONSE"
 
   # Simulate: guard exits 0 → should mark item [x], skip delegation
   GUARD_SOURCE="dedup-test-source:WIL-1:needs-info"
@@ -121,10 +121,12 @@ test_guard_exit_0_item_marked_done() {
 
   # Verify WIL-1 is now [x]
   if grep -q "\- \[x\] WIL-1 " "$recfile"; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "WIL-1 should be [x] after dedup match"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -134,7 +136,7 @@ test_guard_exit_0_skips_delegation() {
   recfile=$(setup_test_recfile "$_TEST_TMPDIR")
 
   # Set guard to "found" (exit 0) for WIL-2
-  echo "found" > "$_TEST_GUARD_RESPONSE"
+  echo "found" >"$_TEST_GUARD_RESPONSE"
 
   GUARD_SOURCE="dedup-test-source:WIL-2:needs-info"
   if bash "$_TEST_TMPDIR/lib/audit-comment-guard.sh" "WIL-2" "$GUARD_SOURCE"; then
@@ -144,10 +146,12 @@ test_guard_exit_0_skips_delegation() {
 
   # WIL-2 should be [x], WIL-1 should still be [ ]
   if grep -q "\- \[x\] WIL-2 " "$recfile" && grep -q "\- \[ \] WIL-1 " "$recfile"; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "WIL-2 should be [x], WIL-1 should still be [ ]"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -172,10 +176,12 @@ test_guard_exit_1_proceeds() {
 
   # WIL-1 should be [x]
   if grep -q "\- \[x\] WIL-1 " "$recfile"; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "WIL-1 should be [x] after processing"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -198,11 +204,12 @@ test_crash_resume_deduplicates() {
   # Verify WIL-10 is [>] (crashed in-progress)
   if ! grep -q "\- \[>\] WIL-10 " "$recfile"; then
     echo "WIL-10 should be [>] after crash"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 
   # Second invocation: guard now finds the comment posted before crash
-  echo "found" > "$_TEST_GUARD_RESPONSE"
+  echo "found" >"$_TEST_GUARD_RESPONSE"
 
   # parse_checklist sees [>] as resumed (treated as pending)
   local checklist
@@ -211,7 +218,8 @@ test_crash_resume_deduplicates() {
   state10=$(echo "$checklist" | jq -r '.structural_items[] | select(.ticket_id == "WIL-10") | .state')
   if [ "$state10" != "resumed" ]; then
     echo "WIL-10 should be resumed, got $state10"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 
   # Re-process: guard matches → mark [x], no second comment
@@ -221,10 +229,12 @@ test_crash_resume_deduplicates() {
 
   # WIL-10 should now be [x]
   if grep -q "\- \[x\] WIL-10 " "$recfile"; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "WIL-10 should be [x] after dedup"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -249,7 +259,8 @@ test_double_invocation_no_double_comment() {
   state12=$(echo "$checklist" | jq -r '.structural_items[] | select(.ticket_id == "WIL-12") | .state')
   if [ "$state12" != "complete" ]; then
     echo "WIL-12 should be complete, got $state12"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 
   # Verify only one WIL-12 line exists (not double-marked)
@@ -257,10 +268,12 @@ test_double_invocation_no_double_comment() {
   count=$(grep -c "WIL-12" "$recfile" || true)
   if [ "$count" -ne 1 ]; then
     echo "WIL-12 should appear exactly once, got $count"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 
-  cleanup; return 0
+  cleanup
+  return 0
 }
 
 # ── Multi-ticket extraction tests ──────────────────────────────────────────────
@@ -278,10 +291,12 @@ test_multi_ticket_extraction_merge_candidate() {
 
   # Should include BOTH WIL-10 and WIL-11
   if echo "$all_tids10" | grep -q "WIL-10" && echo "$all_tids10" | grep -q "WIL-11"; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "expected all_ticket_ids to contain WIL-10 and WIL-11, got: $all_tids10"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -297,10 +312,12 @@ test_detail_clean_strips_finding_type_prefix() {
   local detail_clean_1
   detail_clean_1=$(echo "$checklist" | jq -r '.needs_info_items[] | select(.ticket_id == "WIL-1") | .detail_clean')
   if [ "$detail_clean_1" = "missing repro steps" ]; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "expected 'missing repro steps', got '$detail_clean_1'"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -320,10 +337,12 @@ test_comment_body_no_redundancy() {
 
   # detail_clean should NOT contain the finding type prefix from detail
   if echo "$detail" | grep -q "^merge candidate: " && echo "$detail_clean" | grep -qv "^merge candidate: "; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "detail_clean should strip 'merge candidate: ' prefix"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 
@@ -341,10 +360,12 @@ test_single_ticket_has_only_itself_in_all_tids() {
 
   # Should be exactly "WIL-1" (or contain only WIL-1)
   if [ "$all_tids1" = "WIL-1" ]; then
-    cleanup; return 0
+    cleanup
+    return 0
   else
     echo "expected 'WIL-1', got '$all_tids1'"
-    cleanup; return 1
+    cleanup
+    return 1
   fi
 }
 

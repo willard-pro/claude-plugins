@@ -26,13 +26,13 @@ test_cache_read_write_roundtrip() {
   local tmpdir
   tmpdir=$(mktemp -d)
   local cache_file="$tmpdir/.scan-cache.json"
-  echo '{}' > "$cache_file"
+  echo '{}' >"$cache_file"
 
   # Write entry
   local updated
   updated=$(echo '{}' | jq --arg tid "milestone-abc" --arg date "2026-06-07T00:00:00Z" --arg file "./logs/audit/recommendations/milestone-sprint1-2026-06-07.md" \
     '.[$tid] = {scanned_at: $date, report_file: $file}')
-  echo "$updated" > "$cache_file"
+  echo "$updated" >"$cache_file"
 
   # Read entry
   local cached
@@ -47,7 +47,7 @@ test_cache_miss_returns_empty() {
   local tmpdir
   tmpdir=$(mktemp -d)
   local cache_file="$tmpdir/.scan-cache.json"
-  echo '{}' > "$cache_file"
+  echo '{}' >"$cache_file"
 
   local cached
   cached=$(jq -r --arg tid "nonexistent" '.[$tid] // empty' "$cache_file")
@@ -66,7 +66,7 @@ test_cache_multiple_targets() {
   echo '{}' | jq \
     --arg tid1 "milestone-1" --arg d1 "2026-06-01T00:00:00Z" --arg f1 "report1.md" \
     --arg tid2 "parent-2" --arg d2 "2026-06-02T00:00:00Z" --arg f2 "report2.md" \
-    '.[$tid1] = {scanned_at: $d1, report_file: $f1} | .[$tid2] = {scanned_at: $d2, report_file: $f2}' > "$cache_file"
+    '.[$tid1] = {scanned_at: $d1, report_file: $f1} | .[$tid2] = {scanned_at: $d2, report_file: $f2}' >"$cache_file"
 
   local count
   count=$(jq 'keys | length' "$cache_file")
@@ -84,13 +84,13 @@ test_force_overwrites_existing_cache_entry() {
   local cache_file="$tmpdir/.scan-cache.json"
 
   # Initial entry
-  echo '{"milestone-1": {"scanned_at": "2026-06-01T00:00:00Z", "report_file": "old-report.md"}}' > "$cache_file"
+  echo '{"milestone-1": {"scanned_at": "2026-06-01T00:00:00Z", "report_file": "old-report.md"}}' >"$cache_file"
 
   # --force: overwrite with new data
   local updated
   updated=$(jq --arg tid "milestone-1" --arg date "2026-06-07T00:00:00Z" --arg file "new-report.md" \
     '.[$tid] = {scanned_at: $date, report_file: $file}' "$cache_file")
-  echo "$updated" > "$cache_file"
+  echo "$updated" >"$cache_file"
 
   local cached_date
   cached_date=$(jq -r --arg tid "milestone-1" '.[$tid].scanned_at' "$cache_file")

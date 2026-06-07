@@ -71,15 +71,15 @@ parse_checklist() {
   local phase
   phase=$(grep -m1 '^Phase:' "$file" 2>/dev/null | sed 's/^Phase: *//' | tr -d '\r')
   case "$phase" in
-    "needs-info")      phase="needs-info" ;;
-    "needs-info-done") phase="needs-info-done" ;;
-    "structural-done") phase="structural-done" ;;
-    *)
-      if [ -n "$phase" ]; then
-        echo "parse_checklist warning: unrecognized Phase '$phase', treating as needs-info" >&2
-      fi
-      phase="needs-info"
-      ;;
+  "needs-info") phase="needs-info" ;;
+  "needs-info-done") phase="needs-info-done" ;;
+  "structural-done") phase="structural-done" ;;
+  *)
+    if [ -n "$phase" ]; then
+      echo "parse_checklist warning: unrecognized Phase '$phase', treating as needs-info" >&2
+    fi
+    phase="needs-info"
+    ;;
   esac
 
   # Extract Source header
@@ -162,7 +162,7 @@ parse_checklist() {
         fi
       fi
     fi
-  done < "$file"
+  done <"$file"
 
   # Output as JSON
   jq -n \
@@ -234,11 +234,11 @@ advance_phase() {
   local new_phase="$2"
 
   case "$new_phase" in
-    "needs-info"|"needs-info-done"|"structural-done") ;;
-    *)
-      echo "advance_phase: invalid phase '$new_phase'" >&2
-      return 1
-      ;;
+  "needs-info" | "needs-info-done" | "structural-done") ;;
+  *)
+    echo "advance_phase: invalid phase '$new_phase'" >&2
+    return 1
+    ;;
   esac
 
   # Replace Phase: line (only first occurrence)

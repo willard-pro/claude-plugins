@@ -50,7 +50,7 @@ audit_size_check() {
     local service_count=0
     local IFS=','
     for svc in $wiki_services_csv; do
-      svc=$(echo "$svc" | xargs)  # trim whitespace
+      svc=$(echo "$svc" | xargs) # trim whitespace
       [ -z "$svc" ] && continue
       if echo "$text" | grep -qi "$svc" 2>/dev/null; then
         service_count=$((service_count + 1))
