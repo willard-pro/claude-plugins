@@ -38,7 +38,7 @@ fi
 #
 # Usage: spawn_write_env TICKET_ID=<id> \
 #          REPOS_ROOT=<path> ISSUE_PREFIX=<prefix> BE_SERVICES=<services> \
-#          [WIKI_ROOT=<path>] [BE_TEST_CMD=<cmd>] [FE_TEST_CMD=<cmd>] \
+#          [WIKI_ROOT=<path>] [BE_TEST_CMD=<cmd>] [BE_TEST_RUNNER=<cmd>] [FE_TEST_CMD=<cmd>] \
 #          [LOCAL_URL=<url>] [UAT_URL=<url>] [SLACK_CHANNEL=<channel>]
 #
 # Uses single-quote heredoc — no shell expansion, no injection risk.
@@ -49,6 +49,7 @@ spawn_write_env() {
   local BE_SERVICES=""
   local WIKI_ROOT=""
   local BE_TEST_CMD=""
+  local BE_TEST_RUNNER=""
   local FE_TEST_CMD=""
   local LOCAL_URL=""
   local UAT_URL=""
@@ -63,6 +64,7 @@ spawn_write_env() {
     BE_SERVICES=*) BE_SERVICES="${arg#BE_SERVICES=}" ;;
     WIKI_ROOT=*) WIKI_ROOT="${arg#WIKI_ROOT=}" ;;
     BE_TEST_CMD=*) BE_TEST_CMD="${arg#BE_TEST_CMD=}" ;;
+    BE_TEST_RUNNER=*) BE_TEST_RUNNER="${arg#BE_TEST_RUNNER=}" ;;
     FE_TEST_CMD=*) FE_TEST_CMD="${arg#FE_TEST_CMD=}" ;;
     LOCAL_URL=*) LOCAL_URL="${arg#LOCAL_URL=}" ;;
     UAT_URL=*) UAT_URL="${arg#UAT_URL=}" ;;
@@ -94,6 +96,7 @@ export ISSUE_PREFIX="ISSUE_PREFIX_PLACEHOLDER"
 export BE_SERVICES="BE_SERVICES_PLACEHOLDER"
 export WIKI_ROOT="WIKI_ROOT_PLACEHOLDER"
 export BE_TEST_CMD="BE_TEST_CMD_PLACEHOLDER"
+export BE_TEST_RUNNER="BE_TEST_RUNNER_PLACEHOLDER"
 export FE_TEST_CMD="FE_TEST_CMD_PLACEHOLDER"
 export LOCAL_URL="LOCAL_URL_PLACEHOLDER"
 export UAT_URL="UAT_URL_PLACEHOLDER"
@@ -111,6 +114,7 @@ ENVEOF
     -e "s|BE_SERVICES_PLACEHOLDER|$(_sed_escape "$BE_SERVICES")|" \
     -e "s|WIKI_ROOT_PLACEHOLDER|$(_sed_escape "$WIKI_ROOT")|" \
     -e "s|BE_TEST_CMD_PLACEHOLDER|$(_sed_escape "$BE_TEST_CMD")|" \
+    -e "s|BE_TEST_RUNNER_PLACEHOLDER|$(_sed_escape "$BE_TEST_RUNNER")|" \
     -e "s|FE_TEST_CMD_PLACEHOLDER|$(_sed_escape "$FE_TEST_CMD")|" \
     -e "s|LOCAL_URL_PLACEHOLDER|$(_sed_escape "$LOCAL_URL")|" \
     -e "s|UAT_URL_PLACEHOLDER|$(_sed_escape "$UAT_URL")|" \
@@ -359,6 +363,9 @@ spawn_agent_post() {
       local _pid _waited=0
       for _pid in "$PINGER_PID" "$WATCHDOG_PID"; do
         [ -z "$_pid" ] && continue
+        # Guard: skip wait if process no longer exists, preventing
+        # "[1]+ Exit 127" noise from waiting on dead PIDs.
+        kill -0 "$_pid" 2>/dev/null || continue
         wait "$_pid" 2>/dev/null &
         local _wait_pid=$!
         # 5-second timeout per PID
