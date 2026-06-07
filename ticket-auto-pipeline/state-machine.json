@@ -104,9 +104,9 @@
     "re-claim": {
       "from": null,
       "to": null,
-      "adds": [],
+      "adds": ["claimed"],
       "removes": ["approved"],
-      "description": "Remove approval label to restart gate hold cycle"
+      "description": "Remove approval label and restore claimed to restart gate hold cycle"
     }
   }
 }
