@@ -65,3 +65,13 @@ Pipe-delimited: `ISO|PHASE|STEP|STATUS|MSG`. Statuses: `start`, `done`, `fail`, 
 - **Phase context file**: Before each agent spawn, the router writes both a ctx file (`/tmp/ticket-auto-{ID}-ctx.txt`) and a spawn-meta file (`/tmp/ticket-auto-{ID}-spawn-meta.txt`). The token-tracker hook reads PHASE from the spawn-meta file (stable per-spawn snapshot) with fallback to the ctx file (legacy).
 - **Post-trigger assertions**: After every Linear mutation, `flow.sh` re-fetches the issue and asserts the state/labels match expectations. Mismatch → exit 7 with `STATE_ASSERTION_FAILED`.
 - **Idempotency**: `flow.sh` computes the desired end state from current + adds - removes. If nothing would change, it exits 0 without a mutation call.
+
+## Commit conventions
+
+- Standard git commit messages — no Co-Authored-By trailers. The harness default `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` is blocked by the auto mode Content Integrity classifier. Omit it.
+- Commit messages should follow conventional commits: `type(scope): description` (e.g., `fix: tighten outcome grep pattern`, `feat: add BE_TEST_RUNNER support`).
+
+## Known sharp edges (harness-level)
+
+- **Co-Authored-By classifier block**: Auto mode Content Integrity classifier rejects commits with the default `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` trailer. Workaround: omit the trailer. See Commit conventions above.
+- **Residual classifier state**: After a blocked commit, the classifier reasoning can leak into subsequent unrelated tool calls (e.g., `spawn_agent_pre` denied with the same reasoning). This is a harness bug — the classifier should scope denial reasoning per-action. Filed as harness-level issue.

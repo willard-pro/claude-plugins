@@ -35,6 +35,13 @@ FLEET_PIPELINE_LOG_DIR="${FLEET_PIPELINE_LOG_DIR:-${PIPELINE_LOGS_DIR:-./logs}}"
 BASE_BRANCH="${BASE_BRANCH:-develop}"
 BRANCH_PREFIX="${BRANCH_PREFIX:-feat/}"
 
+# ── Ticket audit ────────────────────────────────────────────────────────────
+
+AUDIT_DIR="${AUDIT_DIR:-./logs/audit}"
+TICKET_AUDIT_SIMILARITY_THRESHOLD="${TICKET_AUDIT_SIMILARITY_THRESHOLD:-80}"
+TICKET_AUDIT_STALE_DAYS="${TICKET_AUDIT_STALE_DAYS:-30}"
+TICKET_AUDIT_MAX_TICKETS="${TICKET_AUDIT_MAX_TICKETS:-30}"
+
 # ── Fleet controller ────────────────────────────────────────────────────────────
 
 # Instance identity — derived from git remote when available, falls back to PWD basename.

@@ -24,6 +24,16 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-outcome-label-check.sh
 	CLAUDE_SKILLS_LIB="$(CURDIR)/ticket-auto-pipeline/lib" \
 	bash ticket-auto-pipeline/lib/tests/test-pipeline-phases.sh
+	# ticket-audit tests
+	bash ticket-auto-pipeline/lib/tests/test-ticket-audit-split-detection.sh
+	bash ticket-auto-pipeline/lib/tests/test-ticket-audit-drift.sh
+	bash ticket-auto-pipeline/lib/tests/test-ticket-audit-cache.sh
+	bash ticket-auto-pipeline/lib/tests/test-ticket-audit-checklist.sh
+	bash ticket-auto-pipeline/lib/tests/test-linear-api-audit.sh
+	# ticket-audit-exec tests
+	bash ticket-auto-pipeline/lib/tests/test-ticket-audit-exec-resume.sh
+	bash ticket-auto-pipeline/lib/tests/test-ticket-audit-exec-phase-gate.sh
+	bash ticket-auto-pipeline/lib/tests/test-ticket-audit-exec-dedup.sh
 
 test-flow:
 	@echo "=== ticket-flow tests ==="

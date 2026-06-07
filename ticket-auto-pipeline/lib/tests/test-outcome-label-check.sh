@@ -80,7 +80,7 @@ source "$LIB_DIR/outcome-label-check.sh"
 # 1. Smooth label already present → exit 0, no flow.sh call
 test_outcome_smooth_present_exits_0() {
   _setup
-  _plog_raw "IMPLEMENT" "implement" "done" "Smooth"
+  _plog_raw "IMPLEMENT" "implement-outcome" "info" "Smooth"
   _fake_issue='{"id":"CRE-47","title":"Test","labels":{"nodes":[{"name":"Smooth"},{"name":"bug"}]}}'
 
   _outcome_label_check
@@ -102,7 +102,7 @@ test_outcome_smooth_present_exits_0() {
 # 2. Rough label already present → exit 0, no flow.sh call
 test_outcome_rough_present_exits_0() {
   _setup
-  _plog_raw "IMPLEMENT" "implement" "done" "Rough"
+  _plog_raw "IMPLEMENT" "implement-outcome" "info" "Rough"
   _fake_issue='{"id":"CRE-47","title":"Test","labels":{"nodes":[{"name":"Rough"}]}}'
 
   _outcome_label_check
@@ -118,7 +118,7 @@ test_outcome_rough_present_exits_0() {
 # 3. Hard label already present → exit 0, no flow.sh call
 test_outcome_hard_present_exits_0() {
   _setup
-  _plog_raw "IMPLEMENT" "implement" "done" "Hard"
+  _plog_raw "IMPLEMENT" "implement-outcome" "info" "Hard"
   _fake_issue='{"id":"CRE-47","title":"Test","labels":{"nodes":[{"name":"Hard"}]}}'
 
   _outcome_label_check
@@ -134,7 +134,7 @@ test_outcome_hard_present_exits_0() {
 # 4. Label missing → calls flow.sh implement-outcome
 test_outcome_label_missing_calls_flow() {
   _setup
-  _plog_raw "IMPLEMENT" "implement" "done" "Rough"
+  _plog_raw "IMPLEMENT" "implement-outcome" "info" "Rough"
   _fake_issue='{"id":"CRE-47","title":"Test","labels":{"nodes":[{"name":"bug"}]}}'
 
   _outcome_label_check
@@ -160,7 +160,7 @@ test_outcome_label_missing_calls_flow() {
 # 5. Outcome read from pipeline log
 test_outcome_read_from_pipeline_log() {
   _setup
-  _plog_raw "IMPLEMENT" "implement" "done" "Smooth"
+  _plog_raw "IMPLEMENT" "implement-outcome" "info" "Smooth"
   _fake_issue='{"id":"CRE-47","title":"Test","labels":{"nodes":[{"name":"bug"}]}}'
 
   _outcome_label_check
