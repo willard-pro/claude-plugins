@@ -44,6 +44,8 @@ ticket-auto-pipeline/
 - `ticket-reproduce` — bug reproduction (Step 1.5 for bug tickets)
 - `ticket-gate-reconcile` — post-gate-hold comment reconciliation (isolated agent, spawned by router at STEP_3_5)
 - `ticket-critique` — code/PR critique
+- `ticket-audit` — cross-ticket audit within milestone or parent/epic; detects duplicates, overlaps, empty tickets, goal misalignment, stale tickets, split candidates, wiki misalignment
+- `ticket-audit-exec` — two-phase apply agent for ticket-audit recommendations; delegates needs-info to ticket-critique, posts structural comments
 - `ticket-env-check` — environment validation
 - `wiki-maintenance` — wiki documentation maintenance
 - `nav-hints` / `app-knowledge` — navigation and domain knowledge
@@ -67,6 +69,16 @@ ticket-auto-pipeline/
 | `gate-check.sh` | Deterministic bash gate logic. `--mode entry` checks artifact existence, complexity-artifact coherence, autonomy routing. `--mode reapprove` checks live Linear state for re-approval integrity. Replaces inline LLM gate reasoning. |
 | `outcome-label-check.sh` | Bash-only post-implement guard. Verifies Smooth/Rough/Hard outcome label is present on the Linear ticket, applying it if missing via flow.sh. |
 | `detect-resume.sh` | Pipeline log state parser. Called directly as bash by the thin router (not via `/ticket-detect-resume` skill). Outputs 19 routing variables (RESUME_STEP, COMPLEXITY, AUTONOMY, VERIFY_ATTEMPTS, ITERATION, etc.). |
+| `audit-size-check.sh` | Deterministic split signal detection. Checks AC count (>5), word count (>400), wiki service count (≥3). Outputs `SIGNAL_COUNT` + `SIGNALS` + templated `SPLIT_SUGGESTION` when 2+ signals fire. |
+| `audit-drift-check.sh` | Delta timestamp comparator for ticket-audit re-runs. Compares current Linear `updatedAt` against snapshot inventory. Outputs `CHANGED_IDS` + `NEW_IDS`. Pure bash, no LLM. |
+| `audit-title-similarity.sh` | Jaccard similarity on two title strings. Tokenizes to word sets (lowercase, strip punctuation), computes intersection/union, outputs integer 0–100. |
+| `audit-scope-check.sh` | Deterministic scope identification. Checks ticket text against wiki service vocabulary + scope indicator keywords. Outputs `SCOPE_FOUND` + `MATCHED_SERVICES`. Replaces LLM Check 4. |
+| `audit-repro-check.sh` | Deterministic repro steps detection for bug tickets. Detects numbered steps, action bullets, "Steps to reproduce" sections. Outputs `HAS_REPRO` + `REPRO_COUNT`. Replaces LLM Check 5. |
+| `audit-ac-testability.sh` | Deterministic AC testability check. Detects vague/unverifiable language patterns per AC line. Outputs `VAGUE_AC_COUNT` + `VAGUE_ACS`. Pre-filters LLM Check 2. |
+| `audit-test-data-check.sh` | Deterministic test data assumption detection. Matches 16 pre-existing-state patterns. Outputs `NEEDS_TEST_DATA` + `ASSUMPTIONS`. Pre-filters LLM Check 3. |
+| `audit-overlap-check.sh` | Deterministic AC overlap detection using Jaccard on tokenized AC text. Outputs `OVERLAP_SCORE` + `OVERLAP_THRESHOLD` + `OVERLAP_SHARED_TERMS`. Pre-filters LLM overlap check. |
+| `audit-comment-guard.sh` | Idempotency guard for ticket-audit-exec comments. Fetches existing comments via `get_comments()`, greps for `Source: {source-id}`. Exit 0 if found (skip), exit 1 if not found (post). |
+| `ticket-audit-exec.sh` | Deterministic operations for ticket-audit-exec skill. `resolve_file`, `parse_checklist` (JSON output), `write_ahead_mark`, `mark_item_done`, `mark_item_failed`, `advance_phase`, `archive_checklist`, `has_pending_items`, `get_item_state`. |
 | `skill-preamble.md` | Shared preamble referenced by all pipeline skill SKILL.md files. Defines parameters and common guard patterns. |
 | `skill-preamble-auto.md` | Thin router variant of skill-preamble. Used by agents spawned from the thin router. Excludes guard, project context detection, step dispatch, and task tracker sections (handled by the router). |
 
