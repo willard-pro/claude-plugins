@@ -166,8 +166,8 @@ _gate_entry() {
     local critique_blocker_count
     critique_blocker_count=$(get_critique_blocker_count "$td" 2>/dev/null || echo "0")
     if [[ "$critique_blocker_count" =~ ^[0-9]+$ ]] && [[ "$critique_score" =~ ^[0-9]+$ ]]; then
-      local max_score=$(( 100 - (critique_blocker_count * 25) ))
-      [ "$max_score" -lt 40 ] && max_score=40  # floor at 40 — below this is already caught
+      local max_score=$((100 - (critique_blocker_count * 25)))
+      [ "$max_score" -lt 40 ] && max_score=40 # floor at 40 — below this is already caught
       if [ "$critique_blocker_count" -ge 2 ] && [ "$critique_score" -gt 50 ]; then
         _plog "$LOG_FILE" "META" "gate-stop" "fail" "CRITIQUE_SCORE_IMPLAUSIBLE — score $critique_score with $critique_blocker_count BLOCKERs (max plausible: 50)"
         hb_gate "entry-gate" "fail" "critique score implausible" "{\"score\":\"$critique_score\",\"blockers\":\"$critique_blocker_count\",\"max_plausible\":50}"
@@ -186,13 +186,42 @@ _gate_entry() {
     local has_test_user has_nav_path has_expected_behavior has_env_prereqs role_pattern missing_count
     # Build role pattern from test-users.json catalog if available, fall back to known roles
     role_pattern=$(jq -r '[.[].roles[]] | unique | join("|")' "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/skills}/config/test-users.json" 2>/dev/null | sed 's/_/[-_]/g' || echo 'attorney|admin|debtor|collection[-_]?agency|correspondent')
-    # grep -c outputs "0" on no match (and exits 1) — use || true to suppress exit code
-    has_test_user=$(grep -ciP '(\*\*User:\*\*|log in as|test as|email[:\s]*\S+@\S+\.\S+|role[:\s]*('"$role_pattern"'))' "$artifact_path" 2>/dev/null || true)
-    has_nav_path=$(grep -ciP '(/handover/|/admin/|/user-permission/|/organisation/|navigate to|menu path|click path)' "$artifact_path" 2>/dev/null || true)
-    # Expected behavior: acceptance criteria, should/must/verify statements, expected behavior headings
-    has_expected_behavior=$(grep -ciP '(acceptance criteria|expected (behavi|result|outcome)|should |must |verify that|pass criter|## Expected|## Acceptance|## Verification Plan|AC[-:])' "$artifact_path" 2>/dev/null || true)
-    # Environment prerequisites: data setup, seed data, migrations, dependencies
-    has_env_prereqs=$(grep -ciP '(seed[- ]?data|setup|prerequisite|before (testing|running)|environment|database|migration|service.*start|dependency|data\.sql|fixture)' "$artifact_path" 2>/dev/null || true)
+    # Primary: check the derived verification plan in notes.md when present
+    local td notes_path vplan_section
+    td="."
+    if command -v resolve_ticket_dir &>/dev/null; then
+      td=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || echo ".")
+    fi
+    notes_path="$td/notes.md"
+    vplan_section=""
+
+    if [ -f "$notes_path" ] && grep -q '## Verification Plan' "$notes_path" 2>/dev/null; then
+      # Extract the per-criterion table between "### Per-Criterion Verification" and the next ## heading
+      vplan_section=$(awk '/^### Per-Criterion Verification$/,/^## /' "$notes_path" 2>/dev/null || true)
+      if [ -n "$vplan_section" ]; then
+        # Test user: check the Role scope column for role mentions or "global"
+        has_test_user=$(echo "$vplan_section" | grep -ciP '(\| *global|role: *\w|attorney|admin|debtor|collection|correspondent)' 2>/dev/null || true)
+        # Navigation path: check the Navigation path column for URLs or paths
+        has_nav_path=$(echo "$vplan_section" | grep -ciP '(\| */\w+|navigate|menu|click|path.*\|)' 2>/dev/null || true)
+        # Expected behavior: check that the Expected behavior column has non-empty content
+        has_expected_behavior=$(echo "$vplan_section" | grep -ciP '(\| *[^|]+\| *[^|]+\| *[^|]+\| *[^|]+)' 2>/dev/null || true)
+        # Environment prerequisites: check the Test data needed column
+        has_env_prereqs=$(echo "$vplan_section" | grep -ciP '(\| *(none|seed|setup|data|fixture|migration|prerequisite))' 2>/dev/null || true)
+      fi
+    fi
+
+    # Fallback: scan the plan artifact directly when:
+    # - no verification plan section exists, OR
+    # - any prerequisite grep returned 0 (grep may have missed data the LLM wrote)
+    if [ -z "$vplan_section" ] || [ "${has_test_user:-0}" = "0" ] || [ "${has_nav_path:-0}" = "0" ] || [ "${has_expected_behavior:-0}" = "0" ] || [ "${has_env_prereqs:-0}" = "0" ]; then
+      # grep -c outputs "0" on no match (and exits 1) — use || true to suppress exit code
+      has_test_user=$(grep -ciP '(\*\*User:\*\*|log in as|test as|email[:\s]*\S+@\S+\.\S+|role[:\s]*('"$role_pattern"'))' "$artifact_path" 2>/dev/null || true)
+      has_nav_path=$(grep -ciP '(/handover/|/admin/|/user-permission/|/organisation/|navigate to|menu path|click path)' "$artifact_path" 2>/dev/null || true)
+      # Expected behavior: acceptance criteria, should/must/verify statements, expected behavior headings
+      has_expected_behavior=$(grep -ciP '(acceptance criteria|expected (behavi|result|outcome)|should |must |verify that|pass criter|## Expected|## Acceptance|## Verification Plan|AC[-:])' "$artifact_path" 2>/dev/null || true)
+      # Environment prerequisites: data setup, seed data, migrations, dependencies
+      has_env_prereqs=$(grep -ciP '(seed[- ]?data|setup|prerequisite|before (testing|running)|environment|database|migration|service.*start|dependency|data\.sql|fixture)' "$artifact_path" 2>/dev/null || true)
+    fi
 
     # Count missing prerequisites
     missing_count=0
@@ -201,7 +230,7 @@ _gate_entry() {
     [ "$has_expected_behavior" = "0" ] && ((missing_count++))
     [ "$has_env_prereqs" = "0" ] && ((missing_count++))
 
-    # Hold if 2+ missing (INCOMPLETE threshold from appraise-exec Step 3.7)
+    # Hold if 2+ missing (INCOMPLETE threshold from appraise-exec Step 3.8)
     if [ "$missing_count" -ge 2 ] 2>/dev/null; then
       _plog "$LOG_FILE" "GATE" "gate" "fail" "held: plan missing $missing_count/4 verification prerequisites (test_user=$has_test_user nav=$has_nav_path expected=$has_expected_behavior env=$has_env_prereqs)"
       hb_gate "entry-gate" "fail" "held: plan missing verification prerequisites" "{\"artifact\":\"$artifact_path\",\"missing\":\"$missing_count\",\"test_user\":\"$has_test_user\",\"nav\":\"$has_nav_path\",\"expected\":\"$has_expected_behavior\",\"env\":\"$has_env_prereqs\"}"

@@ -18,8 +18,9 @@ If `--from-auto` is present in the arguments, follow the auto-pipeline preamble 
 - **Regression verdict**: after the regression guard, write `hb_decision "regression-verdict" "fired" "{CONFLICT|ADJACENT|SUPERSEDES|clear}" '{"verdict":"{CONFLICT|ADJACENT|SUPERSEDES|clear}"}'`
 - **Linear fallback**: if LINEAR_API_KEY is unset and MCP fallback is used for posting the comment, write `hb_fallback "linear-api" "fired" "using MCP Linear tools" '{"reason":"LINEAR_API_KEY unset"}'`
 - **Adversarial review**: after adversarial agent completes, write `hb_decision "adversarial-review" "fired" "{PASS|WARNINGS|BLOCKED}" '{"verdict":"{PASS|WARNINGS|BLOCKED}","issues":"{N}"}'`
+- **Verify plan derived**: after Step 3.7 completes, write `hb_gate "verify-plan-derived" "{ok|fail}" "{CLEAR|INSUFFICIENT_INFO}" '{"criteria":"{N}","verifiable":"{M}"}'`
 - **Re-appraisal skip**: if re-appraisal detected no changes and steps 5-6 are skipped, write `hb_decision "re-appraisal-skip" "info" "no changes detected, skipping Linear post"`
-- **Verification readiness**: after Step 3.7, write `hb_gate "verify-readiness" "{ok|fail}" "{CLEAR|WARNINGS|INCOMPLETE}" '{"missing":"{N}"}'`
+- **Verification readiness**: after Step 3.8, write `hb_gate "verify-readiness" "{ok|fail}" "{CLEAR|WARNINGS|INCOMPLETE}" '{"missing":"{N}"}'`
 
 ### Step dispatch
 | `--from-step` value | Skip to | Restore from |
@@ -27,6 +28,7 @@ If `--from-auto` is present in the arguments, follow the auto-pipeline preamble 
 | `load-workspace` | Step 3 (create artifact) | notes.md `## Complexity` for COMPLEXITY; context.md for ticket metadata |
 | `create-artifact` | Step 3.5 (regression guard) | simple-fix.md or openspec change already exists |
 | `regression-guard` | Step 4 (re-appraisal check) | `## ⚠️ Regression Risk` in notes.md if present |
+| `verify-plan-derived` | Step 3.7 (derive verification plan) | `## Verification Plan` in notes.md if present |
 | `post-linear` | End — skill already complete | — |
 
 ---
@@ -75,7 +77,8 @@ cat > {ticket-dir}/appraise-exec-session.md << 'TRACE'
 - [x] Step 3: Create change artifacts — {type}
 - [x] Step 3.5: Regression guard — {clear | ADJACENT | CONFLICT | skipped (no prior art)}
 - [x] Step 3.6: Adversarial review — {PASS | WARNINGS | BLOCKED | skipped (simple)}
-- [x] Step 3.7: Verification-readiness — {CLEAR | WARNINGS | INCOMPLETE}
+- [x] Step 3.7: Verify plan derivation — {CLEAR | INSUFFICIENT_INFO | skipped (simple)}
+- [x] Step 3.8: Verification-readiness — {CLEAR | WARNINGS | INCOMPLETE}
 - [x] Step 4: Re-appraisal check — {skipped | no marker → continued}
 - [x] Step 5: Post Linear comment — {done | skipped (no changes)}
 - [x] Step 6: Set state → Approve — {done | skipped (no changes)}
@@ -372,7 +375,177 @@ If WARNINGS or PASS, proceed to Step 4.
 
 ---
 
-## Step 3.7 — Verification-Readiness Gate
+## Step 3.7 — Derive Verification Plan
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|verify-plan-derived|start|Deriving verification plan" >> "$LOG_FILE"
+
+**Only run this step if `{COMPLEXITY}` = complex.** If simple, skip to Step 3.8.
+
+Derive a structured verification plan from the ticket and plan artifact. This step produces the `## Verification Plan` section in notes.md that tells `ticket-verify` exactly what to test, who tests it, and how to navigate there. If derivation fails, the ticket has insufficient information — push back before implementation.
+
+### Inputs to read
+
+1. **Ticket description and acceptance criteria** — from `context.md` or the Linear issue
+2. **Plan artifact** — `simple-fix.md` or `openspec/changes/{change-name}/design.md` + `tasks.md` + spec files
+3. **`app-knowledge/SKILL.md`** — for known role constraints, role-based UI rules, and navigation patterns
+4. **`config/test-users.json`** — for available test roles (`attorney`, `admin`, `debtor`, `collection_agency`, `correspondent`, etc.)
+5. **`notes.md`** — for investigation findings (`## Initial Investigation`, `## Blast Radius`), adversarial review results, and prior art context
+
+### Derivation steps
+
+#### A. Extract acceptance criteria
+
+Identify every acceptance criterion in the ticket. Each criterion is one row in the per-criterion table. Criteria sources, in order of preference:
+1. Numbered AC lines in the ticket description (e.g., "AC-1: ...", "1. ...")
+2. Bullet points under an "Acceptance Criteria" or "## Expected Behavior" heading
+3. Behavioral descriptions in the plan artifact (implementation tasks that describe user-visible outcomes)
+4. If no criteria are identifiable anywhere → the ticket is underspecified. Trigger `VERIFY_PLAN_NO_ROLE_SCOPE` (no criteria to derive roles from).
+
+#### B. Determine role scope per criterion
+
+For each criterion, determine which roles are affected. Use the following hierarchy:
+
+1. **Explicit role mention** (confidence: high): If the criterion text says "as an attorney", "admin only", "for debtors", etc. → role scope is the explicitly mentioned role(s). Scope type is "role-specific".
+
+2. **Code path role gating** (confidence: high): If the plan artifact references auth guards, role-based UI components (`*ngIf="role..."`, `hasRole(...)`), or role-specific service methods → role scope is the roles enumerated in the code. Scope type is "role-specific".
+
+3. **App-knowledge role-based UI rules** (confidence: medium): Cross-reference the feature area against `app-knowledge/SKILL.md`. If the app-knowledge file documents a role constraint for that feature area (e.g., "only admins can access user-permission page") → derive role scope from the known rule. Scope type is "role-specific".
+
+4. **Default heuristic** (confidence: low):
+   - **Infrastructure changes** (authentication, routing, database schema, shared utilities, logging, error handling) → "global" (all roles). Scope type is "global".
+   - **Feature changes** with no role information → "unknown". This triggers a push-back.
+
+5. **Role scope classification:**
+   - **global**: Change affects all roles identically. Affected roles = all roles from `test-users.json`.
+   - **role-specific**: Change affects only certain roles. Affected roles = only the roles that can verify the behavior.
+
+#### C. Derive navigation path per criterion
+
+For each criterion, determine how to reach the feature in the browser:
+
+1. **URL in ticket**: Extract any URL path from the ticket description (`/handover/`, `/admin/`, `/user-permission/`, `/organisation/`).
+2. **nav-hints match**: Check `nav-hints.md` (or the nav-hints SKILL.md) for the feature area keyword. If a navigation path exists for that area, use it.
+3. **Infer from feature area**: Map feature area keywords to known URL patterns:
+   - "handover" / "matter handover" → `/handover/`
+   - "admin" / "user permission" → `/admin/user-permission`
+   - "organisation" / "entity" → `/organisation/`
+   - "correspondence" / "portfolio" → `/portfolio/`
+4. **Unknown**: If no nav path can be determined → trigger `VERIFY_PLAN_NO_NAV_PATH`.
+
+#### D. Extract expected behavior per criterion
+
+For each criterion, extract what "working correctly" looks like:
+
+1. **Acceptance criteria wording**: The criterion itself describes the expected outcome (e.g., "AC-1: Attorney clicks Send and the handover is created" → expected behavior: "Handover created after attorney clicks Send").
+2. **"Expected Behaviour" section**: If the ticket has a dedicated expected behavior section, use it.
+3. **Plan artifact behavioral descriptions**: Implementation tasks or design.md may describe user-visible outcomes.
+4. **Vague language detection**: If the only description is vague ("works correctly", "is fixed", "should be improved", "functions properly") with no observable outcome → trigger `VERIFY_PLAN_VAGUE_BEHAVIOR`.
+
+#### E. Detect test data requirements per criterion
+
+For each criterion, determine whether pre-existing data is needed:
+
+1. **Pre-existing state assumptions**: Does the criterion assume data exists (e.g., "an existing handover", "a debtor with overdue invoices", "a pending correspondence")?
+2. **Seed data references**: Does the plan mention `seed-db`, `data.sql`, fixtures, or setup scripts?
+3. **Setup steps**: Are there documented steps to create the required data (e.g., "Create a handover first via ...")?
+4. If data is required but no setup mechanism is documented → trigger `VERIFY_PLAN_NO_TEST_DATA`.
+
+### Push-back triggers
+
+If any single criterion cannot be fully derived, halt the pipeline. The following gate-stop codes apply:
+
+| Condition | Gate-stop code |
+|-----------|---------------|
+| Role scope unknown for any criterion | `VERIFY_PLAN_NO_ROLE_SCOPE` |
+| Navigation path unknown for any criterion | `VERIFY_PLAN_NO_NAV_PATH` |
+| Expected behavior vague for any criterion | `VERIFY_PLAN_VAGUE_BEHAVIOR` |
+| Test data required but no setup documented | `VERIFY_PLAN_NO_TEST_DATA` |
+
+**In `--from-auto` mode:** Push-back halts the pipeline immediately:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|{GATE-STOP-CODE} — {reason}" >> "$LOG_FILE"
+```
+Stop with non-zero exit so `ticket-auto` halts.
+
+**In interactive mode (no `--from-auto`):** Warn the user but allow override:
+```
+⚠️  VERIFICATION PLAN — {GATE-STOP-CODE}
+
+The verification plan for {TICKET-ID} could not be fully derived:
+
+{list of criteria and what's missing}
+
+The pipeline cannot verify this ticket reliably. Options:
+1. Update the ticket with the missing information and re-run
+2. Override and proceed anyway (verification may be incomplete)
+
+Re-run: /ticket-appraise-exec {TICKET-ID} --from-step verify-plan-derived
+```
+
+If the user chooses to override, proceed to Step 3.8 with the partial plan. **Write the partial verification plan to notes.md first** — use the same schema below, marking unverifiable criteria with `✗` in the Verifiable column and noting the missing dimension in the relevant column (e.g., "unknown" for role scope, "not specified" for nav path).
+
+### Write verification plan to notes.md
+
+After derivation (full success or partial with override), append a `## Verification Plan` section to notes.md. If a `## Verification Plan` section already exists from a prior run, replace it.
+
+```markdown
+## Verification Plan
+**Date:** {today}
+**Derived by:** ticket-appraise-exec Step 3.7
+**Overall role scope:** {global | role-specific: {roles} | mixed}
+
+### Role Scope Assessment
+
+| Feature area | Affected roles | Scope type | Confidence | Basis |
+|-------------|---------------|-----------|-----------|-------|
+| {feature area} | {role list or "all"} | {global|role-specific} | {high|medium|low} | {explicit mention|code path|app-knowledge|heuristic} |
+
+### Per-Criterion Verification
+
+| # | Criterion | Role scope | Navigation path | Test data needed | Expected behavior | Verifiable |
+|---|----------|-----------|----------------|-----------------|-------------------|-----------|
+| 1 | {criterion text} | {global|role: {roles}} | {URL path or menu path} | {none|{data description}} | {expected outcome} | {✓|✗} |
+| 2 | ... | ... | ... | ... | ... | ... |
+```
+
+**Verifiable column:** `✓` if all four dimensions (role scope, nav path, expected behavior, test data) are populated. `✗` if any is missing — but note that missing dimensions trigger push-back above, so this should only appear in interactive override mode.
+
+### Wiki ingestion — Role Scope Registry
+
+After writing the verification plan, append role scope findings to `app-knowledge/SKILL.md` under a `## Role Scope Registry` section. This builds a cumulative knowledge base for future appraisals.
+
+**Entry format:**
+```markdown
+### {TICKET-ID} — {feature area}
+- **Role scope:** {global | role-specific: {roles}}
+- **Confidence:** {high|medium|low}
+- **Source:** verification plan derivation (ticket-appraise-exec Step 3.7)
+- **Date:** {today}
+```
+
+**Section creation:** If `app-knowledge/SKILL.md` does not contain a `## Role Scope Registry` section, create it at the end of the file before appending the entry.
+
+**Duplicate handling:** If a prior role scope entry exists for the same ticket ID (re-appraisal), strike through the old entry (`~~...~~`) and append the new entry below it.
+
+**Non-blocking:** Wiki write failure is non-blocking. If `app-knowledge/SKILL.md` cannot be written (permissions, disk full), log a warning and continue:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|verify-plan-derived|skip|Wiki write failed: {reason} — continuing" >> "$LOG_FILE"
+```
+
+### Heartbeat
+
+After derivation completes:
+- **Success (all criteria verifiable):** `hb_gate "verify-plan-derived" "ok" "CLEAR" '{"criteria":"{N}","verifiable":"{M}"}'`
+- **Partial with override (interactive only):** `hb_gate "verify-plan-derived" "ok" "OVERRIDE" '{"criteria":"{N}","verifiable":"{M}","override":"true"}'`
+- **Push-back (any criterion unverifiable, auto mode):** `hb_gate "verify-plan-derived" "fail" "INSUFFICIENT_INFO" '{"criteria":"{N}","verifiable":"{M}"}'`
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|verify-plan-derived|done|{CLEAR|INSUFFICIENT_INFO}" >> "$LOG_FILE"
+
+Proceed to Step 3.8.
+
+---
+
+## Step 3.8 — Verification-Readiness Gate
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|verify-readiness|start|Checking plan for verification prerequisites" >> "$LOG_FILE"
 
@@ -385,7 +558,17 @@ Check the plan artifact for 4 prerequisites required to verify the ticket:
 
 ### How to check
 
-Read the plan artifact:
+**Primary path — read the derived verification plan:**
+If `{TICKET_DIR}/notes.md` contains a `## Verification Plan` section with a populated per-criterion table, extract the 4 prerequisites directly from the derived plan's table columns:
+1. **Test user** — from the "Role scope" column (if role-specific, the named role is the test user)
+2. **Navigation target** — from the "Navigation path" column
+3. **Expected behavior** — from the "Expected behavior" column
+4. **Environment prerequisites** — from the "Test data needed" column
+
+If any column is empty or missing for a criterion, count that prerequisite as missing for that criterion. If all criteria have the prerequisite populated, count it as found.
+
+**Fallback — scan the plan artifact directly:**
+If no `## Verification Plan` section exists in notes.md (backward compat for old tickets), scan the plan artifact:
 - If `{COMPLEXITY}` = simple: read `{TICKET_DIR}/simple-fix.md`
 - If `{COMPLEXITY}` = complex: find the openspec change dir and read `design.md` and `tasks.md`
 
@@ -458,7 +641,7 @@ If the section already exists from a prior re-run, replace it.
 
 ---
 
-## Step 4 — Check for re-appraisal skip
+## Step 4 — Check for re-appraisal skip (after Step 3.8)
 
 Read notes.md and look for a `## Re-appraisal` section. If it contains `**Changes detected:** no`, skip Steps 5 and 6 — no new comment or state change needed. Proceed directly to Step 7 (Report).
 

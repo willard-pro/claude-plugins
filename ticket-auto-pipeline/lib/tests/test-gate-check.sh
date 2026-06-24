@@ -136,6 +136,10 @@ _scaffold_no_meta_artifact() {
 
 # ── Source gate-check.sh (its main is guarded, functions load into this shell) ──
 
+# Ensure gate-check.sh sources its dependencies from the local dev lib,
+# not from ~/.claude/skills/lib (which may lack newer functions).
+export CLAUDE_SKILLS_LIB="$LIB_DIR"
+
 source "$LIB_DIR/gate-check.sh"
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -428,6 +432,341 @@ test_reapprove_both_wrong_single_gate_stop() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Verification plan extraction tests (Check 2.6) — exercises the new
+# ## Verification Plan → per-criterion table → fallback chain
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Helper: scaffold notes.md with critique section (unlocks Check 2.6)
+_scaffold_critique() {
+  local score="${1:-75}"
+  local status="${2:-PASS}"
+  local td
+  td=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || echo "$_ws")
+  mkdir -p "$td" 2>/dev/null || true
+  cat >"${td}/notes.md" <<NOTESEOF
+## Complexity
+**Score:** simple
+
+## Readiness Critique
+**Score:** ${score}
+**Status:** ${status}
+NOTESEOF
+}
+
+# Helper: append a verification plan with a populated per-criterion table to notes.md
+_scaffold_verify_plan_full() {
+  local td
+  td=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || echo "$_ws")
+  mkdir -p "$td" 2>/dev/null || true
+  # Ensure critique section exists first
+  if ! grep -q '## Readiness Critique' "${td}/notes.md" 2>/dev/null; then
+    _scaffold_critique 75 PASS
+  fi
+  cat >>"${td}/notes.md" <<'PLANEOF'
+
+## Verification Plan
+**Date:** 2026-06-24
+**Derived by:** ticket-appraise-exec Step 3.7
+**Overall role scope:** global
+
+### Role Scope Assessment
+
+| Feature area | Affected roles | Scope type | Confidence | Basis |
+|-------------|---------------|-----------|-----------|-------|
+| handover | all | global | low | heuristic |
+
+### Per-Criterion Verification
+
+| # | Criterion | Role scope | Navigation path | Test data needed | Expected behavior | Verifiable |
+|---|----------|-----------|----------------|-----------------|-------------------|-----------|
+| 1 | Attorney clicks Send to create handover | global | /handover/ | none | Handover created and visible in list | ✓ |
+| 2 | Admin views all handovers | role: admin | /admin/ | seed data: 3 handovers | All handovers displayed in admin table | ✓ |
+PLANEOF
+}
+
+# Helper: append a verification plan with an empty per-criterion table (all columns blank)
+_scaffold_verify_plan_empty() {
+  local td
+  td=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || echo "$_ws")
+  mkdir -p "$td" 2>/dev/null || true
+  if ! grep -q '## Readiness Critique' "${td}/notes.md" 2>/dev/null; then
+    _scaffold_critique 75 PASS
+  fi
+  cat >>"${td}/notes.md" <<'PLANEOF'
+
+## Verification Plan
+**Date:** 2026-06-24
+**Derived by:** ticket-appraise-exec Step 3.7
+**Overall role scope:** unknown
+
+### Per-Criterion Verification
+
+| # | Criterion | Role scope | Navigation path | Test data needed | Expected behavior | Verifiable |
+|---|----------|-----------|----------------|-----------------|-------------------|-----------|
+| 1 | Vague criterion |  |  |  |  | ✗ |
+PLANEOF
+}
+
+# Helper: append a verification plan heading WITHOUT the per-criterion subsection
+_scaffold_verify_plan_no_table() {
+  local td
+  td=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || echo "$_ws")
+  mkdir -p "$td" 2>/dev/null || true
+  if ! grep -q '## Readiness Critique' "${td}/notes.md" 2>/dev/null; then
+    _scaffold_critique 75 PASS
+  fi
+  cat >>"${td}/notes.md" <<'PLANEOF'
+
+## Verification Plan
+**Date:** 2026-06-24
+**Derived by:** ticket-appraise-exec Step 3.7
+**Overall role scope:** global
+PLANEOF
+}
+
+# Helper: create an artifact file with verification prerequisites
+_scaffold_artifact_with_prereqs() {
+  local path="${1:-${_ws}/simple-fix.md}"
+  cat >"$path" <<'ARTEOF'
+# Simple Fix — Test
+
+## Summary
+Test fix with verification prerequisites.
+
+**User:** test@example.com
+
+## How to implement
+1. Navigate to /handover/
+2. Click Send button
+3. Verify handover created
+
+## Expected Behavior
+- Handover appears in list after creation
+- Admin can view all handovers at /admin/
+
+## Setup
+- Seed data: 3 test handovers
+ARTEOF
+}
+
+# Helper: create a bare artifact file with NO verification prerequisites
+_scaffold_artifact_bare() {
+  local path="${1:-${_ws}/simple-fix.md}"
+  cat >"$path" <<'ARTEOF'
+# Simple Fix — Test
+
+## Summary
+Fix the thing.
+
+## How to implement
+Change line 42 of foo.js.
+ARTEOF
+}
+
+# 16. Verification plan with populated table → all 4 prereqs found → auto-approve
+test_verify_plan_full_table_auto_approves() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_critique 75 PASS
+  _scaffold_verify_plan_full
+
+  _gate_entry
+  local rc=$?
+
+  local held_line
+  held_line=$(grep 'held: plan missing' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0 (auto-approve), got $rc"
+    return 1
+  }
+  [ -z "$held_line" ] || {
+    echo "unexpected Check 2.6 hold with full verification plan table"
+    return 1
+  }
+}
+
+# 17. Empty verification plan table → falls back to artifact scan → prereqs found in artifact → auto-approve
+test_verify_plan_empty_table_falls_back_to_artifact() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_critique 75 PASS
+  _scaffold_verify_plan_empty
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local held_line
+  held_line=$(grep 'held: plan missing' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0 (auto-approve via artifact fallback), got $rc"
+    return 1
+  }
+  [ -z "$held_line" ] || {
+    echo "unexpected Check 2.6 hold: artifact should have had prereqs"
+    return 1
+  }
+}
+
+# 18. Empty table AND bare artifact → Check 2.6 holds with 2+ missing
+test_verify_plan_empty_table_and_bare_artifact_holds() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_critique 75 PASS
+  _scaffold_verify_plan_empty
+  _scaffold_artifact_bare "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local held_line
+  held_line=$(grep 'held: plan missing' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 1 ] || {
+    echo "expected exit 1 (held), got $rc"
+    return 1
+  }
+  [ -n "$held_line" ] || {
+    echo "expected Check 2.6 hold, but no 'held: plan missing' in log"
+    return 1
+  }
+}
+
+# 19. No verification plan section → falls back to artifact (backward compat)
+test_no_verify_plan_falls_back_to_artifact() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_critique 75 PASS
+  # No _scaffold_verify_plan — notes.md has critique but no verification plan
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local held_line
+  held_line=$(grep 'held: plan missing' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0 (auto-approve), got $rc"
+    return 1
+  }
+  [ -z "$held_line" ] || {
+    echo "unexpected Check 2.6 hold: artifact had prereqs via fallback"
+    return 1
+  }
+}
+
+# 20. Verification plan heading without per-criterion table → falls back
+test_verify_plan_heading_without_table_falls_back() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_critique 75 PASS
+  _scaffold_verify_plan_no_table
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local held_line
+  held_line=$(grep 'held: plan missing' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0 (auto-approve via fallback), got $rc"
+    return 1
+  }
+  [ -z "$held_line" ] || {
+    echo "unexpected Check 2.6 hold: should have fallen back to artifact"
+    return 1
+  }
+}
+
+# 21. No critique section → Check 2.6 skipped entirely (old ticket backward compat)
+test_no_critique_skips_readiness_check() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  # No critique section — old ticket without critique. Write notes.md directly
+  # to avoid _scaffold_verify_plan_empty's auto-critique behavior.
+  local td
+  td=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || echo "$_ws")
+  mkdir -p "$td" 2>/dev/null || true
+  cat >"${td}/notes.md" <<'NOTESEOF'
+## Complexity
+**Score:** simple
+
+## Verification Plan
+stuff but no per-criterion table
+NOTESEOF
+  _scaffold_artifact_bare "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local held_line
+  held_line=$(grep 'held: plan missing' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0 (auto-approve, check skipped), got $rc"
+    return 1
+  }
+  [ -z "$held_line" ] || {
+    echo "unexpected Check 2.6 hold: should have been skipped (no critique)"
+    return 1
+  }
+}
+
+# 22. Verification plan with partial data — one column populated, three empty → fallback
+test_verify_plan_partial_data_falls_back() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_critique 75 PASS
+
+  # Create a verification plan where only the nav path column has content
+  local td
+  td=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || echo "$_ws")
+  mkdir -p "$td" 2>/dev/null || true
+  cat >>"${td}/notes.md" <<'PLANEOF'
+
+## Verification Plan
+**Date:** 2026-06-24
+
+### Per-Criterion Verification
+
+| # | Criterion | Role scope | Navigation path | Test data needed | Expected behavior | Verifiable |
+|---|----------|-----------|----------------|-----------------|-------------------|-----------|
+| 1 | Some criterion |  | /handover/ |  |  | ✗ |
+PLANEOF
+
+  # Artifact also bare — so fallback should still fail
+  _scaffold_artifact_bare "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local held_line
+  held_line=$(grep 'held: plan missing' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  # nav_path=1, but test_user=0 → OR fallback triggers → artifact scan
+  # artifact is bare → 0 prereqs found → Check 2.6 holds (2+ missing)
+  [ "$rc" -eq 1 ] || {
+    echo "expected exit 1 (held — fallback to bare artifact), got $rc"
+    return 1
+  }
+  [ -n "$held_line" ] || {
+    echo "expected Check 2.6 hold after fallback to bare artifact"
+    return 1
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Dispatcher
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -449,7 +788,14 @@ for fn in \
   test_reapprove_approved_and_ready_passes \
   test_reapprove_label_missing_gate_stop \
   test_reapprove_wrong_state_gate_stop \
-  test_reapprove_both_wrong_single_gate_stop; do
+  test_reapprove_both_wrong_single_gate_stop \
+  test_verify_plan_full_table_auto_approves \
+  test_verify_plan_empty_table_falls_back_to_artifact \
+  test_verify_plan_empty_table_and_bare_artifact_holds \
+  test_no_verify_plan_falls_back_to_artifact \
+  test_verify_plan_heading_without_table_falls_back \
+  test_no_critique_skips_readiness_check \
+  test_verify_plan_partial_data_falls_back; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done
