@@ -19,6 +19,7 @@ If `--from-auto` is present in the arguments, follow the auto-pipeline preamble 
 - **Linear fallback**: if LINEAR_API_KEY is unset and MCP fallback is used for posting the comment, write `hb_fallback "linear-api" "fired" "using MCP Linear tools" '{"reason":"LINEAR_API_KEY unset"}'`
 - **Adversarial review**: after adversarial agent completes, write `hb_decision "adversarial-review" "fired" "{PASS|WARNINGS|BLOCKED}" '{"verdict":"{PASS|WARNINGS|BLOCKED}","issues":"{N}"}'`
 - **Re-appraisal skip**: if re-appraisal detected no changes and steps 5-6 are skipped, write `hb_decision "re-appraisal-skip" "info" "no changes detected, skipping Linear post"`
+- **Verification readiness**: after Step 3.7, write `hb_gate "verify-readiness" "{ok|fail}" "{CLEAR|WARNINGS|INCOMPLETE}" '{"missing":"{N}"}'`
 
 ### Step dispatch
 | `--from-step` value | Skip to | Restore from |
@@ -74,6 +75,7 @@ cat > {ticket-dir}/appraise-exec-session.md << 'TRACE'
 - [x] Step 3: Create change artifacts — {type}
 - [x] Step 3.5: Regression guard — {clear | ADJACENT | CONFLICT | skipped (no prior art)}
 - [x] Step 3.6: Adversarial review — {PASS | WARNINGS | BLOCKED | skipped (simple)}
+- [x] Step 3.7: Verification-readiness — {CLEAR | WARNINGS | INCOMPLETE}
 - [x] Step 4: Re-appraisal check — {skipped | no marker → continued}
 - [x] Step 5: Post Linear comment — {done | skipped (no changes)}
 - [x] Step 6: Set state → Approve — {done | skipped (no changes)}
@@ -367,6 +369,92 @@ Fix the plan, then re-run /ticket-appraise-exec {TICKET-ID} --from-step create-a
 If WARNINGS or PASS, proceed to Step 4.
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|adversarial-review|done|{PASS|WARNINGS|BLOCKED}" >> "$LOG_FILE"
+
+---
+
+## Step 3.7 — Verification-Readiness Gate
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|verify-readiness|start|Checking plan for verification prerequisites" >> "$LOG_FILE"
+
+Check the plan artifact for 4 prerequisites required to verify the ticket:
+
+1. **Test user** — an email, `**User:**` field, role mention, or actual test user from the test user catalog
+2. **Navigation target** — a URL path (`/handover/`, `/admin/`), "Navigate to" instruction, or explicit menu path
+3. **Expected behavior** — a description of what "working" looks like (from acceptance criteria or a `## Expected Behavior` section)
+4. **Environment prerequisites** — any data setup, seed data references, or service dependencies needed before testing
+
+### How to check
+
+Read the plan artifact:
+- If `{COMPLEXITY}` = simple: read `{TICKET_DIR}/simple-fix.md`
+- If `{COMPLEXITY}` = complex: find the openspec change dir and read `design.md` and `tasks.md`
+
+For each prerequisite, scan the artifact content:
+1. **Test user**: look for an email pattern, `**User:**`, "as an [role]", "log in as", "test as", or a name matching the test user catalog (`config/test-users.json`). Also check if the `## Verification Readiness` section from notes.md already has one from a prior run.
+2. **Navigation target**: look for URL paths, "Navigate to", "Go to", menu paths, or feature area labels that map to known nav-hints entries.
+3. **Expected behavior**: look for acceptance criteria, `## Expected Behavior` sections, or descriptions of observable outcomes. If the artifact references the ticket's AC (e.g., "Verify AC-1: ..."), that counts.
+4. **Environment prerequisites**: look for data setup steps, seed data references (`seed-db`, `data.sql`), service dependencies, or pre-existing state descriptions.
+
+### Score
+
+Count how many of the 4 prerequisites are missing:
+
+| Missing | Status |
+|---------|--------|
+| 0 | CLEAR — all verification prerequisites present |
+| 1 | WARNINGS — one prerequisite missing, still verifiable |
+| 2+ | INCOMPLETE — too many gaps for reliable verification |
+
+**Backward compat exception:** For tickets without structured plan sections (single-file simple-fix.md with minimal structure), a single missing flag produces WARNINGS, not INCOMPLETE. Only go to INCOMPLETE when 2+ are missing.
+
+### Act on result
+
+**If CLEAR or WARNINGS:**
+Proceed to Step 4. Record in the heartbeat:
+```
+hb_gate "verify-readiness" "ok" "{CLEAR|WARNINGS}" "{\"missing\":\"{N}\"}"
+```
+
+**If INCOMPLETE:**
+
+If `--from-auto` is in the arguments:
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|VERIFY_READINESS_INCOMPLETE — plan missing {N} verification prerequisites: {list}" >> "$LOG_FILE"
+```
+Stop with non-zero exit.
+
+If interactive (no `--from-auto`):
+```
+⚠️  VERIFICATION-READINESS — INCOMPLETE
+
+The plan for {TICKET-ID} is missing {N} verification prerequisites:
+
+{list of missing prerequisites}
+
+Please update the plan artifact with these details, then re-run
+/ticket-appraise-exec {TICKET-ID} --from-step create-artifact.
+```
+
+### Write results to notes.md
+
+Append a `## Verification Readiness` section to notes.md:
+
+```markdown
+## Verification Readiness
+**Date:** {today}
+**Status:** {CLEAR | WARNINGS | INCOMPLETE}
+
+| Prerequisite | Status | Source |
+|-------------|--------|--------|
+| Test user | {found | missing} | {where found or "not specified"} |
+| Navigation target | {found | missing} | {where found or "not specified"} |
+| Expected behavior | {found | missing} | {where found or "not specified"} |
+| Environment prerequisites | {found | missing} | {where found or "not specified"} |
+```
+
+If the section already exists from a prior re-run, replace it.
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|verify-readiness|done|{CLEAR|WARNINGS|INCOMPLETE}" >> "$LOG_FILE"
 
 ---
 

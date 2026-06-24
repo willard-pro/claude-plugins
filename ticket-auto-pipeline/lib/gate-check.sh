@@ -12,6 +12,13 @@ source "$LIB_DIR/heartbeat.sh"
 source "$LIB_DIR/linear-api.sh"
 source "$LIB_DIR/notes-parse.sh"
 
+# Source ticket-dir.sh for resolve_ticket_dir — check multiple locations
+if [ -f "$SCRIPT_DIR/ticket-dir.sh" ]; then
+  source "$SCRIPT_DIR/ticket-dir.sh"
+elif [ -f "$LIB_DIR/ticket-dir.sh" ]; then
+  source "$LIB_DIR/ticket-dir.sh"
+fi
+
 usage() {
   echo "Usage: $0 <TICKET-ID> <LOG-FILE> <HB-LOG-FILE> --mode <entry|reapprove>" >&2
   exit 1
@@ -112,6 +119,96 @@ _gate_entry() {
     return 2
   fi
 
+  # Check 2.5: Content quality score (from critique in notes.md)
+  # Distinguish: critique never ran (section absent → skip, backward compat) vs.
+  #              critique ran but failed (section present but no score → gate-stop)
+  local critique_score critique_status td has_critique
+  if command -v resolve_ticket_dir &>/dev/null; then
+    td=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || true)
+  fi
+  if [ -z "$td" ]; then
+    td="."
+  fi
+  critique_score=$(get_critique_score "$td" 2>/dev/null || true)
+  critique_status=$(get_critique_status "$td" 2>/dev/null || true)
+  # Check whether the Readiness Critique section exists at all
+  if [ -f "$td/notes.md" ] && grep -q '## Readiness Critique' "$td/notes.md" 2>/dev/null; then
+    has_critique="true"
+  else
+    has_critique="false"
+  fi
+
+  if [ "${has_critique}" = "true" ] && [ -z "$critique_score" ]; then
+    # Critique ran but produced no score — structural failure, do not proceed
+    _plog "$LOG_FILE" "META" "gate-stop" "fail" "CRITIQUE_SCORE_MISSING — ## Readiness Critique exists but **Score:** absent or unparseable"
+    hb_gate "entry-gate" "fail" "critique score missing" "{\"has_critique\":\"true\"}"
+    return 2
+  fi
+
+  if [ -n "$critique_score" ]; then
+    # BLOCKED status is a hard stop
+    if [ "$critique_status" = "BLOCKED" ]; then
+      _plog "$LOG_FILE" "META" "gate-stop" "fail" "CRITIQUE_BLOCKED"
+      hb_gate "entry-gate" "fail" "critique blocked" "{\"score\":\"$critique_score\",\"status\":\"$critique_status\"}"
+      return 2
+    fi
+
+    # Score below 40 holds the ticket — validate integer before comparison
+    if [[ "$critique_score" =~ ^[0-9]+$ ]] && [ "$critique_score" -lt 40 ]; then
+      _plog "$LOG_FILE" "GATE" "gate" "fail" "held: content quality score $critique_score < 40"
+      hb_gate "entry-gate" "fail" "held: content quality score below threshold" "{\"score\":\"$critique_score\",\"threshold\":40}"
+      return 1
+    fi
+
+    # Score plausibility cross-check: if BLOCKERs exist, score must be ≤ 70
+    # Each BLOCKER deducts at least 30 (0 AC) or 20 (no test user) or 25 (no bug repro)
+    # Worst case for 1 BLOCKER = -30 → max 70. For 2 BLOCKERs = max 50.
+    local critique_blocker_count
+    critique_blocker_count=$(get_critique_blocker_count "$td" 2>/dev/null || echo "0")
+    if [[ "$critique_blocker_count" =~ ^[0-9]+$ ]] && [[ "$critique_score" =~ ^[0-9]+$ ]]; then
+      local max_score=$(( 100 - (critique_blocker_count * 25) ))
+      [ "$max_score" -lt 40 ] && max_score=40  # floor at 40 — below this is already caught
+      if [ "$critique_blocker_count" -ge 2 ] && [ "$critique_score" -gt 50 ]; then
+        _plog "$LOG_FILE" "META" "gate-stop" "fail" "CRITIQUE_SCORE_IMPLAUSIBLE — score $critique_score with $critique_blocker_count BLOCKERs (max plausible: 50)"
+        hb_gate "entry-gate" "fail" "critique score implausible" "{\"score\":\"$critique_score\",\"blockers\":\"$critique_blocker_count\",\"max_plausible\":50}"
+        return 2
+      elif [ "$critique_blocker_count" -ge 1 ] && [ "$critique_score" -gt 70 ]; then
+        _plog "$LOG_FILE" "META" "gate-stop" "fail" "CRITIQUE_SCORE_IMPLAUSIBLE — score $critique_score with $critique_blocker_count BLOCKER(s) (max plausible: 70)"
+        hb_gate "entry-gate" "fail" "critique score implausible" "{\"score\":\"$critique_score\",\"blockers\":\"$critique_blocker_count\",\"max_plausible\":70}"
+        return 2
+      fi
+    fi
+  fi
+
+  # Check 2.6: Verification readiness — check plan artifact for all 4 prerequisites
+  # Backward compat: skip if no critique score exists (old ticket without new critique sections)
+  if [ -n "$artifact_path" ] && [ -f "$artifact_path" ] && [ -n "$critique_score" ]; then
+    local has_test_user has_nav_path has_expected_behavior has_env_prereqs role_pattern missing_count
+    # Build role pattern from test-users.json catalog if available, fall back to known roles
+    role_pattern=$(jq -r '[.[].roles[]] | unique | join("|")' "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/skills}/config/test-users.json" 2>/dev/null | sed 's/_/[-_]/g' || echo 'attorney|admin|debtor|collection[-_]?agency|correspondent')
+    # grep -c outputs "0" on no match (and exits 1) — use || true to suppress exit code
+    has_test_user=$(grep -ciP '(\*\*User:\*\*|log in as|test as|email[:\s]*\S+@\S+\.\S+|role[:\s]*('"$role_pattern"'))' "$artifact_path" 2>/dev/null || true)
+    has_nav_path=$(grep -ciP '(/handover/|/admin/|/user-permission/|/organisation/|navigate to|menu path|click path)' "$artifact_path" 2>/dev/null || true)
+    # Expected behavior: acceptance criteria, should/must/verify statements, expected behavior headings
+    has_expected_behavior=$(grep -ciP '(acceptance criteria|expected (behavi|result|outcome)|should |must |verify that|pass criter|## Expected|## Acceptance|## Verification Plan|AC[-:])' "$artifact_path" 2>/dev/null || true)
+    # Environment prerequisites: data setup, seed data, migrations, dependencies
+    has_env_prereqs=$(grep -ciP '(seed[- ]?data|setup|prerequisite|before (testing|running)|environment|database|migration|service.*start|dependency|data\.sql|fixture)' "$artifact_path" 2>/dev/null || true)
+
+    # Count missing prerequisites
+    missing_count=0
+    [ "$has_test_user" = "0" ] && ((missing_count++))
+    [ "$has_nav_path" = "0" ] && ((missing_count++))
+    [ "$has_expected_behavior" = "0" ] && ((missing_count++))
+    [ "$has_env_prereqs" = "0" ] && ((missing_count++))
+
+    # Hold if 2+ missing (INCOMPLETE threshold from appraise-exec Step 3.7)
+    if [ "$missing_count" -ge 2 ] 2>/dev/null; then
+      _plog "$LOG_FILE" "GATE" "gate" "fail" "held: plan missing $missing_count/4 verification prerequisites (test_user=$has_test_user nav=$has_nav_path expected=$has_expected_behavior env=$has_env_prereqs)"
+      hb_gate "entry-gate" "fail" "held: plan missing verification prerequisites" "{\"artifact\":\"$artifact_path\",\"missing\":\"$missing_count\",\"test_user\":\"$has_test_user\",\"nav\":\"$has_nav_path\",\"expected\":\"$has_expected_behavior\",\"env\":\"$has_env_prereqs\"}"
+      return 1
+    fi
+  fi
+
   # Check 3: Complex tickets are always held
   if [ "$complexity" = "complex" ]; then
     _plog "$LOG_FILE" "GATE" "gate" "fail" "held: complex ticket"
@@ -154,10 +251,20 @@ _gate_reapprove() {
   # Check for approved label (case-insensitive)
   has_approved=$(echo "$issue_json" | jq -r '[.labels.nodes[]?.name? // empty | ascii_downcase] | index("approved") != null' 2>/dev/null || echo 'false')
 
+  # Count prior verification failures in the plan artifact (informational only)
+  local artifact_path verify_count
+  artifact_path=$(_get_artifact_path)
+  if [ -n "$artifact_path" ] && [ -f "$artifact_path" ]; then
+    verify_count=$(grep -c '^## Verification #' "$artifact_path" 2>/dev/null || echo "0")
+    if [ "$verify_count" -gt 0 ] 2>/dev/null; then
+      _plog "$LOG_FILE" "GATE" "reapprove" "info" "plan has $verify_count prior verification failure(s)"
+    fi
+  fi
+
   # Both state=Ready AND approved label present → pass
   if [ "$state" = "Ready" ] && [ "$has_approved" = "true" ]; then
     _plog "$LOG_FILE" "GATE" "reapprove" "done" ""
-    hb_gate "reapprove-gate" "ok" "re-approval confirmed" "{\"state\":\"$state\"}"
+    hb_gate "reapprove-gate" "ok" "re-approval confirmed" "{\"state\":\"$state\",\"prior_failures\":\"${verify_count:-0}\"}"
     return 0
   fi
 
