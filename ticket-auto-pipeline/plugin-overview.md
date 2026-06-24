@@ -29,8 +29,8 @@ The orchestrator (`ticket-auto`) is a **thin stateless dispatch router** — it 
 |------|-------|------------|------|
 | 1 | Appraise | `ticket-appraise-agent` | Named agent — investigates ticket, scores complexity |
 | 1.5 | Reproduce | `ticket-appraise-agent` | Named agent — bug reproduction (bug tickets only) |
-| 2 | Exec | `ticket-appraise-agent` | Named agent — creates artifact, regression guard, adversarial review (complex) |
-| 2.5 | Gate | `bash gate-check.sh --mode entry` | **Bash only** — artifact existence, complexity coherence, autonomy routing |
+| 2 | Exec | `ticket-appraise-agent` | Named agent — creates artifact, regression guard, adversarial review (complex), verification plan derivation (complex, Step 3.7), verification-readiness gate (Step 3.8) |
+| 2.5 | Gate | `bash gate-check.sh --mode entry` | **Bash only** — artifact existence, complexity coherence, verification readiness (reads derived plan + artifact fallback), autonomy routing |
 | 3.5 | Reconcile | `ticket-gate-reconcile-agent` | Named agent — post-gate-hold comment reconciliation (only when held ticket re-approved) |
 | 4 | Implement | `ticket-implement-agent` | Named agent — code changes, then `bash outcome-label-check.sh` |
 | 4.5 | Verify | `ticket-verify-agent` | Named agent — Playwright UAT, router-managed retry loop (max 3 attempts) |
@@ -59,17 +59,17 @@ The orchestrator (`ticket-auto`) is a **thin stateless dispatch router** — it 
 ticket-auto (thin stateless dispatch router)
   │
   ├─ Bash gates (no Claude agent):
-  │   ├─ lib/gate-check.sh          ── entry mode (artifact, complexity, autonomy)
+  │   ├─ lib/gate-check.sh          ── entry mode (artifact, complexity, verification readiness, autonomy)
   │   │   └─ ticket-flow (state mutations)
   │   ├─ lib/outcome-label-check.sh  ── post-implement outcome label guard
   │   │   └─ ticket-flow
   │   └─ lib/detect-resume.sh       ── direct bash invocation (not skill spawn)
   │
   ├─ Named agent spawns (3-step pattern: pre → spawn → capture → post):
-  │   ├─ ticket-appraise-agent       ── Step 1 (appraise) + Step 1.5 (reproduce) + Step 2 (exec)
+  │   ├─ ticket-appraise-agent       ── Step 1 (appraise) + Step 1.5 (reproduce) + Step 2 (exec: artifact + regression + adversarial + verification plan derivation + readiness gate)
   │   ├─ ticket-gate-reconcile-agent ── Step 3.5 (post-hold comment reconciliation)
   │   ├─ ticket-implement-agent      ── Step 4 (code changes)
-  │   ├─ ticket-verify-agent         ── Step 4.5 (Playwright UAT, router-managed retry)
+  │   ├─ ticket-verify-agent         ── Step 4.5 (Playwright UAT, consumes derived verification plan, router-managed retry)
   │   ├─ ticket-pr-review-agent      ── Step 4.6 (code review, router-managed iteration)
   │   └─ ticket-maintenance-agent    ── Step 5 (document + wiki)
   │
