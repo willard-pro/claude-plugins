@@ -143,7 +143,8 @@ export CLAUDE_SKILLS_LIB="$LIB_DIR"
 source "$LIB_DIR/gate-check.sh"
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Entry mode tests (11)
+# Entry mode tests (core: 12, Check 2.5: 5, Check 2.5a: 2, Check 2.5b: 3,
+# Check 2.6: 7, Cross-val: 4, Tightened regex: 2)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # 1. Artifact file missing → gate-stop EXEC_NO_ARTIFACT (exit 2)
@@ -767,6 +768,552 @@ PLANEOF
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Check 2.5a — Zero-AC structural gate
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Helper: scaffold context.md with configurable AC count and ticket type
+_scaffold_context_md() {
+  local ac_count="${1:-2}"
+  local labels="${2:-feature}"
+  local has_repro="${3:-true}"
+  local td
+  td=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || echo "$_ws")
+  mkdir -p "$td" 2>/dev/null || true
+
+  # Build AC lines
+  local ac_lines=""
+  local i
+  for ((i = 1; i <= ac_count; i++)); do
+    ac_lines+="${i}. Test acceptance criterion ${i}"$'\n'
+  done
+
+  # Build repro steps if requested
+  local repro_section=""
+  if [ "$has_repro" = "true" ]; then
+    repro_section="## Steps to Reproduce
+1. Go to /handover/
+2. Click Send button
+3. See error message"
+  fi
+
+  cat >"${td}/context.md" <<CTXEOF
+# ${TICKET_ID} — Test Ticket
+
+**Labels:** ${labels}
+
+## Description
+${ac_lines}
+
+${repro_section}
+CTXEOF
+}
+
+# Helper: scaffold critique with specific findings (for cross-validation tests)
+_scaffold_critique_with_findings() {
+  local score="${1:-75}"
+  local status="${2:-PASS}"
+  local findings="${3:-}"
+  local td
+  td=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || echo "$_ws")
+  mkdir -p "$td" 2>/dev/null || true
+  cat >"${td}/notes.md" <<NOTESEOF
+## Complexity
+**Score:** simple
+
+## Readiness Critique
+**Date:** 2026-06-25
+**Status:** ${status}
+**Score:** ${score}
+**WARNING count:** 0
+**BLOCKER count:** 1
+
+### Findings
+${findings}
+NOTESEOF
+}
+
+# Helper: append a verification plan with nav path populated (used for cross-val tests
+# where the LLM derived nav info from code/nav-hints despite critique gap)
+_scaffold_verify_plan_with_nav() {
+  local td
+  td=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || echo "$_ws")
+  mkdir -p "$td" 2>/dev/null || true
+  cat >>"${td}/notes.md" <<'PLANEOF'
+
+## Verification Plan
+**Date:** 2026-06-25
+**Overall role scope:** global
+
+### Per-Criterion Verification
+
+| # | Criterion | Role scope | Navigation path | Test data needed | Expected behavior | Verifiable |
+|---|----------|-----------|----------------|-----------------|-------------------|-----------|
+| 1 | Test criterion | global | /handover/ | none | Handover created | ✓ |
+PLANEOF
+}
+
+# 23. Zero acceptance criteria → gate-stop regardless of score
+test_zero_ac_gate_stop() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_context_md 0 "feature" "true"
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+  # Even with critique score 90, zero AC should be a hard stop
+  _scaffold_critique 90 PASS
+
+  _gate_entry
+  local rc=$?
+
+  local gate_stop
+  gate_stop=$(grep 'ZERO_AC' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 2 ] || {
+    echo "expected exit 2 (gate-stop), got $rc"
+    return 1
+  }
+  [ -n "$gate_stop" ] || {
+    echo "expected ZERO_AC gate-stop in log"
+    return 1
+  }
+}
+
+# 24. Zero AC without critique — still gate-stops (reads context.md directly)
+test_zero_ac_no_critique_still_stops() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_context_md 0 "feature" "true"
+  # No critique section at all — Check 2.5a runs independently
+  local td
+  td=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || echo "$_ws")
+  mkdir -p "$td" 2>/dev/null || true
+  cat >"${td}/notes.md" <<'NOTESEOF'
+## Complexity
+**Score:** simple
+NOTESEOF
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local gate_stop
+  gate_stop=$(grep 'ZERO_AC' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 2 ] || {
+    echo "expected exit 2 (gate-stop), got $rc"
+    return 1
+  }
+  [ -n "$gate_stop" ] || {
+    echo "expected ZERO_AC gate-stop even without critique"
+    return 1
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Check 2.5b — Bug repro structural gate
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 25. Bug ticket without reproduction steps → gate-stop
+test_bug_no_repro_gate_stop() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_context_md 2 "bug" "false" # bug label, no repro steps
+  _scaffold_critique 75 PASS
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local gate_stop
+  gate_stop=$(grep 'BUG_NO_REPRO' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 2 ] || {
+    echo "expected exit 2 (gate-stop), got $rc"
+    return 1
+  }
+  [ -n "$gate_stop" ] || {
+    echo "expected BUG_NO_REPRO gate-stop in log"
+    return 1
+  }
+}
+
+# 26. Bug ticket WITH reproduction steps → passes Check 2.5b
+test_bug_with_repro_passes() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_context_md 2 "bug" "true" # bug label WITH repro steps
+  _scaffold_critique 75 PASS
+  _scaffold_verify_plan_full
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local gate_stop
+  gate_stop=$(grep 'BUG_NO_REPRO' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0 (auto-approve), got $rc"
+    return 1
+  }
+  [ -z "$gate_stop" ] || {
+    echo "unexpected BUG_NO_REPRO gate-stop: repro steps present"
+    return 1
+  }
+}
+
+# 27. Bug ticket without repro, good score — still gate-stops (structural, not score-based)
+test_bug_no_repro_high_score_still_stops() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_context_md 3 "bug" "false" # 3 AC, bug, no repro
+  _scaffold_critique 75 PASS # score 75 would normally clear
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local gate_stop
+  gate_stop=$(grep 'BUG_NO_REPRO' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 2 ] || {
+    echo "expected exit 2 (gate-stop), got $rc — score 75 should not override structural gate"
+    return 1
+  }
+  [ -n "$gate_stop" ] || {
+    echo "expected BUG_NO_REPRO gate-stop even with score 75"
+    return 1
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Check 2.5 — Critique score/status gates (previously untested)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 28. Critique status BLOCKED → gate-stop (exit 2)
+test_critique_blocked_gate_stop() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_context_md 2 "feature" "true"
+  _scaffold_critique_with_findings 35 "BLOCKED" "- [BLOCKER] No acceptance criteria: ticket has zero verifiable outcomes listed."
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local gate_stop
+  gate_stop=$(grep 'CRITIQUE_BLOCKED' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 2 ] || {
+    echo "expected exit 2 (gate-stop), got $rc"
+    return 1
+  }
+  [ -n "$gate_stop" ] || {
+    echo "expected CRITIQUE_BLOCKED gate-stop in log"
+    return 1
+  }
+}
+
+# 29. Critique score below 40 → held (exit 1)
+test_critique_score_below_40_held() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_context_md 2 "feature" "true"
+  _scaffold_critique 35 "WARNINGS" # score 35 < 40
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local held_line
+  held_line=$(grep 'held: content quality score' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 1 ] || {
+    echo "expected exit 1 (held), got $rc"
+    return 1
+  }
+  [ -n "$held_line" ] || {
+    echo "expected 'held: content quality score' in log"
+    return 1
+  }
+}
+
+# 30. Score implausibility: 2 BLOCKERs but score > 50 → gate-stop
+test_critique_score_implausible_2_blockers() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_context_md 2 "feature" "true"
+  # 2 BLOCKERs → max plausible score = 50. Score 72 exceeds that.
+  _scaffold_critique_with_findings 72 "WARNINGS" "- [BLOCKER] No test user or role specified.
+- [BLOCKER] No acceptance criteria: ticket has zero verifiable outcomes listed."
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local gate_stop
+  gate_stop=$(grep 'CRITIQUE_SCORE_IMPLAUSIBLE' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 2 ] || {
+    echo "expected exit 2 (gate-stop), got $rc"
+    return 1
+  }
+  [ -n "$gate_stop" ] || {
+    echo "expected CRITIQUE_SCORE_IMPLAUSIBLE gate-stop for 2 BLOCKERs + score 72"
+    return 1
+  }
+}
+
+# 31. Score implausibility: 1 BLOCKER but score > 70 → gate-stop
+test_critique_score_implausible_1_blocker() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_context_md 2 "feature" "true"
+  # 1 BLOCKER → max plausible score = 75. Score 82 exceeds that.
+  _scaffold_critique_with_findings 82 "WARNINGS" "- [BLOCKER] No test user or role specified."
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local gate_stop
+  gate_stop=$(grep 'CRITIQUE_SCORE_IMPLAUSIBLE' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 2 ] || {
+    echo "expected exit 2 (gate-stop), got $rc"
+    return 1
+  }
+  [ -n "$gate_stop" ] || {
+    echo "expected CRITIQUE_SCORE_IMPLAUSIBLE gate-stop for 1 BLOCKER + score 82"
+    return 1
+  }
+}
+
+# 32. Score plausibility: 1 BLOCKER with score 65 → passes (max 75, 65 ≤ 75)
+test_critique_score_plausible_1_blocker_passes() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_context_md 2 "feature" "true"
+  _scaffold_critique_with_findings 65 "WARNINGS" "- [BLOCKER] No test user or role specified."
+  _scaffold_verify_plan_full
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local implausible
+  implausible=$(grep 'CRITIQUE_SCORE_IMPLAUSIBLE' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0 (auto-approve), got $rc"
+    return 1
+  }
+  [ -z "$implausible" ] || {
+    echo "unexpected CRITIQUE_SCORE_IMPLAUSIBLE: 1 BLOCKER with score 65 is plausible"
+    return 1
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cross-validation — critique findings vs. verification plan
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 33. Critique flagged nav gap + plan also has no nav → held
+test_cross_val_nav_gap_unresolved_held() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_context_md 2 "feature" "true"
+  _scaffold_critique_with_findings 65 "WARNINGS" "- [WARNING] No navigation path specified. Verifier will need to discover the feature location from code."
+  # Verification plan exists but nav column is empty (empty table scaffold)
+  _scaffold_verify_plan_empty
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local held_line
+  held_line=$(grep 'cross-validation failed' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 1 ] || {
+    echo "expected exit 1 (held), got $rc"
+    return 1
+  }
+  [ -n "$held_line" ] || {
+    echo "expected cross-validation hold: nav gap flagged by critique AND unresolved in plan"
+    return 1
+  }
+}
+
+# 34. Critique flagged nav gap + plan resolved it (LLM derived from nav-hints) → passes
+test_cross_val_nav_gap_resolved_passes() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_context_md 2 "feature" "true"
+  _scaffold_critique_with_findings 65 "WARNINGS" "- [WARNING] No navigation path specified. Verifier will need to discover the feature location from code."
+  # LLM derived nav path from nav-hints → plan has nav column populated
+  _scaffold_verify_plan_with_nav
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local held_line
+  held_line=$(grep 'cross-validation failed' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0 (auto-approve), got $rc — LLM resolved nav gap so cross-val should pass"
+    return 1
+  }
+  [ -z "$held_line" ] || {
+    echo "unexpected cross-validation hold: nav was resolved in the plan"
+    return 1
+  }
+}
+
+# 35. Critique flagged repro gap → always held (cannot be derived by LLM)
+test_cross_val_repro_gap_always_held() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_context_md 2 "bug" "false" # bug with no repro
+  _scaffold_critique_with_findings 65 "WARNINGS" "- [BLOCKER] Bug without repro steps: no numbered steps to reproduce the issue."
+  _scaffold_verify_plan_with_nav # has nav and user, but repro gap is structural
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local held_line
+  held_line=$(grep 'cross-validation failed' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  # Check 2.5b should catch this first (BUG_NO_REPRO gate-stop, exit 2).
+  # If 2.5b somehow misses it, cross-validation catches repro gap.
+  [ "$rc" -ne 0 ] || {
+    echo "expected non-zero exit (held or gate-stop), got $rc"
+    return 1
+  }
+}
+
+# 36. No critique → cross-validation skipped (backward compat)
+test_cross_val_skipped_without_critique() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_context_md 2 "feature" "true"
+  # No critique section — cross-validation should be skipped
+  local td
+  td=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || echo "$_ws")
+  mkdir -p "$td" 2>/dev/null || true
+  cat >"${td}/notes.md" <<'NOTESEOF'
+## Complexity
+**Score:** simple
+NOTESEOF
+  _scaffold_verify_plan_empty
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local cross_val
+  cross_val=$(grep 'cross-validation' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  # Without critique, Check 2.6 is skipped entirely → goes to auto-approve
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0 (auto-approve, no critique), got $rc"
+    return 1
+  }
+  [ -z "$cross_val" ] || {
+    echo "unexpected cross-validation: no critique section exists"
+    return 1
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tightened fallback regex — false-positive avoidance
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Helper: artifact with incidental matches that SHOULD NOT count as verification prereqs
+_scaffold_artifact_false_positives() {
+  local path="${1:-${_ws}/simple-fix.md}"
+  cat >"$path" <<'ARTEOF'
+# Simple Fix — Test
+
+## Summary
+Fix the thing. You should update the dependency first.
+The setup for your IDE is straightforward.
+
+## How to implement
+The /handover/ API endpoint was changed — update the client.
+Change line 42 of foo.js.
+You should also check the tests pass.
+ARTEOF
+}
+
+# 37. Tightened regex: bare "should" without AC context → not counted as expected behavior
+test_tightened_regex_bare_should_not_counted() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_context_md 2 "feature" "true"
+  _scaffold_critique 75 PASS
+  _scaffold_artifact_false_positives "${_ws}/simple-fix.md"
+  # No verification plan → fallback triggers. Artifact has "should" but no AC context.
+
+  _gate_entry
+  local rc=$?
+
+  local held_line
+  held_line=$(grep 'held: plan missing' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  # Bare "should" + URL without nav verb → artifact fails all 4 prereqs → 2+ missing → held
+  [ "$rc" -eq 1 ] || {
+    echo "expected exit 1 (held), got $rc — bare 'should' and bare URL must not count"
+    return 1
+  }
+  [ -n "$held_line" ] || {
+    echo "expected 'held: plan missing' — bare patterns should not match tightened regex"
+    return 1
+  }
+}
+
+# 38. Tightened regex: artifact with proper context → counted
+test_tightened_regex_proper_context_counted() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_context_md 2 "feature" "true"
+  _scaffold_critique 75 PASS
+  # This artifact has the proper context for all 4 prereqs per tightened patterns
+  _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local held_line
+  held_line=$(grep 'held: plan missing' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0 (auto-approve), got $rc"
+    return 1
+  }
+  [ -z "$held_line" ] || {
+    echo "unexpected Check 2.6 hold: artifact has proper verification context"
+    return 1
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Dispatcher
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -795,7 +1342,23 @@ for fn in \
   test_no_verify_plan_falls_back_to_artifact \
   test_verify_plan_heading_without_table_falls_back \
   test_no_critique_skips_readiness_check \
-  test_verify_plan_partial_data_falls_back; do
+  test_verify_plan_partial_data_falls_back \
+  test_zero_ac_gate_stop \
+  test_zero_ac_no_critique_still_stops \
+  test_bug_no_repro_gate_stop \
+  test_bug_with_repro_passes \
+  test_bug_no_repro_high_score_still_stops \
+  test_critique_blocked_gate_stop \
+  test_critique_score_below_40_held \
+  test_critique_score_implausible_2_blockers \
+  test_critique_score_implausible_1_blocker \
+  test_critique_score_plausible_1_blocker_passes \
+  test_cross_val_nav_gap_unresolved_held \
+  test_cross_val_nav_gap_resolved_passes \
+  test_cross_val_repro_gap_always_held \
+  test_cross_val_skipped_without_critique \
+  test_tightened_regex_bare_should_not_counted \
+  test_tightened_regex_proper_context_counted; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

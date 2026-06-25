@@ -185,6 +185,73 @@ Record:
 - [BLOCKER] Bug without repro steps: no numbered steps to reproduce the issue.
 ```
 
+### Check 6 — Feature tickets: clarity analysis
+
+If the ticket has the `feature` or `enhancement` label, OR has no `bug` label (default: feature), run these sub-checks. If the ticket is a bug, skip this check entirely.
+
+**6a. Acceptance criteria specificity:**
+
+For each acceptance criterion, check whether it describes a **measurable, observable outcome**. A criterion like "Dashboard shows metrics" fails — which metrics? From what source? For which time period?
+
+Flag as BLOCKER if:
+- Any AC uses placeholder language: "shows X", "displays data", "has metrics", "includes information", "provides overview"
+- Quantitative claims lack units or thresholds: "faster", "better", "improved" without measurable baseline
+- No concrete UI element is named: "shows something" vs. "shows case count by status as a pie chart in the dashboard header"
+
+Record:
+```
+- [BLOCKER] Vague AC: "{criterion text}" — not a measurable outcome. Clarify: what exactly should the user see/do?
+```
+
+**6b. Scope boundary check:**
+
+Determine whether the ticket defines what's **in scope** vs. **out of scope**. A feature ticket without boundaries is a BLOCKER — the implementer can't know where to stop.
+
+- **Clear scope**: ticket lists specific deliverables AND states what's NOT included
+- **Ambiguous scope**: ticket lists deliverables but no boundaries (WARNING)
+- **No scope**: ticket describes a general area without specific deliverables (BLOCKER)
+
+Record:
+```
+- [BLOCKER] Scope undefined: ticket describes "{area}" but does not list specific deliverables. What exactly should be built?
+- [WARNING] Scope unbounded: deliverables listed but no boundaries defined. What is explicitly NOT in scope?
+```
+
+**6c. UI/UX specificity:**
+
+If the feature has a UI component (most features do), check whether the ticket specifies:
+
+- **Which page/component** is affected (e.g., "the handover list page", "the admin user-permission table")
+- **What changes** visually (e.g., "add a new column 'Case Count' to the table", "replace the dropdown with radio buttons")
+- **What the new behavior** is (e.g., "clicking the row opens a detail panel", "the button is disabled when no items are selected")
+
+If none of these are specified for a UI-affecting feature → BLOCKER.
+
+Record:
+```
+- [BLOCKER] UI unspecified: feature requires UI changes but no page/component/behavior specified.
+- [WARNING] UI partially specified: {what's missing — page? visual change? behavior?}
+```
+
+**6d. Edge case awareness:**
+
+Check whether the ticket addresses at least one of these edge case categories:
+- **Empty state**: what happens when there's no data? (e.g., "show 'No handovers' message")
+- **Error state**: what happens when an operation fails? (e.g., "show error toast on API failure")
+- **Permission boundaries**: what happens when a user without the right role tries to access? (e.g., "hide the button for non-attorneys")
+- **Loading state**: what does the user see while data loads?
+
+If the ticket mentions NONE of these → WARNING. The implementer will have to guess.
+
+Record:
+```
+- [WARNING] No edge cases addressed: ticket does not describe empty state, error state, permission boundaries, or loading behavior.
+```
+
+**Feature clarity BLOCKER count:** Count how many of 6a, 6b, 6c, 6d produced BLOCKER findings. Feature BLOCKERs contribute to the overall BLOCKER count for status determination.
+
+Record all Check 6 findings.
+
 ---
 
 ## Content Quality Score
@@ -198,6 +265,9 @@ After all checks complete, compute a numeric content quality score from 0-100. S
 | No test user or role mentioned | -20 |
 | No navigation path | -15 |
 | Bug ticket without reproduction steps | -25 |
+| Feature ticket with vague/unmeasurable AC | -15 per vague AC (max -30) |
+| Feature ticket with undefined scope | -20 |
+| Feature ticket with unspecified UI | -15 |
 | No test data/setup described (from Check 3) | -15 |
 | Scope unidentifiable (from Check 4) | -15 |
 | Untestable acceptance criteria | -10 per criterion (max -30) |

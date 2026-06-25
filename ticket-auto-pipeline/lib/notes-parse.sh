@@ -99,10 +99,18 @@ get_ac_count() {
   fi
 
   local count
-  # Count lines that look like acceptance criteria:
-  # - Numbered: "1.", "2.", etc. at start of line (with optional whitespace)
-  # - Checkbox: "- [ ]", "- [x]", or "- [X]" at start of line
-  count=$(grep -cP '^\s*(\d+\.\s|\- \[[ xX]\]\s)' "$ctx" 2>/dev/null || echo "0")
+  # Count numbered (1., 2.) and checkbox (- [ ] and - [x]) criteria lines.
+  # CRITICAL: stop counting at repro section headings — reproduction steps
+  # are numbered but are NOT acceptance criteria.
+  # Strategy: extract everything before the first repro/non-AC section heading,
+  # then count AC lines within that prefix only.
+  local prefix
+  prefix=$(sed -E '/^#*\s*(Steps to Repro|Reproduct|How to Repro|Reproduction Steps|To Reproduce|Background|Context|Environment|Notes|Setup|Prerequisites)/Iq' "$ctx" 2>/dev/null || true)
+  if [ -z "$prefix" ]; then
+    # sed failed or file is entirely repro steps — count from whole file as fallback
+    prefix=$(cat "$ctx" 2>/dev/null || true)
+  fi
+  count=$(echo "$prefix" | grep -cP '^\s*(\d+\.\s|\- \[[ xX]\]\s)' 2>/dev/null || true)
   echo "${count//[^0-9]/}"
   return 0
 }
@@ -126,7 +134,7 @@ get_critique_warning_count() {
 
   local count
   count=$(sed -n '/## Readiness Critique/,/^## /p' "$notes" 2>/dev/null |
-    grep -c '\[WARNING\]' || echo "0")
+    grep -c '\[WARNING\]' || true)
   echo "${count//[^0-9]/}"
   return 0
 }
@@ -150,7 +158,7 @@ get_critique_blocker_count() {
 
   local count
   count=$(sed -n '/## Readiness Critique/,/^## /p' "$notes" 2>/dev/null |
-    grep -c '\[BLOCKER\]' || echo "0")
+    grep -c '\[BLOCKER\]' || true)
   echo "${count//[^0-9]/}"
   return 0
 }
@@ -189,6 +197,102 @@ resolve_test_user_catalog() {
   fi
 
   return 1
+}
+
+# get_ticket_type <ticket-dir>
+# Detects bug vs. feature from context.md labels.
+# Emits "bug", "feature", or "unknown".
+# Exit codes: 0 = found, 1 = file unreadable
+get_ticket_type() {
+  local ticket_dir="$1"
+  local ctx="$ticket_dir/context.md"
+
+  if [ ! -f "$ctx" ]; then
+    return 1
+  fi
+
+  # Check for bug label
+  if grep -qiP '\*\*Labels?:?\*\*[^*]*bug' "$ctx" 2>/dev/null; then
+    echo "bug"
+    return 0
+  fi
+
+  # Check for feature/enhancement label
+  if grep -qiP '\*\*Labels?:?\*\*[^*]*(feature|enhancement)' "$ctx" 2>/dev/null; then
+    echo "feature"
+    return 0
+  fi
+
+  # Check description for bug indicators (no label but reads like a bug)
+  if grep -qiP '(bug|defect|broken|not working|error|crash|regression)' "$ctx" 2>/dev/null; then
+    # Weak signal — only use if no feature indicators present
+    if ! grep -qiP '(feature|enhancement|new |add |implement|build|create)' "$ctx" 2>/dev/null; then
+      echo "bug"
+      return 0
+    fi
+  fi
+
+  echo "feature"
+  return 0
+}
+
+# get_has_repro_steps <ticket-dir>
+# Detects whether the ticket has reproduction steps for bug verification.
+# Checks context.md for numbered browser-action steps or a repro section heading.
+# Emits "true" or "false".
+# Exit codes: 0 = checked, 1 = file unreadable
+get_has_repro_steps() {
+  local ticket_dir="$1"
+  local ctx="$ticket_dir/context.md"
+
+  if [ ! -f "$ctx" ]; then
+    return 1
+  fi
+
+  # Pattern 1: "Steps to reproduce" or "Reproduction" heading
+  if grep -qiP '(steps to repro|reproduc|how to repro|reproduction steps|to reproduce)' "$ctx" 2>/dev/null; then
+    echo "true"
+    return 0
+  fi
+
+  # Pattern 2: At least 2 sequential numbered lines with browser action verbs
+  local numbered_count
+  numbered_count=$(grep -ciP '^\s*\d+[\.\)]\s+(Go to|Navigate|Click|Open|Log in|Select|Type|Enter|Press|Choose|Check|Verify|See|Observe|Confirm)' "$ctx" 2>/dev/null || true)
+  if [ "${numbered_count//[^0-9]/}" -ge 2 ] 2>/dev/null; then
+    echo "true"
+    return 0
+  fi
+
+  # Pattern 3: Checkbox repro steps with action verbs
+  local checkbox_count
+  checkbox_count=$(grep -ciP '^\s*- \[[ xX]\]\s*(Go to|Navigate|Click|Open|Log in|Select|Type|Enter)' "$ctx" 2>/dev/null || true)
+  if [ "${checkbox_count//[^0-9]/}" -ge 2 ] 2>/dev/null; then
+    echo "true"
+    return 0
+  fi
+
+  echo "false"
+  return 0
+}
+
+# get_critique_has_finding <ticket-dir> <pattern>
+# Checks if the ## Readiness Critique section contains a finding matching pattern.
+# Used for cross-validation: verify the plan addresses gaps the critique flagged.
+# Exit codes: 0 = found, 1 = not found / file missing / section absent
+get_critique_has_finding() {
+  local ticket_dir="$1"
+  local pattern="$2"
+  local notes="$ticket_dir/notes.md"
+
+  if [ ! -f "$notes" ]; then
+    return 1
+  fi
+
+  if ! grep -q '## Readiness Critique' "$notes" 2>/dev/null; then
+    return 1
+  fi
+
+  sed -n '/## Readiness Critique/,/^## /p' "$notes" 2>/dev/null | grep -q "$pattern" 2>/dev/null
 }
 
 # get_test_users_by_role <role> [catalog_path]
