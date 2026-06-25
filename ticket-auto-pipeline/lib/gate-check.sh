@@ -12,6 +12,13 @@ source "$LIB_DIR/heartbeat.sh"
 source "$LIB_DIR/linear-api.sh"
 source "$LIB_DIR/notes-parse.sh"
 
+# Source ticket-dir.sh for resolve_ticket_dir — check multiple locations
+if [ -f "$SCRIPT_DIR/ticket-dir.sh" ]; then
+  source "$SCRIPT_DIR/ticket-dir.sh"
+elif [ -f "$LIB_DIR/ticket-dir.sh" ]; then
+  source "$LIB_DIR/ticket-dir.sh"
+fi
+
 usage() {
   echo "Usage: $0 <TICKET-ID> <LOG-FILE> <HB-LOG-FILE> --mode <entry|reapprove>" >&2
   exit 1
@@ -112,6 +119,212 @@ _gate_entry() {
     return 2
   fi
 
+  # Check 2.5: Content quality score (from critique in notes.md)
+  # Distinguish: critique never ran (section absent → skip, backward compat) vs.
+  #              critique ran but failed (section present but no score → gate-stop)
+  local critique_score critique_status td has_critique
+  if command -v resolve_ticket_dir &>/dev/null; then
+    td=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || true)
+  fi
+  if [ -z "$td" ]; then
+    td="."
+  fi
+  critique_score=$(get_critique_score "$td" 2>/dev/null || true)
+  critique_status=$(get_critique_status "$td" 2>/dev/null || true)
+  # Check whether the Readiness Critique section exists at all
+  if [ -f "$td/notes.md" ] && grep -q '## Readiness Critique' "$td/notes.md" 2>/dev/null; then
+    has_critique="true"
+  else
+    has_critique="false"
+  fi
+
+  if [ "${has_critique}" = "true" ] && [ -z "$critique_score" ]; then
+    # Critique ran but produced no score — structural failure, do not proceed
+    _plog "$LOG_FILE" "META" "gate-stop" "fail" "CRITIQUE_SCORE_MISSING — ## Readiness Critique exists but **Score:** absent or unparseable"
+    hb_gate "entry-gate" "fail" "critique score missing" "{\"has_critique\":\"true\"}"
+    return 2
+  fi
+
+  if [ -n "$critique_score" ]; then
+    # BLOCKED status is a hard stop
+    if [ "$critique_status" = "BLOCKED" ]; then
+      _plog "$LOG_FILE" "META" "gate-stop" "fail" "CRITIQUE_BLOCKED"
+      hb_gate "entry-gate" "fail" "critique blocked" "{\"score\":\"$critique_score\",\"status\":\"$critique_status\"}"
+      return 2
+    fi
+
+    # Score below 40 holds the ticket — validate integer before comparison
+    if [[ "$critique_score" =~ ^[0-9]+$ ]] && [ "$critique_score" -lt 40 ]; then
+      _plog "$LOG_FILE" "GATE" "gate" "fail" "held: content quality score $critique_score < 40"
+      hb_gate "entry-gate" "fail" "held: content quality score below threshold" "{\"score\":\"$critique_score\",\"threshold\":40}"
+      return 1
+    fi
+
+    # Score plausibility cross-check: if BLOCKERs exist, score must be ≤ 70
+    # Each BLOCKER deducts at least 30 (0 AC) or 20 (no test user) or 25 (no bug repro)
+    # Worst case for 1 BLOCKER = -30 → max 70. For 2 BLOCKERs = max 50.
+    local critique_blocker_count
+    critique_blocker_count=$(get_critique_blocker_count "$td" 2>/dev/null || echo "0")
+    if [[ "$critique_blocker_count" =~ ^[0-9]+$ ]] && [[ "$critique_score" =~ ^[0-9]+$ ]]; then
+      local max_score=$((100 - (critique_blocker_count * 25)))
+      [ "$max_score" -lt 40 ] && max_score=40 # floor at 40 — below this is already caught
+      if [ "$critique_blocker_count" -ge 2 ] && [ "$critique_score" -gt 50 ]; then
+        _plog "$LOG_FILE" "META" "gate-stop" "fail" "CRITIQUE_SCORE_IMPLAUSIBLE — score $critique_score with $critique_blocker_count BLOCKERs (max plausible: 50)"
+        hb_gate "entry-gate" "fail" "critique score implausible" "{\"score\":\"$critique_score\",\"blockers\":\"$critique_blocker_count\",\"max_plausible\":50}"
+        return 2
+      elif [ "$critique_blocker_count" -ge 1 ] && [ "$critique_score" -gt 70 ]; then
+        _plog "$LOG_FILE" "META" "gate-stop" "fail" "CRITIQUE_SCORE_IMPLAUSIBLE — score $critique_score with $critique_blocker_count BLOCKER(s) (max plausible: 70)"
+        hb_gate "entry-gate" "fail" "critique score implausible" "{\"score\":\"$critique_score\",\"blockers\":\"$critique_blocker_count\",\"max_plausible\":70}"
+        return 2
+      fi
+    fi
+  fi
+
+  # Check 2.5a: Zero-AC structural gate
+  # A ticket with zero acceptance criteria has nothing to verify — hard stop.
+  # Runs even without critique (reads context.md directly).
+  local ac_count
+  ac_count=$(get_ac_count "$td" 2>/dev/null || echo "")
+  if [ -n "$ac_count" ] && [ "$ac_count" = "0" ]; then
+    _plog "$LOG_FILE" "META" "gate-stop" "fail" "ZERO_AC — ticket has zero acceptance criteria; nothing verifiable exists"
+    hb_gate "entry-gate" "fail" "zero acceptance criteria" "{\"ac_count\":\"0\"}"
+    return 2
+  fi
+
+  # Check 2.5b: Bug repro structural gate
+  # A bug ticket without reproduction steps cannot be verified — hard stop.
+  # Reproductions steps cannot be derived by the LLM; they must come from the ticket.
+  local ticket_type has_repro
+  ticket_type=$(get_ticket_type "$td" 2>/dev/null || echo "feature")
+  if [ "$ticket_type" = "bug" ]; then
+    has_repro=$(get_has_repro_steps "$td" 2>/dev/null || echo "false")
+    if [ "$has_repro" = "false" ]; then
+      _plog "$LOG_FILE" "META" "gate-stop" "fail" "BUG_NO_REPRO — bug ticket has no reproduction steps; verifier cannot reproduce the issue"
+      hb_gate "entry-gate" "fail" "bug without repro steps" "{\"ticket_type\":\"bug\"}"
+      return 2
+    fi
+  fi
+
+  # Save ticket directory before Check 2.6 overwrites it — cross-validation needs the
+  # original td (ticket workspace) to read notes.md, not the artifact scan target.
+  local gate_td="${td:-.}"
+
+  # Check 2.6: Verification readiness — check plan artifact for all 4 prerequisites
+  # Backward compat: skip if no critique score exists (old ticket without new critique sections)
+  if [ -n "$artifact_path" ] && [ -f "$artifact_path" ] && [ -n "$critique_score" ]; then
+    local has_test_user has_nav_path has_expected_behavior has_env_prereqs role_pattern missing_count
+    # Build role pattern from test-users.json catalog if available, fall back to known roles
+    role_pattern=$(jq -r '[.[].roles[]] | unique | join("|")' "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/skills}/config/test-users.json" 2>/dev/null | sed 's/_/[-_]/g' || echo 'attorney|admin|debtor|collection[-_]?agency|correspondent')
+    # Primary: check the derived verification plan in notes.md when present
+    local notes_path vplan_section
+    notes_path="$gate_td/notes.md"
+    vplan_section=""
+
+    if [ -f "$notes_path" ] && grep -q '## Verification Plan' "$notes_path" 2>/dev/null; then
+      # Extract the per-criterion table between "### Per-Criterion Verification" and the next ## heading
+      vplan_section=$(awk '/^### Per-Criterion Verification$/,/^## /' "$notes_path" 2>/dev/null || true)
+      if [ -n "$vplan_section" ]; then
+        # Check the Verifiable column for any ✓ entries. If at least one criterion
+        # is marked verifiable, the plan has enough info. If none are ✓, all 4
+        # prereqs are effectively missing (fallback triggers).
+        local verifiable_count
+        verifiable_count=$(echo "$vplan_section" | grep -ciP '✓' 2>/dev/null || true)
+        if [ "${verifiable_count:-0}" -gt 0 ] 2>/dev/null; then
+          # At least one criterion is fully verifiable — all 4 prereqs are present
+          # for that criterion. Mark all as found.
+          has_test_user=1
+          has_nav_path=1
+          has_expected_behavior=1
+          has_env_prereqs=1
+        else
+          # No criteria are verifiable — plan is incomplete
+          has_test_user=0
+          has_nav_path=0
+          has_expected_behavior=0
+          has_env_prereqs=0
+        fi
+      fi
+    fi
+
+    # Save pre-fallback values for cross-validation: the plan's own data
+    # (not artifact fallback) determines whether critique gaps were truly resolved.
+    local plan_has_test_user="${has_test_user:-0}"
+    local plan_has_nav_path="${has_nav_path:-0}"
+    local plan_has_expected="${has_expected_behavior:-0}"
+    local plan_has_env="${has_env_prereqs:-0}"
+
+    # Fallback: scan the plan artifact directly when:
+    # - no verification plan section exists, OR
+    # - any prerequisite grep returned 0 (grep may have missed data the LLM wrote)
+    if [ -z "$vplan_section" ] || [ "${has_test_user:-0}" = "0" ] || [ "${has_nav_path:-0}" = "0" ] || [ "${has_expected_behavior:-0}" = "0" ] || [ "${has_env_prereqs:-0}" = "0" ]; then
+      # grep -c outputs "0" on no match (and exits 1) — use || true to suppress exit code
+      # Tightened patterns (v2): require context proximity, not just substring match.
+      # Test user: require actual user identification — email, **User:** field with content,
+      # or explicit role with a named role (not just "log in as" alone).
+      has_test_user=$(grep -ciP '(\*\*User:\*\*\s*\S|email[:\s]*\S+@\S+\.\S+|log in as \S|test as \S|role[:\s]*('"$role_pattern"'))' "$artifact_path" 2>/dev/null || true)
+      # Navigation target: require URL path near a navigation verb (same line), OR
+      # explicit menu path with bracket notation, OR "navigate to" / "go to" with a target.
+      has_nav_path=$(grep -ciP '((navigate|go to|open|visit|click).{0,60}(/(handover|admin|user-permission|organisation|portfolio)/)|(/(handover|admin|user-permission|organisation|portfolio)/).{0,60}(navigate|go to|open|visit|click)|menu path.{0,30}\[|navigate to \S|go to \S)' "$artifact_path" 2>/dev/null || true)
+      # Expected behavior: remove bare "should " (matches every implementation instruction).
+      # Require AC context: acceptance criteria headings, numbered ACs with should/must,
+      # expected behavior sections, or verify/pass criterion phrasing.
+      has_expected_behavior=$(grep -ciP '(acceptance criteria|expected (behavi|result|outcome)|^\s*\d+[\.\)]\s.*(should |must )|verify that|pass criter|##\s*(Expected|Acceptance|Verification Plan)|AC[-:]\s|###\s*(Acceptance|Expected))' "$artifact_path" 2>/dev/null || true)
+      # Environment prerequisites: remove bare "setup" (matches "setup the project").
+      # Require data/test context: seed data, test data setup, migrations, fixtures,
+      # or "setup" qualified by "data"/"test"/"seed" within 3 words.
+      has_env_prereqs=$(grep -ciP '(seed[- ]?data|(test|data|environment|seed)\s+\w+\s+setup|setup\s+(test|data|seed)\s|prerequisite|before (testing|running)|database|migration|service.{0,10}start|data\.sql|fixture|test data)' "$artifact_path" 2>/dev/null || true)
+    fi
+
+    # Count missing prerequisites
+    missing_count=0
+    [ "$has_test_user" = "0" ] && ((missing_count++))
+    [ "$has_nav_path" = "0" ] && ((missing_count++))
+    [ "$has_expected_behavior" = "0" ] && ((missing_count++))
+    [ "$has_env_prereqs" = "0" ] && ((missing_count++))
+
+    # Hold if 2+ missing (INCOMPLETE threshold from appraise-exec Step 3.8)
+    if [ "$missing_count" -ge 2 ] 2>/dev/null; then
+      _plog "$LOG_FILE" "GATE" "gate" "fail" "held: plan missing $missing_count/4 verification prerequisites (test_user=$has_test_user nav=$has_nav_path expected=$has_expected_behavior env=$has_env_prereqs)"
+      hb_gate "entry-gate" "fail" "held: plan missing verification prerequisites" "{\"artifact\":\"$artifact_path\",\"missing\":\"$missing_count\",\"test_user\":\"$has_test_user\",\"nav\":\"$has_nav_path\",\"expected\":\"$has_expected_behavior\",\"env\":\"$has_env_prereqs\"}"
+      return 1
+    fi
+
+    # Cross-validation: if critique flagged specific gaps, verify the PLAN resolved them.
+    # Uses pre-fallback plan_has_* values — the verification plan must resolve critique
+    # gaps with its own data. Artifact fallback data doesn't count (it wasn't derived).
+    # A critique BLOCKER that's still unaddressed in the plan means the LLM couldn't
+    # derive the missing info from code/nav-hints/app-knowledge either → hold.
+    # Uses gate_td (ticket workspace) — td was reassigned in Check 2.6.
+    # NOTE: bare ((x++)) exits 1 when x=0 (post-increment evaluates as falsy),
+    # triggering set -e. Use || true or $((x+1)) to avoid this.
+    local critique_nav_gap critique_user_gap critique_repro_gap cross_failures
+    cross_failures=0
+    if get_critique_has_finding "$gate_td" 'No navigation path' 2>/dev/null; then
+      critique_nav_gap="true"
+      if [ "${plan_has_nav_path:-0}" = "0" ]; then
+        cross_failures=$((cross_failures + 1))
+      fi
+    fi
+    if get_critique_has_finding "$gate_td" 'No test user' 2>/dev/null; then
+      critique_user_gap="true"
+      if [ "${plan_has_test_user:-0}" = "0" ]; then
+        cross_failures=$((cross_failures + 1))
+      fi
+    fi
+    # Repro steps are special: they can't be derived by the LLM. If the critique flagged
+    # no repro steps, the ticket author must provide them — no plan can compensate.
+    if get_critique_has_finding "$gate_td" 'Bug without repro steps' 2>/dev/null; then
+      critique_repro_gap="true"
+      cross_failures=$((cross_failures + 1))
+    fi
+
+    if [ "$cross_failures" -ge 1 ] 2>/dev/null; then
+      _plog "$LOG_FILE" "GATE" "gate" "fail" "held: critique-plan cross-validation failed — $cross_failures critique gap(s) still unaddressed (nav_gap=${critique_nav_gap:-false} user_gap=${critique_user_gap:-false} repro_gap=${critique_repro_gap:-false})"
+      hb_gate "entry-gate" "fail" "held: critique-plan cross-validation failed" "{\"nav_gap\":\"${critique_nav_gap:-false}\",\"user_gap\":\"${critique_user_gap:-false}\",\"repro_gap\":\"${critique_repro_gap:-false}\",\"cross_failures\":\"$cross_failures\"}"
+      return 1
+    fi
+  fi
+
   # Check 3: Complex tickets are always held
   if [ "$complexity" = "complex" ]; then
     _plog "$LOG_FILE" "GATE" "gate" "fail" "held: complex ticket"
@@ -154,10 +367,20 @@ _gate_reapprove() {
   # Check for approved label (case-insensitive)
   has_approved=$(echo "$issue_json" | jq -r '[.labels.nodes[]?.name? // empty | ascii_downcase] | index("approved") != null' 2>/dev/null || echo 'false')
 
+  # Count prior verification failures in the plan artifact (informational only)
+  local artifact_path verify_count
+  artifact_path=$(_get_artifact_path)
+  if [ -n "$artifact_path" ] && [ -f "$artifact_path" ]; then
+    verify_count=$(grep -c '^## Verification #' "$artifact_path" 2>/dev/null || echo "0")
+    if [ "$verify_count" -gt 0 ] 2>/dev/null; then
+      _plog "$LOG_FILE" "GATE" "reapprove" "info" "plan has $verify_count prior verification failure(s)"
+    fi
+  fi
+
   # Both state=Ready AND approved label present → pass
   if [ "$state" = "Ready" ] && [ "$has_approved" = "true" ]; then
     _plog "$LOG_FILE" "GATE" "reapprove" "done" ""
-    hb_gate "reapprove-gate" "ok" "re-approval confirmed" "{\"state\":\"$state\"}"
+    hb_gate "reapprove-gate" "ok" "re-approval confirmed" "{\"state\":\"$state\",\"prior_failures\":\"${verify_count:-0}\"}"
     return 0
   fi
 

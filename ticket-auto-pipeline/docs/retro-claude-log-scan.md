@@ -96,7 +96,7 @@ Use `cl_write` phase boundary entries as anchors (e.g. `APPRAISE|handoff`) to wi
 
 ```
 EXEC phase — 3 failures found:
-  line 142: permission denied /home/dexter/artifacts/
+  line 142: permission denied /home/user/artifacts/
   line 201: exited with code 1
   line 209: no such file: notes.md
 ```

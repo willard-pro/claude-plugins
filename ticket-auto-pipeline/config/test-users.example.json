@@ -1,0 +1,23 @@
+[
+  {
+    "email": "admin@example.com",
+    "password": "yourpassword",
+    "roles": ["admin"],
+    "orgs": ["Your Org"],
+    "environments": ["local", "uat"]
+  },
+  {
+    "email": "attorney@example.com",
+    "password": "yourpassword",
+    "roles": ["attorney"],
+    "orgs": ["Your Org"],
+    "environments": ["local", "uat"]
+  },
+  {
+    "email": "user@example.com",
+    "password": "yourpassword",
+    "roles": ["viewer"],
+    "orgs": ["Your Org"],
+    "environments": ["local", "uat"]
+  }
+]

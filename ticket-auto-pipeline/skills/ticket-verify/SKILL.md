@@ -138,6 +138,7 @@ cat > {ticket-dir}/verify-session.md << 'TRACE'
 
 ## Step trace
 - [x] Step 1.6: Env readiness — {env start status}
+- [x] Step 1.7: Verify pre-flight — user:{test_user} nav:{nav_target}
 - [x] Step 2: Build verification plan — {N} criteria
 - [x] Step 3: Establish browser session — {logged in|already authenticated}
 - [x] Step 4: Navigate to feature — {path}, {attempts} attempts
@@ -181,6 +182,68 @@ bash {TICKETS_ROOT}/env-start.sh --restart {affected-services} gateway-fe
 ```
 
 Block until the script exits. If it exits non-zero, abort ticket-verify with the script's error — do not proceed to browser.
+
+---
+
+## Step 1.7 — Verify pre-flight (prerequisite resolution)
+
+Before building the verification plan, resolve the test user, navigation target, and expected behavior. This ensures the verify agent has everything needed before launching the browser.
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|pre-flight|start|Resolving verification prerequisites" >> "$LOG_FILE"
+
+### 1.7a — Resolve test user
+
+Use this priority chain (stop at first match):
+
+1. **`--user` flag** — if explicitly passed on the command line, use it verbatim
+2. **notes.md `## Verification Readiness` section** — if present, extract the test user from the prerequisite table
+3. **context.md `**User:**` field** — if present in the ticket context
+4. **Linear ticket description** — scan for `**User:**`, email addresses, or role mentions ("as an attorney", "log in as admin")
+5. **`test-users.json` catalog** — resolve the catalog, find a user matching any role mentioned in the ticket. If no specific role is mentioned in the ticket, catalog lookup SHALL return empty (do NOT default to admin — a ticket with zero role mentions is underspecified and should have been blocked earlier in the pipeline)
+
+**If no test user is found:**
+
+- **If `--from-auto`**: abort with FAIL. Do not launch the browser. Post a Linear comment:
+  ```
+  ⚠️ Cannot verify: no test user found. Resolution chain exhausted — no user in --user flag, notes.md, context.md, ticket description, or test-users.json catalog. Add a test user to the ticket (e.g. "**User:** user@example.com") or provide --user.
+  ```
+  Write to log:
+  ```bash
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|pre-flight|fail|No test user found" >> "$LOG_FILE"
+  ```
+  Exit with SKIP (no failure — the ticket needs human input).
+
+- **If interactive** (no `--from-auto`): prompt the user: "No test user found. Which user should I log in as? (provide --user <email>)"
+
+**If a test user is found**, record it for use in Step 2 and Step 3b.
+
+### 1.7b — Resolve navigation target
+
+Use this priority chain (stop at first match):
+
+1. **notes.md `## Verification Readiness`** — if present, extract the navigation target
+2. **nav-hints.md** — match the ticket's feature area against known nav-hints entries
+3. **context.md** — scan for URL patterns (`/handover/`, `/admin/`, etc.)
+4. **Linear ticket description** — scan for URL patterns or navigation instructions
+
+**If no navigation target is found:**
+
+- **If `--from-auto`**: log a warning but continue. The verifier has a 3-attempt nav budget and can often discover the page from context.
+  ```bash
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|pre-flight|warning|No navigation target found, will use 3-attempt nav budget" >> "$LOG_FILE"
+  ```
+- **If interactive**: note the gap in the verification plan but continue (the user can guide navigation in Step 4).
+
+### 1.7c — Pre-populate expected behavior
+
+Check if the plan artifact already has expected behavior (from the `## Verification Readiness` section in notes.md):
+
+1. **notes.md `## Verification Readiness`** — if present, extract expected behavior
+2. **Linear ticket description** — extract from acceptance criteria, "Expected Behaviour", or "What should be true" sections
+
+If found in notes.md, use it as the basis for verification criteria in Step 2. If not, extract from the Linear ticket description as normal.
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|pre-flight|done|User:{test_user} Nav:{nav_target}" >> "$LOG_FILE"
 
 ---
 
