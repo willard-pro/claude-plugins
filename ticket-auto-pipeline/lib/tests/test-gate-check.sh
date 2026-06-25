@@ -970,7 +970,7 @@ test_bug_no_repro_high_score_still_stops() {
   _setup
   _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
   _scaffold_context_md 3 "bug" "false" # 3 AC, bug, no repro
-  _scaffold_critique 75 PASS # score 75 would normally clear
+  _scaffold_critique 75 PASS           # score 75 would normally clear
   _scaffold_artifact_with_prereqs "${_ws}/simple-fix.md"
 
   _gate_entry
