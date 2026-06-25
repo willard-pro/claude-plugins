@@ -42,8 +42,8 @@ EOF
   },
   "permissions": {
     "allow": [
-      "Bash(source /home/mortal/.claude/skills/lib/spawn-helper.sh *)",
-      "Bash(source /home/mortal/.claude/skills/lib/heartbeat.sh *)",
+      "Bash(source /home/user/.claude/skills/lib/spawn-helper.sh *)",
+      "Bash(source /home/user/.claude/skills/lib/heartbeat.sh *)",
       "Write(/tmp/test-repos/logs/**)"
     ]
   }

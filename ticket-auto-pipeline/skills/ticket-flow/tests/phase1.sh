@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # phase1.sh — unit tests for harden-ticket-auto-pipeline changes.
-# Requires: bash, jq, socat, flock (all present in Dexter image).
+# Requires: bash, jq, socat, flock.
 # Usage: bash phase1.sh [test_name]
 # -u (nounset) intentionally omitted: Claude Code shell snapshots inject
 # ZSH_VERSION references that trigger false-positive "unbound variable"

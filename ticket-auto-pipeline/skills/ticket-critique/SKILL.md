@@ -89,7 +89,7 @@ Count distinct acceptance criteria in the description. Detect by:
 
 **0b. Test user / role scan:**
 Scan the description for test user identification. Detect by:
-- Email address patterns (e.g., `user@example.com`, `name@sdtlaw.co.za`)
+- Email address patterns (e.g., `user@example.com`, `name@example.org`)
 - `**User:**` field with a value
 - Role mentions: "as an attorney", "as an admin", "as a [role]", "log in as", "test as", "with user"
 - Named test users from the test user catalog (`test-users.json` — project-local, not bundled; absent if not yet configured)
