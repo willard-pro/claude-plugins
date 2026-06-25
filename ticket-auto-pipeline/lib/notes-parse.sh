@@ -190,7 +190,8 @@ resolve_test_user_catalog() {
   fi
 
   # 3. Check relative to this script (plugin lib dir → config dir)
-  # test-users.json is gitignored — this path only resolves for local dev copies
+  # test-users.json is not committed to the repo — this path resolves only for
+  # local dev copies where the file was placed manually.
   local script_dir
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   if [ -f "$script_dir/../config/test-users.json" ]; then
