@@ -29,7 +29,7 @@ Posts a summary comment to Linear and moves the ticket to the Approve state.
 | --from-auto flag | CLI (set by ticket-auto) | No |
 | --from-step flag | CLI (crash recovery) | No |
 | app-knowledge/SKILL.md | Plugin skill file | Step 3.7 only |
-| config/test-users.json | Plugin config | Step 3.7 only |
+| test-users.json | Project-local (not bundled; copy from config/test-users.example.json) | Step 3.7 only |
 | nav-hints/SKILL.md | Plugin skill file | Step 3.7 only |
 
 ## Outputs / Artifacts

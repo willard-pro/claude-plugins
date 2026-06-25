@@ -92,7 +92,7 @@ Scan the description for test user identification. Detect by:
 - Email address patterns (e.g., `user@example.com`, `name@sdtlaw.co.za`)
 - `**User:**` field with a value
 - Role mentions: "as an attorney", "as an admin", "as a [role]", "log in as", "test as", "with user"
-- Named test users from the test user catalog (check `config/test-users.json`)
+- Named test users from the test user catalog (`test-users.json` — project-local, not bundled; absent if not yet configured)
 
 - **No test user email AND no role mention** → `[BLOCKER] No test user or role specified. Cannot determine who should verify this ticket.`
 - **Test user email or role found** → pass (no finding)

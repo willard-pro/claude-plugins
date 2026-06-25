@@ -388,7 +388,7 @@ Derive a structured verification plan from the ticket and plan artifact. This st
 1. **Ticket description and acceptance criteria** — from `context.md` or the Linear issue
 2. **Plan artifact** — `simple-fix.md` or `openspec/changes/{change-name}/design.md` + `tasks.md` + spec files
 3. **`app-knowledge/SKILL.md`** — for known role constraints, role-based UI rules, and navigation patterns
-4. **`config/test-users.json`** — for available test roles (`attorney`, `admin`, `debtor`, `collection_agency`, `correspondent`, etc.)
+4. **`test-users.json`** — project-local catalog (not bundled; copy `config/test-users.example.json` to your `TICKETS_ROOT` and populate). Provides available roles and emails. If absent, role scope must be inferred from the ticket and app-knowledge.
 5. **`notes.md`** — for investigation findings (`## Initial Investigation`, `## Blast Radius`), adversarial review results, and prior art context
 
 ### Derivation steps
@@ -573,7 +573,7 @@ If no `## Verification Plan` section exists in notes.md (backward compat for old
 - If `{COMPLEXITY}` = complex: find the openspec change dir and read `design.md` and `tasks.md`
 
 For each prerequisite, scan the artifact content:
-1. **Test user**: look for an email pattern, `**User:**`, "as an [role]", "log in as", "test as", or a name matching the test user catalog (`config/test-users.json`). Also check if the `## Verification Readiness` section from notes.md already has one from a prior run.
+1. **Test user**: look for an email pattern, `**User:**`, "as an [role]", "log in as", "test as", or a name matching the test user catalog (`test-users.json` — project-local, resolved via `resolve_test_user_catalog`). Also check if the `## Verification Readiness` section from notes.md already has one from a prior run.
 2. **Navigation target**: look for URL paths, "Navigate to", "Go to", menu paths, or feature area labels that map to known nav-hints entries.
 3. **Expected behavior**: look for acceptance criteria, `## Expected Behavior` sections, or descriptions of observable outcomes. If the artifact references the ticket's AC (e.g., "Verify AC-1: ..."), that counts.
 4. **Environment prerequisites**: look for data setup steps, seed data references (`seed-db`, `data.sql`), service dependencies, or pre-existing state descriptions.

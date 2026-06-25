@@ -164,10 +164,11 @@ get_critique_blocker_count() {
 }
 
 # resolve_test_user_catalog [tickets_root]
-# Resolves the path to test-users.json.
-# Priority: $TICKETS_ROOT/test-users.json → plugin default config/test-users.json
-# If TICKETS_ROOT is unset, checks the current directory for a tickets root.
-# Emits absolute path or empty string if no catalog found.
+# Resolves the path to test-users.json. NOT bundled with the plugin — must be
+# created per-project. Copy config/test-users.example.json and populate with
+# real credentials in your TICKETS_ROOT or installed plugin config dir.
+# Priority: $TICKETS_ROOT/test-users.json → $CLAUDE_PLUGIN_ROOT/config/ → ~/.claude/skills/config/
+# Emits absolute path or empty string if no catalog found (non-fatal).
 # Exit codes: 0 = found, 1 = not found (non-fatal)
 resolve_test_user_catalog() {
   local tickets_root="${1:-${TICKETS_ROOT:-.}}"
@@ -189,6 +190,7 @@ resolve_test_user_catalog() {
   fi
 
   # 3. Check relative to this script (plugin lib dir → config dir)
+  # test-users.json is gitignored — this path only resolves for local dev copies
   local script_dir
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   if [ -f "$script_dir/../config/test-users.json" ]; then
