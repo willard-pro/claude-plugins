@@ -935,51 +935,63 @@ const DATA = {
     "EXEC": {
       transition: ["Todo", "Approve"],
       agentType: "ticket-appraise-exec-agent",
-      description: "Loads the saved appraisal workspace, produces the canonical execution artifact, posts it back to Linear as a structured comment, and hands off to the gate.",
+      description: "Loads the saved appraisal workspace, produces the canonical execution artifact, derives a verification plan (complex tickets), checks verification readiness, posts back to Linear, and hands off to the gate.",
       labelsActive: [
         { name: "claimed",      note: "present from APPRAISE" },
         { name: "{complexity}", note: "required, drives gate behaviour" },
       ],
       steps: [
-        { name: "load-workspace",  desc: "Re-attaches to the APPRAISE workspace so context carries forward without re-fetching." },
-        { name: "create-artifact",    desc: "Generates the formal execution artifact — scope, approach, file plan, test plan." },
-        { name: "regression-guard",   desc: "Scans the execution artifact against the existing test suite to flag tests the proposed changes are likely to break before a line of code is written." },
-        { name: "adversarial-review", desc: "Red-team pass on the artifact — challenges assumptions, pokes at edge cases, flags plan gaps before implementation begins." },
-        { name: "post-linear",        desc: "Posts the artifact to the Linear ticket as a structured comment for reviewers." },
-        { name: "handoff",         desc: "Marks the ticket ready for the gate and exits cleanly." },
+        { name: "load-workspace",        desc: "Re-attaches to the APPRAISE workspace so context carries forward without re-fetching." },
+        { name: "create-artifact",       desc: "Generates the formal execution artifact — scope, approach, file plan, test plan." },
+        { name: "regression-guard",      desc: "Scans the execution artifact against the existing test suite to flag tests the proposed changes are likely to break before a line of code is written." },
+        { name: "adversarial-review",    desc: "Red-team pass on the artifact — challenges assumptions, pokes at edge cases, flags plan gaps before implementation begins." },
+        { name: "verify-plan-derived",   desc: "Complex tickets only: derives a per-criterion verification plan — role scope, navigation path, expected behavior, and test data requirements. Any unresolvable dimension gate-stops the pipeline in auto mode (VERIFY_PLAN_* codes)." },
+        { name: "verification-readiness", desc: "Checks the artifact for 4 prerequisites: test user, nav target, expected behavior, environment. Scores CLEAR / WARNINGS / INCOMPLETE. In auto mode, INCOMPLETE (2+ gaps) gate-stops with VERIFY_READINESS_INCOMPLETE." },
+        { name: "post-linear",           desc: "Posts the artifact to the Linear ticket as a structured comment for reviewers." },
+        { name: "handoff",               desc: "Marks the ticket ready for the gate and exits cleanly." },
       ],
       gateText: null,
       stopCodes: [
-        { code: "EXEC_NO_ARTIFACT",            desc: "Artifact generation produced no file — pipeline halts before posting." },
+        { code: "EXEC_NO_ARTIFACT",             desc: "Artifact generation produced no file — pipeline halts before posting." },
         { code: "COMPLEXITY_ARTIFACT_MISMATCH", desc: "Artifact shape does not match the complexity bucket assigned in APPRAISE." },
+        { code: "VERIFY_PLAN_NO_ROLE_SCOPE",    desc: "Role scope unknown for one or more AC — verification plan cannot determine which users are affected." },
+        { code: "VERIFY_PLAN_NO_NAV_PATH",      desc: "Navigation path unknown for one or more AC — verifier has no route to the feature." },
+        { code: "VERIFY_PLAN_VAGUE_BEHAVIOR",   desc: "Expected behavior vague for one or more AC — pass/fail criterion cannot be determined." },
+        { code: "VERIFY_PLAN_NO_TEST_DATA",     desc: "Test data required but no setup steps documented — prerequisite data cannot be created." },
+        { code: "VERIFY_READINESS_INCOMPLETE",  desc: "Plan artifact missing 2+ of 4 verification prerequisites in auto mode — verifier would have to guess." },
       ],
     },
 
     "GATE": {
       transition: ["Approve", "Ready"],
       agentType: "bash: gate-check.sh",
-      description: "The decision point. Simple tickets pass through autonomously; complex tickets hold for a human reviewer to add the approved label before continuing.",
+      description: "Multi-layer decision point. Bash gates check content quality score, structural completeness (zero AC, missing repro steps), and verification readiness before complexity routing. Tickets can hold or gate-stop at any layer regardless of complexity.",
       labelsActive: [
         { name: "claimed",      note: "present" },
         { name: "approved",     note: "added on pass" },
         { name: "{complexity}", note: "drives auto vs hold" },
       ],
       steps: [
-        { name: "gate-check",        desc: "Bash-only gate (gate-check.sh --mode entry). Checks artifact existence, complexity-artifact coherence, autonomy mode routing. No LLM involved." },
-        { name: "complexity-routing", desc: "simple + auto|semi-auto → auto-approve immediately. complex OR manual mode → hold in Approve, wait for human approved label. Autonomy resolved once at startup." },
-        { name: "gate-reconcile",    desc: "When a held ticket is re-approved, a gate-reconcile agent (STEP_3_5) fetches Linear comments, evaluates open questions, and either passes clean or re-holds with an amendment cycle." },
+        { name: "gate-check",         desc: "Bash-only gate (gate-check.sh --mode entry). Five layered checks: (2.5) content quality score from critique — BLOCKED status or score <40 holds; (2.5a) ZERO_AC gate-stop if ticket has no ACs; (2.5b) BUG_NO_REPRO gate-stop if bug ticket lacks repro steps; (2.6) verification readiness — holds if 2+ of 4 prerequisites missing in plan artifact. No LLM involved." },
+        { name: "complexity-routing", desc: "Tickets that clear all content checks: simple + auto|semi-auto → auto-approve immediately. complex OR manual mode → hold in Approve, wait for human approved label. Autonomy resolved once at startup." },
+        { name: "gate-reconcile",     desc: "When a held ticket is re-approved, a gate-reconcile agent (STEP_3_5) fetches Linear comments, evaluates open questions, and either passes clean or re-holds with an amendment cycle." },
       ],
       gateText: {
-        title: "Complexity gate",
-        body: "If <code>complexity = simple</code> the gate auto-applies the <code>approved</code> label and transitions Approve → Ready immediately. Otherwise it parks the ticket in Approve and listens for a human to add <code>approved</code>."
+        title: "Multi-layer content gate",
+        body: "Checks run in order before complexity routing: <code>CRITIQUE_BLOCKED</code> or score &lt;40 holds the ticket; <code>ZERO_AC</code> and <code>BUG_NO_REPRO</code> are hard stops; verification readiness (2+ prerequisites missing) holds. Only tickets that clear all structural checks proceed to complexity routing — <code>simple</code> auto-approves, <code>complex</code> waits for human <code>approved</code> label."
       },
       outcomes: [
-        { verdict: "auto",  label: "simple",  desc: "Auto-approved. Adds approved label, transitions Approve → Ready." },
+        { verdict: "auto",  label: "simple",        desc: "Cleared all content gates + auto mode. Adds approved label, transitions Approve → Ready." },
         { verdict: "pass",  label: "human-approve", desc: "Reviewer adds approved label. Transitions Approve → Ready." },
         { verdict: "fail",  label: "human-reject",  desc: "Reviewer rejects. Loops back to Todo for re-appraisal." },
       ],
       stopCodes: [
-        { code: "APPROVAL_REVOKED", desc: "The approved label was removed while the gate was watching — re-enters hold state." },
+        { code: "CRITIQUE_SCORE_MISSING",     desc: "Critique section exists in notes.md but no **Score:** line found — structural failure, cannot evaluate content quality." },
+        { code: "CRITIQUE_BLOCKED",           desc: "Critique status is BLOCKED (cumulative warnings escalated or explicit blockers present) — requires human revision." },
+        { code: "CRITIQUE_SCORE_IMPLAUSIBLE", desc: "Score is inconsistent with BLOCKER count (e.g., score 80 with 2 BLOCKERs, max plausible 50) — indicates LLM scoring error." },
+        { code: "ZERO_AC",                   desc: "Ticket has zero acceptance criteria — nothing verifiable exists, implementation has no success condition." },
+        { code: "BUG_NO_REPRO",              desc: "Bug ticket has no reproduction steps — verifier cannot confirm the defect exists before implementation." },
+        { code: "APPROVAL_REVOKED",          desc: "The approved label was removed while the gate was watching — re-enters hold state." },
       ],
     },
 
@@ -1035,7 +1047,7 @@ const DATA = {
     "VERIFY": {
       transition: ["UAT", "Done / Ready"],
       agentType: "ticket-verify-agent",
-      description: "Live user-acceptance verification. Launches a real browser, walks through the requirements as a user would, evaluates outcomes against the spec, and reports back to Linear.",
+      description: "Live user-acceptance verification. A pre-flight step resolves the test user, navigation target, and expected behavior before browser launch — aborting if any are missing. Then walks through requirements as a user would, evaluates outcomes against the spec, and reports back to Linear.",
       labelsActive: [
         { name: "claimed",  note: "present" },
         { name: "reviewed", note: "present from PR-REVIEW" },
@@ -1043,6 +1055,7 @@ const DATA = {
       ],
       steps: [
         { name: "load-requirements", desc: "Reads the checklist extracted by PR-REVIEW so verification mirrors the same spec." },
+        { name: "pre-flight",        desc: "Resolves test user (5-level chain: --user flag → notes.md Verification Readiness → context.md → Linear ticket → test-users.json catalog), nav target, and expected behavior. Aborts with FAIL if no test user found — no admin default fallback." },
         { name: "launch-browser",    desc: "Spins up a headed browser session against the staged deploy." },
         { name: "execute-steps",     desc: "Walks the user-flow scripts derived from the requirements." },
         { name: "evaluate",          desc: "Compares observed UI / API responses against expected outcomes." },
@@ -1050,7 +1063,7 @@ const DATA = {
       ],
       outcomes: [
         { verdict: "pass", label: "uat-pass", desc: "All checks green. Transitions UAT → Done; removes claimed and reviewed." },
-        { verdict: "fail", label: "uat-fail", desc: "One or more checks failed. Adds rejected, loops UAT → Ready for fixes. (max 3 attempts — VERIFY_ATTEMPTS counter in pipeline log)" },
+        { verdict: "fail", label: "uat-fail", desc: "One or more checks failed, or pre-flight found no test user. Adds rejected, loops UAT → Ready for fixes. (max 3 attempts — VERIFY_ATTEMPTS counter in pipeline log)" },
       ],
       stopCodes: [
         { code: "REMEDIATION_BRIEF_TRUNCATED", desc: "The remediation brief written back to the ticket was cut off — risk that fixes miss context." },
