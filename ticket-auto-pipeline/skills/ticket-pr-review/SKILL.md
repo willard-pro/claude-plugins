@@ -73,9 +73,7 @@ Capture:
 ## Step 2 — Extract requirements
 
 Activate the analyzer persona:
-```
-/buddy:persona-analyzer
-```
+Run `lib/persona-select.sh --repo <repo> --phase review` and read the persona file at `$PERSONA_BASE`. Inject its content as role context for this step.
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|extract-requirements|start|Extracting requirements" >> "$LOG_FILE"
 

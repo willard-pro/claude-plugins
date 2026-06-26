@@ -137,7 +137,7 @@ Store goal context for embedding in the report file.
 
 ## Step 5: Load product owner persona
 
-Invoke `/buddy:persona-po` once. This persona remains active through Steps 6 and 7 (per-ticket + cross-ticket analysis). The PO has the widest business view for detecting duplicates, merge candidates, and goal misalignment across all ticket types.
+Run `lib/persona-select.sh --repo <repo> --phase audit` and read the persona file at `$PERSONA_BASE`. Inject its content as role context for this step. This persona remains active through Steps 6 and 7 (per-ticket + cross-ticket analysis). The PO has the widest business view for detecting duplicates, merge candidates, and goal misalignment across all ticket types.
 
 This is one of maximum two persona invocations per audit run.
 
@@ -234,7 +234,7 @@ Requires semantic comparison of ticket's claimed service references against wiki
    ```
 2. If `SIGNAL_COUNT >= 2` → flag as WARNING: "Split candidate"
 3. **Use templated `SPLIT_SUGGESTION`** from the bash script. The suggestion is generated deterministically based on which signals fired (AC count, word count, service count). This covers 80%+ of split cases without LLM.
-4. **LLM persona only for complex splits:** If the ticket has FE AND BE signals (detected by keyword matching on title + description), load `/buddy:persona-backend` or `/buddy:persona-frontend` (whichever dominates) for a layer-informed refinement of the templated suggestion. Otherwise, use `$SPLIT_SUGGESTION` directly.
+4. **LLM persona only for complex splits:** If the ticket has FE AND BE signals (detected by keyword matching on title + description), run `lib/persona-select.sh --repo <repo> --layer <FE|BE>` and read the persona file at `$PERSONA_BASE` for a layer-informed refinement of the templated suggestion. Otherwise, use `$SPLIT_SUGGESTION` directly.
    - **Backend signal keywords**: API, endpoint, service, migration, model, query, repository, controller, DTO, Feign, job, cron, async
    - **Frontend signal keywords**: component, page, form, modal, button, hook, route, CSS, React, TypeScript, layout, view
 5. This counts as the second persona invocation (max reached — no more FE/BE switches).
