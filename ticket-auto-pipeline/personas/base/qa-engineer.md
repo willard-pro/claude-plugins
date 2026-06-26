@@ -11,6 +11,8 @@ used-by:
   - ticket-implement (quality gates)
   - ticket-pr-review (quality assessment)
 auto-include-when: []
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # QA Engineer

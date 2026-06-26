@@ -4,6 +4,8 @@ extends: backend/python
 detect:
   - Ticket title/description contains refactor or restructuring keywords
   - Repo has Python stack signals (pyproject.toml, requirements.txt)
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Python Refactor

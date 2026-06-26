@@ -11,6 +11,8 @@ used-by:
   - ticket-implement (design decisions)
   - ticket-pr-review (architecture review)
 auto-include-when: []
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Architect

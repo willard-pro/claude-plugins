@@ -7,6 +7,8 @@ detect:
   - pyenv in BE_TEST_RUNNER
   - pipenv in BE_TEST_RUNNER
   - poetry.lock
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Python Backend

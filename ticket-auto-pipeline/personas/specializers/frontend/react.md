@@ -4,6 +4,8 @@ extends: frontend-developer
 detect:
   - react or react-dom in package.json dependencies
   - next.config.js or next.config.mjs (Next.js)
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # React Frontend

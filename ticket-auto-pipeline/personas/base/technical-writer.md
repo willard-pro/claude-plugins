@@ -12,6 +12,8 @@ used-by:
   - ticket-retro
   - wiki-maintenance
 auto-include-when: []
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Technical Writer

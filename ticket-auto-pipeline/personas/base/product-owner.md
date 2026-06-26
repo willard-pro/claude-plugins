@@ -10,6 +10,8 @@ used-by:
   - ticket-audit
   - ticket-appraise (business value assessment)
 auto-include-when: []
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Product Owner

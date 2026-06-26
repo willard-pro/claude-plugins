@@ -11,6 +11,8 @@ used-by:
   - ticket-implement (BE/infra repos)
   - ticket-audit (BE layer)
 auto-include-when: []
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Backend Developer

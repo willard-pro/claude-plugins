@@ -4,6 +4,8 @@ extends: frontend-developer
 detect:
   - vue in package.json dependencies
   - nuxt.config.js or nuxt.config.ts (Nuxt)
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Vue Frontend

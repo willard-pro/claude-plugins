@@ -80,3 +80,21 @@ Read `base/<role>.md`, then read the matching `specializers/<group>/<stack>.md`.
 | `qa` | `api-testing.md` | qa-engineer | Contract testing (OpenAPI/JSON Schema), status code assertions, auth token handling (valid/expired/malformed), idempotency verification, error message leakage detection | No UAT_URL (API-only) |
 | `architect` | `microservices.md` | architect | Bounded contexts, event-driven communication, API Gateway, Saga pattern, distributed tracing (OpenTelemetry), independent deployability | Multi-service directory structure |
 | `architect` | `monolith.md` | architect | Modular monolith patterns, layered architecture, feature-based packaging, module boundary enforcement (ArchUnit/dep-cruiser), extraction-ready design | Single-service structure |
+
+## Versioning
+
+Each persona file carries `version` (integer) and `last-reviewed` (ISO date) in its YAML frontmatter. `personas/CHANGELOG.md` records all changes.
+
+## Refreshing personas
+
+Run `/ticket-persona-refresh persona=<name>` to check a persona against current best practices. The skill:
+
+1. Reads the persona to identify its tech stack (libraries, frameworks, tools, versions)
+2. Fetches current docs via Context7 and web search
+3. Compares persona guidance against current recommendations
+4. Proposes a diff showing outdated, missing, and confirmed items
+5. Waits for approval before applying changes
+
+Use `persona=all` to refresh all personas. Use `persona=backend/python` for a single specializer.
+
+**Executors**: `lib/persona-refresh.sh` handles the mechanical mutations (version bump, changelog append, file write). The skill handles the research and reasoning. This follows the same determinism boundary as `ticket-flow` → `flow.sh`.

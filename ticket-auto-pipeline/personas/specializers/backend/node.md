@@ -5,6 +5,8 @@ detect:
   - package.json (without angular.json, react, or vue dependency)
   - tsconfig.json
   - nest-cli.json
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Node.js Backend
