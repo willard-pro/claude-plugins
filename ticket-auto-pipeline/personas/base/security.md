@@ -25,6 +25,8 @@ auto-include-when:
   - personal data
   - encryption
   - vulnerability
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Security

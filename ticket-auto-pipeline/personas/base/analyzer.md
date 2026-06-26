@@ -11,6 +11,8 @@ used-by:
   - ticket-pr-review
   - ticket-critique
 auto-include-when: []
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Analyzer

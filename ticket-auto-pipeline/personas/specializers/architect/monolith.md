@@ -5,6 +5,8 @@ detect:
   - Single service directory structure
   - No multi-service orchestration files
   - Single deployable artifact (one Dockerfile, one build output)
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Monolith Architecture

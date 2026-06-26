@@ -4,6 +4,8 @@ extends: backend-developer
 detect:
   - Ticket title/description contains upgrade, migration, or version-bump keywords
   - Repo has Java stack signals (pom.xml, build.gradle)
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Java Migration

@@ -10,6 +10,8 @@ used-by:
   - ticket-implement (FE repos)
   - ticket-audit (FE layer)
 auto-include-when: []
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Frontend Developer

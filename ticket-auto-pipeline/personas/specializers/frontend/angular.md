@@ -4,6 +4,8 @@ extends: frontend-developer
 detect:
   - angular.json
   - angular.json + package.json
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Angular Frontend

@@ -4,6 +4,8 @@ extends: qa-engineer
 detect:
   - UAT_URL is set
   - Playwright config file (playwright.config.ts, playwright.config.js)
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Playwright Web QA

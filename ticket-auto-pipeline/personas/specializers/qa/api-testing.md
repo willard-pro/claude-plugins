@@ -5,6 +5,8 @@ detect:
   - UAT_URL is not set (API-only ticket)
   - BE_TEST_CMD is set
   - No frontend repo markers
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # API Testing QA

@@ -6,6 +6,8 @@ detect:
   - docker-compose.yml with multiple services
   - API gateway or service mesh configuration
   - Message broker configuration (Kafka, RabbitMQ)
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Microservices Architecture

@@ -6,6 +6,8 @@ detect:
   - build.gradle
   - build.gradle.kts
   - settings.gradle
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Java Backend

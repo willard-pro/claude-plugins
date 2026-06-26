@@ -4,6 +4,8 @@ extends: backend/node
 detect:
   - Ticket title/description contains refactor or restructuring keywords
   - Repo has Node.js backend signals (package.json without FE framework)
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Node.js Refactor

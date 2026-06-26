@@ -4,6 +4,8 @@ extends: backend/java
 detect:
   - Ticket title/description contains refactor or restructuring keywords
   - Repo has Java stack signals (pom.xml, build.gradle)
+version: 1
+last-reviewed: 2026-06-26
 ---
 
 # Java Refactor
