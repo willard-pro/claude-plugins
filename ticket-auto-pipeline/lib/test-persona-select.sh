@@ -12,40 +12,40 @@ FAIL=0
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 assert_contains() {
-  local desc="$1" output="$2" key="$3" expected="$4"
-  local actual
-  actual=$(echo "$output" | grep "^${key}=" | cut -d'=' -f2-)
-  if echo "$actual" | grep -q "$expected"; then
-    PASS=$((PASS + 1))
-    echo "  PASS: $desc"
-  else
-    FAIL=$((FAIL + 1))
-    echo "  FAIL: $desc — expected '$expected' in ${key}=${actual}" >&2
-  fi
+	local desc="$1" output="$2" key="$3" expected="$4"
+	local actual
+	actual=$(echo "$output" | grep "^${key}=" | cut -d'=' -f2-)
+	if echo "$actual" | grep -q "$expected"; then
+		PASS=$((PASS + 1))
+		echo "  PASS: $desc"
+	else
+		FAIL=$((FAIL + 1))
+		echo "  FAIL: $desc — expected '$expected' in ${key}=${actual}" >&2
+	fi
 }
 
 assert_empty() {
-  local desc="$1" output="$2" key="$3"
-  local actual
-  actual=$(echo "$output" | grep "^${key}=" | cut -d'=' -f2-)
-  if [ -z "$actual" ]; then
-    PASS=$((PASS + 1))
-    echo "  PASS: $desc"
-  else
-    FAIL=$((FAIL + 1))
-    echo "  FAIL: $desc — expected empty ${key}, got '${actual}'" >&2
-  fi
+	local desc="$1" output="$2" key="$3"
+	local actual
+	actual=$(echo "$output" | grep "^${key}=" | cut -d'=' -f2-)
+	if [ -z "$actual" ]; then
+		PASS=$((PASS + 1))
+		echo "  PASS: $desc"
+	else
+		FAIL=$((FAIL + 1))
+		echo "  FAIL: $desc — expected empty ${key}, got '${actual}'" >&2
+	fi
 }
 
 assert_exit_code() {
-  local desc="$1" expected="$2" actual="$3"
-  if [ "$actual" -eq "$expected" ]; then
-    PASS=$((PASS + 1))
-    echo "  PASS: $desc"
-  else
-    FAIL=$((FAIL + 1))
-    echo "  FAIL: $desc — expected exit $expected, got $actual" >&2
-  fi
+	local desc="$1" expected="$2" actual="$3"
+	if [ "$actual" -eq "$expected" ]; then
+		PASS=$((PASS + 1))
+		echo "  PASS: $desc"
+	else
+		FAIL=$((FAIL + 1))
+		echo "  FAIL: $desc — expected exit $expected, got $actual" >&2
+	fi
 }
 
 # ── Setup: create temp repo directories with mock files ────────────────────────
@@ -63,26 +63,26 @@ touch "$TMPDIR/java-project/pom.xml"
 
 # Node.js backend project
 mkdir -p "$TMPDIR/node-project"
-cat > "$TMPDIR/node-project/package.json" <<'JSON'
+cat >"$TMPDIR/node-project/package.json" <<'JSON'
 {"name": "api", "dependencies": {"express": "^4.0.0"}}
 JSON
 
 # Angular project
 mkdir -p "$TMPDIR/angular-project"
 touch "$TMPDIR/angular-project/angular.json"
-cat > "$TMPDIR/angular-project/package.json" <<'JSON'
+cat >"$TMPDIR/angular-project/package.json" <<'JSON'
 {"name": "ng-app"}
 JSON
 
 # React project
 mkdir -p "$TMPDIR/react-project"
-cat > "$TMPDIR/react-project/package.json" <<'JSON'
+cat >"$TMPDIR/react-project/package.json" <<'JSON'
 {"name": "react-app", "dependencies": {"react": "^18.0.0", "react-dom": "^18.0.0"}}
 JSON
 
 # Vue project
 mkdir -p "$TMPDIR/vue-project"
-cat > "$TMPDIR/vue-project/package.json" <<'JSON'
+cat >"$TMPDIR/vue-project/package.json" <<'JSON'
 {"name": "vue-app", "dependencies": {"vue": "^3.0.0"}}
 JSON
 
@@ -228,7 +228,7 @@ assert_empty "unknown FE stack → empty specializer" "$output" "PERSONA_SPECIAL
 
 # unknown stack does not cause errors
 set +e
-"$SELECTOR" --repo "$TMPDIR/unknown-project" --layer BE --phase implement > /dev/null 2>&1
+"$SELECTOR" --repo "$TMPDIR/unknown-project" --layer BE --phase implement >/dev/null 2>&1
 rc=$?
 set -e
 assert_exit_code "unknown stack → exit 0" 0 "$rc"
@@ -287,39 +287,39 @@ echo "## Path existence"
 
 # Test a few representative combinations
 check_paths() {
-  local desc="$1" output="$2"
-  local base spec auto ok
-  base=$(echo "$output" | grep "^PERSONA_BASE=" | cut -d'=' -f2-)
-  spec=$(echo "$output" | grep "^PERSONA_SPECIALIZER=" | cut -d'=' -f2-)
-  auto=$(echo "$output" | grep "^PERSONA_AUTO_INCLUDE=" | cut -d'=' -f2-)
+	local desc="$1" output="$2"
+	local base spec auto ok
+	base=$(echo "$output" | grep "^PERSONA_BASE=" | cut -d'=' -f2-)
+	spec=$(echo "$output" | grep "^PERSONA_SPECIALIZER=" | cut -d'=' -f2-)
+	auto=$(echo "$output" | grep "^PERSONA_AUTO_INCLUDE=" | cut -d'=' -f2-)
 
-  if [ -n "$base" ] && [ -f "$base" ]; then
-    PASS=$((PASS + 1))
-    echo "  PASS: $desc — base path exists"
-  else
-    FAIL=$((FAIL + 1))
-    echo "  FAIL: $desc — base path not found: $base" >&2
-  fi
+	if [ -n "$base" ] && [ -f "$base" ]; then
+		PASS=$((PASS + 1))
+		echo "  PASS: $desc — base path exists"
+	else
+		FAIL=$((FAIL + 1))
+		echo "  FAIL: $desc — base path not found: $base" >&2
+	fi
 
-  if [ -n "$spec" ]; then
-    if [ -f "$spec" ]; then
-      PASS=$((PASS + 1))
-      echo "  PASS: $desc — specializer path exists"
-    else
-      FAIL=$((FAIL + 1))
-      echo "  FAIL: $desc — specializer path not found: $spec" >&2
-    fi
-  fi
+	if [ -n "$spec" ]; then
+		if [ -f "$spec" ]; then
+			PASS=$((PASS + 1))
+			echo "  PASS: $desc — specializer path exists"
+		else
+			FAIL=$((FAIL + 1))
+			echo "  FAIL: $desc — specializer path not found: $spec" >&2
+		fi
+	fi
 
-  if [ -n "$auto" ]; then
-    if [ -f "$auto" ]; then
-      PASS=$((PASS + 1))
-      echo "  PASS: $desc — auto-include path exists"
-    else
-      FAIL=$((FAIL + 1))
-      echo "  FAIL: $desc — auto-include path not found: $auto" >&2
-    fi
-  fi
+	if [ -n "$auto" ]; then
+		if [ -f "$auto" ]; then
+			PASS=$((PASS + 1))
+			echo "  PASS: $desc — auto-include path exists"
+		else
+			FAIL=$((FAIL + 1))
+			echo "  FAIL: $desc — auto-include path not found: $auto" >&2
+		fi
+	fi
 }
 
 output=$("$SELECTOR" --repo "$TMPDIR/python-project" --layer BE --phase implement)
@@ -358,6 +358,6 @@ echo "Results: $PASS passed, $FAIL failed"
 echo "========================================="
 
 if [ "$FAIL" -gt 0 ]; then
-  exit 1
+	exit 1
 fi
 exit 0
