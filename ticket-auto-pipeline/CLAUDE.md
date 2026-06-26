@@ -81,6 +81,20 @@ ticket-auto-pipeline/
 | `ticket-audit-exec.sh` | Deterministic operations for ticket-audit-exec skill. `resolve_file`, `parse_checklist` (JSON output), `write_ahead_mark`, `mark_item_done`, `mark_item_failed`, `advance_phase`, `archive_checklist`, `has_pending_items`, `get_item_state`. |
 | `skill-preamble.md` | Shared preamble referenced by all pipeline skill SKILL.md files. Defines parameters and common guard patterns. |
 | `skill-preamble-auto.md` | Thin router variant of skill-preamble. Used by agents spawned from the thin router. Excludes guard, project context detection, step dispatch, and task tracker sections (handled by the router). |
+| `persona-select.sh` | Deterministic base+specializer persona selector. Emits `PERSONA_BASE`, `PERSONA_SPECIALIZER`, `PERSONA_AUTO_INCLUDE` from repo markers, CLAUDE.md Layer column, phase, and keyword triggers. Follows gate-check.sh philosophy — zero LLM involvement. |
+
+## Personas
+
+The `personas/` directory provides in-house role guidance as plain markdown reference files — no cross-plugin skill activation dependency. See `personas/README.md` for the full selection logic index.
+
+**Architecture**: Two-tier composition. A `base/<role>.md` file defines universal role rules (priority hierarchy, core principles, phase-tailored checklists, preferred tools). A `specializers/<group>/<stack>.md` file adds stack-specific depth (idioms, test framework, pitfalls, detection signals). Skills read both and layer the specializer on top.
+
+**Selection**: `lib/persona-select.sh` auto-selects the correct files from existing pipeline variables (CLAUDE.md Layer column, repo marker files, ticket phase, keyword triggers). Deterministic — no LLM reasoning. Unknown stack → base persona only, empty specializer (graceful fallback).
+
+**Auto-include**: Security persona automatically activates on auth/payment/credential/PII keywords — no extra skill logic needed; the helper emits `PERSONA_AUTO_INCLUDE` when triggers fire.
+
+**Base roles (8)**: architect, backend-developer, frontend-developer, qa-engineer, analyzer, product-owner, security, technical-writer.
+**Specializers (11)**: backend/{python,node,java}, frontend/{angular,react,vue}, qa/{playwright-web,api-testing}, architect/{microservices,monolith}.
 
 ## State machine
 

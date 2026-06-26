@@ -135,9 +135,8 @@ find . -name "simple-fix.md" -path "*{TICKET-ID}*"
 
 **Activate persona** based on the `Layer` column in CLAUDE.md for each affected repo. For `FE+BE` monorepos, use the layer boundary table to classify by actual files touched:
 
-- All `FE` → `/buddy:persona-frontend`
-- All `BE` / `infra` → `/buddy:persona-backend`
-- Mixed → activate both; switch at the FE/BE boundary. Note the boundary in `notes.md`.
+Run `lib/persona-select.sh --repo <repo> --layer <FE|BE> --phase implement` and read the persona files at `$PERSONA_BASE` and `$PERSONA_SPECIALIZER`. If `$PERSONA_AUTO_INCLUDE` is non-empty, read that too.
+- Mixed → run once per layer; switch at the FE/BE boundary. Note the boundary in `notes.md`.
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|detect-path|done|{simple-fix|openspec}" >> "$LOG_FILE"
 

@@ -107,9 +107,7 @@ ticket-setup writes a minimal notes.md stub. Replace it with the full appraisal 
 
 Activate the analyzer persona before scoring:
 
-```
-/buddy:persona-analyzer
-```
+Run `lib/persona-select.sh --repo <repo> --phase appraise` and read the persona file at `$PERSONA_BASE`. Inject its content as role context for this step.
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|complexity-sweep|start|Scoring complexity axes" >> "$LOG_FILE"
 
