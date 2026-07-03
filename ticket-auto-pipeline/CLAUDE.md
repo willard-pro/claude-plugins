@@ -11,14 +11,33 @@ Fully autonomous Linear ticket pipeline. Appraise, implement, verify, and merge 
 ```
 ticket-auto-pipeline/
   .claude-plugin/plugin.json      # Plugin manifest (name, version, hooks)
-  skills/                         # 20 skill directories, each with SKILL.md
+  skills/                         # 20+ skill directories, each with SKILL.md
   lib/                            # Shared bash libraries
+  personas/                       # In-house persona role guidance (base + specializers)
   state-machine.json              # Linear state/label transition definitions
   pipeline-log-format.md          # Pipeline log schema (ISO|PHASE|STEP|STATUS|MSG)
-  pipeline-heartbeat-format.md    # Heartbeat log schema (ISO|CATEGORY|EVENT|STATUS|MSG|DETAIL)
+  pipeline-heartbeat-format.md    # Heartbeat log schema
   docs/pipeline-diagram.html      # Interactive state diagram (served via GitHub Pages)
   validate-linear-config.sh       # Validates Linear team config matches state machine
   install.sh                      # Migration from host-side skills
+```
+
+### `.ticket-auto/` artifact layout (on disk, outside source repos)
+
+```
+REPOS_ROOT/.ticket-auto/
+  system.md                       # Cross-repo FE→BE contract map
+  <repo-slug>/
+    meta.json                     # SHA, timestamps, schema version, stats
+    .lock                         # Flock concurrency guard
+    docs/
+      overview.md                 # Architecture overview (architect persona)
+      processes.md                # Execution flows (analyzer persona)
+      security-surfaces.md        # Auth surfaces, PII locations (security persona)
+      services/*.md               # Per-service docs (deterministic distiller)
+      routes.md                   # API route table (deterministic distiller)
+      backend.md / frontend.md    # Layer-specific docs (developer personas)
+      INDEX.md                    # Lookup by Topic / Lookup by Service (technical-writer)
 ```
 
 ## Skill categories
@@ -47,6 +66,7 @@ ticket-auto-pipeline/
 - `ticket-audit` — cross-ticket audit within milestone or parent/epic; detects duplicates, overlaps, empty tickets, goal misalignment, stale tickets, split candidates, wiki misalignment
 - `ticket-audit-exec` — two-phase apply agent for ticket-audit recommendations; delegates needs-info to ticket-critique, posts structural comments
 - `ticket-env-check` — environment validation
+- `ticket-prescan` — repo prescan for durable agent-knowledge docs under `REPOS_ROOT/.ticket-auto/`
 - `wiki-maintenance` — wiki documentation maintenance
 - `nav-hints` / `app-knowledge` — navigation and domain knowledge
 
@@ -81,7 +101,12 @@ ticket-auto-pipeline/
 | `ticket-audit-exec.sh` | Deterministic operations for ticket-audit-exec skill. `resolve_file`, `parse_checklist` (JSON output), `write_ahead_mark`, `mark_item_done`, `mark_item_failed`, `advance_phase`, `archive_checklist`, `has_pending_items`, `get_item_state`. |
 | `skill-preamble.md` | Shared preamble referenced by all pipeline skill SKILL.md files. Defines parameters and common guard patterns. |
 | `skill-preamble-auto.md` | Thin router variant of skill-preamble. Used by agents spawned from the thin router. Excludes guard, project context detection, step dispatch, and task tracker sections (handled by the router). |
-| `persona-select.sh` | Deterministic base+specializer persona selector. Emits `PERSONA_BASE`, `PERSONA_SPECIALIZER`, `PERSONA_AUTO_INCLUDE` from repo markers, CLAUDE.md Layer column, phase, and keyword triggers. Follows gate-check.sh philosophy — zero LLM involvement. |
+| `persona-select.sh` | Deterministic base+specializer persona selector. Emits `PERSONA_BASE`, `PERSONA_SPECIALIZER`, `PERSONA_AUTO_INCLUDE` from repo markers, CLAUDE.md Layer column, phase, and keyword triggers. For `PHASE=prescan`, emits `PERSONA_SET` (multi-persona list for fan-out). Follows gate-check.sh philosophy — zero LLM involvement. |
+| `prescan-check.sh` | Deterministic freshness gate for `.ticket-auto/` prescan docs. Evaluates marker existence, schema version, integrity, SHA ancestry, source changes, and decay thresholds. Emits `PRESCAN_STATUS`, `PRESCAN_REASON`, `CHANGED_FILES`, `STALENESS_SCORE`, `DIRTY`. Exit 0 fresh, 1 stale/decayed, 2 missing. |
+| `prescan-docs.sh` | Deterministic graph-to-markdown distiller. Reads gitnexus JSON (clusters, routes, processes) and assembles `.ticket-auto/docs/` tree via jq. Zero LLM tokens. Produces `services/*.md`, `routes.md`, `processes.md`, `INDEX.md`. Idempotent output for identical input. |
+| `prescan-route.sh` | Deterministic INDEX.md keyword→file router. Parses Lookup by Topic/Service tables, matches ticket text against keywords via case-insensitive substring. Emits matched file paths. Replaces LLM keyword-matching in appraise Step 3a. Also supports `--mode repos` for deterministic repo enumeration under REPOS_ROOT. Zero variance between runs. |
+| `prescan-verify.sh` | Deterministic post-scan content quality assertions. Checks every expected doc file exists, is non-empty, meets minimum line/heading counts, is not placeholder-only, and has required structure (security warning header, INDEX.md tables, services/ dir). Replaces inline LLM scaffold-verify. |
+| `prescan-wire-claude-md.sh` | Deterministic CLAUDE.md managed-block injection. Inserts or replaces the `<!-- ticket-auto:agent-knowledge -->` block pointing to prescan docs. Handles both first-time append and idempotent replacement between markers. Replaces fragile "LLM writes sed" pattern. |
 
 ## Personas
 
@@ -131,7 +156,7 @@ Consumers: `skills/ticket-auto/dashboard.py` (dual-panel), `skills/ticket-overse
 
 - **Determinism boundary**: AI skills never call Linear mutation endpoints directly. All mutations go through `flow.sh`. Skills plan/reason/navigate; flow.sh executes with idempotency and assertions.
 - **Crash recovery**: Pipeline log is the checkpoint. `detect-resume.sh` is called directly as bash by the thin router (no Claude agent spawn). Router re-reads state after every dispatch and resumes from the last completed step.
-- **Sub-agent isolation**: Thin router spawns named agent types (`ticket-appraise-agent`, `ticket-implement-agent`, `ticket-verify-agent`, `ticket-pr-review-agent`, `ticket-maintenance-agent`, `ticket-gate-reconcile-agent`) per phase. Each agent runs in a fresh isolated session. Router brackets each spawn with `|waiting|`/`|done|` via the 3-step pattern (`spawn_agent_pre` → agent spawn → `spawn_capture` → `spawn_agent_post`).
+- **Sub-agent isolation**: Thin router spawns named agent types (`ticket-appraise-agent`, `ticket-implement-agent`, `ticket-verify-agent`, `ticket-pr-review-agent`, `ticket-maintenance-agent`, `ticket-gate-reconcile-agent`, `ticket-prescan-agent`) per phase. Each agent runs in a fresh isolated session. Router brackets each spawn with `|waiting|`/`|done|` via the 3-step pattern (`spawn_agent_pre` → agent spawn → `spawn_capture` → `spawn_agent_post`).
 - **Bash gates**: Gate decisions (artifact existence, complexity coherence, verification readiness, autonomy routing, outcome labels) are deterministic bash scripts (`gate-check.sh`, `outcome-label-check.sh`) — zero Claude agent involvement, zero tokens burned on deterministic comparisons.
 - **Router-managed retry loops**: Verify retry (up to 3 attempts) and PR iteration (up to 3 cycles) are managed by the router tracking counters (`VERIFY_ATTEMPTS`, `ITERATION`) from the pipeline log. Each iteration spawns a fresh agent with clean context — no accumulated output from prior attempts.
 - **Stateless routing**: Router reads all state from pipeline log via `detect-resume.sh` (direct bash invocation, not a Claude skill spawn). After every phase dispatch, router re-reads state. Zero in-memory state between dispatches.

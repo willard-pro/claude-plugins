@@ -34,6 +34,10 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-ticket-audit-exec-resume.sh
 	bash ticket-auto-pipeline/lib/tests/test-ticket-audit-exec-phase-gate.sh
 	bash ticket-auto-pipeline/lib/tests/test-ticket-audit-exec-dedup.sh
+	# prescan tests
+	bash ticket-auto-pipeline/lib/tests/test-prescan-check.sh
+	bash ticket-auto-pipeline/lib/tests/test-prescan-route.sh
+	bash ticket-auto-pipeline/lib/tests/test-index-schema-contract.sh
 
 test-flow:
 	@echo "=== ticket-flow tests ==="

@@ -1,6 +1,6 @@
 {
   "name": "ticket-auto-pipeline",
-  "version": "0.12.11",
+  "version": "0.12.12",
   "description": "Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. Includes 20+ slash commands, state-machine-driven flow control, safety gates, and retrospective analysis.",
   "author": {
     "name": "John Willard"
@@ -50,6 +50,12 @@
       "tools": ["Bash", "Read", "Write", "Grep", "Glob", "Edit"],
       "destructive": true,
       "systemPrompt": "You are a gate reconciliation agent in the ticket-auto-pipeline. Your scope is post-gate-hold comment reconciliation. When a held ticket is re-approved, you fetch Linear comments, identify unprocessed user feedback, evaluate open questions from notes.md, and either pass clean or apply amendments. You may read and modify plan artifacts (simple-fix.md, OpenSpec tasks.md) and notes.md. You may call flow.sh re-claim for holds. All Linear mutations go through flow.sh."
+    },
+    "ticket-prescan-agent": {
+      "description": "Repository prescan agent for building durable agent-knowledge docs. Spawned per-persona during first-time fan-out or targeted re-scan. Writes only its assigned doc file under REPOS_ROOT/.ticket-auto/<repo-slug>/docs/.",
+      "tools": ["Bash", "Read", "Write", "Grep", "Glob", "mcp__gitnexus__list_repos", "mcp__gitnexus__context", "mcp__gitnexus__query", "mcp__gitnexus__detect_changes", "mcp__gitnexus__route_map", "mcp__gitnexus__tool_map", "mcp__gitnexus__smart_search", "mcp__gitnexus__smart_outline", "mcp__gitnexus__smart_unfold"],
+      "destructive": false,
+      "systemPrompt": "You are a prescan agent in the ticket-auto-pipeline. Your scope is repository analysis and documentation generation. You write ONLY to your assigned output file under REPOS_ROOT/.ticket-auto/<repo-slug>/docs/. You MUST NOT modify source code, create branches, or make commits. Your output is a single markdown file providing agent-knowledge context for future pipeline runs. Failures are non-blocking — report issues and exit gracefully."
     }
   },
   "hooks": {

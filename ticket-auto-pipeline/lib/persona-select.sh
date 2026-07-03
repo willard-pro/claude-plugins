@@ -15,17 +15,19 @@ PERSONAS_DIR="${CLAUDE_PLUGIN_ROOT:-$SCRIPT_DIR/..}/personas"
 
 usage() {
   cat >&2 <<'EOF'
-Usage: persona-select.sh --repo <path> [--layer FE|BE|infra] [--phase appraise|implement|review|audit]
+Usage: persona-select.sh --repo <path> [--layer FE|BE|infra] [--phase appraise|implement|review|audit|prescan] [--with-qa]
 
 Emits persona file paths as KEY=value lines:
   PERSONA_BASE=personas/base/<role>.md
   PERSONA_SPECIALIZER=personas/specializers/<group>/<stack>.md   (empty if none matches)
   PERSONA_AUTO_INCLUDE=personas/base/security.md                (empty if no trigger)
+  PERSONA_SET=<newline-separated paths>                          (prescan phase only)
 
 Options:
   --repo <path>      Path to the affected repository (required)
   --layer <value>    Layer classification: FE, BE, infra (optional)
-  --phase <value>    Pipeline phase: appraise, implement, review, audit (optional)
+  --phase <value>    Pipeline phase: appraise, implement, review, audit, prescan (optional)
+  --with-qa          Include qa-engineer in prescan persona set (prescan phase only)
 EOF
   exit 1
 }
@@ -35,6 +37,7 @@ EOF
 REPO=""
 LAYER=""
 PHASE=""
+WITH_QA="false"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -49,6 +52,10 @@ while [[ $# -gt 0 ]]; do
   --phase)
     PHASE="${2:-}"
     shift 2
+    ;;
+  --with-qa)
+    WITH_QA="true"
+    shift
     ;;
   --help | -h)
     usage
@@ -81,9 +88,9 @@ fi
 # Validate --phase if provided
 if [ -n "$PHASE" ]; then
   case "$PHASE" in
-  appraise | implement | review | audit) ;;
+  appraise | implement | review | audit | prescan) ;;
   *)
-    echo "ERROR: Invalid --phase value '$PHASE'. Must be appraise, implement, review, or audit." >&2
+    echo "ERROR: Invalid --phase value '$PHASE'. Must be appraise, implement, review, audit, or prescan." >&2
     exit 1
     ;;
   esac
@@ -324,10 +331,100 @@ select_auto_include() {
   echo ""
 }
 
+# ── Prescan persona set ────────────────────────────────────────────────────────
+
+# For prescan, we fan out multiple agents in parallel — each with a different
+# persona lens. This function emits the complete set of persona file paths.
+select_prescan_set() {
+  local layer="${LAYER:-}"
+  local prescan_personas=()
+
+  # Always include these four lenses
+  prescan_personas+=("architect")
+  prescan_personas+=("analyzer")
+  prescan_personas+=("security")
+  prescan_personas+=("technical-writer")
+
+  # Layer-driven developer persona
+  case "$layer" in
+  FE)
+    prescan_personas+=("frontend-developer")
+    ;;
+  BE | infra)
+    prescan_personas+=("backend-developer")
+    ;;
+  *)
+    # Unknown layer — include both frontend and backend
+    prescan_personas+=("backend-developer")
+    prescan_personas+=("frontend-developer")
+    ;;
+  esac
+
+  # Optional QA engineer
+  if [ "$WITH_QA" = "true" ]; then
+    prescan_personas+=("qa-engineer")
+  fi
+
+  # Emit each persona as a base path, with specializer if available
+  local first=true
+  local persona_set=""
+  for role in "${prescan_personas[@]}"; do
+    local base_path specializer_path persona_entry
+    base_path=$(_persona_path "base/${role}.md")
+    if [ -z "$base_path" ]; then
+      continue # skip missing persona files
+    fi
+
+    persona_entry="$base_path"
+
+    # Attach specializer only for developer personas (backend/frontend)
+    case "$role" in
+    backend-developer | frontend-developer)
+      # Temporarily set LAYER for specializer detection
+      local saved_layer="$LAYER"
+      LAYER="${role%*-developer}" # "backend" or "frontend"
+      # Upper-case for the LAYER variable check in select_specializer
+      if [ "$LAYER" = "backend" ]; then LAYER="BE"; fi
+      if [ "$LAYER" = "frontend" ]; then LAYER="FE"; fi
+      specializer_path=$(_persona_path "$(select_specializer)")
+      LAYER="$saved_layer"
+      if [ -n "$specializer_path" ]; then
+        persona_entry="${persona_entry}|${specializer_path}"
+      fi
+      ;;
+    esac
+
+    if [ "$first" = "true" ]; then
+      persona_set="$persona_entry"
+      first=false
+    else
+      persona_set="${persona_set}
+${persona_entry}"
+    fi
+  done
+
+  echo "$persona_set"
+}
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 main() {
   local base_role base_path specializer specializer_path auto_include auto_path
+
+  # ── Prescan phase: emit persona set for multi-agent fan-out ────────────────
+  if [ "$PHASE" = "prescan" ]; then
+    local persona_set
+    persona_set=$(select_prescan_set)
+    if [ -z "$persona_set" ]; then
+      echo "ERROR: No persona files found for prescan phase" >&2
+      exit 2
+    fi
+    echo "PERSONA_SET=$persona_set"
+    echo "PERSONA_BASE="
+    echo "PERSONA_SPECIALIZER="
+    echo "PERSONA_AUTO_INCLUDE="
+    return
+  fi
 
   base_role=$(select_base)
   base_path=$(_persona_path "base/${base_role}.md")

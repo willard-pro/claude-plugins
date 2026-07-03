@@ -27,7 +27,8 @@ The orchestrator (`ticket-auto`) is a **thin stateless dispatch router** — it 
 
 | Step | Phase | Dispatches | Type |
 |------|-------|------------|------|
-| 1 | Appraise | `ticket-appraise-agent` | Named agent — investigates ticket, scores complexity |
+| 0 | Prescan | `ticket-prescan-agent` | Named agent — auto-invoke before Step 1. Runs `prescan-check.sh` per repo; if stale/missing, spawns prescan to refresh `.ticket-auto/` docs. Non-blocking — failure/skip falls through to appraise Path B. |
+| 1 | Appraise | `ticket-appraise-agent` | Named agent — investigates ticket, scores complexity. Step 3a loads prescan docs (Tier 1: INDEX.md routing via `prescan-route.sh`, Tier 2: claude-mem corpus, Tier 3: wiki fallback). |
 | 1.5 | Reproduce | `ticket-appraise-agent` | Named agent — bug reproduction (bug tickets only) |
 | 2 | Exec | `ticket-appraise-agent` | Named agent — creates artifact, regression guard, adversarial review (complex), verification plan derivation (complex, Step 3.7), verification-readiness gate (Step 3.8) |
 | 2.5 | Gate | `bash gate-check.sh --mode entry` | **Bash only** — artifact existence, complexity coherence, verification readiness (reads derived plan + artifact fallback), autonomy routing |
@@ -52,11 +53,16 @@ The orchestrator (`ticket-auto`) is a **thin stateless dispatch router** — it 
 | Validation | `ticket-env-check`, `validate-linear-config.sh` | Pre-flight checks |
 | Batch ops | `ticket-batch-appraise`, `ticket-batch-verify` | Bulk ticket processing |
 | Audit | `ticket-audit`, `ticket-audit-exec`, `lib/audit-size-check.sh`, `lib/audit-drift-check.sh`, `lib/audit-title-similarity.sh`, `lib/audit-scope-check.sh`, `lib/audit-repro-check.sh`, `lib/audit-ac-testability.sh`, `lib/audit-test-data-check.sh`, `lib/audit-overlap-check.sh`, `lib/audit-comment-guard.sh`, `lib/ticket-audit-exec.sh` | Cross-ticket audit within milestone/parent — detects duplicates, overlaps, empty tickets, goal misalignment, stale tickets, split candidates, wiki misalignment. Two-phase apply agent delegates needs-info to ticket-critique, posts structural comments. |
+| Prescan | `ticket-prescan`, `lib/prescan-check.sh`, `lib/prescan-docs.sh`, `lib/prescan-route.sh`, `lib/prescan-verify.sh`, `lib/prescan-wire-claude-md.sh` | Repo knowledge building — deterministic freshness gate, graph-to-markdown distiller, INDEX.md keyword router, post-scan quality assertions, managed block injection. Produces `.ticket-auto/` docs consumed by appraise Step 3a to skip per-ticket codebase rediscovery. |
 
 ## Architecture: Thin Router Dispatch
 
 ```
 ticket-auto (thin stateless dispatch router)
+  │
+  ├─ Pre-pipeline bash gate (no Claude agent):
+  │   └─ lib/prescan-check.sh       ── freshness gate per repo (before Step 1)
+  │       └─ if stale/missing: flock → spawn ticket-prescan-agent (non-blocking)
   │
   ├─ Bash gates (no Claude agent):
   │   ├─ lib/gate-check.sh          ── entry mode (artifact, complexity, verification readiness, autonomy)
@@ -66,6 +72,7 @@ ticket-auto (thin stateless dispatch router)
   │   └─ lib/detect-resume.sh       ── direct bash invocation (not skill spawn)
   │
   ├─ Named agent spawns (3-step pattern: pre → spawn → capture → post):
+  │   ├─ ticket-prescan-agent        ── Step 0 (pre-pipeline: repo knowledge refresh)
   │   ├─ ticket-appraise-agent       ── Step 1 (appraise) + Step 1.5 (reproduce) + Step 2 (exec: artifact + regression + adversarial + verification plan derivation + readiness gate)
   │   ├─ ticket-gate-reconcile-agent ── Step 3.5 (post-hold comment reconciliation)
   │   ├─ ticket-implement-agent      ── Step 4 (code changes)
@@ -78,6 +85,7 @@ ticket-auto (thin stateless dispatch router)
       └─ PR iteration: ⚠️ → reapprove-check → pr-iterate → re-implement → verify → pr-review (max 3)
 
 Support (invoked independently):
+  ticket-prescan ── manual prescan slash command (also auto-invoked by router)
   ticket-detect-resume ── reads pipeline log (also called as bash by router)
   ticket-retro ── reads pipeline + heartbeat logs
   ticket-overseer ── reads pipeline logs
