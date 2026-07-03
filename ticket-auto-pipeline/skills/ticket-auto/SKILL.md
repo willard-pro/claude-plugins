@@ -347,6 +347,97 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|recovery|info|Resuming from {RESUME_ST
 
 ---
 
+## Prescan gate (Phase 2 — auto-invoke before appraise)
+
+Before entering the dispatch loop, ensure prescan docs are fresh for each repo affected by this ticket. Prescan is an optimization, not a correctness requirement — failures or lock contention MUST NOT block the pipeline.
+
+### Identify affected repos
+
+Primary: Derive the repo(s) this ticket touches from the project CLAUDE.md codebase map and ticket labels/description.
+
+**Safety net — deterministic enumeration:** As a fallback, also scan all repos under `REPOS_ROOT`. The freshness gate is a cheap single-bash-call per repo (~10ms for `fresh`), so overscanning is harmless. This guarantees no repo is missed if the LLM misidentifies the affected set.
+
+```bash
+_derive_slug() { basename "$repo" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g'; }
+
+# Deterministic enumeration of all repos under REPOS_ROOT
+REPOS=()
+while IFS= read -r -d '' gitdir; do
+  REPOS+=("$(dirname "$gitdir")")
+done < <(find "$REPOS_ROOT" -maxdepth 3 -name ".git" -printf '%h\0' 2>/dev/null || true)
+
+# If no repos found, skip prescan entirely (nothing to scan)
+if [ ${#REPOS[@]} -eq 0 ]; then
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|prescan|skip|no repos found under REPOS_ROOT" >> {LOG_FILE}
+fi
+```
+
+### Run freshness gate
+
+For each repo under `REPOS_ROOT`:
+
+```bash
+eval $(bash "$HOME/.claude/skills/lib/prescan-check.sh" "$repo" --repos-root "$REPOS_ROOT")
+```
+
+Branch on status:
+
+- **`fresh`**: Skip. Log nothing — overhead is one bash call per repo.
+- **`stale`, `decayed`, or `missing`**: Attempt prescan spawn.
+- **`missing` with `no_marker`**: First-time scan — full fan-out needed.
+
+### Acquire lock and spawn (if stale/decayed/missing)
+
+Use flock-based concurrency — non-blocking, skip on contention:
+
+```bash
+LOCK_FILE="$REPOS_ROOT/.ticket-auto/$slug/.lock"
+mkdir -p "$(dirname "$LOCK_FILE")"
+exec {lock_fd}>"$LOCK_FILE"
+if flock -n "$lock_fd"; then
+  # Lock acquired — proceed with prescan spawn
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|prescan|waiting|$slug prescan triggered ($PRESCAN_STATUS)" >> {LOG_FILE}
+
+  # Spawn using standard bracketed pattern
+  _prompt=$(spawn_agent_pre \
+    PHASE=MAINTENANCE STEP=prescan TICKET_ID={TICKET-ID} \
+    SKILL=/ticket-prescan REPO="$repo" REPO_SLUG="$slug" CADENCE="$PRESCAN_STATUS" \
+    DESCRIPTION="Refresh prescan docs for $slug ($PRESCAN_STATUS)" \
+    INSTRUCTIONS="Run /ticket-prescan --from-auto on $repo. Cadence: $PRESCAN_STATUS.")
+
+  AGENT_RESULT=$(Agent "$_prompt" \
+    agentType="ticket-prescan-agent" \
+    description="Prescan $slug ($PRESCAN_STATUS)")
+
+  spawn_capture TICKET_ID={TICKET-ID} PHASE=MAINTENANCE RESULT="$AGENT_RESULT"
+
+  if [ $? -eq 0 ]; then
+    spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
+      MSG="$slug prescan complete: $PRESCAN_STATUS → fresh" NEXT_PHASE=APPRAISE
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|prescan|done|$slug prescan complete" >> {LOG_FILE}
+  else
+    FAIL_ACTION=warn-continue spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail \
+      MSG="$slug prescan failed (non-blocking)"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|prescan|fail|$slug prescan failed" >> {LOG_FILE}
+  fi
+
+  flock -u "$lock_fd"
+else
+  # Lock contended — skip, proceed to appraise
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|prescan|skip|$slug locked by another process" >> {LOG_FILE}
+fi
+```
+
+### Token-tracker label
+
+The token-tracker hook labels prescan spawns as `PRESCAN` in the `META|tokens` free-form label field. The spawn-meta file written by `spawn_agent_pre` sets `PHASE=MAINTENANCE` which the hook reads. The `PRESCAN` label is informational only — NOT a resumable pipeline phase.
+
+### Non-blocking invariant
+
+Prescan failure, timeout, or lock contention SHALL NEVER prevent the pipeline from proceeding. On any failure path, log the issue and continue to the dispatch loop. Appraise Step 3a handles missing/stale prescan docs via the fallthrough chain: INDEX.md → claude-mem corpus → WIKI_ROOT → Path B from-scratch.
+
+---
+
 ## Dispatch Loop
 
 After state detection, enter the stateless dispatch loop. Re-run `detect-resume.sh` before each dispatch decision to get current state from the pipeline log.

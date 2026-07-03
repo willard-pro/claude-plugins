@@ -67,6 +67,31 @@ bash ticket-auto-pipeline/validate-linear-config.sh
 
 Use `--auto` or `--semi-auto` for reduced gating (see [Autonomy Modes](#ticket-auto--autonomy-modes)).
 
+## Ticket Templates
+
+The pipeline extracts structured data from Linear ticket descriptions at multiple phases. Poorly written tickets cause the pipeline to guess — increasing appraise time, triggering false verification passes, and burning extra LLM cycles recovering information that should have been in the ticket.
+
+The [`templates/`](templates/) directory provides four ready-to-copy templates for creating tickets that give the pipeline exactly what it needs:
+
+| Template | Label | Use when |
+|----------|-------|----------|
+| [`bug.md`](templates/bug.md) | `bug` | Something that worked before is now broken |
+| [`feature.md`](templates/feature.md) | `feature` | Net-new capability that doesn't exist yet |
+| [`improvement.md`](templates/improvement.md) | `improvement` | Improving or extending an existing feature |
+| [`security.md`](templates/security.md) | `security` | Vulnerability, auth bypass, or data exposure |
+
+**Why it matters for the pipeline:**
+
+| Template field | Pipeline phase that reads it | Without it |
+|----------------|------------------------------|------------|
+| Atomic acceptance criteria | `ticket-verify` — one criterion = one browser assertion | Pipeline expands vague phrases at verify time; risks false passes |
+| Test User | `ticket-verify` pre-flight (Step 1.7a) | Falls back through 4 sources; may pick the wrong user |
+| Navigation Path (click-by-click) | `ticket-verify` — drives Playwright navigation | Direct URL navigation breaks Angular session state |
+| Scope table | `ticket-appraise` — fires multi-service / cross-layer complexity axes | Complexity may be underscored; simple-fix artifact generated for a complex ticket |
+| Test Data Prerequisites | `ticket-verify` pre-flight gate | Verify runs against missing data and fails with misleading errors |
+
+Copy the relevant template into the Linear ticket description before running `/ticket-auto`. The pipeline will parse the structure without needing to infer it.
+
 ## Required Environment
 
 | Variable | Purpose |
@@ -151,6 +176,7 @@ Restart Claude Code after adding MCP servers.
 | `/ticket-verify <id>` | Post-implementation Playwright UAT |
 | `/ticket-pr-review <id>` | PR code review pass |
 | `/ticket-pr-iterate <id>` | Iteration on PR feedback |
+| `/ticket-prescan [path]` | Build durable agent-knowledge docs for a repo |
 
 ### Flow Control
 

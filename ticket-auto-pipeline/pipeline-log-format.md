@@ -54,7 +54,12 @@ Never use `>>` without a trailing newline on the echo string. Always quote `$LOG
 `fetch-ticket` `extract-requirements` `find-pr` `validate-diff` `post-findings` `merge-decision`
 
 ### MAINTENANCE
-`document` `maintenance`
+`document` `maintenance` `prescan`
+
+### PRESCAN (token-label only)
+`PRESCAN` is a free-form token label for prescan spawns — NOT a resumable pipeline phase.
+Prescan writes its own repo-scoped log at `~/.claude/logs/prescan-<repo-slug>.log`.
+The router brackets auto-invoke prescan spawns as `MAINTENANCE|prescan|waiting`/`done` in the ticket log.
 
 ## META entries
 

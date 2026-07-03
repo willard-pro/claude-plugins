@@ -31,7 +31,7 @@ Skills are Claude Code `.md` files with YAML frontmatter. Claude Code runs them 
 
 **Pipeline skills** (the core workflow): `ticket-auto` (thin stateless dispatch router), `ticket-appraise` (investigation + complexity scoring), `ticket-appraise-exec` (artifact creation), `ticket-implement` (code changes), `ticket-verify` (Playwright UAT), `ticket-flow` (state/label mutations), `ticket-pr-review`, `ticket-pr-iterate`, `ticket-setup`, `ticket-retro`.
 
-**Support skills**: `ticket-critique`, `ticket-detect-resume`, `ticket-document`, `ticket-overseer`, `ticket-fleet-controller`, `ticket-batch-appraise`, `ticket-batch-verify`, `ticket-reproduce`, `ticket-gate-reconcile`, `wiki-maintenance`, `nav-hints`, `app-knowledge`.
+**Support skills**: `ticket-critique`, `ticket-detect-resume`, `ticket-document`, `ticket-overseer`, `ticket-fleet-controller`, `ticket-batch-appraise`, `ticket-batch-verify`, `ticket-reproduce`, `ticket-gate-reconcile`, `ticket-prescan`, `wiki-maintenance`, `nav-hints`, `app-knowledge`.
 
 ## Plan/file name matching — no guessing
 
