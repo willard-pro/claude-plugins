@@ -71,7 +71,7 @@ _check_file_basics() {
     return 1
   fi
   local lines
-  lines=$(wc -l < "$path" 2>/dev/null || echo "0")
+  lines=$(wc -l <"$path" 2>/dev/null || echo "0")
   lines=$(echo "$lines" | tr -d ' ')
   if [ "$lines" -lt "$MIN_LINES" ] 2>/dev/null; then
     _violation "$label" "too few lines ($lines < $MIN_LINES)"
@@ -97,7 +97,7 @@ _check_not_placeholder() {
   local path="$1" label="$2"
   if grep -qiE 'no .* data available|no .* data extracted|will be populated|will be generated' "$path" 2>/dev/null; then
     local line_count
-    line_count=$(wc -l < "$path" 2>/dev/null | tr -d ' ')
+    line_count=$(wc -l <"$path" 2>/dev/null | tr -d ' ')
     # If the file is short AND contains placeholder language, it's a placeholder
     if [ "${line_count:-0}" -lt 8 ] 2>/dev/null; then
       _violation "$label" "appears to be placeholder-only"
@@ -157,22 +157,39 @@ main() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-    --docs-dir) docs_dir="${2:-}"; shift 2 ;;
-    --cadence)  cadence="${2:-}"; shift 2 ;;
-    --help|-h)  usage ;;
-    *) echo "Unknown flag: $1" >&2; usage ;;
+    --docs-dir)
+      docs_dir="${2:-}"
+      shift 2
+      ;;
+    --cadence)
+      cadence="${2:-}"
+      shift 2
+      ;;
+    --help | -h) usage ;;
+    *)
+      echo "Unknown flag: $1" >&2
+      usage
+      ;;
     esac
   done
 
-  [ -z "$docs_dir" ] && { echo "ERROR: --docs-dir is required" >&2; usage; }
-  [ ! -d "$docs_dir" ] && { echo "ERROR: docs dir not found: $docs_dir" >&2; exit 2; }
+  [ -z "$docs_dir" ] && {
+    echo "ERROR: --docs-dir is required" >&2
+    usage
+  }
+  [ ! -d "$docs_dir" ] && {
+    echo "ERROR: docs dir not found: $docs_dir" >&2
+    exit 2
+  }
 
   local expected_docs
   case "$cadence" in
-  full|decayed|missing|forced)
-    expected_docs=("${FULL_DOCS[@]}") ;;
-  incremental|stale)
-    expected_docs=("${INCREMENTAL_DOCS[@]}") ;;
+  full | decayed | missing | forced)
+    expected_docs=("${FULL_DOCS[@]}")
+    ;;
+  incremental | stale)
+    expected_docs=("${INCREMENTAL_DOCS[@]}")
+    ;;
   *)
     echo "ERROR: invalid cadence '$cadence'. Use 'full' or 'incremental'." >&2
     exit 2
@@ -193,7 +210,7 @@ main() {
     # Specialized checks
     case "$doc" in
     "security-surfaces.md") _check_security_warning "$path" ;;
-    "INDEX.md")             _check_index_tables "$path" ;;
+    "INDEX.md") _check_index_tables "$path" ;;
     esac
   done
 

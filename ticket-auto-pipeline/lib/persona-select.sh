@@ -372,7 +372,7 @@ select_prescan_set() {
     local base_path specializer_path persona_entry
     base_path=$(_persona_path "base/${role}.md")
     if [ -z "$base_path" ]; then
-      continue  # skip missing persona files
+      continue # skip missing persona files
     fi
 
     persona_entry="$base_path"
@@ -382,7 +382,7 @@ select_prescan_set() {
     backend-developer | frontend-developer)
       # Temporarily set LAYER for specializer detection
       local saved_layer="$LAYER"
-      LAYER="${role%*-developer}"  # "backend" or "frontend"
+      LAYER="${role%*-developer}" # "backend" or "frontend"
       # Upper-case for the LAYER variable check in select_specializer
       if [ "$LAYER" = "backend" ]; then LAYER="BE"; fi
       if [ "$LAYER" = "frontend" ]; then LAYER="FE"; fi

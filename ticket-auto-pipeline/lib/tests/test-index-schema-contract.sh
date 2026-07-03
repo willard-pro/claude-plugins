@@ -12,8 +12,14 @@ GOLDEN="$TEST_DIR/fixtures/golden-INDEX.md"
 PASS=0
 FAIL=0
 
-_pass() { echo "PASS: $1"; ((PASS++)) || true; }
-_fail() { echo "FAIL: $1"; ((FAIL++)) || true; }
+_pass() {
+  echo "PASS: $1"
+  ((PASS++)) || true
+}
+_fail() {
+  echo "FAIL: $1"
+  ((FAIL++)) || true
+}
 
 # ── Test data ──────────────────────────────────────────────────────────────────
 

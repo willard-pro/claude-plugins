@@ -154,7 +154,7 @@ _calc_churn_pct() {
   fi
 
   # Integer percentage: (changed * 100) / total
-  echo $(( (changed_files * 100) / total_files ))
+  echo $(((changed_files * 100) / total_files))
 }
 
 # ── Decay check ───────────────────────────────────────────────────────────────
@@ -195,8 +195,8 @@ _check_decay() {
   now_epoch=$(date -u +%s)
   dive_epoch=$(date -u -d "$last_full_dive_ts" +%s 2>/dev/null || echo "0")
   if [ "$dive_epoch" -gt 0 ] 2>/dev/null; then
-    age_sec=$(( now_epoch - dive_epoch ))
-    age_days=$(( age_sec / 86400 ))
+    age_sec=$((now_epoch - dive_epoch))
+    age_days=$((age_sec / 86400))
     if [ "$age_days" -ge "$DECAY_AGE_DAYS" ] 2>/dev/null; then
       STALENESS_SCORE="$age_days"
       PRESCAN_STATUS="decayed"
@@ -440,7 +440,10 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   done
 
   [ -z "$REPO" ] && usage
-  [ -z "$REPOS_ROOT" ] && { echo "ERROR: --repos-root is required (or set REPOS_ROOT env var)" >&2; exit 2; }
+  [ -z "$REPOS_ROOT" ] && {
+    echo "ERROR: --repos-root is required (or set REPOS_ROOT env var)" >&2
+    exit 2
+  }
 
   if [ ! -d "$REPO" ]; then
     echo "ERROR: repo path does not exist: $REPO" >&2

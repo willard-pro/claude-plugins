@@ -62,7 +62,7 @@ _ensure_dir() {
 _write_if_changed() {
   local path="$1" content="$2"
   local tmp="${path}.tmp.$$"
-  echo "$content" > "$tmp"
+  echo "$content" >"$tmp"
   if [ -f "$path" ] && cmp -s "$tmp" "$path" 2>/dev/null; then
     rm -f "$tmp"
     return 0
@@ -81,7 +81,7 @@ _write_services() {
     _hb_fallback "services" "no cluster data"
     local services_dir="$docs_dir/services"
     _ensure_dir "$services_dir"
-    cat > "$services_dir/.placeholder.md" <<'MD'
+    cat >"$services_dir/.placeholder.md" <<'MD'
 # Services
 
 No gitnexus cluster data available. Services documentation will be generated
@@ -129,7 +129,7 @@ _write_routes() {
 
   if [ ! -f "$routes_file" ] || [ ! -s "$routes_file" ]; then
     _hb_fallback "routes" "no route_map data"
-    cat > "$docs_dir/routes.md" <<'MD'
+    cat >"$docs_dir/routes.md" <<'MD'
 # API Routes
 
 | Route | Method | Handler | Middleware |
@@ -154,7 +154,8 @@ MD
 |-------|--------|---------|------------|
 " ]; then
     _hb_fallback "routes" "empty route data"
-    content=$(cat <<'MD'
+    content=$(
+      cat <<'MD'
 # API Routes
 
 | Route | Method | Handler | Middleware |
@@ -162,7 +163,7 @@ MD
 
 No route data extracted from gitnexus.
 MD
-)
+    )
   fi
 
   _write_if_changed "$docs_dir/routes.md" "$content"
@@ -174,7 +175,7 @@ _write_processes() {
 
   if [ ! -f "$processes_file" ] || [ ! -s "$processes_file" ]; then
     _hb_fallback "processes" "no process data"
-    cat > "$docs_dir/processes.md" <<'MD'
+    cat >"$docs_dir/processes.md" <<'MD'
 # Execution Processes
 
 | Process | Steps | Entry Point |
@@ -252,20 +253,21 @@ _write_index() {
   fi
 
   local content
-  content=$(printf '%s\n' \
-    "# Prescan Index — $(basename "$(dirname "$docs_dir")")" \
-    "" \
-    "## Lookup by Topic" \
-    "" \
-    "| Topic | File |" \
-    "|-------|------|" \
-    "$(printf '%b' "$topic_entries")" \
-    "" \
-    "## Lookup by Service" \
-    "" \
-    "| Service | File |" \
-    "|---------|------|" \
-    "$(printf '%b' "$service_entries")" \
+  content=$(
+    printf '%s\n' \
+      "# Prescan Index — $(basename "$(dirname "$docs_dir")")" \
+      "" \
+      "## Lookup by Topic" \
+      "" \
+      "| Topic | File |" \
+      "|-------|------|" \
+      "$(printf '%b' "$topic_entries")" \
+      "" \
+      "## Lookup by Service" \
+      "" \
+      "| Service | File |" \
+      "|---------|------|" \
+      "$(printf '%b' "$service_entries")"
   )
 
   _write_if_changed "$docs_dir/INDEX.md" "$content"
@@ -285,7 +287,7 @@ _update_meta() {
   local tmp="${meta_path}.tmp.$$"
   jq --argjson sc "$symbol_count" --argjson idx "$indexed" \
     '. + {gitnexus_indexed: $idx, gitnexus_symbol_count: $sc}' \
-    "$meta_path" > "$tmp" 2>/dev/null || true
+    "$meta_path" >"$tmp" 2>/dev/null || true
 
   if [ -s "$tmp" ]; then
     mv "$tmp" "$meta_path"
@@ -303,23 +305,40 @@ main() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
     --repos-root)
-      repos_root="${2:-}"; shift 2 ;;
+      repos_root="${2:-}"
+      shift 2
+      ;;
     --repo-slug)
-      repo_slug="${2:-}"; shift 2 ;;
+      repo_slug="${2:-}"
+      shift 2
+      ;;
     --clusters)
-      clusters_file="${2:-}"; shift 2 ;;
+      clusters_file="${2:-}"
+      shift 2
+      ;;
     --routes)
-      routes_file="${2:-}"; shift 2 ;;
+      routes_file="${2:-}"
+      shift 2
+      ;;
     --processes)
-      processes_file="${2:-}"; shift 2 ;;
+      processes_file="${2:-}"
+      shift 2
+      ;;
     --tools)
-      tools_file="${2:-}"; shift 2 ;;
+      tools_file="${2:-}"
+      shift 2
+      ;;
     --update-meta)
-      update_meta="true"; shift ;;
+      update_meta="true"
+      shift
+      ;;
     --help | -h)
-      usage ;;
+      usage
+      ;;
     *)
-      echo "Unknown flag: $1" >&2; usage ;;
+      echo "Unknown flag: $1" >&2
+      usage
+      ;;
     esac
   done
 

@@ -131,7 +131,7 @@ _route_index() {
         fi
       fi
     fi
-  done < "$index_path"
+  done <"$index_path"
 
   # Emit results
   if [ "$route_count" -gt 0 ]; then
@@ -181,28 +181,58 @@ main() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-    --index)       ARG_INDEX="${2:-}"; shift 2 ;;
-    --ticket-title) ARG_TITLE="${2:-}"; shift 2 ;;
-    --ticket-labels) ARG_LABELS="${2:-}"; shift 2 ;;
-    --ticket-desc)  ARG_DESC="${2:-}"; shift 2 ;;
-    --ticket-text)  ARG_TEXT="${2:-}"; shift 2 ;;
-    --repos-root)   ARG_REPOS_ROOT="${2:-}"; shift 2 ;;
-    --mode)         ARG_MODE="${2:-}"; shift 2 ;;
-    --help|-h)      usage ;;
-    *) echo "Unknown flag: $1" >&2; usage ;;
+    --index)
+      ARG_INDEX="${2:-}"
+      shift 2
+      ;;
+    --ticket-title)
+      ARG_TITLE="${2:-}"
+      shift 2
+      ;;
+    --ticket-labels)
+      ARG_LABELS="${2:-}"
+      shift 2
+      ;;
+    --ticket-desc)
+      ARG_DESC="${2:-}"
+      shift 2
+      ;;
+    --ticket-text)
+      ARG_TEXT="${2:-}"
+      shift 2
+      ;;
+    --repos-root)
+      ARG_REPOS_ROOT="${2:-}"
+      shift 2
+      ;;
+    --mode)
+      ARG_MODE="${2:-}"
+      shift 2
+      ;;
+    --help | -h) usage ;;
+    *)
+      echo "Unknown flag: $1" >&2
+      usage
+      ;;
     esac
   done
 
   case "$ARG_MODE" in
   index)
-    [ -z "$ARG_INDEX" ] && { echo "ERROR: --index is required for mode=index" >&2; usage; }
+    [ -z "$ARG_INDEX" ] && {
+      echo "ERROR: --index is required for mode=index" >&2
+      usage
+    }
     local haystack
     haystack=$(_build_haystack)
     _route_index "$ARG_INDEX" "$haystack"
     return $?
     ;;
   repos)
-    [ -z "$ARG_REPOS_ROOT" ] && { echo "ERROR: --repos-root is required for mode=repos" >&2; usage; }
+    [ -z "$ARG_REPOS_ROOT" ] && {
+      echo "ERROR: --repos-root is required for mode=repos" >&2
+      usage
+    }
     _route_repos "$ARG_REPOS_ROOT"
     return $?
     ;;

@@ -58,17 +58,38 @@ main() {
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
-    --claude-md)      claude_md="${2:-}"; shift 2 ;;
-    --prescan-index)  index_path="${2:-}"; shift 2 ;;
-    --repo-slug)      slug="${2:-}"; shift 2 ;;
-    --dry-run)        dry_run="true"; shift ;;
-    --help|-h)        usage ;;
-    *) echo "Unknown flag: $1" >&2; usage ;;
+    --claude-md)
+      claude_md="${2:-}"
+      shift 2
+      ;;
+    --prescan-index)
+      index_path="${2:-}"
+      shift 2
+      ;;
+    --repo-slug)
+      slug="${2:-}"
+      shift 2
+      ;;
+    --dry-run)
+      dry_run="true"
+      shift
+      ;;
+    --help | -h) usage ;;
+    *)
+      echo "Unknown flag: $1" >&2
+      usage
+      ;;
     esac
   done
 
-  [ -z "$claude_md" ] && { echo "ERROR: --claude-md is required" >&2; usage; }
-  [ -z "$index_path" ] && { echo "ERROR: --prescan-index is required" >&2; usage; }
+  [ -z "$claude_md" ] && {
+    echo "ERROR: --claude-md is required" >&2
+    usage
+  }
+  [ -z "$index_path" ] && {
+    echo "ERROR: --prescan-index is required" >&2
+    usage
+  }
 
   if [ ! -f "$claude_md" ]; then
     echo "ERROR: CLAUDE.md not found: $claude_md" >&2
@@ -96,7 +117,7 @@ main() {
       $0 == start { print block; in_block = 1; next }
       $0 == end   { in_block = 0; next }
       !in_block   { print }
-    ' "$claude_md" > "$tmp" && mv "$tmp" "$claude_md"
+    ' "$claude_md" >"$tmp" && mv "$tmp" "$claude_md"
   else
     # No markers — append block at end
     if [ "$dry_run" = "true" ]; then
@@ -105,8 +126,8 @@ main() {
       return 0
     fi
     cp "$claude_md" "$tmp"
-    echo "" >> "$tmp"
-    echo "$block_text" >> "$tmp"
+    echo "" >>"$tmp"
+    echo "$block_text" >>"$tmp"
     mv "$tmp" "$claude_md"
   fi
 

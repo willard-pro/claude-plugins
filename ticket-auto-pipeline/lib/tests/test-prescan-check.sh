@@ -30,9 +30,9 @@ _run() {
 
 # ── Mock environment ──────────────────────────────────────────────────────────
 
-_ws=""       # workspace dir
-_repo=""     # mock git repo
-_root=""     # mock REPOS_ROOT
+_ws=""   # workspace dir
+_repo="" # mock git repo
+_root="" # mock REPOS_ROOT
 
 _setup() {
   _ws=$(mktemp -d)
@@ -43,10 +43,10 @@ _setup() {
   git init -q
   git config user.email "test@test.com"
   git config user.name "Test"
-  echo "// test source" > "$_repo/main.ts"
+  echo "// test source" >"$_repo/main.ts"
   git add main.ts
   git commit -q -m "initial commit"
-  cd /  # go somewhere safe, not into a temp dir we'll delete
+  cd / # go somewhere safe, not into a temp dir we'll delete
 }
 
 _teardown() {
@@ -74,7 +74,7 @@ _run_check() {
 # Make a commit on the repo (creates source change by touching main.ts)
 _make_commit() {
   cd "$_repo"
-  echo "// change $(date +%s%N)" >> "$_repo/main.ts"
+  echo "// change $(date +%s%N)" >>"$_repo/main.ts"
   git add main.ts
   git commit -q -m "change"
   cd /
@@ -87,7 +87,7 @@ _write_marker() {
   mkdir -p "$meta_dir"
   local fd_sha="${full_dive_sha:-$sha}"
   local fd_ts="${full_dive_ts:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
-  cat > "$meta_dir/meta.json" <<JSONEOF
+  cat >"$meta_dir/meta.json" <<JSONEOF
 {
   "schema_version": "$schema",
   "last_scanned_sha": "$sha",
@@ -103,11 +103,11 @@ _write_docs() {
   local slug="$1"
   local docs_dir="$_root/.ticket-auto/$slug/docs"
   mkdir -p "$docs_dir/services"
-  echo "# Overview" > "$docs_dir/overview.md"
-  echo "# Processes" > "$docs_dir/processes.md"
-  echo "# INDEX" > "$docs_dir/INDEX.md"
-  echo "# Security Surfaces" > "$docs_dir/security-surfaces.md"
-  echo "# Test Service" > "$docs_dir/services/test-service.md"
+  echo "# Overview" >"$docs_dir/overview.md"
+  echo "# Processes" >"$docs_dir/processes.md"
+  echo "# INDEX" >"$docs_dir/INDEX.md"
+  echo "# Security Surfaces" >"$docs_dir/security-surfaces.md"
+  echo "# Test Service" >"$docs_dir/services/test-service.md"
 }
 
 # ── Tests ──────────────────────────────────────────────────────────────────────
@@ -201,10 +201,10 @@ test_integrity_fail_missing_doc_is_stale() {
   # Write all docs except overview.md to trigger integrity:overview.md
   local docs_dir="$_root/.ticket-auto/$slug/docs"
   mkdir -p "$docs_dir/services"
-  echo "# Processes" > "$docs_dir/processes.md"
-  echo "# INDEX" > "$docs_dir/INDEX.md"
-  echo "# Security" > "$docs_dir/security-surfaces.md"
-  echo "# Svc" > "$docs_dir/services/test-service.md"
+  echo "# Processes" >"$docs_dir/processes.md"
+  echo "# INDEX" >"$docs_dir/INDEX.md"
+  echo "# Security" >"$docs_dir/security-surfaces.md"
+  echo "# Svc" >"$docs_dir/services/test-service.md"
   _run_check "$_repo"
   [ "$PRESCAN_STATUS" = "stale" ] && echo "$PRESCAN_REASON" | grep -q "integrity_fail"
   local rc=$?
@@ -220,11 +220,11 @@ test_integrity_fail_empty_doc_is_stale() {
   # Write empty overview.md, all others non-empty
   local docs_dir="$_root/.ticket-auto/$slug/docs"
   mkdir -p "$docs_dir/services"
-  touch "$docs_dir/overview.md"   # empty!
-  echo "# Processes" > "$docs_dir/processes.md"
-  echo "# INDEX" > "$docs_dir/INDEX.md"
-  echo "# Security" > "$docs_dir/security-surfaces.md"
-  echo "# Svc" > "$docs_dir/services/test-service.md"
+  touch "$docs_dir/overview.md" # empty!
+  echo "# Processes" >"$docs_dir/processes.md"
+  echo "# INDEX" >"$docs_dir/INDEX.md"
+  echo "# Security" >"$docs_dir/security-surfaces.md"
+  echo "# Svc" >"$docs_dir/services/test-service.md"
   _run_check "$_repo"
   [ "$PRESCAN_STATUS" = "stale" ] && echo "$PRESCAN_REASON" | grep -q "integrity_fail:overview.md"
   local rc=$?
@@ -238,7 +238,7 @@ test_dirty_working_tree() {
   head=$(git -C "$_repo" rev-parse HEAD)
   _write_marker "$slug" "$head"
   _write_docs "$slug"
-  echo "// dirty change" >> "$_repo/main.ts"
+  echo "// dirty change" >>"$_repo/main.ts"
   _run_check "$_repo"
   [ "$DIRTY" = "true" ]
   local rc=$?
@@ -255,7 +255,7 @@ test_no_source_changes_after_head_move_is_fresh() {
   # Make a change to a file NOT in source globs — add a CI config file
   cd "$_repo"
   mkdir -p .github/workflows
-  echo "name: CI" > .github/workflows/ci.yml
+  echo "name: CI" >.github/workflows/ci.yml
   git add .github/workflows/ci.yml
   git commit -q -m "add CI config"
   cd /
@@ -358,7 +358,7 @@ test_no_sha_in_marker_is_missing() {
   local slug="test-repo"
   local meta_dir="$_root/.ticket-auto/$slug"
   mkdir -p "$meta_dir"
-  cat > "$meta_dir/meta.json" <<'JSONEOF'
+  cat >"$meta_dir/meta.json" <<'JSONEOF'
 {
   "schema_version": "1",
   "last_scanned_at": "2026-01-01T00:00:00Z"
@@ -382,8 +382,8 @@ test_decay_incremental_count() {
   _write_docs "$slug"
   # Simulate 10 prior incremental scans by writing incremental_count into meta.json
   jq '.incremental_scan_count = 10' \
-    "$_root/.ticket-auto/$slug/meta.json" > "$_root/.ticket-auto/$slug/meta.json.tmp" \
-    && mv "$_root/.ticket-auto/$slug/meta.json.tmp" "$_root/.ticket-auto/$slug/meta.json"
+    "$_root/.ticket-auto/$slug/meta.json" >"$_root/.ticket-auto/$slug/meta.json.tmp" &&
+    mv "$_root/.ticket-auto/$slug/meta.json.tmp" "$_root/.ticket-auto/$slug/meta.json"
   _run_check "$_repo"
   [ "$PRESCAN_STATUS" = "decayed" ] && [ "$PRESCAN_REASON" = "decay_incremental_count" ]
   local rc=$?
@@ -399,8 +399,8 @@ test_incremental_count_not_yet_decayed() {
   _write_docs "$slug"
   # Only 3 incremental scans — below threshold of 10
   jq '.incremental_scan_count = 3' \
-    "$_root/.ticket-auto/$slug/meta.json" > "$_root/.ticket-auto/$slug/meta.json.tmp" \
-    && mv "$_root/.ticket-auto/$slug/meta.json.tmp" "$_root/.ticket-auto/$slug/meta.json"
+    "$_root/.ticket-auto/$slug/meta.json" >"$_root/.ticket-auto/$slug/meta.json.tmp" &&
+    mv "$_root/.ticket-auto/$slug/meta.json.tmp" "$_root/.ticket-auto/$slug/meta.json"
   _run_check "$_repo"
   [ "$PRESCAN_STATUS" = "fresh" ]
   local rc=$?
@@ -430,10 +430,10 @@ test_integrity_services_empty() {
   # Create docs but NO services/ dir
   local docs_dir="$_root/.ticket-auto/$slug/docs"
   mkdir -p "$docs_dir"
-  echo "# Overview" > "$docs_dir/overview.md"
-  echo "# Processes" > "$docs_dir/processes.md"
-  echo "# INDEX" > "$docs_dir/INDEX.md"
-  echo "# Security" > "$docs_dir/security-surfaces.md"
+  echo "# Overview" >"$docs_dir/overview.md"
+  echo "# Processes" >"$docs_dir/processes.md"
+  echo "# INDEX" >"$docs_dir/INDEX.md"
+  echo "# Security" >"$docs_dir/security-surfaces.md"
   # services/ dir intentionally not created
   _run_check "$_repo"
   [ "$PRESCAN_STATUS" = "stale" ] && echo "$PRESCAN_REASON" | grep -q "services/"
@@ -449,10 +449,10 @@ test_integrity_services_no_md_files() {
   _write_marker "$slug" "$head"
   local docs_dir="$_root/.ticket-auto/$slug/docs"
   mkdir -p "$docs_dir/services"
-  echo "# Overview" > "$docs_dir/overview.md"
-  echo "# Processes" > "$docs_dir/processes.md"
-  echo "# INDEX" > "$docs_dir/INDEX.md"
-  echo "# Security" > "$docs_dir/security-surfaces.md"
+  echo "# Overview" >"$docs_dir/overview.md"
+  echo "# Processes" >"$docs_dir/processes.md"
+  echo "# INDEX" >"$docs_dir/INDEX.md"
+  echo "# Security" >"$docs_dir/security-surfaces.md"
   # services/ exists but has NO .md files
   _run_check "$_repo"
   [ "$PRESCAN_STATUS" = "stale" ] && echo "$PRESCAN_REASON" | grep -q "services/"
