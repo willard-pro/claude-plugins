@@ -394,13 +394,13 @@ _check_dirty() {
 # ── Emit results ──────────────────────────────────────────────────────────────
 
 _emit() {
-  # Single-quote values so sourcing is safe even if a value contains shell
-  # metacharacters (defense-in-depth — all values are controlled inputs).
-  printf "PRESCAN_STATUS='%s'\n" "${PRESCAN_STATUS:-missing}"
-  printf "PRESCAN_REASON='%s'\n" "${PRESCAN_REASON:-unknown}"
-  printf "CHANGED_FILES='%s'\n" "${CHANGED_FILES:-}"
-  printf "STALENESS_SCORE='%s'\n" "${STALENESS_SCORE:-}"
-  printf "DIRTY='%s'\n" "${DIRTY:-false}"
+  # Use %q for shell-safe output — all values are source/eval-safe even if
+  # they contain spaces, quotes, or metacharacters (defense-in-depth).
+  printf 'PRESCAN_STATUS=%q\n' "${PRESCAN_STATUS:-missing}"
+  printf 'PRESCAN_REASON=%q\n' "${PRESCAN_REASON:-unknown}"
+  printf 'CHANGED_FILES=%q\n' "${CHANGED_FILES:-}"
+  printf 'STALENESS_SCORE=%s\n' "${STALENESS_SCORE:-}"
+  printf 'DIRTY=%s\n' "${DIRTY:-false}"
 }
 
 # ── Main dispatch ─────────────────────────────────────────────────────────────

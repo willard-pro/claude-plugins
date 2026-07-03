@@ -359,8 +359,8 @@ main() {
     _update_meta "$meta_path" "$symbol_count"
   fi
 
-  printf "PRESCAN_DOCS_STATUS='%s'\n" "done"
-  printf "PRESCAN_DOCS_DIR='%s'\n" "$docs_dir"
+  printf 'PRESCAN_DOCS_STATUS=%q\n' "done"
+  printf 'PRESCAN_DOCS_DIR=%q\n' "$docs_dir"
 }
 
 # ── Dispatch ───────────────────────────────────────────────────────────────────
