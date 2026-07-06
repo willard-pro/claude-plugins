@@ -74,6 +74,10 @@ Proactive capture: state a decision, root-cause finding, or "let's park this" in
 - **Low friction or bust**: One-shot capture. Never a multi-question interrogation. Never auto-merge.
 - **Deterministic mutation boundary**: Agents mutate only through `kc-item.sh` (mirrors `flow.sh` pattern).
 
+## Limitations
+
+- **Cross-project view (`/kc --all-projects`)**: Uses live filesystem scanning of sibling repos. Fast for a handful of repos (typical workspace), but may slow noticeably with dozens. This is a scan-based approach, not a prebuilt index — a trade-off that avoids background daemons or push-on-write hooks.
+
 ## License
 
 UNLICENSED — proprietary.
