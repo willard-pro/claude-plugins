@@ -99,10 +99,10 @@ fleet_kill_pipeline() {
   fleet_stop_background "$tid"
 
   # Write intervention log entry
-  _log_pipeline "$log_file" "META" "fleet-intervention" "warn" "KILL|reason=${reason}"
+  _log_pipeline "$log_file" "META" "fleet-intervention" "warn" "KILL; reason=${reason}"
 
   # Write outcome to finalize pipeline
-  _log_pipeline "$log_file" "META" "outcome" "info" "stopped: fleet-kill|${reason}"
+  _log_pipeline "$log_file" "META" "outcome" "info" "stopped: fleet-kill; ${reason}"
 
   # Write heartbeat audit entry
   export HB_LOG_FILE="${hb_file}"

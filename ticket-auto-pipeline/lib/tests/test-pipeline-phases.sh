@@ -350,8 +350,8 @@ test_router_implement_complete_has_plugin_cache_fallback() {
     echo "implement-complete flow.sh resolution missing plugin-cache fallback"
     return 1
   }
-  echo "$block" | grep -q 'hb_retry' || {
-    echo "implement-complete flow.sh resolution no longer swallows failure with hb_retry"
+  echo "$block" | grep -qE 'hb_retry|hb-wrap\.sh' || {
+    echo "implement-complete flow.sh resolution no longer swallows failure with hb_retry/hb-wrap.sh"
     return 1
   }
   echo "$block" | grep -q '|| true' && {
@@ -386,8 +386,8 @@ test_router_retro_condition_2_uses_success_markers() {
     echo "retro condition 2 does not check verify PASS marker"
     return 1
   }
-  echo "$block" | grep -q 'PR-REVIEW|post-findings|done|Verdict: ✅' || {
-    echo "retro condition 2 does not check PR-review verdict marker"
+  echo "$block" | grep -q 'PR-REVIEW|pr-review|done|PASS' || {
+    echo "retro condition 2 does not check PR-review PASS marker"
     return 1
   }
   echo "$block" | grep -q 'META|outcome|info|completed:' && {
@@ -569,7 +569,7 @@ test_router_autonomy_write_is_guarded() {
   local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
   [ -f "$skill_md" ] || return 1
   local block
-  block=$(sed -n '/Log the resolved autonomy mode/,/hb_gate "phase-transition"/p' "$skill_md")
+  block=$(sed -n '/Log the resolved autonomy mode/,/hb-wrap.sh gate "phase-transition"/p' "$skill_md")
   echo "$block" | grep -q '_recorded_autonomy' || {
     echo "autonomy write is not guarded by a recorded-value check"
     return 1
