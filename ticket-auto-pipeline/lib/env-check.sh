@@ -15,6 +15,9 @@
 # errors in this bash version when nounset is active.
 set -eo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$SCRIPT_DIR/error-handler.sh" ] && source "$SCRIPT_DIR/error-handler.sh"
+
 SUMMARY_FILE=""
 SHOW=""
 PROJECT_DIR=""
@@ -24,7 +27,7 @@ for arg in "${@}"; do
   if $_EXPECTING_SUMMARY_PATH; then
     if [[ "$arg" == --* ]]; then
       echo "env-check: --summary-file requires a path argument (got flag: $arg)" >&2
-      exit 1
+      error_exit 12 "env-check: required configuration missing"
     fi
     SUMMARY_FILE="$arg"
     _EXPECTING_SUMMARY_PATH=false
@@ -43,7 +46,7 @@ for arg in "${@}"; do
       PROJECT_DIR="$arg"
     else
       echo "env-check: unexpected argument: $arg" >&2
-      exit 1
+      error_exit 12 "env-check: required configuration missing"
     fi
     ;;
   esac
@@ -51,7 +54,7 @@ done
 
 if $_EXPECTING_SUMMARY_PATH; then
   echo "env-check: --summary-file requires a path argument" >&2
-  exit 1
+  error_exit 12 "env-check: required configuration missing"
 fi
 PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
 
@@ -60,7 +63,7 @@ case "${_MODE:-full}" in
 full | validate) ;;
 *)
   echo "ERROR: unknown --mode '${_MODE:-}'. Valid modes: full, validate" >&2
-  exit 1
+  error_exit 12 "env-check: required configuration missing"
   ;;
 esac
 # ── Color helpers (used by validate mode) ─────────────────────────────────────
@@ -145,7 +148,7 @@ if [ "${_MODE:-full}" = "validate" ]; then
     fail "CLAUDE.md not found at $CLAUDE_MD" "ticket-auto guard should have already verified working directory"
     echo ""
     echo "${RED}${BOLD}Validation failed: ${failures} missing${RESET}"
-    exit 1
+    error_exit 12 "env-check: required configuration missing"
   fi
 
   # REPOS_ROOT
@@ -280,7 +283,7 @@ if [ "${_MODE:-full}" = "validate" ]; then
     exit 0
   else
     echo "${RED}${BOLD}${failures} required value(s) missing. Fix above and re-run.${RESET}"
-    exit 1
+    error_exit 12 "env-check: required configuration missing"
   fi
 fi
 

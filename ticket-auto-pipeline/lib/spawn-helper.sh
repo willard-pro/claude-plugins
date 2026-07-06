@@ -241,13 +241,17 @@ spawn_agent_pre() {
     hb_heartbeat "orchestrator-waiting" "agent ${phase_lower} launched"
     hb_pinger_start "$pinger_stop"
     PINGER_PID=$!
-    spawn_watchdog_start "$watchdog_stop" "$PHASE"
+    spawn_watchdog_start "$watchdog_stop" "$PHASE" 60 "$TICKET_ID"
     WATCHDOG_PID=$!
   fi
 
   # 3. Write phase context file
   if [ -n "$LOG_FILE" ]; then
     echo "${PHASE}|${LOG_FILE}" >"/tmp/ticket-auto-${TICKET_ID}-ctx.txt"
+
+    # 3b. Create empty agent progress file — agents write single-line status
+    # updates here. The watchdog reads it each cycle for agent-progress heartbeats.
+    : >"/tmp/ticket-auto-${TICKET_ID}-progress.txt"
   fi
 
   # 4. Write cl_write handoff
@@ -286,16 +290,31 @@ EOF
 # log entry. Call this after the agent returns.
 #
 # Usage: spawn_agent_post TICKET_ID=<id> RESULT=<done|fail> [MSG=<message>] \
-#          [NEXT_PHASE=<phase>] [PHASE=<phase>] [STEP=<step>]
+#          [VERDICT=<PASS|FAIL|OK|WARN|BLOCK>] \
+#          [NEXT_PHASE=<phase>] [PHASE=<phase>] [STEP=<step>] \
+#          [LOOP_BEARING=true]
 #
 # Or, after calling spawn_agent_pre, the metadata file is auto-read:
 # Usage: spawn_agent_post TICKET_ID=<id> RESULT=<done|fail> [MSG=<message>] \
 #          [NEXT_PHASE=<phase>]
+#
+# VERDICT is optional for non-loop phases. When set, it is prepended to MSG as
+# a canonical token ("${VERDICT} — ${MSG}") so downstream consumers
+# (detect-resume.sh) can grep the token instead of coupling to router free-text
+# prose or emoji bytes.
+#
+# LOOP_BEARING=true marks this phase as participating in a router-managed retry
+# loop (VERIFY, PR-REVIEW iterate/reconcile). When set, either VERDICT= must be
+# supplied OR MSG= must contain "cycle#" — failing loudly if neither is present.
+# This prevents the silent loop-counter freeze that occurs when the router LLM
+# omits the free-text token.
 spawn_agent_post() {
   local TICKET_ID=""
   local RESULT=""
   local MSG=""
+  local VERDICT=""
   local NEXT_PHASE=""
+  local LOOP_BEARING="false"
   local PHASE=""
   local STEP=""
   local LOG_FILE=""
@@ -307,18 +326,41 @@ spawn_agent_post() {
     TICKET_ID=*) TICKET_ID="${arg#TICKET_ID=}" ;;
     RESULT=*) RESULT="${arg#RESULT=}" ;;
     MSG=*) MSG="${arg#MSG=}" ;;
+    VERDICT=*) VERDICT="${arg#VERDICT=}" ;;
     NEXT_PHASE=*) NEXT_PHASE="${arg#NEXT_PHASE=}" ;;
     PHASE=*) PHASE="${arg#PHASE=}" ;;
     STEP=*) STEP="${arg#STEP=}" ;;
     LOG_FILE=*) LOG_FILE="${arg#LOG_FILE=}" ;;
     HB_LOG_FILE=*) HB_LOG_FILE="${arg#HB_LOG_FILE=}" ;;
     CLAUDE_LOG_FILE=*) CLAUDE_LOG_FILE="${arg#CLAUDE_LOG_FILE=}" ;;
+    LOOP_BEARING=*) LOOP_BEARING="${arg#LOOP_BEARING=}" ;;
     *)
       echo "spawn_agent_post: unknown parameter '$arg'" >&2
       return 1
       ;;
     esac
   done
+
+  # Hard-require VERDICT= or cycle#N in MSG for loop-bearing phases.
+  # The router's retry counters (VERIFY_ATTEMPTS, ITERATION, etc.) depend
+  # on these tokens to advance. If the router LLM omits the token, the
+  # counter silently freezes — defeating the 3-attempt safety cap.
+  if [ "$LOOP_BEARING" = "true" ]; then
+    if [ -z "$VERDICT" ] && ! echo "$MSG" | grep -q 'cycle#'; then
+      echo "spawn_agent_post: LOOP_BEARING=true requires VERDICT=<token> or MSG containing 'cycle#'" >&2
+      echo "  Phase: ${PHASE:-unknown}, Step: ${STEP:-unknown}" >&2
+      echo "  This prevents silent loop-counter freeze from an omitted verdict token." >&2
+      return 1
+    fi
+  fi
+
+  case "$VERDICT" in
+  "" | PASS | FAIL | OK | WARN | BLOCK) ;;
+  *)
+    echo "spawn_agent_post: VERDICT must be one of PASS|FAIL|OK|WARN|BLOCK, got '$VERDICT'" >&2
+    return 1
+    ;;
+  esac
 
   # If metadata file exists and explicit params not given, read from it
   local meta_file="/tmp/ticket-auto-${TICKET_ID}-spawn-meta.txt"
@@ -356,6 +398,9 @@ spawn_agent_post() {
     spawn_watchdog_stop "$watchdog_stop"
     hb_pinger_stop "$pinger_stop"
 
+    # Truncate agent progress file — agent has returned
+    : >"/tmp/ticket-auto-${TICKET_ID}-progress.txt"
+
     # Reap background processes — wait for captured PIDs to prevent zombie accumulation.
     # Handles stale PIDs (process already exited): wait on dead PID returns immediately
     # with exit 127, which is acceptable (non-fatal, logged to stderr only in debug).
@@ -392,34 +437,44 @@ spawn_agent_post() {
 
   case "$RESULT" in
   done)
+    local done_msg="${MSG:-agent done}"
+    [ -n "$VERDICT" ] && done_msg="${VERDICT} — ${done_msg}"
     if [ -n "${LOG_FILE:-}" ]; then
-      local done_msg="${MSG:-agent done}"
-      if grep -q "|$phase_upper|${phase_lower:-unknown}|done|" "${LOG_FILE}" 2>/dev/null; then
-        : # already written, skip
+      # Tail-scoped (not whole-file): a whole-file grep would suppress every
+      # done line after the first for loop phases (pr-review iterate, verify
+      # retry), where the same PHASE|STEP recurs across brackets. Matches the
+      # pre-guard's tail-check semantics (see spawn_agent_pre above).
+      local last_line
+      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
+      if echo "$last_line" | grep -q "|$phase_upper|${phase_lower:-unknown}|done|"; then
+        : # already written, skip (back-to-back duplicate)
       else
         _plog "$LOG_FILE" "$phase_upper" "${phase_lower:-unknown}" "done" "${done_msg}"
       fi
     fi
     if [ -n "${HB_LOG_FILE:-}" ]; then
-      hb_heartbeat "agent-returned" "${phase_lower:-agent} done — ${MSG:-}"
+      hb_heartbeat "agent-returned" "${phase_lower:-agent} done — ${done_msg}"
       if [ -n "$NEXT_PHASE" ]; then
         hb_heartbeat "phase-transition" "${PHASE:-} → ${NEXT_PHASE}"
       fi
     fi
     if [ -n "${CLAUDE_LOG_FILE:-}" ]; then
-      cl_write "$phase_upper" "${phase_lower:-unknown}" "done" "${MSG:-agent done}"
+      cl_write "$phase_upper" "${phase_lower:-unknown}" "done" "${done_msg}"
     fi
     ;;
 
   fail)
     local fail_msg="${MSG:-Agent failed}"
+    [ -n "$VERDICT" ] && fail_msg="${VERDICT} — ${fail_msg}"
     local fail_action="${FAIL_ACTION:-stop}"
     local suffix=""
     [ "$fail_action" = "warn-continue" ] && suffix=" — continuing"
 
     if [ -n "${LOG_FILE:-}" ]; then
-      if grep -q "|$phase_upper|${phase_lower:-unknown}|fail|" "${LOG_FILE}" 2>/dev/null; then
-        : # already written, skip
+      local last_line
+      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
+      if echo "$last_line" | grep -q "|$phase_upper|${phase_lower:-unknown}|fail|"; then
+        : # already written, skip (back-to-back duplicate)
       else
         _plog "$LOG_FILE" "$phase_upper" "${phase_lower:-unknown}" "fail" "${fail_msg}${suffix}"
       fi
@@ -488,13 +543,14 @@ spawn_capture() {
 # Backgrounds a watchdog heartbeat loop that emits hb_heartbeat entries every 60s
 # while the orchestrator waits for a sub-agent. Uses a stop-file to signal shutdown.
 #
-# Usage: spawn_watchdog_start <stop_file> <phase_label> [sleep_secs=60]
+# Usage: spawn_watchdog_start <stop_file> <phase_label> [sleep_secs=60] [ticket_id]
 spawn_watchdog_start() {
   [ -z "${HB_LOG_FILE:-}" ] && return 0
 
   local stop_file="$1"
   local phase_label="${2:-unknown}"
   local sleep_secs="${3:-60}"
+  local ticket_id="${4:-}"
 
   rm -f "$stop_file"
 
@@ -504,6 +560,15 @@ spawn_watchdog_start() {
       sleep "$sleep_secs"
       [ -f "$stop_file" ] && break
       hb_heartbeat "watchdog" "alive" "waiting for ${phase_label} agent" || true
+      # Read agent progress file — if non-empty, emit as agent-progress heartbeat
+      if [ -n "$ticket_id" ]; then
+        local prog_file="/tmp/ticket-auto-${ticket_id}-progress.txt"
+        if [ -f "$prog_file" ] && [ -s "$prog_file" ]; then
+          local prog_content
+          prog_content=$(head -1 "$prog_file" 2>/dev/null || true)
+          [ -n "$prog_content" ] && hb_heartbeat "agent-progress" "${prog_content}" || true
+        fi
+      fi
     done
   ) >/dev/null 2>&1 &
   disown

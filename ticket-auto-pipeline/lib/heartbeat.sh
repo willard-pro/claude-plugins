@@ -16,7 +16,7 @@ _HB_CATEGORIES="decision fallback heartbeat api gate retry source"
 # Valid status enum values
 _HB_STATUSES="ok warn fail info fired skip"
 # Schema version
-_HB_SCHEMA_VERSION="1"
+_HB_SCHEMA_VERSION="2"
 
 # ISO-8601 UTC timestamp. Single canonical source — use everywhere instead of
 # inlining `date -u +%Y-%m-%dT%H:%M:%SZ`.
@@ -38,6 +38,13 @@ _source_if_missing() { declare -f "$1" >/dev/null 2>&1 || source "$2"; }
 _plog() {
   local file="$1"
   [ -z "$file" ] && return 0
+
+  # Reject pipe characters in MSG (field 5) — would corrupt pipe-delimited format
+  if [[ "${5:-}" == *"|"* ]]; then
+    echo "_plog: MSG field contains pipe character — entry skipped" >&2
+    return 1
+  fi
+
   _ensure_dir_for "$file"
   echo "$(_iso_now)|${2:-}|${3:-}|${4:-}|${5:-}" >>"$file"
 }

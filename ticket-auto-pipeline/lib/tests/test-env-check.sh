@@ -198,7 +198,8 @@ test_full_mode_ticket_autonomy_warn() {
 test_unknown_mode_exits_1() {
   local exit_code=0
   bash "$LIB_DIR/env-check.sh" --mode=garbage >/dev/null 2>&1 || exit_code=$?
-  [ "$exit_code" -eq 1 ]
+  # Migration to error-handler.sh: E_ENV=12
+  [ "$exit_code" -eq 12 ]
 }
 
 test_summary_file_flag_writes_to_path() {

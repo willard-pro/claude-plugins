@@ -553,6 +553,30 @@ META
   [ "$has_upper" -eq 1 ] && [ "$has_lower" -eq 0 ]
 }
 
+test_post_loop_phase_two_brackets_produce_two_done_lines() {
+  # R4 regression: loop phases (pr-review iterate, verify retry) reuse the same
+  # PHASE|STEP across multiple spawn brackets. A whole-file dedup grep would
+  # suppress the second bracket's done line forever since the first done line
+  # already matches. The post-guard must be tail-scoped like the pre-guard so
+  # each bracket's own done line lands.
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local log_file="$tmpdir/test.log"
+  source "$LIB_DIR/spawn-helper.sh"
+  # Bracket 1: waiting -> done
+  spawn_agent_pre PHASE=PR-REVIEW STEP=pr-review TICKET_ID=TEST-LOOP \
+    SKILL=/ticket-pr-review LOG_FILE="$log_file" >/dev/null 2>&1
+  spawn_agent_post TICKET_ID=TEST-LOOP RESULT=done MSG="Verdict: first pass" >/dev/null 2>&1
+  # Bracket 2 (iteration): waiting -> done, same PHASE|STEP
+  spawn_agent_pre PHASE=PR-REVIEW STEP=pr-review TICKET_ID=TEST-LOOP \
+    SKILL=/ticket-pr-review LOG_FILE="$log_file" >/dev/null 2>&1
+  spawn_agent_post TICKET_ID=TEST-LOOP RESULT=done MSG="Verdict: second pass" >/dev/null 2>&1
+  local done_count
+  done_count=$(grep -c '|PR-REVIEW|pr-review|done|' "$log_file" 2>/dev/null || true)
+  rm -rf "$tmpdir" /tmp/ticket-auto-TEST-LOOP-spawn-meta.txt 2>/dev/null
+  [ "$done_count" -eq 2 ]
+}
+
 test_post_retry_after_fail_writes_new_bracket() {
   # After a fail entry, calling pre again MUST write a new waiting bracket
   # (last line is fail, not waiting — guard must allow the retry)
@@ -581,6 +605,69 @@ META
   fail_count=$(grep -c '|TEST|test_step|fail|' "$log_file" 2>/dev/null || true)
   rm -rf "$tmpdir"
   [ "$waiting_count" -eq 2 ] && [ "$fail_count" -eq 1 ]
+}
+
+# ── VERDICT token tests (R5) ───────────────────────────────────────────────────
+
+test_post_rejects_bad_verdict_value() {
+  source "$LIB_DIR/spawn-helper.sh"
+  spawn_agent_post TICKET_ID=TEST-42 RESULT=done VERDICT=MAYBE >/dev/null 2>&1 && false || true
+}
+
+test_post_done_verdict_prepended_to_log_msg() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local log_file="$tmpdir/test.log"
+  cat >/tmp/ticket-auto-TEST-VERDICT1-spawn-meta.txt <<META
+PHASE=VERIFY
+STEP=verify
+TICKET_ID=TEST-VERDICT1
+LOG_FILE=$log_file
+META
+  source "$LIB_DIR/spawn-helper.sh"
+  spawn_agent_post TICKET_ID=TEST-VERDICT1 RESULT=done VERDICT=PASS MSG="3/3 criteria met" >/dev/null 2>&1
+  local rc=$?
+  local matched
+  matched=$(grep -c '|VERIFY|verify|done|PASS — 3/3 criteria met' "$log_file" 2>/dev/null || true)
+  rm -rf "$tmpdir" /tmp/ticket-auto-TEST-VERDICT1-spawn-meta.txt
+  [ "$rc" -eq 0 ] && [ "$matched" -eq 1 ]
+}
+
+test_post_fail_verdict_prepended_to_log_msg() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local log_file="$tmpdir/test.log"
+  cat >/tmp/ticket-auto-TEST-VERDICT2-spawn-meta.txt <<META
+PHASE=VERIFY
+STEP=verify
+TICKET_ID=TEST-VERDICT2
+LOG_FILE=$log_file
+META
+  source "$LIB_DIR/spawn-helper.sh"
+  spawn_agent_post TICKET_ID=TEST-VERDICT2 RESULT=fail VERDICT=FAIL MSG="2/3 criteria met" >/dev/null 2>&1
+  local matched
+  matched=$(grep -c '|VERIFY|verify|fail|FAIL — 2/3 criteria met' "$log_file" 2>/dev/null || true)
+  rm -rf "$tmpdir" /tmp/ticket-auto-TEST-VERDICT2-spawn-meta.txt
+  [ "$matched" -eq 1 ]
+}
+
+test_post_no_verdict_leaves_msg_unprefixed() {
+  # Non-verdict phases (e.g. document/maintenance) must not gain a stray prefix.
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local log_file="$tmpdir/test.log"
+  cat >/tmp/ticket-auto-TEST-VERDICT3-spawn-meta.txt <<META
+PHASE=MAINTENANCE
+STEP=document
+TICKET_ID=TEST-VERDICT3
+LOG_FILE=$log_file
+META
+  source "$LIB_DIR/spawn-helper.sh"
+  spawn_agent_post TICKET_ID=TEST-VERDICT3 RESULT=done MSG="ai-context.md written" >/dev/null 2>&1
+  local matched
+  matched=$(grep -c '|MAINTENANCE|document|done|ai-context.md written$' "$log_file" 2>/dev/null || true)
+  rm -rf "$tmpdir" /tmp/ticket-auto-TEST-VERDICT3-spawn-meta.txt
+  [ "$matched" -eq 1 ]
 }
 
 # ── spawn_capture tests ────────────────────────────────────────────────────────
@@ -967,7 +1054,12 @@ for fn in \
   test_post_warn_continue_stops_pinger_but_does_not_exit \
   test_pre_duplicate_waiting_suppressed \
   test_post_duplicate_done_suppressed \
+  test_post_rejects_bad_verdict_value \
+  test_post_done_verdict_prepended_to_log_msg \
+  test_post_fail_verdict_prepended_to_log_msg \
+  test_post_no_verdict_leaves_msg_unprefixed \
   test_post_phase_uppercase_in_log \
+  test_post_loop_phase_two_brackets_produce_two_done_lines \
   test_post_retry_after_fail_writes_new_bracket \
   test_capture_rejects_missing_phase \
   test_capture_calls_through_with_all_params \

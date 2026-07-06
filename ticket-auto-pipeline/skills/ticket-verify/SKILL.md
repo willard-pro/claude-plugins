@@ -28,10 +28,10 @@ Parse the arguments before proceeding.
 Follow the pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=VERIFY, FROM_FLAG=none, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_GUARD=true, HAS_PROJECT_CONTEXT=false, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=false
 
 ### Heartbeat points
-- **Browser session**: after starting Playwright, write `hb_api "browser-session" "ok" "browser session established"`; if session fails, write `hb_api "browser-session" "fail" "browser session failed"`
-- **Navigation**: after each page navigation, write `hb_api "browser-navigate" "ok" "navigated to <url>" '{"url":"...","title":"..."}'`
-- **Session resume**: if browser session was lost and resumed, write `hb_fallback "browser-resume" "fired" "session lost, rebuilding plan" '{"reason":"Playwright session lost"}'`
-- **Verdict**: after the final pass/fail determination, write `hb_decision "verification-verdict" "fired" "PASS|FAIL" '{"verdict":"PASS|FAIL","criteria_met":"N","criteria_total":"M"}'`
+- **Browser session**: after starting Playwright, write `hb-wrap.sh api "browser-session" "ok" "browser session established"`; if session fails, write `hb-wrap.sh api "browser-session" "fail" "browser session failed"`
+- **Navigation**: after each page navigation, write `hb-wrap.sh api "browser-navigate" "ok" "navigated to <url>" '{"url":"...","title":"..."}'`
+- **Session resume**: if browser session was lost and resumed, write `hb-wrap.sh fallback "browser-resume" "fired" "session lost, rebuilding plan" '{"reason":"Playwright session lost"}'`
+- **Verdict**: after the final pass/fail determination, write `hb-wrap.sh decision "verification-verdict" "fired" "PASS|FAIL" '{"verdict":"PASS|FAIL","criteria_met":"N","criteria_total":"M"}'`
 
 ### Step dispatch
 **Important:** Steps `browser-session`, `navigate`, and `execute-steps` depend on a live Playwright session that is lost when the server crashes. If `--from-step` is one of these values, fall back to `build-plan` instead — always re-run browser steps from scratch.
@@ -513,7 +513,7 @@ Verification passed on localhost — the implementation is confirmed working. No
    /ticket-flow {TICKET-ID} implement-complete
    _rc=$?
    if [ "$_rc" -ne 0 ]; then
-     hb_retry "flow-sh" "fail" "flow.sh implement-complete failed (exit ${_rc})" \
+     hb-wrap.sh retry "flow-sh" "fail" "flow.sh implement-complete failed (exit ${_rc})" \
        "{\"trigger\":\"implement-complete\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: implement-complete" >> {LOG_FILE}
    fi
@@ -551,7 +551,7 @@ No PR creation. Delegate the state transition:
 /ticket-flow {TICKET-ID} uat-pass
 _rc=$?
 if [ "$_rc" -ne 0 ]; then
-  hb_retry "flow-sh" "fail" "flow.sh uat-pass failed (exit ${_rc})" \
+  hb-wrap.sh retry "flow-sh" "fail" "flow.sh uat-pass failed (exit ${_rc})" \
     "{\"trigger\":\"uat-pass\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: uat-pass" >> {LOG_FILE}
 fi
@@ -758,7 +758,7 @@ If `--env uat`:
 /ticket-flow {TICKET-ID} uat-fail
 _rc=$?
 if [ "$_rc" -ne 0 ]; then
-  hb_retry "flow-sh" "fail" "flow.sh uat-fail failed (exit ${_rc})" \
+  hb-wrap.sh retry "flow-sh" "fail" "flow.sh uat-fail failed (exit ${_rc})" \
     "{\"trigger\":\"uat-fail\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: uat-fail" >> {LOG_FILE}
 fi

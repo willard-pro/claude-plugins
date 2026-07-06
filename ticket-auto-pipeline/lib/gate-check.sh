@@ -38,7 +38,7 @@ FLOW_SH=$(_resolve_flow_sh)
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 # Extract artifact path from pipeline log
-# Checks META|artifact|info|plan: first, falls back to EXEC|exec|done|
+# Checks META|artifact|info|plan: first, falls back to EXEC|create-artifact|done|
 _get_artifact_path() {
   local artifact_path
   # Prefer explicit META|artifact entry
@@ -79,10 +79,10 @@ _get_complexity() {
   echo "${complexity:-simple}"
 }
 
-# Determine artifact type from the pipeline log EXEC|exec|done| line
+# Determine artifact type from the pipeline log EXEC|create-artifact|done| line
 _get_artifact_type() {
   local artifact_line atype
-  artifact_line=$(grep '^[^|]*|EXEC|exec|done|' "$LOG_FILE" 2>/dev/null | tail -1 || true)
+  artifact_line=$(grep '^[^|]*|EXEC|create-artifact|done|' "$LOG_FILE" 2>/dev/null | tail -1 || true)
   if echo "$artifact_line" | grep -q 'openspec'; then
     atype="openspec"
   elif echo "$artifact_line" | grep -q 'simple-fix'; then
@@ -277,10 +277,10 @@ _gate_entry() {
 
     # Count missing prerequisites
     missing_count=0
-    [ "$has_test_user" = "0" ] && ((missing_count++))
-    [ "$has_nav_path" = "0" ] && ((missing_count++))
-    [ "$has_expected_behavior" = "0" ] && ((missing_count++))
-    [ "$has_env_prereqs" = "0" ] && ((missing_count++))
+    [ "$has_test_user" = "0" ] && missing_count=$((missing_count + 1))
+    [ "$has_nav_path" = "0" ] && missing_count=$((missing_count + 1))
+    [ "$has_expected_behavior" = "0" ] && missing_count=$((missing_count + 1))
+    [ "$has_env_prereqs" = "0" ] && missing_count=$((missing_count + 1))
 
     # Hold if 2+ missing (INCOMPLETE threshold from appraise-exec Step 3.8)
     if [ "$missing_count" -ge 2 ] 2>/dev/null; then

@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.13.0 (2026-07-05)
+
+Pipeline integrity, Phase 1 — closes the "agent self-reports done with zero
+independent check" hole for the highest-value case: an implement agent claims
+`done` while its openspec `tasks.md` still has unchecked boxes. Ships
+warn-only, per the `openspec/changes/pipeline-integrity` design — it never
+halts the pipeline in this phase; it only measures.
+
+- Feature: new `lib/return-completeness-check.sh` — deterministic bash gate (0 complete / 1 incomplete / 2 error) that counts unchecked `- [ ]` boxes in a ticket's openspec `tasks.md`, resolved by searching `REPOS_ROOT` for the matching change directory (or via `--tasks-file` directly).
+- Feature: `ticket-auto`'s STEP_4 (Implement) now runs this gate between `spawn_capture` and `spawn_agent_post`, scoped to openspec tickets only (`{ARTIFACT_TYPE}=openspec`) — simple-fix tickets are ungated in this phase (decision D1).
+- Feature: a mismatch logs `|META|gate-warn|info|RETURN_INCOMPLETE — ...` — a new channel distinct from `gate-stop`, so `fleet-detect.sh` never escalates a warn-only mismatch to a human-must-resolve severity.
+- Feature: `retro.sh` gains a `GATE_WARN_TOTAL` counter (and `{GATE_WARN_TOTAL}` in the `ticket-retro` report), separate from `GATE_STOP_TOTAL`, so the false-positive rate can be measured before any future flip to enforce mode. New `templates/RETURN_INCOMPLETE.md` investigation guide.
+- Documented (not yet enforced): the D3 hard contract — once enforce mode ships (Phase 2), the router MUST call `spawn_agent_post RESULT=fail` on any non-zero gate exit, mirroring `gate-check.sh`'s existing contract.
+- Test: added `lib/tests/test-return-completeness.sh` (6 cases: all-checked, unchecked, multi-unchecked count, missing tasks.md, `--tasks-file` bypass, unchecked-item listing), wired into the CI `Makefile`.
+
+## 0.12.13 (2026-07-05)
+
+Router hardening — `ticket-auto`'s thin dispatch router and `detect-resume.sh` coupled
+deterministic greps to unspecified LLM free-text/emoji output in several places; this
+release closes those gaps (14 findings, Increments A–F of the router-hardening plan).
+
+- Fix: `detect-resume.sh` `VERIFY_ATTEMPTS` now counts only terminal `|VERIFY|verify|(done|fail)|` lines instead of any `|VERIFY|*|fail|` sub-step line — a pre-flight hiccup no longer double-counts a verify attempt. (R6)
+- Fix: `MAINTENANCE_FROM` extraction now excludes `|MAINTENANCE|prescan|` lines — the auto-invoked prescan gate no longer gets mistaken for a resumable wiki-maintenance sub-step. (R7)
+- Fix: preflight team-resolution distinguishes a failed Linear teams query from a genuine multi-team result, instead of reporting "multiple teams" on any query failure. (R14)
+- Fix: `implement-complete`'s `flow.sh` resolution now falls back to the plugin-cache path (matching every other resolution site) and reports failure via `hb_retry` instead of silently swallowing it with `|| true` — plugin-cache-only installs no longer drift Linear state silently. (R3)
+- Fix: prescan spawn success is now judged by grepping the captured `AGENT_RESULT` for the skill's completion marker, not by `spawn_capture`'s exit code (which is a log write and always succeeds). (R9)
+- Fix: STEP_6's retro auto-trigger condition 2 now tests for positive success markers (`VERIFY|verify|done|PASS` + `PR-REVIEW|post-findings|done|Verdict: ✅`) instead of the absence of the outcome-write marker, which that same step wrote *after* the check ran — the retro agent no longer spawns on every clean run. (R2)
+- Fix: `spawn_agent_post`'s done/fail idempotency guard is now tail-scoped (compares only the log's last line) instead of whole-file — loop phases (PR-review iteration, verify retry) now get a fresh terminal log line on every cycle instead of only the first. (R4)
+- Feature: `spawn_agent_post` accepts an optional `VERDICT=<PASS|FAIL|OK|WARN|BLOCK>` parameter, prepended to `MSG` as a canonical token (`done|PASS — <text>`). `detect-resume.sh`'s STEP_4_6 routing and `ITERATION` counting now match these tokens instead of router prose / byte-exact emoji bytes. Documented in `pipeline-log-format.md#verdict-tokens`. (R5)
+- Fix: added `VERIFY_LAST` resume hint — if the last terminal VERIFY event is a `fail` with no later `IMPLEMENT|implement|done`, the pipeline dispatches re-implement before re-verifying instead of re-running verify against the same unfixed code. (R8)
+- Feature: auto-merge now reads the confirmed Linear outcome label via a new `META|outcome-label|info|<value>` line (written by `outcome-label-check.sh`) instead of the IMPLEMENT terminal line, which never carried the Smooth/Rough/Hard value. Auto-merge now fires in both `auto` and `semi-auto` autonomy modes (previously `semi-auto` only, and effectively dead code). (R1)
+- Feature: STEP_5_5 (PR comment reconciliation) caps `PR_FEEDBACK_CYCLE` at 3, gate-stopping with `PR_FEEDBACK_EXHAUSTED` on a 4th round of new human comments; `pr-reconcile` now emits a `cycle#N` marker so the counter advances. (R10)
+- Fix: the prescan freshness gate is skipped entirely when resuming at STEP_4 or later — crash recovery mid-implement/verify/PR-review/report no longer pays the per-repo freshness-check cost. (R11)
+- Fix: the `META|autonomy` write is now guarded against a resume silently re-appending or switching modes — an explicit `META|mode-change|warn|` event is logged when a resume's `--mode` flag differs from the recorded autonomy. (R12)
+- Fix: the tmux dashboard pane spawn now checks for an existing `dashboard.py $LOG_FILE` process before splitting a new pane — resuming a pipeline no longer stacks duplicate panes. (R13)
+- Test: added ~70 new tests across `test-pipeline-phases.sh`, `test-detect-resume.sh` (new), `test-spawn-helper.sh`, and `test-outcome-label-check.sh` covering every fix above.
+- Chore: `marketplace.json` version synced from 0.12.11 to 0.12.13 (had drifted behind `plugin.json` and `README.md`).
+
 ## 0.9.1 (2026-06-02)
 
 - Fix: Fleet controller `_flow_mutex_held()` now uses `flock -n` on `./logs/.ticket-flow-{tid}.lock` instead of pidfile `kill -0` on `/tmp/ticket-auto-{tid}-flow.lock` — mutex check was dead code (wrong path, wrong primitive). (F1)

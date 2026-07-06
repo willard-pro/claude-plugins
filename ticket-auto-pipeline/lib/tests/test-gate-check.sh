@@ -85,6 +85,37 @@ FLOWEOF
   resolve_ticket_dir() { echo "${_ws}/${1}--test"; }
 }
 
+# Scaffold default context.md and notes.md so checks 2.5a (ZERO_AC) and
+# 2.5b (BUG_NO_REPRO) get sane defaults. Specific tests override these
+# via _scaffold_context_md / _scaffold_critique after calling this helper.
+_scaffold_default_ticket_files() {
+  local td
+  td=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || echo "$_ws")
+  mkdir -p "$td" 2>/dev/null || true
+
+  # Default context.md: 2 ACs, feature label, has repro steps
+  cat >"${td}/context.md" <<'CTXEOF'
+# Test Ticket
+
+**Labels:** feature
+
+## Description
+1. Test acceptance criterion 1
+2. Test acceptance criterion 2
+
+## Steps to Reproduce
+1. Go to /handover/
+2. Click Send button
+3. See error message
+CTXEOF
+
+  # Default notes.md: complexity only, no critique section
+  cat >"${td}/notes.md" <<'NOTESEOF'
+## Complexity
+**Score:** simple
+NOTESEOF
+}
+
 # Scaffold exec-done pipeline log with configurable params
 _scaffold_exec_done() {
   local complexity="${1:-simple}"
@@ -106,14 +137,17 @@ _scaffold_exec_done() {
   if [ -n "$artifact_path" ]; then
     _plog_raw "META" "artifact" "info" "plan:${artifact_path}"
   fi
-  # Exec done with artifact type hint
-  _plog_raw "EXEC" "exec" "done" "plan:${artifact_type}:${artifact_path}"
+  # Exec done with artifact type (canonical EXEC|create-artifact|done| token)
+  _plog_raw "EXEC" "create-artifact" "done" "${artifact_type}"
 
   # Create artifact file if path is set and not "none"
   if [ -n "$artifact_path" ] && [ "$artifact_path" != "none" ]; then
     mkdir -p "$(dirname "$artifact_path")" 2>/dev/null || true
     touch "$artifact_path" 2>/dev/null || true
   fi
+
+  # Default ticket files for structural gate checks (2.5a, 2.5b)
+  _scaffold_default_ticket_files
 }
 
 # Like _scaffold_exec_done but omits META|artifact|info|plan: and writes
@@ -132,6 +166,9 @@ _scaffold_no_meta_artifact() {
   _plog_raw "APPRAISE" "appraise" "done" "complexity=${complexity}"
   # No META|artifact|info|plan: — forces fallback to EXEC|create-artifact|done|
   _plog_raw "EXEC" "create-artifact" "done" "${artifact_type}"
+
+  # Default ticket files for structural gate checks (2.5a, 2.5b)
+  _scaffold_default_ticket_files
 }
 
 # ── Source gate-check.sh (its main is guarded, functions load into this shell) ──
@@ -172,9 +209,16 @@ test_entry_complexity_artifact_mismatch() {
   _gate_entry
   local rc=$?
 
+  local gate_stop
+  gate_stop=$(grep 'COMPLEXITY_ARTIFACT_MISMATCH' "$LOG_FILE" 2>/dev/null || true)
+
   _teardown
   [ "$rc" -eq 2 ] || {
     echo "expected exit 2, got $rc"
+    return 1
+  }
+  [ -n "$gate_stop" ] || {
+    echo "expected COMPLEXITY_ARTIFACT_MISMATCH gate-stop in log"
     return 1
   }
 }
@@ -1314,6 +1358,60 @@ test_tightened_regex_proper_context_counted() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Increment C — set -e safety: one missing prereq must not abort _gate_entry
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Helper: artifact with exactly 3 of 4 prereqs (nav path missing)
+_scaffold_artifact_three_prereqs() {
+  local path="${1:-${_ws}/simple-fix.md}"
+  cat >"$path" <<'ARTEOF'
+# Simple Fix — Test
+
+## Summary
+Fix the thing.
+
+**User:** test@example.com
+
+## How to implement
+Change line 42 of foo.js.
+
+## Expected Behavior
+- Result appears after save
+
+## Setup
+- Seed data: test fixture needed
+ARTEOF
+}
+
+# 39. One missing prerequisite (nav path) → does NOT abort, evaluates below 2-missing threshold
+test_entry_one_missing_prereq_no_abort() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_critique 75 PASS
+  # No verification plan → fallback to artifact scan
+  _scaffold_artifact_three_prereqs "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local held_line
+  held_line=$(grep 'held: plan missing' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  # With 3 of 4 prereqs found, missing_count=1 < 2 → auto-approve
+  # If set -e fired on ((missing_count++)), _gate_entry would abort before
+  # reaching the 2-missing threshold check.
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0 (auto-approve — 1 missing prereq not threshold), got $rc"
+    return 1
+  }
+  [ -z "$held_line" ] || {
+    echo "unexpected Check 2.6 hold: 1 missing prereq should not trigger 2+ threshold"
+    return 1
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Dispatcher
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1358,7 +1456,8 @@ for fn in \
   test_cross_val_repro_gap_always_held \
   test_cross_val_skipped_without_critique \
   test_tightened_regex_bare_should_not_counted \
-  test_tightened_regex_proper_context_counted; do
+  test_tightened_regex_proper_context_counted \
+  test_entry_one_missing_prereq_no_abort; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

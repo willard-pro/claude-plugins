@@ -13,10 +13,10 @@ If `$LOG_FILE` is set (passed by the `ticket-auto` orchestrator): read `~/.claud
 
 ## Heartbeat (--from-auto)
 
-If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/skills/lib/heartbeat.sh` then write heartbeat entries at these points:
-- **Classification decision**: after significance classification, write `hb_decision "significance-classification" "fired" "{trivial|non-trivial}" '{"reason":"{summary}"}'`
-- **Document written**: after ai-context.md is written, write `hb_decision "document-written" "fired" "ai-context.md generated" '{"patterns":"{N}","decisions":"{N}","significance":"{trivial|non-trivial}"}'`
-- **Document failed**: if generation fails, write `hb_decision "document-failed" "warn" "ai-context.md generation failed" '{"error":"{reason}"}'`
+If `$HB_LOG_FILE` is set (passed by the orchestrator): call `~/.claude/skills/lib/hb-wrap.sh` then write heartbeat entries at these points:
+- **Classification decision**: after significance classification, write `hb-wrap.sh decision "significance-classification" "fired" "{trivial|non-trivial}" '{"reason":"{summary}"}'`
+- **Document written**: after ai-context.md is written, write `hb-wrap.sh decision "document-written" "fired" "ai-context.md generated" '{"patterns":"{N}","decisions":"{N}","significance":"{trivial|non-trivial}"}'`
+- **Document failed**: if generation fails, write `hb-wrap.sh decision "document-failed" "warn" "ai-context.md generation failed" '{"error":"{reason}"}'`
 
 ---
 
@@ -35,6 +35,13 @@ Read `notes.md` from the ticket directory. Extract:
 - `{AFFECTED_REPOS}` — from `## Initial Investigation` (which services were touched)
 - `{KEY_FINDINGS}` — the main bullet points from Initial Investigation
 - `{PLAN_PATH}` — from `## Next Steps` or `## Plan` (path to simple-fix.md or openspec change directory)
+
+Extract CORRECTIONS from notes.md if the implement phase wrote any mismatch feedback:
+
+```bash
+source "$HOME/.claude/skills/lib/corrections-parse.sh"
+eval $(get_corrections "{ticket-dir}/notes.md" 2>/dev/null) || CORRECTION_COUNT=0
+```
 
 ```bash
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|start|Reading notes.md for context" >> "$LOG_FILE"
@@ -125,6 +132,9 @@ Write `ai-context.md` to the ticket directory with this structure:
 
 ## Decisions
 {non-trivial choices made during implementation with one-line rationale. Only include when a real trade-off was evaluated. Skip if none.}
+
+## Corrections from Implementation
+{if CORRECTION_COUNT > 0, list each correction as: `- [{source}] {fact} — {corrected}`; if CORRECTION_COUNT = 0, omit this section entirely}
 ```
 
 **Content guidelines:**
@@ -156,10 +166,10 @@ Trivial change — no architectural impact.
 Append to the ticket's `notes.md` session log:
 
 ```markdown
-- ai-context.md written ({N} patterns, {N} decisions)
+- ai-context.md written ({N} patterns, {N} decisions, {C} corrections)
 ```
 
-Count N as: number of entries in Patterns used section (0 if skipped), number of entries in Decisions section (0 if skipped).
+Count N as: number of entries in Patterns used section (0 if skipped), number of entries in Decisions section (0 if skipped). C is `CORRECTION_COUNT` — the number of corrections carried forward from the implement phase.
 
 ---
 

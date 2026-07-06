@@ -12,7 +12,7 @@ source "$LIB_DIR/linear-api.sh"
 source "$LIB_DIR/ticket-dir.sh"
 source "$LIB_DIR/notes-parse.sh"
 
-CURRENT_SCHEMA_VERSION=1
+CURRENT_SCHEMA_VERSION=2
 
 usage() {
   echo "Usage: $0 <TICKET-ID>" >&2
@@ -44,8 +44,13 @@ if [ -s "$LOG_FILE" ]; then
   schema_line=$(grep '^[^|]*|META|schema|info|' "$LOG_FILE" 2>/dev/null | head -1 || true)
 
   if [ -n "$schema_line" ]; then
-    log_version=$(echo "$schema_line" | cut -d'|' -f5)
-    if [ "$log_version" != "$CURRENT_SCHEMA_VERSION" ]; then
+    log_version=$(echo "$schema_line" | awk -F'|' '{print $5}')
+    if [ "$log_version" = "$CURRENT_SCHEMA_VERSION" ]; then
+      : # Current version — proceed
+    elif [ "$log_version" = "1" ]; then
+      _plog "$LOG_FILE" "META" "schema" "warn" "Schema v1 detected — pipe-safe extraction not guaranteed"
+      hb_gate "schema-check" "warn" "schema v1 accepted with warning — pipe-safe extraction not guaranteed"
+    else
       cat <<EOF
 DETECT_RESUME_RESULT
   RESUME_STEP:        SCHEMA_MISMATCH
@@ -101,10 +106,7 @@ else
     RESUME_STEP="STEP_5"
   elif grep -q '^[^|]*|PR-REVIEW|pr-review|done|' "$LOG_FILE"; then
     # PR merge-status check: merged → STEP_6, open with human comments → STEP_5_5, else → STEP_5
-    _pr_number=$(grep '^[^|]*|PR-REVIEW|checkout-pr|done|' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'|' -f5 || true)
-    if [ -z "$_pr_number" ]; then
-      _pr_number=$(grep -oP 'PR-REVIEW\|pr-review\|done\|PR #\K\d+' "$LOG_FILE" 2>/dev/null | tail -1 || true)
-    fi
+    _pr_number=$(grep '^[^|]*|PR-REVIEW|checkout-pr|done|' "$LOG_FILE" 2>/dev/null | tail -1 | awk -F'|' '{print $5}' || true)
     _gh_available=false
     if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
       _gh_available=true
@@ -160,6 +162,44 @@ else
   fi
 fi
 
+# ── Zombie detection ───────────────────────────────────────────────────────
+# Detect steps stuck on "waiting" where the agent process is gone.
+# A zombie is: status=waiting, timestamp > 5 min old, no agent process alive.
+if [ -s "$LOG_FILE" ]; then
+  _zombie_cutoff=$(date -d "5 minutes ago" +%s 2>/dev/null || echo 0)
+  if [ "$_zombie_cutoff" -gt 0 ]; then
+    while IFS= read -r _zline; do
+      _z_iso=$(echo "$_zline" | awk -F'|' '{print $1}')
+      _z_phase=$(echo "$_zline" | awk -F'|' '{print $2}')
+      _z_step=$(echo "$_zline" | awk -F'|' '{print $3}')
+
+      # Skip non-phase lines (META, schema headers)
+      case "$_z_phase" in APPRAISE | REPRODUCE | EXEC | GATE | IMPLEMENT | VERIFY | PR-REVIEW | MAINTENANCE) ;; *) continue ;; esac
+
+      _z_epoch=$(date -d "$_z_iso" +%s 2>/dev/null || echo 0)
+      if [ "$_z_epoch" -gt 0 ] && [ "$_z_epoch" -lt "$_zombie_cutoff" ]; then
+        # Older than 5 minutes — check for agent process
+        if ! pgrep -f "ticket-auto.*${TICKET_ID}" >/dev/null 2>&1; then
+          _plog "$LOG_FILE" "$_z_phase" "$_z_step" "fail" "zombie-detected: ${_z_phase} ${_z_step}"
+          hb_gate "zombie-detection" "fail" "zombie detected: ${_z_phase}/${_z_step} — re-running phase"
+
+          # Set resume point to re-run the phase
+          case "$_z_phase" in
+          APPRAISE) RESUME_STEP="STEP_1" ;;
+          REPRODUCE) RESUME_STEP="STEP_1_5" ;;
+          EXEC) RESUME_STEP="STEP_2" ;;
+          GATE) RESUME_STEP="STEP_3" ;;
+          IMPLEMENT) RESUME_STEP="STEP_4" ;;
+          VERIFY) RESUME_STEP="STEP_4_5" ;;
+          PR-REVIEW) RESUME_STEP="STEP_5" ;;
+          MAINTENANCE) RESUME_STEP="STEP_5" ;;
+          esac
+        fi
+      fi
+    done < <(grep '|waiting|' "$LOG_FILE" 2>/dev/null || true)
+  fi
+fi
+
 # ── GATE_HELD handling ──────────────────────────────────────────────────────
 
 if [ "$RESUME_STEP" = "GATE_HELD" ]; then
@@ -188,39 +228,48 @@ PR_ITERATE_FROM=""
 if [ -s "$LOG_FILE" ]; then
   APPRAISE_FROM=$(grep '^[^|]*|APPRAISE|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
     grep -v '|APPRAISE|appraise|done|' |
-    tail -1 | cut -d'|' -f3 || true)
+    tail -1 | awk -F'|' '{print $3}' || true)
 
   REPRODUCE_FROM=$(grep '^[^|]*|REPRODUCE|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
     grep -v '|REPRODUCE|reproduce|done|' |
-    tail -1 | cut -d'|' -f3 || true)
+    tail -1 | awk -F'|' '{print $3}' || true)
 
+  # EXEC_FROM extracts the last sub-step within the EXEC phase, excluding the
+  # terminal EXEC|create-artifact|done| marker. The grep -v '|EXEC|exec|done|'
+  # exclusion below is currently a no-op — no producer ever writes "exec" as a
+  # step name; the canonical terminal marker is "create-artifact", which this
+  # grep already excludes via the |EXEC|[^|]*|done| pattern (it only matches
+  # sub-step lines, never the terminal marker). The exclusion is harmless and
+  # retained as a safety net in case a legacy log with the old token shape is
+  # ever re-read.
   EXEC_FROM=$(grep '^[^|]*|EXEC|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
     grep -v '|EXEC|exec|done|' |
-    tail -1 | cut -d'|' -f3 || true)
+    tail -1 | awk -F'|' '{print $3}' || true)
 
   IMPLEMENT_FROM=$(grep '^[^|]*|IMPLEMENT|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
     grep -v '|IMPLEMENT|implement|done|' |
-    tail -1 | cut -d'|' -f3 || true)
+    tail -1 | awk -F'|' '{print $3}' || true)
 
   MAINTENANCE_FROM=$(grep '^[^|]*|MAINTENANCE|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
     grep -v '|MAINTENANCE|maintenance|done|' |
     grep -v '|MAINTENANCE|document|done|' |
-    tail -1 | cut -d'|' -f3 || true)
+    grep -v '|MAINTENANCE|prescan|' |
+    tail -1 | awk -F'|' '{print $3}' || true)
 
   DOCUMENT_FROM=$(grep '^[^|]*|MAINTENANCE|document|done|' "$LOG_FILE" 2>/dev/null |
-    tail -1 | cut -d'|' -f3 || true)
+    tail -1 | awk -F'|' '{print $3}' || true)
 
   VERIFY_FROM=$(grep '^[^|]*|VERIFY|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
     grep -v '|VERIFY|verify|done|' |
-    tail -1 | cut -d'|' -f3 || true)
+    tail -1 | awk -F'|' '{print $3}' || true)
 
   PR_REVIEW_FROM=$(grep '^[^|]*|PR-REVIEW|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
     grep -v '|PR-REVIEW|pr-review|done|' |
     grep -v '|PR-REVIEW|plan-iterate' |
-    tail -1 | cut -d'|' -f3 || true)
+    tail -1 | awk -F'|' '{print $3}' || true)
 
   PR_ITERATE_FROM=$(grep '^[^|]*|PR-REVIEW|iterate-[^|]*|done|' "$LOG_FILE" 2>/dev/null |
-    tail -1 | cut -d'|' -f3 || true)
+    tail -1 | awk -F'|' '{print $3}' || true)
 fi
 
 # ── Reconcile cycle extraction ──────────────────────────────────────────────
@@ -242,6 +291,7 @@ ARTIFACT_TYPE=""
 BRANCH=""
 TICKET_TITLE=""
 VERIFY_ATTEMPTS=0
+VERIFY_LAST=""
 ITERATION=0
 PR_FEEDBACK_CYCLE=0
 
@@ -253,25 +303,50 @@ if [ "$RESUME_STEP" != "STEP_1" ] && [ "$RESUME_STEP" != "GATE_STILL_HELD" ]; th
   fi
 
   if [ -s "$LOG_FILE" ]; then
-    ARTIFACT_TYPE=$(grep '^[^|]*|EXEC|exec|done|' "$LOG_FILE" 2>/dev/null |
-      tail -1 | cut -d'|' -f5- || true)
+    # Actual log line is EXEC|create-artifact|done|{simple-fix|openspec} —
+    # "exec" is not a step name ticket-appraise-exec ever writes.
+    ARTIFACT_TYPE=$(grep '^[^|]*|EXEC|create-artifact|done|' "$LOG_FILE" 2>/dev/null |
+      tail -1 | awk -F'|' '{for(i=5;i<=NF;i++) printf "%s%s", (i>5?"|":""), $i; print ""}' || true)
 
     BRANCH=$(grep '^[^|]*|IMPLEMENT|checkout-branch|done|' "$LOG_FILE" 2>/dev/null |
-      tail -1 | cut -d'|' -f5- || true)
+      tail -1 | awk -F'|' '{for(i=5;i<=NF;i++) printf "%s%s", (i>5?"|":""), $i; print ""}' || true)
 
     TICKET_TITLE=$(grep '^[^|]*|META|title|info|' "$LOG_FILE" 2>/dev/null |
-      tail -1 | cut -d'|' -f5- | sed 's/^[^:]*: //' || true)
+      tail -1 | awk -F'|' '{for(i=5;i<=NF;i++) printf "%s%s", (i>5?"|":""), $i; print ""}' | sed 's/^[^:]*: //' || true)
 
-    AUTONOMY=$(grep '^[^|]*|META|autonomy|info|' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'|' -f5- || true)
+    AUTONOMY=$(grep '^[^|]*|META|autonomy|info|' "$LOG_FILE" 2>/dev/null | tail -1 | awk -F'|' '{for(i=5;i<=NF;i++) printf "%s%s", (i>5?"|":""), $i; print ""}' || true)
     AUTONOMY=${AUTONOMY:-manual}
 
-    VERIFY_ATTEMPTS=$(grep -c '^[^|]*|VERIFY|[^|]*|fail|' "$LOG_FILE" 2>/dev/null || true)
+    # R6: count only terminal FAIL entries — a PASS naturally exits the retry
+    # loop and should not inflate the 3-attempt exhaustion cap. Counting
+    # both fail|done would ambiguously mix success and failure into the limit.
+    VERIFY_ATTEMPTS=$(grep -Ec '^[^|]*\|VERIFY\|verify\|fail\|' "$LOG_FILE" 2>/dev/null || true)
     VERIFY_ATTEMPTS=${VERIFY_ATTEMPTS:-0}
 
-    ITERATION=$(grep -c '^[^|]*|PR-REVIEW|pr-review|done|Verdict.*⚠️' "$LOG_FILE" 2>/dev/null || true)
+    # WARN is the canonical verdict token spawn_agent_post prepends for a
+    # gaps-found PR-review verdict (see pipeline-log-format.md#verdict-tokens).
+    # Matching the token avoids the byte-exact warning-emoji coupling this
+    # replaced (variation-selector bytes made the old prose match brittle).
+    ITERATION=$(grep -c '^[^|]*|PR-REVIEW|pr-review|done|WARN' "$LOG_FILE" 2>/dev/null || true)
     ITERATION=${ITERATION:-0}
     PR_FEEDBACK_CYCLE=$(grep -c '^[^|]*|PR-REVIEW|pr-reconcile|done|cycle#' "$LOG_FILE" 2>/dev/null || true)
     PR_FEEDBACK_CYCLE=${PR_FEEDBACK_CYCLE:-0}
+
+    # R8: distinguish crash-resume-after-verify-fail from a fresh verify dispatch.
+    # If the last terminal VERIFY event is a fail with no later IMPLEMENT|implement|done
+    # line, the pipeline crashed before re-implementing — resuming straight into verify
+    # would re-run against the same broken code. VERIFY_LAST tells STEP_4_5 to dispatch
+    # re-implement first instead.
+    _verify_last_ln=$(grep -nE '^[^|]*\|VERIFY\|verify\|(done|fail)\|' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d: -f1 || true)
+    if [ -n "$_verify_last_ln" ]; then
+      _verify_last_content=$(sed -n "${_verify_last_ln}p" "$LOG_FILE")
+      if echo "$_verify_last_content" | grep -q '|VERIFY|verify|fail|'; then
+        _implement_after=$(awk -F'|' -v n="$_verify_last_ln" 'NR>n && $2=="IMPLEMENT" && $3=="implement" && $4=="done"{f=1; exit} END{print f+0}' "$LOG_FILE")
+        [ "$_implement_after" = "0" ] && VERIFY_LAST="fail"
+      elif echo "$_verify_last_content" | grep -q '|VERIFY|verify|done|PASS'; then
+        VERIFY_LAST="pass"
+      fi
+    fi
   fi
 fi
 
@@ -294,8 +369,11 @@ fi
 #   ARTIFACT_TYPE     — simple-fix|openspec (from EXEC phase completion line)
 #   BRANCH            — git branch name (from IMPLEMENT checkout)
 #   TICKET_TITLE      — human-readable ticket title
-#   VERIFY_ATTEMPTS   — count of verify FAIL entries in pipeline log
-#   ITERATION         — count of PR review ⚠️ verdicts in pipeline log
+#   VERIFY_ATTEMPTS   — count of terminal verify fail entries in pipeline log (PASS excluded)
+#   VERIFY_LAST       — "fail" if the last terminal VERIFY event is a fail with no
+#                       later IMPLEMENT done (crash-resume must re-implement before
+#                       re-verifying); "pass" if PASS; empty otherwise
+#   ITERATION         — count of PR review WARN-verdict (⚠️) entries in pipeline log
 #   RECONCILE_CYCLE   — count of gate reconcile done entries
 #   PR_FEEDBACK_CYCLE — count of pr-reconcile done entries
 
@@ -318,6 +396,7 @@ DETECT_RESUME_RESULT
   BRANCH:             ${BRANCH:-}
   TICKET_TITLE:       ${TICKET_TITLE:-}
   VERIFY_ATTEMPTS:    ${VERIFY_ATTEMPTS}
+  VERIFY_LAST:        ${VERIFY_LAST:-}
   ITERATION:          ${ITERATION}
   RECONCILE_CYCLE:    ${RECONCILE_CYCLE}
   PR_FEEDBACK_CYCLE:  ${PR_FEEDBACK_CYCLE}

@@ -100,20 +100,41 @@ If `$LOG_FILE` is set (passed by the `ticket-auto` orchestrator): read `~/.claud
 ```
 ## Heartbeat (--from-auto)
 
-If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/skills/lib/heartbeat.sh` then write heartbeat entries at these decision points:
+If `$HB_LOG_FILE` is set (passed by the orchestrator): use `~/.claude/skills/lib/hb-wrap.sh` to write heartbeat entries. The wrapper handles sourcing heartbeat.sh internally — no separate source command needed.
+
+Usage: `hb-wrap.sh <category> <event> <status> <msg> [detail]`
 
 <!-- skill-specific heartbeat points go here -->
 ```
 
-Each skill defines its own heartbeat decision points inline. Standard heartbeat functions:
-- `hb_decision <tag> <status> <msg> [json]` — critical decision point (complexity score, verdict, mode selection)
-- `hb_gate <tag> <status> <msg> [json]` — gate check (approval, CI, coherence)
-- `hb_fallback <tag> <status> <msg> [json]` — degraded-path fallback (MCP used instead of bash, missing data)
-- `hb_api <tag> <status> <msg> [json]` — external API call result
-- `hb_retry <tag> <status> <msg> [json]` — retryable failure
-- `hb_heartbeat <tag> <msg> [json]` — informational heartbeat
+Each skill defines its own heartbeat decision points inline. Standard categories:
+- `decision` — critical decision point (complexity score, verdict, mode selection)
+- `gate` — gate check (approval, CI, coherence)
+- `fallback` — degraded-path fallback (MCP used instead of bash, missing data)
+- `api` — external API call result
+- `retry` — retryable failure
+- `heartbeat` — informational heartbeat (status is always "ok", only 3 args needed)
+
+Example: `~/.claude/skills/lib/hb-wrap.sh decision complexity-score fired "simple, axes: cross-layer" '{"score":"simple"}'`
 
 <!-- endif -->
+
+---
+
+## 4b. Agent progress file (--from-auto)
+
+```
+## Agent Progress File (--from-auto)
+
+Before significant operations (editing files, running commands, making decisions), write a single-line status update to `/tmp/ticket-auto-{TICKET_ID}-progress.txt`. The orchestrator's watchdog reads this file each cycle and emits `agent-progress` heartbeats.
+
+Progress updates MUST be a single line under 200 characters. Examples:
+- `implement: editing src/auth/middleware.ts`
+- `verify: navigating to /dashboard, step 3/5`
+- `appraise: running complexity sweep`
+
+Write the progress file via Bash: `echo "implement: editing src/auth/middleware.ts" > /tmp/ticket-auto-{TICKET_ID}-progress.txt`
+```
 
 ---
 
@@ -121,7 +142,7 @@ Each skill defines its own heartbeat decision points inline. Standard heartbeat 
 
 <!-- if {HAS_API_ERROR_CAPTURE} == true -->
 
-After every Linear API call (`get_issue`, `get_comments`, `save_comment`, `get_me`), capture failures in the heartbeat log using `hb_retry`. This is mandatory — never silently discard API errors.
+After every Linear API call (`get_issue`, `get_comments`, `save_comment`, `get_me`), capture failures in the heartbeat log using `~/.claude/skills/lib/hb-wrap.sh retry`. This is mandatory — never silently discard API errors.
 
 **get_issue failure pattern:**
 ```bash
@@ -129,7 +150,7 @@ _raw=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_issue '{TICKET-ID
 _rc=$?
 if [ $_rc -ne 0 ] || ! echo "$_raw" | jq -e '.data.issue' >/dev/null 2>&1; then
   _snippet=$(echo "$_raw" | head -c 200)
-  hb_retry "get-issue" "fail" "get_issue failed (exit ${_rc})" \
+  ~/.claude/skills/lib/hb-wrap.sh retry "get-issue" "fail" "get_issue failed (exit ${_rc})" \
     "{\"command\":\"get_issue\",\"ticket\":\"{TICKET-ID}\",\"exit_code\":\"${_rc}\",\"error_snippet\":\"$(echo "$_snippet" | tr '"' "'"  | tr '\n' ' ')\"}"
   # Handle failure per-step (report or stop as appropriate)
 fi
@@ -143,18 +164,18 @@ bash "$_flow_sh" "{TICKET-ID}" "{trigger}" 2>&1
 _rc=$?
 if [ $_rc -ne 0 ]; then
   _error_type=$( [ $_rc -eq 7 ] && echo "state_assertion" || echo "flow_error" )
-  hb_retry "flow-sh" "fail" "flow.sh {trigger} failed (exit ${_rc})" \
+  ~/.claude/skills/lib/hb-wrap.sh retry "flow-sh" "fail" "flow.sh {trigger} failed (exit ${_rc})" \
     "{\"trigger\":\"{trigger}\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\",\"error_type\":\"${_error_type}\"}"
 fi
 ```
 
-**API telemetry pattern:** For read operations where elapsed time matters, wrap with `hb_api`:
+**API telemetry pattern:** For read operations where elapsed time matters, wrap with `~/.claude/skills/lib/hb-wrap.sh api`:
 ```bash
 _t0=$(date +%s)
 _raw=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_issue '{TICKET-ID}'" 2>&1)
 _rc=$?
 _elapsed=$(( $(date +%s) - _t0 ))
-hb_api "get-issue" "$( [ $_rc -eq 0 ] && echo ok || echo fail )" \
+~/.claude/skills/lib/hb-wrap.sh api "get-issue" "$( [ $_rc -eq 0 ] && echo ok || echo fail )" \
   "get_issue {TICKET-ID} (${_elapsed}s)" \
   "{\"command\":\"get_issue\",\"ticket\":\"{TICKET-ID}\",\"elapsed_s\":\"${_elapsed}\",\"exit_code\":\"${_rc}\"}"
 ```

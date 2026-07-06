@@ -42,14 +42,15 @@ _get_outcome_from_log() {
   echo "$outcome"
 }
 
-# Check if any outcome label (Smooth/Rough/Hard) is present on the ticket
+# Check if any outcome label (Smooth/Rough/Hard) is present on the ticket.
+# Uses jq exact-match to avoid grep -qw's hyphen-as-word-boundary bug
+# (e.g. "Hard" would falsely match "Hard-blocked").
 _has_outcome_label() {
   local issue_json="$1"
-  local labels
-  labels=$(echo "$issue_json" | jq -r '[.labels.nodes[]?.name? // empty] | join(" ")' 2>/dev/null || true)
 
   for ol in $OUTCOME_LABELS; do
-    if echo "$labels" | grep -qw "$ol"; then
+    if echo "$issue_json" | jq -e --arg ol "$ol" \
+      '[.labels.nodes[]?.name? // empty] | index($ol) != null' >/dev/null 2>&1; then
       return 0
     fi
   done
@@ -82,6 +83,7 @@ _outcome_label_check() {
   # If outcome label already present, exit clean
   if _has_outcome_label "$issue_json"; then
     hb_gate "outcome-check" "ok" "outcome label already present" "{\"outcome\":\"$outcome\"}"
+    _plog "$LOG_FILE" "META" "outcome-label" "info" "$outcome"
     return 0
   fi
 
@@ -91,6 +93,9 @@ _outcome_label_check() {
   fi
 
   hb_gate "outcome-check" "ok" "outcome label applied" "{\"outcome\":\"$outcome\"}"
+  # Authoritative source for auto-merge eligibility (ticket-auto/SKILL.md Auto-merge
+  # logic) — the confirmed Linear label, not the implement terminal line.
+  _plog "$LOG_FILE" "META" "outcome-label" "info" "$outcome"
   return 0
 }
 

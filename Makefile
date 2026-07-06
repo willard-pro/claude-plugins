@@ -16,14 +16,18 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-spawn-helper.sh
 	bash ticket-auto-pipeline/lib/tests/test-fleet-detect.sh
 	bash ticket-auto-pipeline/lib/tests/test-fleet-intervene.sh
+	bash ticket-auto-pipeline/lib/tests/test-fleet-dashboard.sh
 	bash ticket-auto-pipeline/lib/tests/test-config.sh
 	bash ticket-auto-pipeline/lib/tests/test-fleet-monitor.sh
+	bash ticket-auto-pipeline/lib/test-persona-select.sh
 	CLAUDE_SKILLS_LIB="$(CURDIR)/ticket-auto-pipeline/lib" \
 	bash ticket-auto-pipeline/lib/tests/test-gate-check.sh
 	CLAUDE_SKILLS_LIB="$(CURDIR)/ticket-auto-pipeline/lib" \
 	bash ticket-auto-pipeline/lib/tests/test-outcome-label-check.sh
 	CLAUDE_SKILLS_LIB="$(CURDIR)/ticket-auto-pipeline/lib" \
 	bash ticket-auto-pipeline/lib/tests/test-pipeline-phases.sh
+	CLAUDE_SKILLS_LIB="$(CURDIR)/ticket-auto-pipeline/lib" \
+	bash ticket-auto-pipeline/lib/tests/test-detect-resume.sh
 	# ticket-audit tests
 	bash ticket-auto-pipeline/lib/tests/test-ticket-audit-split-detection.sh
 	bash ticket-auto-pipeline/lib/tests/test-ticket-audit-drift.sh
@@ -38,6 +42,10 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-prescan-check.sh
 	bash ticket-auto-pipeline/lib/tests/test-prescan-route.sh
 	bash ticket-auto-pipeline/lib/tests/test-index-schema-contract.sh
+	bash ticket-auto-pipeline/lib/tests/test-prescan-docs.sh
+	# pipeline-integrity tests
+	bash ticket-auto-pipeline/lib/tests/test-return-completeness.sh
+	bash ticket-auto-pipeline/lib/tests/test-corrections.sh
 
 test-flow:
 	@echo "=== ticket-flow tests ==="

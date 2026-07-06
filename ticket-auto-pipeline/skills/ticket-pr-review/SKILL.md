@@ -12,9 +12,9 @@ You have been given a ticket ID as the argument (e.g. `WIL-42`). Execute the ful
 If `--from-auto` is present in the arguments, follow the auto-pipeline preamble in `~/.claude/skills/lib/skill-preamble-auto.md` with parameters: TICKET_ID=<from args>, PHASE=PR-REVIEW, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_LOGGING=true, HAS_HEARTBEAT=true. Before starting, source the project context: `source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true`. Otherwise, follow the full pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=PR-REVIEW, FROM_FLAG=none, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=ISSUE_PREFIX,REPOS_ROOT, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
 
 ### Heartbeat points
-- **Requirement extraction**: after extracting requirements from the ticket, write `hb_decision "requirement-extraction" "ok" "extracted N requirements" '{"count":"N"}'`
-- **CI checks**: after checking CI status, write `hb_gate "ci-checks" "ok|fail" "CI status: <state>" '{"state":"<passing|failing>"}'`
-- **Merge decision**: after rendering verdict, write `hb_decision "merge-decision" "fired" "verdict" '{"verdict":"<✅|⚠️|❌>"}'`
+- **Requirement extraction**: after extracting requirements from the ticket, write `hb-wrap.sh decision "requirement-extraction" "ok" "extracted N requirements" '{"count":"N"}'`
+- **CI checks**: after checking CI status, write `hb-wrap.sh gate "ci-checks" "ok|fail" "CI status: <state>" '{"state":"<passing|failing>"}'`
+- **Merge decision**: after rendering verdict, write `hb-wrap.sh decision "merge-decision" "fired" "verdict" '{"verdict":"<✅|⚠️|❌>"}'`
 
 ### Step dispatch
 | `--from-step` value | Skip to | Restore from |
@@ -203,7 +203,7 @@ Delegate to the flow executor:
   /ticket-flow {TICKET-ID} pr-review-fail
   _rc=$?
   if [ "$_rc" -ne 0 ]; then
-    hb_retry "flow-sh" "fail" "flow.sh pr-review-fail failed (exit ${_rc})" \
+    hb-wrap.sh retry "flow-sh" "fail" "flow.sh pr-review-fail failed (exit ${_rc})" \
       "{\"trigger\":\"pr-review-fail\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: pr-review-fail" >> {LOG_FILE}
   fi
@@ -213,14 +213,14 @@ Delegate to the flow executor:
   config=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_project_config")
   uat_url=$(echo "$config" | jq -r '.UAT_URL // empty')
   if [ $? -ne 0 ]; then
-    hb_retry "jq-parse" "fail" "jq extraction failed for UAT_URL" \
+    hb-wrap.sh retry "jq-parse" "fail" "jq extraction failed for UAT_URL" \
       "{\"error_type\":\"jq_parse\",\"field\":\"UAT_URL\"}"
   fi
   if [ -n "$uat_url" ]; then
     /ticket-flow {TICKET-ID} pr-review-pass-uat
     _rc=$?
     if [ "$_rc" -ne 0 ]; then
-      hb_retry "flow-sh" "fail" "flow.sh pr-review-pass-uat failed (exit ${_rc})" \
+      hb-wrap.sh retry "flow-sh" "fail" "flow.sh pr-review-pass-uat failed (exit ${_rc})" \
         "{\"trigger\":\"pr-review-pass-uat\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
       echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: pr-review-pass-uat" >> {LOG_FILE}
     fi
@@ -228,7 +228,7 @@ Delegate to the flow executor:
     /ticket-flow {TICKET-ID} pr-review-pass-done
     _rc=$?
     if [ "$_rc" -ne 0 ]; then
-      hb_retry "flow-sh" "fail" "flow.sh pr-review-pass-done failed (exit ${_rc})" \
+      hb-wrap.sh retry "flow-sh" "fail" "flow.sh pr-review-pass-done failed (exit ${_rc})" \
         "{\"trigger\":\"pr-review-pass-done\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
       echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: pr-review-pass-done" >> {LOG_FILE}
     fi
@@ -302,7 +302,7 @@ Post the same message as a PR comment.
 ```bash
 gh api "repos/{owner}/{repo}/pulls/{number}/merge" -X PUT -f merge_method=squash 2>&1 || {
   echo "ERROR: REST API merge failed for PR #{number}" >&2
-  hb_retry "pr-merge" "fail" "REST API merge failed for PR #{number}" \
+  hb-wrap.sh retry "pr-merge" "fail" "REST API merge failed for PR #{number}" \
     "{\"pr_number\":\"{number}\",\"owner\":\"{owner}\",\"repo\":\"{repo}\"}"
   [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|merge-decision|fail|gh api merge failed for PR #{number}" >> "$LOG_FILE"
 }

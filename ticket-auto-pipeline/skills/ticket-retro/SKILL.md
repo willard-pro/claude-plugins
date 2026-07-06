@@ -42,6 +42,7 @@ If `retro.sh` exits non-zero, report the stderr message and stop — no logs wer
 Parse the JSON output into the following variables:
 - `{FAILURE_HISTOGRAM}` — object, keyed by error code, values are counts
 - `{GATE_STOP_TOTAL}` — total gate-stop events
+- `{GATE_WARN_TOTAL}` — total gate-warn events (e.g. `RETURN_INCOMPLETE` in Phase 1 warn-only mode); tracked separately since these never halt the pipeline — used to measure false-positive rate before a warn-only gate flips to enforce
 - `{COMPLEXITY_PREDICTIONS}` — array of `{ticket, declared, actual, actual_source}`
 - `{COMPLEXITY_ACCURACY}` — float 0–1
 - `{LOGS_SCANNED}`, `{LOGS_SKIPPED}`, `{LOGS_WITH_FAILURES}` — counts. `LOGS_SCANNED` counts only newly-scanned logs (not cursor-skipped). `LOGS_SKIPPED` counts logs that were skipped because their mtime matched the cursor.
@@ -157,6 +158,7 @@ The template identifies which skill file(s) to inspect. Read the relevant sectio
 | `APPROVAL_REVOKED` | `ticket-auto/SKILL.md` (Step 5d), `ticket-pr-iterate/SKILL.md` |
 | `REMEDIATION_BRIEF_TRUNCATED` | `ticket-verify/SKILL.md`, `ticket-implement/SKILL.md` |
 | `PR_REVIEW_VERDICT_UNPARSEABLE` | `ticket-pr-review/SKILL.md` |
+| `RETURN_INCOMPLETE` | `ticket-auto/SKILL.md` (STEP_4), `lib/return-completeness-check.sh` |
 
 For the `complexity-drift` meta-code (accuracy < 0.5): inspect `ticket-appraise/SKILL.md`.
 
@@ -383,6 +385,7 @@ Report to the user:
 **Logs scanned:** {LOGS_SCANNED}
 **Logs with failures:** {LOGS_WITH_FAILURES}
 **Gate-stop events:** {GATE_STOP_TOTAL}
+**Gate-warn events:** {GATE_WARN_TOTAL}
 **Complexity accuracy:** {COMPLEXITY_ACCURACY}
 
 **Proposal written:** ~/.claude/state/ticket-retro/proposals/{YYYY-MM-DD}-retro.md

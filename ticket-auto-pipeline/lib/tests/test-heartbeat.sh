@@ -508,6 +508,50 @@ test_pinger_start_removes_stale_stop_file() {
   [ "$count" -ge 2 ]
 }
 
+# ── _plog pipe rejection tests ─────────────────────────────────────────────────
+
+test__plog_rejects_pipe_in_msg() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  local exit_code=0
+  (
+    source "$LIB_DIR/heartbeat.sh"
+    _plog "$tmpfile" "TEST" "step1" "done" "msg|with|pipe"
+  ) 2>/dev/null || exit_code=$?
+  rm -f "$tmpfile"
+  [ "$exit_code" -ne 0 ]
+}
+
+test__plog_accepts_clean_msg() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  rm -f "$tmpfile"
+  local exit_code=0
+  (
+    source "$LIB_DIR/heartbeat.sh"
+    _plog "$tmpfile" "TEST" "step1" "done" "clean message"
+  ) || exit_code=$?
+  local written=false
+  [ -s "$tmpfile" ] && written=true
+  rm -f "$tmpfile"
+  [ "$exit_code" -eq 0 ] && $written
+}
+
+test__plog_accepts_empty_msg() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  rm -f "$tmpfile"
+  local exit_code=0
+  (
+    source "$LIB_DIR/heartbeat.sh"
+    _plog "$tmpfile" "TEST" "step1" "done" ""
+  ) || exit_code=$?
+  local written=false
+  [ -s "$tmpfile" ] && written=true
+  rm -f "$tmpfile"
+  [ "$exit_code" -eq 0 ] && $written
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -542,7 +586,10 @@ for fn in \
   test_hb_write_rejects_hb_category \
   test_hb_write_hb_category_diagnostic \
   test_hb_validate_line_rejects_hb_category \
-  test_hb_write_bash_source_warns_outside_caller; do
+  test_hb_write_bash_source_warns_outside_caller \
+  test__plog_rejects_pipe_in_msg \
+  test__plog_accepts_clean_msg \
+  test__plog_accepts_empty_msg; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

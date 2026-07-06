@@ -3,6 +3,12 @@
 # Single match: emits path on stdout, exit 0.
 # Multiple matches: exits non-zero, lists all matches on stderr.
 # No match: exits 1, empty stdout.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/error-handler.sh" ]; then
+  source "$SCRIPT_DIR/error-handler.sh"
+fi
+
 resolve_ticket_dir() {
   local ticket_id="$1"
   local root="${2:-.}"
@@ -12,7 +18,8 @@ resolve_ticket_dir() {
   local count
   count=$(echo "$matches" | grep -c . 2>/dev/null || true)
   if [ -z "$matches" ] || [ "$count" -eq 0 ]; then
-    return 1
+    hb_heartbeat "ticket-dir-not-found" "no workspace directory for ${ticket_id}" 2>/dev/null || true
+    error_return 12 "ticket directory not found for ${ticket_id}"
   elif [ "$count" -eq 1 ]; then
     echo "$matches"
     return 0
@@ -56,5 +63,5 @@ resolve_plan_path() {
     fi
   fi
 
-  return 1
+  error_return 12 "plan path not resolved for ${ticket_dir}"
 }

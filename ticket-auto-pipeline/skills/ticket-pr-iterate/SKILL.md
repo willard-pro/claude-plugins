@@ -12,12 +12,12 @@ You have been given a ticket ID as the argument (e.g. `WIL-42`). Execute the ste
 If `--from-auto` is present in the arguments, follow the auto-pipeline preamble in `~/.claude/skills/lib/skill-preamble-auto.md` with parameters: TICKET_ID=<from args>, PHASE=PR-REVIEW, HAS_LINEAR_ACCESS=false, HAS_LOGGING=true, HAS_HEARTBEAT=true. Before starting, source the project context: `source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true`. Otherwise, follow the full pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=PR-REVIEW, FROM_FLAG=none, HAS_LINEAR_ACCESS=false, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=REPOS_ROOT,ISSUE_PREFIX, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
 
 ### Heartbeat points
-- **Findings source**: after locating review findings, write `hb_decision "findings-source" "info" "findings from {PR|session-file}" '{"source":"{pr|session-file}"}'`
-- **Session fallback**: if no PR found and falling back to pr-review-session.md, write `hb_fallback "pr-review-data" "fired" "no PR found, using session file" '{"reason":"gh pr view returned no results"}'
-- **Verdict already passing**: if verdict is ✅ (no gaps), write `hb_decision "iteration-skip" "info" "PR review already passed, no iteration needed"`
-- **Iteration guard**: if N > 3 (too many iterations), write `hb_gate "iteration-limit" "fail" "iteration #{N} exceeds limit" '{"iterations":"{N}"}'`
-- **Gap count**: after parsing gaps, write `hb_decision "gap-count" "fired" "{N} gaps to address" '{"count":"{N}"}'`
-- **Artifact updated**: after updating the plan artifact, write `hb_decision "plan-updated" "fired" "appended PR Review #{N} to {ARTIFACT}" '{"artifact":"{ARTIFACT}","iteration":"{N}"}'`
+- **Findings source**: after locating review findings, write `hb-wrap.sh decision "findings-source" "info" "findings from {PR|session-file}" '{"source":"{pr|session-file}"}'`
+- **Session fallback**: if no PR found and falling back to pr-review-session.md, write `hb-wrap.sh fallback "pr-review-data" "fired" "no PR found, using session file" '{"reason":"gh pr view returned no results"}'
+- **Verdict already passing**: if verdict is ✅ (no gaps), write `hb-wrap.sh decision "iteration-skip" "info" "PR review already passed, no iteration needed"`
+- **Iteration guard**: if N > 3 (too many iterations), write `hb-wrap.sh gate "iteration-limit" "fail" "iteration #{N} exceeds limit" '{"iterations":"{N}"}'`
+- **Gap count**: after parsing gaps, write `hb-wrap.sh decision "gap-count" "fired" "{N} gaps to address" '{"count":"{N}"}'`
+- **Artifact updated**: after updating the plan artifact, write `hb-wrap.sh decision "plan-updated" "fired" "appended PR Review #{N} to {ARTIFACT}" '{"artifact":"{ARTIFACT}","iteration":"{N}"}'`
 
 ### Step dispatch
 | `--from-step` value | Skip to | Restore from |
@@ -101,7 +101,7 @@ _review_body=$(gh pr view {PR_NUMBER} --json comments --jq '.comments[] | select
 _rc=$?
 echo "$_review_body"
 if [ $_rc -ne 0 ] || [ -z "$_review_body" ]; then
-  hb_retry "jq-parse" "fail" "gh --jq extraction failed for PR review comment" \
+  hb-wrap.sh retry "jq-parse" "fail" "gh --jq extraction failed for PR review comment" \
     "{\"error_type\":\"jq_parse\",\"command\":\"gh pr view\"}"
 fi
 ```
@@ -231,7 +231,7 @@ Delegate to the flow executor:
 /ticket-flow {TICKET-ID} pr-iterate
 _rc=$?
 if [ "$_rc" -ne 0 ]; then
-  hb_retry "flow-sh" "fail" "flow.sh pr-iterate failed (exit ${_rc})" \
+  hb-wrap.sh retry "flow-sh" "fail" "flow.sh pr-iterate failed (exit ${_rc})" \
     "{\"trigger\":\"pr-iterate\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: pr-iterate" >> {LOG_FILE}
 fi

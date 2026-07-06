@@ -216,7 +216,8 @@ test_graphql_error_in_body_exits_2() {
     # command substitution, so test at the linear_graphql level.
     linear_graphql '{\"query\":\"query{viewer{id}}\"}'
   " 2>/dev/null || exit_code=$?
-  [ "$exit_code" -eq 2 ]
+  # Migration to error-handler.sh: E_LINEAR_API=10
+  [ "$exit_code" -eq 10 ]
 }
 
 test_retry_three_503s_exits_2() {
@@ -228,7 +229,8 @@ test_retry_three_503s_exits_2() {
     LINEAR_RETRY_DELAYS='0 0 0' \
       linear_graphql '{\"query\":\"query{viewer{id}}\"}'
   " 2>/dev/null || exit_code=$?
-  [ "$exit_code" -eq 2 ]
+  # Migration to error-handler.sh: E_LINEAR_API=10
+  [ "$exit_code" -eq 10 ]
 }
 
 test_retry_503_then_200_succeeds() {

@@ -12,15 +12,15 @@ You have been given a ticket ID as the argument (e.g. `WIL-42`). The investigati
 If `--from-auto` is present in the arguments, follow the auto-pipeline preamble in `~/.claude/skills/lib/skill-preamble-auto.md` with parameters: TICKET_ID=<from args>, PHASE=EXEC, HAS_LINEAR_ACCESS=true, LINEAR_OPS=save_comment,list_issues, HAS_LOGGING=true, HAS_HEARTBEAT=true. Before starting, source the project context: `source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true`. Otherwise, follow the full pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=EXEC, FROM_FLAG=none, HAS_LINEAR_ACCESS=true, LINEAR_OPS=save_comment,list_issues, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=REPOS_ROOT,ISSUE_PREFIX,BE_SERVICES,BE_TEST_CMD, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
 
 ### Heartbeat points
-- **Complexity read**: after extracting complexity from notes.md, write `hb_decision "complexity-read" "info" "complexity: {simple|complex}" '{"score":"{COMPLEXITY}"}'`
-- **Artifact created**: after writing simple-fix.md or openspec change, write `hb_decision "artifact-created" "fired" "created {simple-fix|openspec}" '{"type":"{simple-fix|openspec}"}'`
-- **Coherence gate**: after complexity-coherence check, write `hb_gate "coherence-check" "ok|fail" "complexity-artifact match|mismatch" '{"declared":"{COMPLEXITY}","artifact":"{simple-fix|openspec}"}'`
-- **Regression verdict**: after the regression guard, write `hb_decision "regression-verdict" "fired" "{CONFLICT|ADJACENT|SUPERSEDES|clear}" '{"verdict":"{CONFLICT|ADJACENT|SUPERSEDES|clear}"}'`
-- **Linear fallback**: if LINEAR_API_KEY is unset and MCP fallback is used for posting the comment, write `hb_fallback "linear-api" "fired" "using MCP Linear tools" '{"reason":"LINEAR_API_KEY unset"}'`
-- **Adversarial review**: after adversarial agent completes, write `hb_decision "adversarial-review" "fired" "{PASS|WARNINGS|BLOCKED}" '{"verdict":"{PASS|WARNINGS|BLOCKED}","issues":"{N}"}'`
-- **Verify plan derived**: after Step 3.7 completes, write `hb_gate "verify-plan-derived" "{ok|fail}" "{CLEAR|INSUFFICIENT_INFO}" '{"criteria":"{N}","verifiable":"{M}"}'`
-- **Re-appraisal skip**: if re-appraisal detected no changes and steps 5-6 are skipped, write `hb_decision "re-appraisal-skip" "info" "no changes detected, skipping Linear post"`
-- **Verification readiness**: after Step 3.8, write `hb_gate "verify-readiness" "{ok|fail}" "{CLEAR|WARNINGS|INCOMPLETE}" '{"missing":"{N}"}'`
+- **Complexity read**: after extracting complexity from notes.md, write `hb-wrap.sh decision "complexity-read" "info" "complexity: {simple|complex}" '{"score":"{COMPLEXITY}"}'`
+- **Artifact created**: after writing simple-fix.md or openspec change, write `hb-wrap.sh decision "artifact-created" "fired" "created {simple-fix|openspec}" '{"type":"{simple-fix|openspec}"}'`
+- **Coherence gate**: after complexity-coherence check, write `hb-wrap.sh gate "coherence-check" "ok|fail" "complexity-artifact match|mismatch" '{"declared":"{COMPLEXITY}","artifact":"{simple-fix|openspec}"}'`
+- **Regression verdict**: after the regression guard, write `hb-wrap.sh decision "regression-verdict" "fired" "{CONFLICT|ADJACENT|SUPERSEDES|clear}" '{"verdict":"{CONFLICT|ADJACENT|SUPERSEDES|clear}"}'`
+- **Linear fallback**: if LINEAR_API_KEY is unset and MCP fallback is used for posting the comment, write `hb-wrap.sh fallback "linear-api" "fired" "using MCP Linear tools" '{"reason":"LINEAR_API_KEY unset"}'`
+- **Adversarial review**: after adversarial agent completes, write `hb-wrap.sh decision "adversarial-review" "fired" "{PASS|WARNINGS|BLOCKED}" '{"verdict":"{PASS|WARNINGS|BLOCKED}","issues":"{N}"}'`
+- **Verify plan derived**: after Step 3.7 completes, write `hb-wrap.sh gate "verify-plan-derived" "{ok|fail}" "{CLEAR|INSUFFICIENT_INFO}" '{"criteria":"{N}","verifiable":"{M}"}'`
+- **Re-appraisal skip**: if re-appraisal detected no changes and steps 5-6 are skipped, write `hb-wrap.sh decision "re-appraisal-skip" "info" "no changes detected, skipping Linear post"`
+- **Verification readiness**: after Step 3.8, write `hb-wrap.sh gate "verify-readiness" "{ok|fail}" "{CLEAR|WARNINGS|INCOMPLETE}" '{"missing":"{N}"}'`
 
 ### Step dispatch
 | `--from-step` value | Skip to | Restore from |
@@ -106,6 +106,13 @@ Branch on `{COMPLEXITY}` extracted from notes.md:
 
 Create `simple-fix.md` in the ticket directory. Do not run `opsx:propose`.
 
+**Completion Checklist requirement:** The `## Completion Checklist` section is
+machine-validated by the return-completeness gate after implementation. Every
+`- [ ]` item must map to a ticket acceptance criterion. The implement agent must
+check these off as work is completed. If the ticket description has no explicit
+ACs, derive checklist items from the ticket's core behavioral requirements —
+one independently verifiable outcome per item.
+
 ```markdown
 # Simple Fix — {ISSUE-ID}
 
@@ -120,6 +127,15 @@ Create `simple-fix.md` in the ticket directory. Do not run `opsx:propose`.
 {Concrete step-by-step instructions derived from the investigation. Be specific enough
 that an implementer can follow without re-reading the ticket. Include method names,
 field names, enum values, config keys, etc. where known.}
+
+## Completion Checklist
+{For each acceptance criterion in the ticket description:
+- Start the line with `- [ ]` followed by the criterion in plain language
+- If no explicit ACs exist, derive checklist items from the ticket's core requirements
+- Each item must be independently verifiable — one concrete outcome per line
+Examples:
+- [ ] AC-1: User can initiate a handover from the matter detail page
+- [ ] AC-2: Error message displayed when handover fails due to missing attorney assignment}
 
 ## Constraints and gotchas
 {Anything that could go wrong: ordering dependencies, side effects, things NOT to change.
@@ -168,6 +184,7 @@ Insert this task after the main implementation tasks and before any commit/push 
 }
 ```
 
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|plan:{artifact_path}" >> "$LOG_FILE"
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|create-artifact|done|{simple-fix|openspec}" >> "$LOG_FILE"
 cl_write RETRO hint info "artifact path derived from TICKET_DIR={TICKET_DIR} — verify path resolution works when WORKSPACE_ROOT differs from default"
 
@@ -535,9 +552,9 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|verify-plan-derived|skip|Wiki write fa
 ### Heartbeat
 
 After derivation completes:
-- **Success (all criteria verifiable):** `hb_gate "verify-plan-derived" "ok" "CLEAR" '{"criteria":"{N}","verifiable":"{M}"}'`
-- **Partial with override (interactive only):** `hb_gate "verify-plan-derived" "ok" "OVERRIDE" '{"criteria":"{N}","verifiable":"{M}","override":"true"}'`
-- **Push-back (any criterion unverifiable, auto mode):** `hb_gate "verify-plan-derived" "fail" "INSUFFICIENT_INFO" '{"criteria":"{N}","verifiable":"{M}"}'`
+- **Success (all criteria verifiable):** `hb-wrap.sh gate "verify-plan-derived" "ok" "CLEAR" '{"criteria":"{N}","verifiable":"{M}"}'`
+- **Partial with override (interactive only):** `hb-wrap.sh gate "verify-plan-derived" "ok" "OVERRIDE" '{"criteria":"{N}","verifiable":"{M}","override":"true"}'`
+- **Push-back (any criterion unverifiable, auto mode):** `hb-wrap.sh gate "verify-plan-derived" "fail" "INSUFFICIENT_INFO" '{"criteria":"{N}","verifiable":"{M}"}'`
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|verify-plan-derived|done|{CLEAR|INSUFFICIENT_INFO}" >> "$LOG_FILE"
 
@@ -595,7 +612,7 @@ Count how many of the 4 prerequisites are missing:
 **If CLEAR or WARNINGS:**
 Proceed to Step 4. Record in the heartbeat:
 ```
-hb_gate "verify-readiness" "ok" "{CLEAR|WARNINGS}" "{\"missing\":\"{N}\"}"
+hb-wrap.sh gate "verify-readiness" "ok" "{CLEAR|WARNINGS}" "{\"missing\":\"{N}\"}"
 ```
 
 **If INCOMPLETE:**
@@ -680,7 +697,7 @@ Delegate to the flow executor:
 /ticket-flow {TICKET-ID} appraise-complete
 _rc=$?
 if [ "$_rc" -ne 0 ]; then
-  hb_retry "flow-sh" "fail" "flow.sh appraise-complete failed (exit ${_rc})" \
+  hb-wrap.sh retry "flow-sh" "fail" "flow.sh appraise-complete failed (exit ${_rc})" \
     "{\"trigger\":\"appraise-complete\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: appraise-complete" >> {LOG_FILE}
 fi

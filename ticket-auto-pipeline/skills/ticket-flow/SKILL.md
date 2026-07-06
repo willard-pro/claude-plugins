@@ -80,6 +80,7 @@ bash "$_flow_sh" "<TICKET-ID>" "<TRIGGER>" [--data key=value] [--dry-run]
 | `uat-fail` | `Ready` | `rejected` | `reviewed` | |
 | `needs-info` | — | `needs-info` | — | No state change |
 | `needs-info-resolved` | — | — | `needs-info` | No state change |
+| `re-claim` | — | — | `approved` | No state change; restarts gate hold cycle |
 
 ## Preflight Sentinel
 

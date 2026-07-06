@@ -51,7 +51,7 @@ Never use `>>` without a trailing newline on the echo string. Always quote `$LOG
 `load-requirements` `launch-browser` `execute-steps` `evaluate` `report`
 
 ### PR-REVIEW
-`fetch-ticket` `extract-requirements` `find-pr` `validate-diff` `post-findings` `merge-decision`
+`fetch-ticket` `extract-requirements` `find-pr` `validate-diff` `post-findings` `merge-decision` `pr-reconcile`
 
 ### MAINTENANCE
 `document` `maintenance` `prescan`
@@ -61,6 +61,43 @@ Never use `>>` without a trailing newline on the echo string. Always quote `$LOG
 Prescan writes its own repo-scoped log at `~/.claude/logs/prescan-<repo-slug>.log`.
 The router brackets auto-invoke prescan spawns as `MAINTENANCE|prescan|waiting`/`done` in the ticket log.
 
+## Verdict tokens
+
+`spawn_agent_post` (in `lib/spawn-helper.sh`) accepts an optional `VERDICT=` parameter. When
+set, it is prepended to `MSG` as `{VERDICT} — {MSG}` before the `done`/`fail` line is written.
+This gives deterministic consumers (`detect-resume.sh`) a fixed token to grep instead of
+coupling to router free-text prose or emoji bytes — the router still writes whatever
+human-readable summary it wants in `MSG`, but the token in front of it is guaranteed stable.
+
+| Token   | Meaning                                  | Used by            |
+|---------|-------------------------------------------|--------------------|
+| `PASS`  | Verify UAT passed                        | VERIFY terminal    |
+| `FAIL`  | Verify UAT failed (retryable)            | VERIFY terminal    |
+| `OK`    | PR review verdict ✅ — no gaps           | PR-REVIEW terminal |
+| `WARN`  | PR review verdict ⚠️ — gaps, iterate     | PR-REVIEW terminal |
+| `BLOCK` | PR review verdict ❌ — blocking issues   | PR-REVIEW terminal |
+
+Example:
+
+```bash
+spawn_agent_post TICKET_ID=CRE-40 RESULT=done VERDICT=PASS MSG="3/3 criteria met" NEXT_PHASE=PR-REVIEW
+# writes: ...|VERIFY|verify|done|PASS — 3/3 criteria met
+```
+
+This is additive — schema version stays **1**. Older log lines written before this token set
+existed simply have no token prefix; consumers that grep for the token (not just the phase)
+treat those as non-matches, which is the correct conservative behavior (unknown verdict ≠ pass).
+
+### PR feedback reconciliation cycle marker
+
+`STEP_5_5`'s `pr-reconcile` terminal entry carries a `cycle#N` counter in `MSG` so
+`detect-resume.sh` can compute `PR_FEEDBACK_CYCLE` — the number of reconciliation rounds
+already run, capped at 3 (`PR_FEEDBACK_EXHAUSTED` gate-stop, see below):
+
+```bash
+echo "...|PR-REVIEW|pr-reconcile|done|cycle#2 reconciled" >> "$LOG_FILE"
+```
+
 ## META entries
 
 Non-phase metadata. `STEP` is the key, `MSG` is the value:
@@ -69,11 +106,61 @@ Non-phase metadata. `STEP` is the key, `MSG` is the value:
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|title|info|CRE-40: Ticket title here" >> "$LOG_FILE"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-result|info|simple — auto-approved" >> "$LOG_FILE"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|outcome|info|complete" >> "$LOG_FILE"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|outcome-label|info|Smooth" >> "$LOG_FILE"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|notes:/path/to/tickets/proj/epic/CRE-40--slug/notes.md" >> "$LOG_FILE"
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|artifact|info|plan:/path/to/tickets/proj/epic/CRE-40--slug/simple-fix.md" >> "$LOG_FILE"
 ```
 
 `artifact` entries are cumulative — each call adds a file to the dashboard's document list. `MSG` format: `{label}:{absolute path}`. Standard labels: `notes`, `plan`.
+
+`outcome-label` is distinct from `outcome`: `outcome` (written once, last, by STEP_6) is the
+pipeline run's final status; `outcome-label` (written by `outcome-label-check.sh` after every
+implement) mirrors the Smooth/Rough/Hard Linear label confirmed for this ticket. The
+auto-merge check in `ticket-auto/SKILL.md` reads `outcome-label`, not `outcome` — it needs
+the ticket-quality verdict, not the pipeline-run verdict.
+
+`mode-change` is written to Step 0.6's `META|autonomy` guard instead of a silent re-append
+when a resume's `--mode` flag differs from the autonomy already recorded for this run —
+gate decisions upstream were made under the old mode, so the switch must be visible, not
+last-wins:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|mode-change|warn|auto (was semi-auto)" >> "$LOG_FILE"
+```
+
+### Corrections entries
+
+When `ticket-implement` Step 4c Part 4 fails to write a CORRECTIONS block to notes.md, it emits a non-blocking warning:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|corrections-error|warn|append_correction failed" >> "$LOG_FILE"
+```
+
+`corrections-error` entries are always `warn` status — corrections are a feedback signal, not a pipeline gate. A missing correction never halts the pipeline.
+
+### Gate-warn channel
+
+The `gate-warn` channel (distinct from `gate-stop`) carries non-blocking completeness warnings
+from `return-completeness-check.sh`. Unlike `gate-stop`, which halts the pipeline, `gate-warn`
+events are informational — they signal a potential issue without changing the phase result.
+
+```bash
+# Warn-only (Phase 1): unchecked boxes detected but pipeline continues
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-warn|info|RETURN_INCOMPLETE — UNCHECKED_BOXES (unchecked=2/5, artifact=openspec)" >> "$LOG_FILE"
+```
+
+Gate-warn codes:
+- `RETURN_INCOMPLETE` — one or more `- [ ]` boxes remain unchecked in tasks.md
+  or simple-fix.md's `## Completion Checklist`. Emitted by the return-completeness
+  gate in warn-only mode (Phase 1). In enforce mode (Phase 2+), this flips to the
+  `gate-stop` channel as `RETURN_INCOMPLETE` and triggers `IMPLEMENT_RETRY` (max 2).
+- `COMPLETION_CHECKLIST_MISSING` — simple-fix.md lacks a `## Completion Checklist`
+  section (artifact predates Section 2 fast-follow). Treated as `error` (exit 2) by
+  the gate script; signals the artifact needs re-appraisal.
+
+`gate-warn` counters are tracked separately from `gate-stop` in retro.sh aggregation
+(`GATE_WARN_TOTAL` vs `GATE_STOP_TOTAL`) — they drive Phase 2 false-positive measurement,
+not severity classification.
 
 ### Fleet controller entries
 
@@ -125,6 +212,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|<CODE>" >> "$LOG_FILE"
 | `ADVERSARIAL_BLOCKED` | Adversarial review found blocking issues in the implementation plan (Phase 2) |
 | `REPRO_NOT_CONFIRMED` | Reproduce skill determined bug does not manifest on UAT (Step 1.5) |
 | `REPRO_BLOCKED` | Reproduce skill blocked — insufficient detail in ticket (Step 1.5) |
+| `PR_FEEDBACK_EXHAUSTED` | `PR_FEEDBACK_CYCLE` reached 3 — reconciliation cycle capped, needs human review (Step 5.5) |
 
 ## Ordering guarantees
 

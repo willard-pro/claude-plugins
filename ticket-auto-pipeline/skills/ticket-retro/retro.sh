@@ -188,6 +188,7 @@ fi
 
 declare -A FAILURE_COUNT=()
 GATE_STOP_TOTAL=0
+GATE_WARN_TOTAL=0
 LOGS_SCANNED=0
 LOGS_WITH_FAILURES=0
 
@@ -238,6 +239,11 @@ for log_file in "${LOG_FILES[@]}"; do
       code=$(echo "$msg" | awk '{print $1}')
       FAILURE_COUNT["$code"]=$((${FAILURE_COUNT["$code"]:-0} + 1))
       local_has_failure=1
+    elif [ "$step" = "gate-warn" ] && [ "$status" = "info" ]; then
+      # Warn-only completeness-gate telemetry (RETURN_INCOMPLETE) — kept
+      # separate from GATE_STOP_TOTAL/FAILURE_COUNT since these never halt
+      # the pipeline; counted so Phase 2 can measure the false-positive rate.
+      GATE_WARN_TOTAL=$((GATE_WARN_TOTAL + 1))
     elif [ "$status" = "fail" ] && [ "$step" != "schema" ] && [ "$step" != "migration" ]; then
       FAILURE_COUNT["$step"]=$((${FAILURE_COUNT["$step"]:-0} + 1))
       local_has_failure=1
@@ -452,6 +458,7 @@ jq -n \
   --argjson logs_skipped "$LOGS_SKIPPED" \
   --argjson logs_with_failures "$LOGS_WITH_FAILURES" \
   --argjson gate_stop_total "$GATE_STOP_TOTAL" \
+  --argjson gate_warn_total "$GATE_WARN_TOTAL" \
   --argjson complexity_accuracy "$ACCURACY" \
   --arg histogram_str "$HISTOGRAM_JSON" \
   --arg predictions_str "$PREDICTIONS_JSON" \
@@ -470,6 +477,7 @@ jq -n \
     logs_with_failures: $logs_with_failures,
     failure_histogram: ($histogram_str | fromjson),
     gate_stop_total: $gate_stop_total,
+    gate_warn_total: $gate_warn_total,
     complexity_predictions: ($predictions_str | fromjson),
     complexity_accuracy: $complexity_accuracy,
     heartbeat: {

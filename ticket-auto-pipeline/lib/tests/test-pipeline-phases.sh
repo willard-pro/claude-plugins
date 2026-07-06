@@ -247,6 +247,30 @@ test_router_zero_inline_llm_invariant() {
   }
 }
 
+test_router_team_resolution_query_failure_message() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  local preflight
+  preflight=$(sed -n '/Step 0.4 — Preflight/,/^## /p' "$skill_md" 2>/dev/null)
+  echo "$preflight" | grep -qE '\^\[0-9\]\+\$' || {
+    echo "team_count numeric-format guard not found (query-failure detection)"
+    return 1
+  }
+  echo "$preflight" | grep -qi 'teams query failed' || {
+    echo "distinct query-failure message not found"
+    return 1
+  }
+}
+
+test_router_team_resolution_multi_team_message_unchanged() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  grep -q 'Multiple Linear teams — set LINEAR_TEAM_ID' "$skill_md" || {
+    echo "genuine multi-team message missing or changed"
+    return 1
+  }
+}
+
 # ── Gate-check.sh tests ────────────────────────────────────────────────────────
 
 test_gate_check_has_artifact_guard() {
@@ -311,6 +335,258 @@ test_gate_reconcile_has_context_loading() {
   [ -f "$skill_md" ] || return 1
   grep -q 'source /tmp/ticket-auto' "$skill_md" && grep -q 'env.sh' "$skill_md" || {
     echo "gate-reconcile missing env.sh context loading"
+    return 1
+  }
+}
+
+# ── Increment B — silent-skip & false-done fixes (R3, R9, R2) ─────────────────
+
+test_router_implement_complete_has_plugin_cache_fallback() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  local block
+  block=$(sed -n '/Then transition from Ready/,/^```$/p' "$skill_md")
+  echo "$block" | grep -q 'claude/plugins/cache' || {
+    echo "implement-complete flow.sh resolution missing plugin-cache fallback"
+    return 1
+  }
+  echo "$block" | grep -q 'hb_retry' || {
+    echo "implement-complete flow.sh resolution no longer swallows failure with hb_retry"
+    return 1
+  }
+  echo "$block" | grep -q '|| true' && {
+    echo "implement-complete flow.sh resolution still swallows failure with || true"
+    return 1
+  }
+  return 0
+}
+
+test_router_prescan_success_judged_by_content() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  local block
+  block=$(sed -n '/spawn_capture TICKET_ID={TICKET-ID} PHASE=MAINTENANCE/,/flock -u/p' "$skill_md")
+  echo "$block" | grep -q 'echo "\$AGENT_RESULT" | grep -q' || {
+    echo "prescan success no longer judged by AGENT_RESULT content"
+    return 1
+  }
+  echo "$block" | grep -qE '\bif \[ \$\? -eq 0 \]' && {
+    echo "prescan success still judged by spawn_capture exit code"
+    return 1
+  }
+  return 0
+}
+
+test_router_retro_condition_2_uses_success_markers() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  local block
+  block=$(sed -n '/Condition 2: did the ticket NOT reach/,/^fi/p' "$skill_md")
+  echo "$block" | grep -q 'VERIFY|verify|done|PASS' || {
+    echo "retro condition 2 does not check verify PASS marker"
+    return 1
+  }
+  echo "$block" | grep -q 'PR-REVIEW|post-findings|done|Verdict: ✅' || {
+    echo "retro condition 2 does not check PR-review verdict marker"
+    return 1
+  }
+  echo "$block" | grep -q 'META|outcome|info|completed:' && {
+    echo "retro condition 2 still tests the tautological outcome marker"
+    return 1
+  }
+  return 0
+}
+
+test_router_verify_dispatch_uses_verdict_tokens() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  local block
+  block=$(sed -n '/### STEP_4_5 —/,/### STEP_4_6 —/p' "$skill_md")
+  echo "$block" | grep -q 'VERDICT=PASS' || {
+    echo "STEP_4_5 does not pass VERDICT=PASS on verify success"
+    return 1
+  }
+  echo "$block" | grep -q 'VERDICT=FAIL' || {
+    echo "STEP_4_5 does not pass VERDICT=FAIL on verify failure"
+    return 1
+  }
+}
+
+test_router_verify_checks_verify_last_before_dispatch() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  local block
+  block=$(sed -n '/### STEP_4_5 —/,/### STEP_4_6 —/p' "$skill_md")
+  echo "$block" | grep -q '{VERIFY_LAST}' || {
+    echo "STEP_4_5 does not branch on VERIFY_LAST"
+    return 1
+  }
+  echo "$block" | grep -qi 're-implement' || {
+    echo "STEP_4_5 does not dispatch re-implement when VERIFY_LAST=fail"
+    return 1
+  }
+}
+
+test_router_pr_review_dispatch_uses_verdict_tokens() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  local block
+  block=$(sed -n '/### STEP_4_6 —/,/### Auto-merge logic/p' "$skill_md")
+  echo "$block" | grep -q 'VERDICT=OK' || {
+    echo "STEP_4_6 does not map ✅ to VERDICT=OK"
+    return 1
+  }
+  echo "$block" | grep -q 'VERDICT=WARN' || {
+    echo "STEP_4_6 does not map ⚠️ to VERDICT=WARN"
+    return 1
+  }
+  echo "$block" | grep -q 'VERDICT=BLOCK' || {
+    echo "STEP_4_6 does not map ❌ to VERDICT=BLOCK"
+    return 1
+  }
+}
+
+test_detect_resume_iteration_uses_warn_token() {
+  local src="$LIB_DIR/../skills/ticket-detect-resume/detect-resume.sh"
+  [ -f "$src" ] || return 1
+  grep -q "PR-REVIEW|pr-review|done|WARN" "$src" || {
+    echo "ITERATION no longer counts the WARN verdict token"
+    return 1
+  }
+  grep -q 'Verdict.\*⚠️' "$src" && {
+    echo "ITERATION still coupled to byte-exact emoji match"
+    return 1
+  }
+  return 0
+}
+
+test_detect_resume_outputs_verify_last() {
+  local src="$LIB_DIR/../skills/ticket-detect-resume/detect-resume.sh"
+  [ -f "$src" ] || return 1
+  grep -q 'VERIFY_LAST:' "$src" || {
+    echo "detect-resume.sh does not emit VERIFY_LAST"
+    return 1
+  }
+}
+
+test_router_auto_merge_covers_auto_and_semi_auto() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  local block
+  block=$(sed -n '/### Auto-merge logic/,/^```$/p' "$skill_md")
+  echo "$block" | grep -q '{AUTONOMY}" = "auto"' || {
+    echo "auto-merge no longer covers AUTONOMY=auto"
+    return 1
+  }
+  echo "$block" | grep -q '{AUTONOMY}" = "semi-auto"' || {
+    echo "auto-merge no longer covers AUTONOMY=semi-auto"
+    return 1
+  }
+}
+
+test_router_auto_merge_reads_outcome_label_not_implement_line() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  local block
+  block=$(sed -n '/### Auto-merge logic/,/^```$/p' "$skill_md")
+  echo "$block" | grep -q 'META|outcome-label|info|' || {
+    echo "auto-merge does not read the authoritative outcome-label META line"
+    return 1
+  }
+  echo "$block" | grep -q "IMPLEMENT|implement|done|" && {
+    echo "auto-merge still reads OUTCOME from the implement terminal line"
+    return 1
+  }
+  return 0
+}
+
+test_outcome_label_check_writes_meta_line() {
+  local src="$LIB_DIR/outcome-label-check.sh"
+  [ -f "$src" ] || return 1
+  grep -q 'META" "outcome-label" "info"' "$src" || {
+    echo "outcome-label-check.sh does not write META|outcome-label"
+    return 1
+  }
+}
+
+test_router_retro_conditions_1_and_3_unchanged() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  grep -q "META|gate-stop|fail|" "$skill_md" || {
+    echo "retro condition 1 (gate-stop) missing"
+    return 1
+  }
+  grep -q "grep -q '|fallback|' \"{HB_LOG_FILE}\"" "$skill_md" || {
+    echo "retro condition 3 (heartbeat fallback) missing or changed"
+    return 1
+  }
+}
+
+# ── Increment F — hygiene batch (R10, R11, R12, R13) ──────────────────────────
+
+test_router_pr_feedback_cycle_caps_at_3() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  local block
+  block=$(sed -n '/### STEP_5_5 —/,/^### STEP_6/p' "$skill_md")
+  echo "$block" | grep -q '{PR_FEEDBACK_CYCLE}" -ge 3' || {
+    echo "STEP_5_5 does not cap PR_FEEDBACK_CYCLE at 3"
+    return 1
+  }
+  echo "$block" | grep -q 'PR_FEEDBACK_EXHAUSTED' || {
+    echo "STEP_5_5 does not gate-stop with PR_FEEDBACK_EXHAUSTED"
+    return 1
+  }
+}
+
+test_router_pr_reconcile_emits_cycle_marker() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  local block
+  block=$(sed -n '/### STEP_5_5 —/,/^### STEP_6/p' "$skill_md")
+  echo "$block" | grep -q 'MSG="cycle#' || {
+    echo "STEP_5_5 does not emit a cycle# marker for PR_FEEDBACK_CYCLE to count"
+    return 1
+  }
+}
+
+test_router_prescan_skipped_on_late_resume() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  local block
+  block=$(sed -n '/## Prescan gate/,/### Identify affected repos/p' "$skill_md")
+  echo "$block" | grep -q 'Skip on late resume' || {
+    echo "prescan gate missing late-resume skip section"
+    return 1
+  }
+  echo "$block" | grep -qE 'STEP_4 \| STEP_4_5 \| STEP_4_6' || {
+    echo "prescan gate does not skip STEP_4+ resume steps"
+    return 1
+  }
+}
+
+test_router_autonomy_write_is_guarded() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  local block
+  block=$(sed -n '/Log the resolved autonomy mode/,/hb_gate "phase-transition"/p' "$skill_md")
+  echo "$block" | grep -q '_recorded_autonomy' || {
+    echo "autonomy write is not guarded by a recorded-value check"
+    return 1
+  }
+  echo "$block" | grep -q 'mode-change' || {
+    echo "autonomy write does not log an explicit mode-change event"
+    return 1
+  }
+}
+
+test_router_dashboard_pane_not_duplicated() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  local block
+  block=$(sed -n '/^if \[ -n "\$TMUX" \]; then$/,/^fi$/p' "$skill_md" | head -20)
+  echo "$block" | grep -q 'pgrep -f "dashboard.py' || {
+    echo "dashboard pane spawn does not check for an existing pane first"
     return 1
   }
 }

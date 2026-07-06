@@ -48,7 +48,7 @@ _raw=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_issue '{TICKET-ID
 _rc=$?
 if [ $_rc -ne 0 ] || ! echo "$_raw" | jq -e '.id' >/dev/null 2>&1; then
   _snippet=$(echo "$_raw" | head -c 200)
-  hb_retry "get-issue" "fail" "get_issue failed (exit ${_rc})" \
+  hb-wrap.sh retry "get-issue" "fail" "get_issue failed (exit ${_rc})" \
     "{\"command\":\"get_issue\",\"ticket\":\"{TICKET-ID}\",\"exit_code\":\"${_rc}\",\"error_snippet\":\"$(echo "$_snippet" | tr '"' "'"  | tr '\n' ' ')\"}"
   # Handle failure per-step (report or stop as appropriate)
 fi
@@ -59,7 +59,7 @@ fi
 _raw=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_comments '{TICKET-ID}'" 2>&1)
 _rc=$?
 if [ $_rc -ne 0 ]; then
-  hb_retry "get-comments" "fail" "get_comments failed (exit ${_rc})" \
+  hb-wrap.sh retry "get-comments" "fail" "get_comments failed (exit ${_rc})" \
     "{\"command\":\"get_comments\",\"ticket\":\"{TICKET-ID}\",\"exit_code\":\"${_rc}\"}"
 fi
 ```
@@ -68,7 +68,7 @@ fi
 ```bash
 _field=$(echo "$_raw" | jq -r '.fieldName' 2>&1)
 if [ $? -ne 0 ] || [ "$_field" = "null" ]; then
-  hb_retry "jq-parse" "fail" "jq extraction failed for fieldName" \
+  hb-wrap.sh retry "jq-parse" "fail" "jq extraction failed for fieldName" \
     "{\"error_type\":\"jq_parse\",\"command\":\"get_issue\",\"field\":\"fieldName\"}"
 fi
 ```
@@ -81,7 +81,7 @@ bash "$_flow_sh" "{TICKET-ID}" "{trigger}" 2>&1
 _rc=$?
 if [ $_rc -ne 0 ]; then
   _error_type=$( [ $_rc -eq 7 ] && echo "state_assertion" || echo "flow_error" )
-  hb_retry "flow-sh" "fail" "flow.sh {trigger} failed (exit ${_rc})" \
+  hb-wrap.sh retry "flow-sh" "fail" "flow.sh {trigger} failed (exit ${_rc})" \
     "{\"trigger\":\"{trigger}\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\",\"error_type\":\"${_error_type}\"}"
 fi
 ```
@@ -92,7 +92,7 @@ _t0=$(date +%s)
 _raw=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_issue '{TICKET-ID}'" 2>&1)
 _rc=$?
 _elapsed=$(( $(date +%s) - _t0 ))
-hb_api "get-issue" "$( [ $_rc -eq 0 ] && echo ok || echo fail )" \
+hb-wrap.sh api "get-issue" "$( [ $_rc -eq 0 ] && echo ok || echo fail )" \
   "get_issue {TICKET-ID} (${_elapsed}s)" \
   "{\"command\":\"get_issue\",\"ticket\":\"{TICKET-ID}\",\"elapsed_s\":\"${_elapsed}\",\"exit_code\":\"${_rc}\"}"
 ```
@@ -138,16 +138,16 @@ The heartbeat log must exist before preflight (Step 0.4) so failures leave a tra
 ```bash
 mkdir -p ./logs
 HB_LOG_FILE="$PWD/logs/{TICKET-ID}-heartbeat.log"
-source ~/.claude/skills/lib/heartbeat.sh
+~/.claude/skills/lib/hb-wrap.sh
 source ~/.claude/skills/lib/capture-transcript.sh
 export HB_LOG_FILE="$HB_LOG_FILE"
 hb_init
 # Idempotency guards: skip if already written (prevents duplication on resume)
 if ! grep -q '|heartbeat|pipeline-start|' "$HB_LOG_FILE" 2>/dev/null; then
-  hb_heartbeat "pipeline-start" "pipeline starting — autonomy={AUTONOMY}, ticket={TICKET-ID}"
+  hb-wrap.sh heartbeat "pipeline-start" "pipeline starting — autonomy={AUTONOMY}, ticket={TICKET-ID}"
 fi
 if ! grep -q '|decision|autonomy-resolution|' "$HB_LOG_FILE" 2>/dev/null; then
-  hb_decision "autonomy-resolution" "fired" "autonomy set to {AUTONOMY}" '{"mode":"{AUTONOMY}"}'
+  hb-wrap.sh decision "autonomy-resolution" "fired" "autonomy set to {AUTONOMY}" '{"mode":"{AUTONOMY}"}'
 fi
 ```
 
@@ -166,8 +166,11 @@ SM_HASH=$(sha256sum "$SM" | cut -d' ' -f1)
 TEAM_ID="${LINEAR_TEAM_ID:-}"
 if [ -z "$TEAM_ID" ]; then
   teams=$(LINEAR_API_KEY="$LINEAR_API_KEY" bash -c \
-    "source ~/.claude/skills/lib/linear-api.sh; linear_graphql '{\"query\":\"query{teams{nodes{id name}}}\"}'")
-  team_count=$(echo "$teams" | jq '.data.teams.nodes | length')
+    "source ~/.claude/skills/lib/linear-api.sh; linear_graphql '{\"query\":\"query{teams{nodes{id name}}}\"}'" 2>/dev/null || true)
+  team_count=$(echo "$teams" | jq '.data.teams.nodes | length' 2>/dev/null || true)
+  if [ -z "$team_count" ] || ! [[ "$team_count" =~ ^[0-9]+$ ]]; then
+    echo "Preflight failed: Linear teams query failed — check LINEAR_API_KEY and network connectivity"; exit 1
+  fi
   [ "$team_count" -eq 1 ] || { echo "Multiple Linear teams — set LINEAR_TEAM_ID"; exit 1; }
   TEAM_ID=$(echo "$teams" | jq -r '.data.teams.nodes[0].id')
 fi
@@ -179,17 +182,17 @@ SENTINEL="$SENTINEL_DIR/validated-${TEAM_ID}"
 ```bash
 if [ -f "$SENTINEL" ] && grep -q "^sm_hash=${SM_HASH}$" "$SENTINEL" 2>/dev/null; then
   echo "Preflight: sentinel valid — skipping Linear config check"
-  hb_gate "preflight" "ok" "sentinel valid, skipping config check"
+  hb-wrap.sh gate "preflight" "ok" "sentinel valid, skipping config check"
 else
   # Cold run — run full validation
   _validate_sh="${HOME}/.claude/skills/ticket-flow/validate-linear-config.sh"
   [ -f "$_validate_sh" ] || _validate_sh=$(find "${HOME}/.claude/plugins/cache" -name "validate-linear-config.sh" -path "*/ticket-auto-pipeline/*/validate-linear-config.sh" 2>/dev/null | sort | tail -1)
   bash "$_validate_sh" "$TEAM_ID" || {
     echo "Preflight failed: Linear config validation error. Fix the team config and retry." >&2
-    hb_gate "preflight" "fail" "Linear config validation failed" "{\"team_id\":\"$TEAM_ID\"}"
+    hb-wrap.sh gate "preflight" "fail" "Linear config validation failed" "{\"team_id\":\"$TEAM_ID\"}"
     exit 1
   }
-  hb_gate "preflight" "ok" "Linear config validated" "{\"team_id\":\"$TEAM_ID\"}"
+  hb-wrap.sh gate "preflight" "ok" "Linear config validated" "{\"team_id\":\"$TEAM_ID\"}"
 fi
 ```
 
@@ -197,11 +200,11 @@ fi
 ```bash
 me=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_me" 2>&1) || {
   echo "Preflight failed: Linear API key unset or rejected (exit 4). Set LINEAR_API_KEY." >&2
-  hb_gate "preflight" "fail" "Linear API key rejected" "{\"exit_code\":\"4\"}"
+  hb-wrap.sh gate "preflight" "fail" "Linear API key rejected" "{\"exit_code\":\"4\"}"
   exit 4
 }
 echo "Linear: API key (direct GraphQL) — authenticated as $(echo "$me" | jq -r '.name // "unknown"')"
-hb_source "linear-auth" "ok" "authenticated as $(echo "$me" | jq -r '.name // "unknown"')"
+hb-wrap.sh source "linear-auth" "ok" "authenticated as $(echo "$me" | jq -r '.name // "unknown"')"
 ```
 
 ---
@@ -244,18 +247,32 @@ touch "$LOG_FILE"
 cl_init
 YELLOW=$(tput setaf 3); BOLD=$(tput bold); RESET=$(tput sgr0)
 if [ -n "$TMUX" ]; then
-  tmux split-window -h "python3 ~/.claude/skills/ticket-auto/dashboard.py $LOG_FILE; read"
-  echo "${BOLD}${YELLOW}(Dashboard opened in right pane.)${RESET}"
+  # Check for an existing dashboard pane for this ticket before spawning another —
+  # every resume would otherwise stack a new pane on top of prior ones (R13).
+  if pgrep -f "dashboard.py $LOG_FILE" >/dev/null 2>&1; then
+    echo "${BOLD}${YELLOW}(Dashboard already running for {TICKET-ID} — skipping duplicate pane.)${RESET}"
+  else
+    tmux split-window -h "python3 ~/.claude/skills/ticket-auto/dashboard.py $LOG_FILE; read"
+    echo "${BOLD}${YELLOW}(Dashboard opened in right pane.)${RESET}"
+  fi
 else
   echo "${BOLD}${YELLOW}Dashboard ready. In a second terminal run:${RESET}"
   echo "${BOLD}${YELLOW}  python3 ~/.claude/skills/ticket-auto/dashboard.py $LOG_FILE${RESET}"
 fi
 ```
 
-Log the resolved autonomy mode immediately after dashboard launch:
+Log the resolved autonomy mode immediately after dashboard launch. Guard the write so a
+resume doesn't silently re-append (or silently switch modes mid-pipeline after gate
+decisions were already made under the old mode) — an explicit `mode-change` event is
+logged instead when the flag differs from what's recorded (R12):
 ```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|autonomy|info|{AUTONOMY}" >> {LOG_FILE}
-hb_gate "phase-transition" "ok" "START → APPRAISE"
+_recorded_autonomy=$(grep '^[^|]*|META|autonomy|info|' {LOG_FILE} 2>/dev/null | tail -1 | cut -d'|' -f5-)
+if [ -z "$_recorded_autonomy" ]; then
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|autonomy|info|{AUTONOMY}" >> {LOG_FILE}
+elif [ "$_recorded_autonomy" != "{AUTONOMY}" ]; then
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|mode-change|warn|{AUTONOMY} (was $_recorded_autonomy)" >> {LOG_FILE}
+fi
+hb-wrap.sh gate "phase-transition" "ok" "START → APPRAISE"
 ```
 
 ### :rotating_light: CRITICAL — Agent isolation requirement
@@ -303,6 +320,15 @@ Every agent spawn follows this 3-step pattern:
    FAIL_ACTION=warn-continue spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail MSG="<reason>"
    ```
 
+   **Verdict phases (VERIFY, PR-REVIEW only)** — pass `VERDICT=<token>` so `spawn_agent_post`
+   prepends a canonical token to `MSG` (`done|PASS — <result>`). This decouples
+   `detect-resume.sh`'s resume grep from router free-text prose or emoji bytes. See
+   [Verdict tokens](../../pipeline-log-format.md#verdict-tokens) for the full token table.
+   ```bash
+   spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done VERDICT=PASS MSG="<result>" NEXT_PHASE=<next>
+   spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done VERDICT=WARN MSG="Verdict: ⚠️ <summary>" NEXT_PHASE=<next>
+   ```
+
 ### Self-check after each spawn
 
 Before proceeding to the next dispatch, verify:
@@ -332,7 +358,7 @@ DETECT_OUTPUT=$(bash "$DETECT_SH" "{TICKET_ID}")
 ```
 
 Parse the `DETECT_RESUME_RESULT` block and set all routing variables:
-`{RESUME_STEP}`, `{APPRAISE_FROM}`, `{REPRODUCE_FROM}`, `{EXEC_FROM}`, `{IMPLEMENT_FROM}`, `{MAINTENANCE_FROM}`, `{DOCUMENT_FROM}`, `{VERIFY_FROM}`, `{PR_REVIEW_FROM}`, `{PR_ITERATE_FROM}`, `{TICKET_DIR}`, `{COMPLEXITY}`, `{AUTONOMY}`, `{ARTIFACT_TYPE}`, `{BRANCH}`, `{TICKET_TITLE}`, `{VERIFY_ATTEMPTS}`, `{ITERATION}`, `{RECONCILE_CYCLE}`, `{PR_FEEDBACK_CYCLE}`.
+`{RESUME_STEP}`, `{APPRAISE_FROM}`, `{REPRODUCE_FROM}`, `{EXEC_FROM}`, `{IMPLEMENT_FROM}`, `{MAINTENANCE_FROM}`, `{DOCUMENT_FROM}`, `{VERIFY_FROM}`, `{PR_REVIEW_FROM}`, `{PR_ITERATE_FROM}`, `{TICKET_DIR}`, `{COMPLEXITY}`, `{AUTONOMY}`, `{ARTIFACT_TYPE}`, `{BRANCH}`, `{TICKET_TITLE}`, `{VERIFY_ATTEMPTS}`, `{VERIFY_LAST}`, `{ITERATION}`, `{RECONCILE_CYCLE}`, `{PR_FEEDBACK_CYCLE}`.
 
 **If `RESUME_STEP = SCHEMA_MISMATCH`:**
 Report the schema mismatch with log vs expected version numbers. Stop here.
@@ -350,6 +376,26 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|recovery|info|Resuming from {RESUME_ST
 ## Prescan gate (Phase 2 — auto-invoke before appraise)
 
 Before entering the dispatch loop, ensure prescan docs are fresh for each repo affected by this ticket. Prescan is an optimization, not a correctness requirement — failures or lock contention MUST NOT block the pipeline.
+
+### Skip on late resume
+
+Prescan only benefits the appraise phase — skip the entire gate when resuming at STEP_4
+or later. Crash recovery mid-implement/verify/PR-review/report should not pay the
+per-repo freshness-check cost on every resume:
+
+```bash
+case "{RESUME_STEP}" in
+STEP_4 | STEP_4_5 | STEP_4_6 | STEP_5 | STEP_5_5 | STEP_6 | done)
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|prescan|skip|resuming at {RESUME_STEP} — prescan skipped" >> {LOG_FILE}
+  ;;
+*)
+  # Not a late resume — run the freshness gate below.
+  ;;
+esac
+```
+
+If `{RESUME_STEP}` matched the case above, skip the rest of this section entirely and go
+straight to the Dispatch Loop.
 
 ### Identify affected repos
 
@@ -411,7 +457,9 @@ if flock -n "$lock_fd"; then
 
   spawn_capture TICKET_ID={TICKET-ID} PHASE=MAINTENANCE RESULT="$AGENT_RESULT"
 
-  if [ $? -eq 0 ]; then
+  # Judge success by the PRESCAN_RESULT block's per-repo marker, not spawn_capture's
+  # exit code (spawn_capture is a log write and succeeds regardless of agent outcome).
+  if echo "$AGENT_RESULT" | grep -q "$slug: scanned"; then
     spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
       MSG="$slug prescan complete: $PRESCAN_STATUS → fresh" NEXT_PHASE=APPRAISE
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|prescan|done|$slug prescan complete" >> {LOG_FILE}
@@ -456,7 +504,7 @@ After state detection, enter the stateless dispatch loop. Re-run `detect-resume.
 | `STEP_2_5` | Run `bash gate-check.sh --mode entry` | **Bash only** |
 | `STEP_3` | Alias for `STEP_2_5` — run `bash gate-check.sh --mode entry` | **Bash only** |
 | `STEP_3_5` | Spawn `ticket-gate-reconcile` agent | Agent |
-| `STEP_4` | Spawn `ticket-implement` agent, then run `outcome-label-check.sh` | Agent + Bash |
+| `STEP_4` | Spawn `ticket-implement` agent, run `return-completeness-check.sh` (openspec tickets only), then `outcome-label-check.sh` | Agent + Bash |
 | `STEP_4_5` | Verify retry sub-loop (see below) | Router-managed loop |
 | `STEP_4_6` | PR review + iteration sub-loop (see below) | Router-managed loop |
 | `STEP_5` | Spawn `ticket-document`, then `wiki-maintenance` (sequential) | Agent |
@@ -476,13 +524,13 @@ _flow_sh="${HOME}/.claude/skills/ticket-flow/flow.sh"
 bash "$_flow_sh" "{TICKET-ID}" "appraise-start" --data complexity=simple 2>&1
 _rc=$?
 if [ $_rc -ne 0 ]; then
-  hb_retry "flow-sh" "fail" "flow.sh appraise-start failed (exit ${_rc})" \
+  hb-wrap.sh retry "flow-sh" "fail" "flow.sh appraise-start failed (exit ${_rc})" \
     "{\"trigger\":\"appraise-start\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: appraise-start" >> {LOG_FILE}
   exit 1
 fi
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|ticket-claimed|info|{TICKET-ID} claimed → Todo" >> {LOG_FILE}
-hb_gate "ticket-claimed" "ok" "ticket claimed — Todo + claimed label + assigned"
+hb-wrap.sh gate "ticket-claimed" "ok" "ticket claimed — Todo + claimed label + assigned"
 ```
 
 ```
@@ -521,7 +569,7 @@ _gate_rc=$?
 
 if [ $_gate_rc -eq 0 ]; then
   # Auto-approved — loop back to state detection
-  hb_gate "phase-transition" "ok" "GATE → IMPLEMENT"
+  hb-wrap.sh gate "phase-transition" "ok" "GATE → IMPLEMENT"
 elif [ $_gate_rc -eq 1 ]; then
   # Held — fleet controller will detect, stop here
   echo "Gate held for {TICKET_ID}. Add 'approved' label to proceed."
@@ -532,10 +580,6 @@ else
   exit 1
 fi
 ```
-
-### STEP_3 — Gate Check (alias for STEP_2_5)
-
-STEP_3 is a legacy/inferred step emitted in some recovery paths (e.g., after a fleet-kill in the EXEC phase). It maps to the same gate check as STEP_2_5. Execute identically to STEP_2_5 above.
 
 ### STEP_3_5 — Gate Reconcile
 
@@ -550,7 +594,10 @@ NEXT_PHASE=GATE
 
 ### STEP_4 — Implement
 
-Spawn implement agent, then run outcome-label-check:
+Spawn implement agent. This phase overrides the generic post-spawn step: run
+`spawn_capture` as usual, but insert `return-completeness-check.sh` **before**
+`spawn_agent_post` — the gate must see the agent's returned work before the
+router commits the phase as `done`:
 
 ```
 STEP=implement PHASE=IMPLEMENT SKILL=/ticket-implement FROM_STEP={IMPLEMENT_FROM}
@@ -560,6 +607,34 @@ INSTRUCTIONS="Use Serena for all code navigation."
 NEXT_PHASE=IMPLEMENT
 ```
 
+```bash
+spawn_capture TICKET_ID={TICKET-ID} PHASE=IMPLEMENT RESULT="$AGENT_RESULT"
+
+# Return-completeness gate — runs for all artifact types.
+# Handles both openspec tasks.md and simple-fix.md Completion Checklist
+# internally. Resolution order: tasks.md first, simple-fix.md fallback.
+_rcc_sh="${HOME}/.claude/skills/lib/return-completeness-check.sh"
+_rcc_out=$(bash "$_rcc_sh" "{TICKET_ID}" --repos-root "{REPOS_ROOT}" 2>/dev/null) || true
+eval "$_rcc_out" 2>/dev/null || true
+if [ "${RETURN_COMPLETENESS_STATUS:-complete}" != "complete" ]; then
+  # Warn-only (Phase 1): log via gate-warn, never gate-stop. Does NOT
+  # flip done->fail — the pipeline continues as if the phase were done.
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-warn|info|RETURN_INCOMPLETE — ${REASON:-unknown} (unchecked=${UNCHECKED_COUNT:-?}/${TOTAL_COUNT:-?}, artifact=${ARTIFACT_TYPE:-?})" >> "{LOG_FILE}"
+fi
+
+# On success:
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done MSG="<result>" NEXT_PHASE=IMPLEMENT
+# On failure (blocking):
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail MSG="<reason>"
+```
+
+**Hard contract (D3):** whenever `return-completeness-check.sh` exits non-zero
+in enforce mode (Phase 2+), the router MUST call `spawn_agent_post RESULT=fail`
+— no code path may call `RESULT=done` on a non-zero exit once enforce mode is
+active. This mirrors `gate-check.sh`'s existing exit-code contract. In Phase 1
+(warn-only, current), the gate never changes `RESULT` — this note documents
+the contract ahead of the Phase 2 flip, it does not yet apply.
+
 After implement completes, always run outcome-label-check:
 ```bash
 _outcome_sh="${HOME}/.claude/skills/lib/outcome-label-check.sh"
@@ -568,13 +643,40 @@ bash "$_outcome_sh" "{TICKET_ID}" "{LOG_FILE}"
 
 Then transition from Ready → Review via implement-complete:
 ```bash
-flow_sh=$(find "$HOME/.claude/skills" -name "flow.sh" -path "*/ticket-flow/*" 2>/dev/null | head -1)
-[ -n "$flow_sh" ] && bash "$flow_sh" "{TICKET_ID}" "implement-complete" || true
+flow_sh="${HOME}/.claude/skills/ticket-flow/flow.sh"
+[ -f "$flow_sh" ] || flow_sh=$(find "${HOME}/.claude/plugins/cache" -name "flow.sh" -path "*/ticket-auto-pipeline/*/skills/ticket-flow/flow.sh" 2>/dev/null | sort | tail -1)
+if [ -z "$flow_sh" ]; then
+  hb-wrap.sh retry "flow-sh" "fail" "flow.sh not found for implement-complete" \
+    "{\"trigger\":\"implement-complete\",\"ticket\":\"{TICKET_ID}\",\"error_type\":\"resolution_failure\"}"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|implement-complete: flow.sh not found" >> "{LOG_FILE}"
+else
+  bash "$flow_sh" "{TICKET_ID}" "implement-complete" 2>&1
+  _rc=$?
+  if [ $_rc -ne 0 ]; then
+    _error_type=$( [ $_rc -eq 7 ] && echo "state_assertion" || echo "flow_error" )
+    hb-wrap.sh retry "flow-sh" "fail" "flow.sh implement-complete failed (exit ${_rc})" \
+      "{\"trigger\":\"implement-complete\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET_ID}\",\"error_type\":\"${_error_type}\"}"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: implement-complete" >> "{LOG_FILE}"
+  fi
+fi
 ```
 
 ### STEP_4_5 — Verify (with retry sub-loop)
 
 The router manages the verify→implement→verify retry loop.
+
+**Before dispatching**, check `VERIFY_LAST` from `detect-resume.sh`. `VERIFY_LAST=fail` means
+the pipeline crashed after a terminal verify FAIL but before the re-implement step ran —
+resuming straight into verify would re-run against the same unfixed code. Dispatch
+re-implement first in that case, not verify:
+
+```bash
+if [ "{VERIFY_LAST}" = "fail" ]; then
+  # Dispatch re-implement (FROM_STEP={IMPLEMENT_FROM}) first, then fall through to verify below
+else
+  # Dispatch verify directly
+fi
+```
 
 ```
 STEP=verify PHASE=VERIFY SKILL=/ticket-verify FROM_STEP={VERIFY_FROM}
@@ -584,9 +686,14 @@ INSTRUCTIONS="Follow the skill exactly."
 NEXT_PHASE=VERIFY
 ```
 
-**After verify completes**, re-run `detect-resume.sh` and check VERIFY_ATTEMPTS:
+**After verify completes**, write the terminal entry with a canonical `VERDICT` token
+(see [Verdict tokens](../../pipeline-log-format.md#verdict-tokens)) so PASS/FAIL never
+depends on router prose, then re-run `detect-resume.sh` and check VERIFY_ATTEMPTS:
 
 ```bash
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done VERDICT=PASS MSG="<summary>" NEXT_PHASE=PR-REVIEW LOOP_BEARING=true  # on PASS
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail VERDICT=FAIL MSG="<summary>" LOOP_BEARING=true                         # on FAIL
+
 # If VERIFY fail AND VERIFY_ATTEMPTS < 3 → loop to re-implement
 if grep -q '^[^|]*|VERIFY|verify|fail|' "{LOG_FILE}"; then
   if [ "{VERIFY_ATTEMPTS}" -ge 3 ]; then
@@ -609,12 +716,24 @@ INSTRUCTIONS="Follow the skill exactly. Return verdict: ✅ ✅, ⚠️, or ❌.
 NEXT_PHASE=PR-REVIEW
 ```
 
-**After PR review completes**, evaluate verdict:
+**After PR review completes**, write the terminal entry with a canonical `VERDICT` token
+mapped from the review's emoji verdict (see
+[Verdict tokens](../../pipeline-log-format.md#verdict-tokens)) — this is what `ITERATION`
+counts on, so it must never be skipped or left as free-text prose:
 
 ```bash
-# ✅ → proceed to STEP_5 (Document + Wiki)
-# ⚠️ AND ITERATION < 3 → run gate-check.sh --mode reapprove, spawn pr-iterate → implement → outcome-check → implement-complete → verify → loop back to pr-review
-# ❌ OR ITERATION >= 3 → gate-stop
+# ✅ → VERDICT=OK
+# ⚠️ → VERDICT=WARN
+# ❌ → VERDICT=BLOCK
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done VERDICT=<OK|WARN|BLOCK> MSG="Verdict: <emoji> <summary>" NEXT_PHASE=<next> LOOP_BEARING=true
+```
+
+Then evaluate verdict:
+
+```bash
+# ✅ (VERDICT=OK) → proceed to STEP_5 (Document + Wiki)
+# ⚠️ (VERDICT=WARN) AND ITERATION < 3 → run gate-check.sh --mode reapprove, spawn pr-iterate → implement → outcome-check → implement-complete → verify → loop back to pr-review
+# ❌ (VERDICT=BLOCK) OR ITERATION >= 3 → gate-stop
 ```
 
 **PR iteration loop:**
@@ -628,11 +747,14 @@ NEXT_PHASE=PR-REVIEW
 
 ### Auto-merge logic
 
-After PR review ✅, check auto-merge eligibility:
+After PR review ✅, check auto-merge eligibility. Both `auto` and `semi-auto` modes merge
+(only `manual` never does); the outcome is read from the `META|outcome-label|info|` line
+written by `outcome-label-check.sh` — the confirmed Linear label — not from the IMPLEMENT
+terminal line, which never carries the Smooth/Rough/Hard value:
 
 ```bash
-if [ "{AUTONOMY}" = "semi-auto" ] && [ "{COMPLEXITY}" = "simple" ]; then
-  OUTCOME=$(grep '^[^|]*|IMPLEMENT|implement|done|' "{LOG_FILE}" | tail -1 | cut -d'|' -f5-)
+if { [ "{AUTONOMY}" = "auto" ] || [ "{AUTONOMY}" = "semi-auto" ]; } && [ "{COMPLEXITY}" = "simple" ]; then
+  OUTCOME=$(grep '^[^|]*|META|outcome-label|info|' "{LOG_FILE}" | tail -1 | cut -d'|' -f5-)
   if [ "$OUTCOME" = "Smooth" ]; then
     _pr_num=$(grep '^[^|]*|PR-REVIEW|checkout-pr|done|' "{LOG_FILE}" | tail -1 | cut -d'|' -f5-)
     if [ -n "$_pr_num" ]; then
@@ -664,11 +786,31 @@ NEXT_PHASE=MAINTENANCE
 
 ### STEP_5_5 — PR Comment Reconciliation
 
+**Before dispatching**, check `PR_FEEDBACK_CYCLE` from `detect-resume.sh`. Caps at 3,
+matching the `VERIFY_ATTEMPTS`/`ITERATION` cap pattern — otherwise a single reviewer
+leaving repeated new comments could cycle the pipeline indefinitely:
+
+```bash
+if [ "{PR_FEEDBACK_CYCLE}" -ge 3 ]; then
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|PR_FEEDBACK_EXHAUSTED" >> "{LOG_FILE}"
+  echo "PR feedback reconciliation exhausted after 3 cycles for {TICKET_ID}. Needs human review."
+  exit 1
+fi
+```
+
 ```
 STEP=pr-reconcile PHASE=PR-REVIEW SKILL=/ticket-pr-iterate
 DESCRIPTION="Reconcile PR comments from human reviewers"
 INSTRUCTIONS="Check for new human comments on the open PR. Apply amend/push-back/clean logic."
 NEXT_PHASE=PR-REVIEW
+```
+
+**After pr-reconcile completes**, write the terminal entry with a `cycle#N` counter so
+`PR_FEEDBACK_CYCLE` (see `detect-resume.sh`) can track reconciliation rounds — without
+this, the cap above never advances past 0:
+
+```bash
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done MSG="cycle#$(({PR_FEEDBACK_CYCLE} + 1)) reconciled" NEXT_PHASE=PR-REVIEW LOOP_BEARING=true
 ```
 
 ### STEP_6 — Report
@@ -680,7 +822,11 @@ if grep -q '|META|gate-stop|fail|' "{LOG_FILE}"; then
   NEEDS_RETRO=true
 fi
 # Condition 2: did the ticket NOT reach a successful outcome?
-if ! grep -q '|META|outcome|info|completed:' "{LOG_FILE}"; then
+# Tested as the absence of positive success markers (verify PASS + PR-review ✅).
+# The prior version tested the absence of the STEP_6 outcome-write marker below —
+# that line's only writer is this same step, written after this check ran, so the
+# condition was tautologically true on every run.
+if ! grep -q '^[^|]*|VERIFY|verify|done|PASS' "{LOG_FILE}" || ! grep -q '^[^|]*|PR-REVIEW|pr-review|done|PASS' "{LOG_FILE}"; then
   NEEDS_RETRO=true
 fi
 # Condition 3: did any heartbeat fallback event fire?

@@ -14,9 +14,9 @@ You have been given a ticket ID as the argument (e.g. `WIL-42`). Execute the ful
 If `--from-auto` is present in the arguments, follow the auto-pipeline preamble in `~/.claude/skills/lib/skill-preamble-auto.md` with parameters: TICKET_ID=<from args>, PHASE=IMPLEMENT, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_LOGGING=true, HAS_HEARTBEAT=true. Before starting, source the project context: `source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true`. Otherwise, follow the full pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=IMPLEMENT, FROM_FLAG=none, EXTRA_GUARD=base-branch, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=REPOS_ROOT,ISSUE_PREFIX,BE_SERVICES,BE_TEST_CMD,BE_TEST_RUNNER,FE_TEST_CMD, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
 
 ### Heartbeat points
-- **Test command**: if BE_TEST_RUNNER found, write `hb_heartbeat "test-command" "BE_TEST_RUNNER configured" '{"cmd":"<cmd>"}'`; elif BE_TEST_CMD found, write `hb_heartbeat "test-command" "BE_TEST_CMD configured" '{"cmd":"<cmd>"}'`; if absent, write `hb_heartbeat "test-command" "skip" "no BE_TEST_CMD or BE_TEST_RUNNER"`
-- **Artifact path**: after detecting the plan artifact, write `hb_decision "artifact-path" "info" "artifact detected" '{"type":"simple-fix|openspec"}'`
-- **Implementation mode**: after detect-path, write `hb_decision "implementation-mode" "fired" "simple|openspec" '{"mode":"..."}'`
+- **Test command**: if BE_TEST_RUNNER found, write `hb-wrap.sh heartbeat "test-command" "BE_TEST_RUNNER configured" '{"cmd":"<cmd>"}'`; elif BE_TEST_CMD found, write `hb-wrap.sh heartbeat "test-command" "BE_TEST_CMD configured" '{"cmd":"<cmd>"}'`; if absent, write `hb-wrap.sh heartbeat "test-command" "skip" "no BE_TEST_CMD or BE_TEST_RUNNER"`
+- **Artifact path**: after detecting the plan artifact, write `hb-wrap.sh decision "artifact-path" "info" "artifact detected" '{"type":"simple-fix|openspec"}'`
+- **Implementation mode**: after detect-path, write `hb-wrap.sh decision "implementation-mode" "fired" "simple|openspec" '{"mode":"..."}'`
 
 ### Step dispatch
 **Context restoration when skipping early steps:**
@@ -371,7 +371,7 @@ Rate from `{DIFFICULTY_SUMMARY}` (openspec) or in-context history (simple-fix). 
 /ticket-flow {TICKET-ID} implement-outcome --data outcome={Smooth|Rough|Hard}
 _rc=$?
 if [ "$_rc" -ne 0 ]; then
-  hb_retry "flow-sh" "fail" "flow.sh implement-outcome failed (exit ${_rc})" \
+  hb-wrap.sh retry "flow-sh" "fail" "flow.sh implement-outcome failed (exit ${_rc})" \
     "{\"trigger\":\"implement-outcome\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: implement-outcome" >> {LOG_FILE}
 fi
@@ -416,6 +416,53 @@ A mismatch means the appraisal missed something. When `simple` + `Rough`/`Hard`,
    - If the file already has an `## Errata` section, append to it. If not, create the section.
    - If multiple wiki files were loaded, append to the most specific flow file. If the gap is cross-service (e.g. credit-report → BOM interaction), append to both.
    - If no `Wiki bootstrap:` line exists, skip — the mismatch was not wiki-related.
+
+### Part 4 — Write CORRECTIONS to notes.md (only on mismatch)
+
+When the outcome label (`Smooth`/`Rough`/`Hard`) disagrees with the complexity prediction (`simple`/`complex`), append a CORRECTIONS block to notes.md so downstream skills (`ticket-document`, `wiki-maintenance`, `ticket-prescan`) can feed the signal back into their own artifacts.
+
+The source maps to the skill whose prediction was overturned:
+
+| Outcome vs Prediction | Source | Meaning |
+|-----------------------|--------|---------|
+| `Hard` (predicted `simple`) | `appraise` | Complexity sweep underestimated the ticket |
+| `Rough` (predicted `simple`) | `appraise` | Complexity sweep underestimated the ticket |
+| `Smooth` (predicted `complex`) | `appraise` | Complexity sweep overestimated — could have auto-approved |
+| `Hard` (predicted `simple`), plan was accurate | `exec` | Plan artifact missed key details |
+| `Rough` (predicted `simple`), plan was accurate | `exec` | Plan artifact missed key details |
+
+Use the atomic `.tmp` → `mv` pattern from `corrections-parse.sh`:
+
+```bash
+source "$HOME/.claude/skills/lib/corrections-parse.sh"
+
+# Choose the source based on the mismatch table above
+_correction_fact="Predicted {simple|complex} but actual outcome was {Smooth|Rough|Hard}"
+_correction_source="{appraise|exec}"   # per mapping table
+_correction_detail="{What the investigation missed — concrete gap description from the mismatch comment above}"
+
+append_correction "{ticket-dir}/notes.md" \
+  "$_correction_fact" \
+  "$_correction_source" \
+  "$_correction_detail" \
+|| echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|corrections-error|warn|append_correction failed" >> "$LOG_FILE"
+```
+
+If wiki errata was appended (Part 3 above), also write a `source=wiki` correction:
+
+```bash
+# Only if wiki errata was appended in Part 3
+append_correction "{ticket-dir}/notes.md" \
+  "Wiki flow file {filename} missing or stale for {specific detail}" \
+  "wiki" \
+  "Wiki gap found: {What the wiki missed}" \
+|| echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|corrections-error|warn|append_correction wiki failed" >> "$LOG_FILE"
+```
+
+**Rules:**
+- Only write corrections when there is a mismatch — never on agreement.
+- The atomic `tmp` → `mv` pattern prevents torn blocks on crash.
+- Failure to write a correction logs a `corrections-error` warning but **never halts** the implement phase.
 
 ---
 

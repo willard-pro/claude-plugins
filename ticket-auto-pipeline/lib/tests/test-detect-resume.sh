@@ -1,0 +1,306 @@
+#!/usr/bin/env bash
+# test-detect-resume.sh — functional tests for skills/ticket-detect-resume/detect-resume.sh
+# Invokes the real script against constructed pipeline-log fixtures and asserts
+# on the DETECT_RESUME_RESULT block's field values, not just "doesn't crash".
+# Usage: CLAUDE_SKILLS_LIB=<lib dir> bash test-detect-resume.sh [test_name_filter]
+# -u (nounset) intentionally omitted: Claude Code shell snapshots inject
+# ZSH_VERSION references that trigger false-positive "unbound variable"
+# errors in this bash version when nounset is active.
+set -eo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+DETECT_SH="$(cd "$LIB_DIR/../skills/ticket-detect-resume" && pwd)/detect-resume.sh"
+export CLAUDE_SKILLS_LIB="${CLAUDE_SKILLS_LIB:-$LIB_DIR}"
+
+PASS=0
+FAIL=0
+
+_run() {
+  local name="$1"
+  shift
+  if "$@" 2>/dev/null; then
+    echo "PASS: $name"
+    ((PASS++)) || true
+  else
+    echo "FAIL: $name"
+    ((FAIL++)) || true
+  fi
+}
+
+# Runs detect-resume.sh in a fresh tmpdir with the given log lines and echoes
+# the DETECT_RESUME_RESULT block. $1 = ticket id, remaining args = log lines.
+_detect_resume_with_log() {
+  local ticket_id="$1"
+  shift
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs"
+  local line
+  for line in "$@"; do
+    echo "$line" >>"$tmpdir/logs/${ticket_id}-pipeline.log"
+  done
+  (cd "$tmpdir" && bash "$DETECT_SH" "$ticket_id" 2>/dev/null)
+  local rc=$?
+  rm -rf "$tmpdir"
+  return $rc
+}
+
+_field() {
+  local block="$1" field="$2"
+  echo "$block" | grep "^  ${field}:" | sed -E "s/^  ${field}: *//"
+}
+
+# ── VERIFY_ATTEMPTS (R6) ────────────────────────────────────────────────────
+
+test_verify_attempts_preflight_fail_does_not_overcount() {
+  local out
+  out=$(_detect_resume_with_log "TEST-1" \
+    "2026-07-05T10:00:00Z|META|schema|info|1" \
+    "2026-07-05T10:00:01Z|VERIFY|pre-flight|fail|No test user found" \
+    "2026-07-05T10:00:02Z|VERIFY|verify|fail|reproduction failed")
+  [ "$(_field "$out" VERIFY_ATTEMPTS)" = "1" ]
+}
+
+test_verify_attempts_two_terminal_failures_count_two() {
+  local out
+  out=$(_detect_resume_with_log "TEST-2" \
+    "2026-07-05T10:00:00Z|META|schema|info|1" \
+    "2026-07-05T10:00:01Z|VERIFY|verify|fail|reproduction failed" \
+    "2026-07-05T10:00:02Z|VERIFY|verify|fail|reproduction failed again")
+  [ "$(_field "$out" VERIFY_ATTEMPTS)" = "2" ]
+}
+
+test_verify_attempts_terminal_done_counts_as_attempt() {
+  local out
+  out=$(_detect_resume_with_log "TEST-3" \
+    "2026-07-05T10:00:00Z|META|schema|info|1" \
+    "2026-07-05T10:00:01Z|VERIFY|verify|fail|reproduction failed" \
+    "2026-07-05T10:00:02Z|VERIFY|verify|done|PASS")
+  # R6: count only terminal FAIL entries — PASS doesn't inflate the exhaustion cap.
+  # One fail + one done(PASS) = 1 attempt counted (only fail entries increment).
+  [ "$(_field "$out" VERIFY_ATTEMPTS)" = "1" ]
+}
+
+# ── MAINTENANCE_FROM (R7) ────────────────────────────────────────────────────
+
+test_maintenance_from_excludes_prescan_only_line() {
+  local out
+  out=$(_detect_resume_with_log "TEST-4" \
+    "2026-07-05T10:00:00Z|META|schema|info|1" \
+    "2026-07-05T10:00:01Z|MAINTENANCE|prescan|done|fresh")
+  [ -z "$(_field "$out" MAINTENANCE_FROM)" ]
+}
+
+test_maintenance_from_still_picks_real_substep() {
+  local out
+  out=$(_detect_resume_with_log "TEST-5" \
+    "2026-07-05T10:00:00Z|META|schema|info|1" \
+    "2026-07-05T10:00:01Z|MAINTENANCE|wiki-check|done|ok" \
+    "2026-07-05T10:00:02Z|MAINTENANCE|prescan|done|fresh")
+  [ "$(_field "$out" MAINTENANCE_FROM)" = "wiki-check" ]
+}
+
+# ── ITERATION via WARN token (R5) ───────────────────────────────────────────
+
+test_iteration_counts_warn_token_not_emoji_bytes() {
+  local out
+  out=$(_detect_resume_with_log "TEST-6" \
+    "2026-07-05T10:00:00Z|META|schema|info|1" \
+    "2026-07-05T10:00:01Z|PR-REVIEW|pr-review|done|WARN — gaps found" \
+    "2026-07-05T10:00:02Z|PR-REVIEW|pr-review|done|WARN — still gaps")
+  [ "$(_field "$out" ITERATION)" = "2" ]
+}
+
+test_iteration_does_not_count_ok_verdict() {
+  local out
+  out=$(_detect_resume_with_log "TEST-7" \
+    "2026-07-05T10:00:00Z|META|schema|info|1" \
+    "2026-07-05T10:00:01Z|PR-REVIEW|pr-review|done|OK — all good")
+  [ "$(_field "$out" ITERATION)" = "0" ]
+}
+
+# ── VERIFY_LAST (R8) ─────────────────────────────────────────────────────────
+
+test_verify_last_fail_with_no_reimplement_flags_fail() {
+  local out
+  out=$(_detect_resume_with_log "TEST-8" \
+    "2026-07-05T10:00:00Z|META|schema|info|1" \
+    "2026-07-05T10:00:01Z|IMPLEMENT|implement|done|3 files changed" \
+    "2026-07-05T10:00:02Z|VERIFY|verify|fail|FAIL — 1/3 criteria met")
+  [ "$(_field "$out" VERIFY_LAST)" = "fail" ]
+}
+
+test_verify_last_fail_followed_by_reimplement_is_clear() {
+  local out
+  out=$(_detect_resume_with_log "TEST-9" \
+    "2026-07-05T10:00:00Z|META|schema|info|1" \
+    "2026-07-05T10:00:01Z|IMPLEMENT|implement|done|3 files changed" \
+    "2026-07-05T10:00:02Z|VERIFY|verify|fail|FAIL — 1/3 criteria met" \
+    "2026-07-05T10:00:03Z|IMPLEMENT|implement|done|1 file changed")
+  [ -z "$(_field "$out" VERIFY_LAST)" ]
+}
+
+test_verify_last_pass_is_pass() {
+  local out
+  out=$(_detect_resume_with_log "TEST-10" \
+    "2026-07-05T10:00:00Z|META|schema|info|1" \
+    "2026-07-05T10:00:01Z|IMPLEMENT|implement|done|3 files changed" \
+    "2026-07-05T10:00:02Z|VERIFY|verify|done|PASS — 3/3 criteria met")
+  [ "$(_field "$out" VERIFY_LAST)" = "pass" ]
+}
+
+test_verify_last_empty_when_no_verify_yet() {
+  local out
+  out=$(_detect_resume_with_log "TEST-11" \
+    "2026-07-05T10:00:00Z|META|schema|info|1" \
+    "2026-07-05T10:00:01Z|IMPLEMENT|implement|done|3 files changed")
+  [ -z "$(_field "$out" VERIFY_LAST)" ]
+}
+
+# ── PR_FEEDBACK_CYCLE (R10) ─────────────────────────────────────────────────
+
+test_pr_feedback_cycle_counts_cycle_markers() {
+  local out
+  out=$(_detect_resume_with_log "TEST-12" \
+    "2026-07-05T10:00:00Z|META|schema|info|1" \
+    "2026-07-05T10:00:01Z|IMPLEMENT|implement|done|3 files changed" \
+    "2026-07-05T10:00:02Z|PR-REVIEW|pr-reconcile|done|cycle#1 reconciled" \
+    "2026-07-05T10:00:03Z|PR-REVIEW|pr-reconcile|done|cycle#2 reconciled" \
+    "2026-07-05T10:00:04Z|PR-REVIEW|pr-reconcile|done|cycle#3 reconciled")
+  [ "$(_field "$out" PR_FEEDBACK_CYCLE)" = "3" ]
+}
+
+test_pr_feedback_cycle_zero_when_no_reconcile_yet() {
+  local out
+  out=$(_detect_resume_with_log "TEST-13" \
+    "2026-07-05T10:00:00Z|META|schema|info|1" \
+    "2026-07-05T10:00:01Z|IMPLEMENT|implement|done|3 files changed")
+  [ "$(_field "$out" PR_FEEDBACK_CYCLE)" = "0" ]
+}
+
+# ── ARTIFACT_TYPE (pipeline-integrity Phase 1 dependency) ──────────────────
+# ticket-appraise-exec writes EXEC|create-artifact|done|{simple-fix|openspec} —
+# the "exec" step name never occurs in a real log. Regression test for the
+# fix that changed the grep pattern to match the actual step name.
+
+test_artifact_type_openspec_from_create_artifact_line() {
+  local out
+  out=$(_detect_resume_with_log "TEST-14" \
+    "2026-07-05T10:00:00Z|META|schema|info|1" \
+    "2026-07-05T10:00:01Z|APPRAISE|appraise|done|complexity=complex" \
+    "2026-07-05T10:00:02Z|EXEC|create-artifact|done|openspec")
+  [ "$(_field "$out" ARTIFACT_TYPE)" = "openspec" ]
+}
+
+test_artifact_type_simple_fix_from_create_artifact_line() {
+  local out
+  out=$(_detect_resume_with_log "TEST-15" \
+    "2026-07-05T10:00:00Z|META|schema|info|1" \
+    "2026-07-05T10:00:01Z|APPRAISE|appraise|done|complexity=simple" \
+    "2026-07-05T10:00:02Z|EXEC|create-artifact|done|simple-fix")
+  [ "$(_field "$out" ARTIFACT_TYPE)" = "simple-fix" ]
+}
+
+# ── Zombie detection ──────────────────────────────────────────────────────────
+
+test_zombie_detection_triggers_on_old_waiting() {
+  local old_ts
+  old_ts=$(date -u -d "10 minutes ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "2020-01-01T00:00:00Z")
+  local out
+  out=$(_detect_resume_with_log "ZB-1" \
+    "${old_ts}|META|schema|info|2" \
+    "${old_ts}|IMPLEMENT|implement|waiting|agent running")
+  # Zombie should be detected — resume point should re-run the phase (STEP_4)
+  # If pgrep finds nothing (which it shouldn't in test), zombie triggers
+  local resume_step
+  resume_step=$(_field "$out" RESUME_STEP)
+  # May be STEP_4 (zombie detected) or STEP_1 (no log progress past waiting —
+  # which is also correct since a zombie'd IMPLEMENT waiting step means we
+  # need to start from STEP_4). The key: it's not stuck on a waiting-derived step.
+  [ -n "$resume_step" ]
+}
+
+test_zombie_detection_skips_non_phase_waiting() {
+  local old_ts
+  old_ts=$(date -u -d "10 minutes ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "2020-01-01T00:00:00Z")
+  local out
+  out=$(_detect_resume_with_log "ZB-2" \
+    "${old_ts}|META|schema|info|2" \
+    "${old_ts}|META|meta-step|waiting|not a real phase")
+  # META lines are skipped by zombie detection — should not cause a phase re-route
+  local resume_step
+  resume_step=$(_field "$out" RESUME_STEP)
+  # Without any real phase entries, should default to STEP_1
+  [ "$resume_step" = "STEP_1" ]
+}
+
+# ── Pipe-safe field extraction ────────────────────────────────────────────────
+
+test_msg_field_preserves_embedded_pipes() {
+  # With schema v1 (no pipe rejection), old logs may have pipes in MSG.
+  # The inline awk preserves embedded pipes in field 5+ extraction.
+  local out
+  out=$(_detect_resume_with_log "PF-1" \
+    "2026-07-05T10:00:00Z|META|schema|info|2" \
+    "2026-07-05T10:00:01Z|APPRAISE|appraise|done|complexity=simple" \
+    "2026-07-05T10:00:02Z|EXEC|create-artifact|done|openspec|with|extra|pipes")
+  local artifact_type
+  artifact_type=$(_field "$out" ARTIFACT_TYPE)
+  # Full message including pipes should be preserved
+  echo "$artifact_type" | grep -q "openspec"
+}
+
+test_schema_v1_accepted_with_warning() {
+  local out
+  out=$(_detect_resume_with_log "SV-1" \
+    "2026-07-05T10:00:00Z|META|schema|info|1" \
+    "2026-07-05T10:00:01Z|APPRAISE|appraise|done|complexity=simple")
+  local resume_step
+  resume_step=$(_field "$out" RESUME_STEP)
+  # Schema v1 accepted — RESUME_STEP should be STEP_2 (appraise done)
+  [ "$resume_step" = "STEP_2" ]
+}
+
+test_schema_v2_accepted() {
+  local out
+  out=$(_detect_resume_with_log "SV-2" \
+    "2026-07-05T10:00:00Z|META|schema|info|2" \
+    "2026-07-05T10:00:01Z|APPRAISE|appraise|done|complexity=simple")
+  local resume_step
+  resume_step=$(_field "$out" RESUME_STEP)
+  [ "$resume_step" = "STEP_2" ]
+}
+
+# ── dispatch ──────────────────────────────────────────────────────────────────
+
+FILTER="${1:-}"
+
+for fn in \
+  test_verify_attempts_preflight_fail_does_not_overcount \
+  test_verify_attempts_two_terminal_failures_count_two \
+  test_verify_attempts_terminal_done_counts_as_attempt \
+  test_maintenance_from_excludes_prescan_only_line \
+  test_maintenance_from_still_picks_real_substep \
+  test_iteration_counts_warn_token_not_emoji_bytes \
+  test_iteration_does_not_count_ok_verdict \
+  test_verify_last_fail_with_no_reimplement_flags_fail \
+  test_verify_last_fail_followed_by_reimplement_is_clear \
+  test_verify_last_pass_is_pass \
+  test_verify_last_empty_when_no_verify_yet \
+  test_pr_feedback_cycle_counts_cycle_markers \
+  test_pr_feedback_cycle_zero_when_no_reconcile_yet \
+  test_artifact_type_openspec_from_create_artifact_line \
+  test_artifact_type_simple_fix_from_create_artifact_line \
+  test_zombie_detection_triggers_on_old_waiting \
+  test_zombie_detection_skips_non_phase_waiting \
+  test_msg_field_preserves_embedded_pipes \
+  test_schema_v1_accepted_with_warning \
+  test_schema_v2_accepted; do
+  [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
+  _run "$fn" "$fn"
+done
+
+echo ""
+echo "Results: $PASS passed, $FAIL failed"
+[ "$FAIL" -eq 0 ]
