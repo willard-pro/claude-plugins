@@ -404,8 +404,10 @@ test_ticket_dir_disambiguation() {
 # ── test_gen_mermaid_roundtrip ────────────────────────────────────────────────
 
 test_gen_mermaid_roundtrip() {
-  local gen="$SCRIPT_DIR/../gen-mermaid.sh"
-  local sm="$SCRIPT_DIR/../state-machine.json"
+  # Use PLUGIN_DIR (set at script startup, never overwritten) rather than
+  # SCRIPT_DIR which ticket-dir.sh clobbers when sourced by earlier tests.
+  local gen="$PLUGIN_DIR/skills/ticket-flow/gen-mermaid.sh"
+  local sm="$PLUGIN_DIR/skills/ticket-flow/state-machine.json"
   [ -f "$gen" ] || {
     echo "gen-mermaid.sh missing" >&2
     return 1

@@ -4,9 +4,9 @@
 # Multiple matches: exits non-zero, lists all matches on stderr.
 # No match: exits 1, empty stdout.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$SCRIPT_DIR/error-handler.sh" ]; then
-  source "$SCRIPT_DIR/error-handler.sh"
+_TICKET_DIR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$_TICKET_DIR_DIR/error-handler.sh" ]; then
+  source "$_TICKET_DIR_DIR/error-handler.sh"
 fi
 
 resolve_ticket_dir() {
