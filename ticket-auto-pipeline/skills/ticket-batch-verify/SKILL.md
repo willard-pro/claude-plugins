@@ -120,7 +120,7 @@ Call `/ticket-flow {TICKET-ID} uat-pass` to move to Done:
 /ticket-flow {TICKET-ID} uat-pass
 _rc=$?
 if [ "$_rc" -ne 0 ]; then
-  hb_retry "flow-sh" "fail" "flow.sh uat-pass failed (exit ${_rc})" \
+  hb-wrap.sh retry "flow-sh" "fail" "flow.sh uat-pass failed (exit ${_rc})" \
     "{\"trigger\":\"uat-pass\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: uat-pass" >> {LOG_FILE}
 fi
@@ -146,7 +146,7 @@ Then call `/ticket-flow {TICKET-ID} uat-fail` to move back to Ready:
 /ticket-flow {TICKET-ID} uat-fail
 _rc=$?
 if [ "$_rc" -ne 0 ]; then
-  hb_retry "flow-sh" "fail" "flow.sh uat-fail failed (exit ${_rc})" \
+  hb-wrap.sh retry "flow-sh" "fail" "flow.sh uat-fail failed (exit ${_rc})" \
     "{\"trigger\":\"uat-fail\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: uat-fail" >> {LOG_FILE}
 fi

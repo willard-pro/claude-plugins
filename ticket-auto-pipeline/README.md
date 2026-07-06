@@ -254,7 +254,7 @@ Skills plan, reason, and navigate code. `flow.sh` executes mutations with idempo
 | `fleet-dashboard.sh` | Dashboard renderer: `fleet_render_dashboard` (terminal) and `fleet_write_report` (markdown). |
 | `gate-check.sh` | Deterministic bash gate logic. `--mode entry` checks artifact, complexity, autonomy. `--mode reapprove` checks live Linear state. Replaces inline LLM reasoning. |
 | `outcome-label-check.sh` | Bash-only post-implement guard for Smooth/Rough/Hard outcome label. |
-| `detect-resume.sh` | Pipeline log state parser. Called directly as bash by the thin router — outputs 19 routing variables including counters (VERIFY_ATTEMPTS, ITERATION). |
+| `detect-resume.sh` | Pipeline log state parser. Called directly as bash by the thin router — outputs 21 routing variables including counters (VERIFY_ATTEMPTS, VERIFY_LAST, ITERATION, RECONCILE_CYCLE, PR_FEEDBACK_CYCLE). |
 
 ### Pipeline Log Format
 
@@ -297,10 +297,10 @@ The thin router calls `detect-resume.sh` directly as bash (no Claude agent spawn
 | Flag | Simple ticket at gate | Complex ticket at gate | PR merge |
 |------|-----------------------|------------------------|----------|
 | `--manual` / no flag | ⛔ HELD | ⛔ HELD | Human approves PR |
-| `--auto` | ✅ Auto-approved | ⛔ HELD | Human approves PR |
+| `--auto` | ✅ Auto-approved | ⛔ HELD | Auto-merged if outcome = Smooth |
 | `--semi-auto` | ✅ Auto-approved | ⛔ HELD | Auto-merged if outcome = Smooth |
 
-Semi-auto auto-merge only fires when all three hold: `--semi-auto` flag, complexity was `simple`, and implement outcome was `Smooth`.
+Auto-merge fires in both `--auto` and `--semi-auto` modes (never in `--manual`) when all three hold: autonomy is `auto` or `semi-auto`, complexity was `simple`, and the confirmed Linear outcome label was `Smooth`. The outcome is read from the `META|outcome-label|info|` pipeline-log line written by `outcome-label-check.sh` — the authoritative, Linear-confirmed label — not from the implement phase's own terminal line.
 
 ## Pipeline Safety Gates
 

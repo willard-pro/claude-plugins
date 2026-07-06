@@ -32,9 +32,12 @@ shift 2 2>/dev/null || true
 }
 
 # ── Concurrent-execution lock (flock FD 9) ──────────────────────────────────
-
-mkdir -p "./logs"
-exec 9>"./logs/.ticket-flow-${TICKET_ID}.lock"
+# Lock path is anchored to a fixed directory so fleet-intervene.sh's mutex
+# check sees the same lock regardless of the caller's CWD. Resolve via env
+# var first, then fall back to the plugin directory.
+FLOW_LOCK_DIR="${TICKET_FLOW_LOCK_DIR:-$SCRIPT_DIR/locks}"
+mkdir -p "$FLOW_LOCK_DIR"
+exec 9>"${FLOW_LOCK_DIR}/.ticket-flow-${TICKET_ID}.lock"
 if ! flock -n -E 42 9; then
   echo "ticket already in flight: $TICKET_ID" >&2
   exit 42
@@ -121,6 +124,21 @@ done < <(echo "$def" | jq -r '.removes[]? // empty')
 ISSUE_JSON=$(get_issue "$TICKET_ID")
 TEAM_ID=$(echo "$ISSUE_JSON" | jq -r '.team.id // empty')
 CURRENT_STATE_NAME=$(echo "$ISSUE_JSON" | jq -r '.state.name // empty')
+
+# ── Warn-only from-precondition check (D-2) ─────────────────────────────────
+# flow.sh has executed triggers unguarded since inception. This check logs
+# ILLEGAL_TRANSITION when the ticket's current state does not match the
+# trigger's declared "from" field, but does NOT block the mutation. Ship
+# warn-only first, gather telemetry, then decide whether to hard-enforce.
+# If "from" is null or absent, the check is skipped entirely.
+EXPECTED_FROM=$(echo "$def" | jq -r '.from // empty')
+if [ -n "$EXPECTED_FROM" ] && [ "$EXPECTED_FROM" != "null" ]; then
+  if [ "$CURRENT_STATE_NAME" != "$EXPECTED_FROM" ]; then
+    _log "META|flow-warn|info|ILLEGAL_TRANSITION — ${TICKET_ID} attempted ${TRIGGER} from ${CURRENT_STATE_NAME}, expected from ${EXPECTED_FROM}"
+    hb_gate "flow-warn" "warn" "ILLEGAL_TRANSITION" "{\"ticket\":\"${TICKET_ID}\",\"trigger\":\"${TRIGGER}\",\"actual\":\"${CURRENT_STATE_NAME}\",\"expected_from\":\"${EXPECTED_FROM}\"}"
+  fi
+fi
+
 CURRENT_LABEL_NAMES=$(echo "$ISSUE_JSON" | jq -r '[.labels.nodes[].name] | join(",")')
 PROJECT_NAME=$(echo "$ISSUE_JSON" | jq -r '.project.name // empty')
 
@@ -259,51 +277,66 @@ fi
 # Skip when idempotency path was taken (no mutation occurred)
 
 if ! $IDEMPOTENT; then
-  LIVE_JSON=$(get_issue "$TICKET_ID")
-  LIVE_STATE=$(echo "$LIVE_JSON" | jq -r '.state.name // empty')
-  LIVE_LABELS=$(echo "$LIVE_JSON" | jq -r '[.labels.nodes[].name]')
+  # Bounded retry with backoff for read-after-write consistency.
+  # Linear's API is eventually consistent — a mutation may not be
+  # visible in the immediate next read. Retry once (2 total reads)
+  # with a short delay before declaring STATE_ASSERTION_FAILED.
+  _assert_attempt=0
+  _assert_max=2
+  while true; do
+    LIVE_JSON=$(get_issue "$TICKET_ID")
+    LIVE_STATE=$(echo "$LIVE_JSON" | jq -r '.state.name // empty')
+    LIVE_LABELS=$(echo "$LIVE_JSON" | jq -r '[.labels.nodes[].name]')
 
-  assert_failed=false
-  assert_details=""
+    assert_failed=false
+    assert_details=""
 
-  # Assert state
-  if [ -n "$NEW_STATE_NAME" ] && [ "$LIVE_STATE" != "$NEW_STATE_NAME" ]; then
-    assert_failed=true
-    assert_details="state: expected=$NEW_STATE_NAME actual=$LIVE_STATE"
-  fi
-
-  # Assert added labels are present
-  for name in "${ADD_LABEL_NAMES[@]}"; do
-    if ! echo "$LIVE_LABELS" | jq -e --arg n "$name" \
-      '.[] | select(ascii_downcase == ($n | ascii_downcase))' >/dev/null 2>&1; then
+    # Assert state
+    if [ -n "$NEW_STATE_NAME" ] && [ "$LIVE_STATE" != "$NEW_STATE_NAME" ]; then
       assert_failed=true
-      assert_details="${assert_details:+$assert_details; }missing_label=$name"
+      assert_details="state: expected=$NEW_STATE_NAME actual=$LIVE_STATE"
+    fi
+
+    # Assert added labels are present
+    for name in "${ADD_LABEL_NAMES[@]}"; do
+      if ! echo "$LIVE_LABELS" | jq -e --arg n "$name" \
+        '.[] | select(ascii_downcase == ($n | ascii_downcase))' >/dev/null 2>&1; then
+        assert_failed=true
+        assert_details="${assert_details:+$assert_details; }missing_label=$name"
+      fi
+    done
+
+    # Assert removed labels are absent
+    for name in "${REMOVE_LABEL_NAMES[@]}"; do
+      if echo "$LIVE_LABELS" | jq -e --arg n "$name" \
+        '.[] | select(ascii_downcase == ($n | ascii_downcase))' >/dev/null 2>&1; then
+        assert_failed=true
+        assert_details="${assert_details:+$assert_details; }unexpected_label=$name"
+      fi
+    done
+
+    # post_assert removed: latent RCE vector via eval on trigger-defined shell code.
+    # No trigger in state-machine.json currently uses post_assert.
+    # If future assertion support is needed, implement a safe DSL (e.g. predicate
+    # functions like assert_label_present) rather than eval.
+
+    if $assert_failed; then
+      _assert_attempt=$((_assert_attempt + 1))
+      if [ "$_assert_attempt" -lt "$_assert_max" ]; then
+        _log "META|assert|warn|retry ${_assert_attempt}/${_assert_max}: read-after-write lag — ${assert_details}"
+        sleep 0.5
+        continue
+      fi
+      local_details="trigger=${TRIGGER} expected_state=${NEW_STATE_NAME:-none} actual_state=${LIVE_STATE} ${assert_details}"
+      echo "STATE_ASSERTION_FAILED: $local_details" >&2
+      _log "META|assert|fail|${local_details}"
+      hb_gate "assertion" "fail" "post-trigger assertion failed" "{\"trigger\":\"$TRIGGER\",\"detail\":\"${assert_details:0:60}\"}"
+      exit 7
+    else
+      hb_gate "assertion" "ok" "post-trigger assertion passed" "{\"trigger\":\"$TRIGGER\"}"
+      break
     fi
   done
-
-  # Assert removed labels are absent
-  for name in "${REMOVE_LABEL_NAMES[@]}"; do
-    if echo "$LIVE_LABELS" | jq -e --arg n "$name" \
-      '.[] | select(ascii_downcase == ($n | ascii_downcase))' >/dev/null 2>&1; then
-      assert_failed=true
-      assert_details="${assert_details:+$assert_details; }unexpected_label=$name"
-    fi
-  done
-
-  # post_assert removed: latent RCE vector via eval on trigger-defined shell code.
-  # No trigger in state-machine.json currently uses post_assert.
-  # If future assertion support is needed, implement a safe DSL (e.g. predicate
-  # functions like assert_label_present) rather than eval.
-
-  if $assert_failed; then
-    local_details="trigger=${TRIGGER} expected_state=${NEW_STATE_NAME:-none} actual_state=${LIVE_STATE} ${assert_details}"
-    echo "STATE_ASSERTION_FAILED: $local_details" >&2
-    _log "META|assert|fail|${local_details}"
-    hb_gate "assertion" "fail" "post-trigger assertion failed" "{\"trigger\":\"$TRIGGER\",\"detail\":\"${assert_details:0:60}\"}"
-    exit 7
-  else
-    hb_gate "assertion" "ok" "post-trigger assertion passed" "{\"trigger\":\"$TRIGGER\"}"
-  fi
 fi
 
 echo "$RESULT" | jq -c '.'

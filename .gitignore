@@ -16,3 +16,5 @@ sdk-tools.ts
 
 # Python bytecode cache
 __pycache__/
+ticket-auto-pipeline/skills/ticket-flow/locks/
+docs/linkedin-posts/

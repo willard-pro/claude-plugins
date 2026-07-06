@@ -43,7 +43,8 @@ test_no_match_exits_1() {
   local exit_code=0
   bash -c "source $LIB_DIR/ticket-dir.sh; resolve_ticket_dir WIL-99 '$tmpdir'" 2>/dev/null || exit_code=$?
   rm -rf "$tmpdir"
-  [ "$exit_code" -eq 1 ]
+  # Migration to error-handler.sh: E_ENV=12 for directory-not-found
+  [ "$exit_code" -eq 12 ]
 }
 
 test_multiple_matches_exits_2() {

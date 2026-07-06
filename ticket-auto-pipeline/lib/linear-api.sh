@@ -13,6 +13,10 @@ _HB_LIB="$(dirname "${BASH_SOURCE[0]}")/heartbeat.sh"
 _CONFIG_LIB="$(dirname "${BASH_SOURCE[0]}")/config.sh"
 [ -f "$_CONFIG_LIB" ] && source "$_CONFIG_LIB"
 
+# Source error handler for standard error codes
+_EH_LIB="$(dirname "${BASH_SOURCE[0]}")/error-handler.sh"
+[ -f "$_EH_LIB" ] && source "$_EH_LIB"
+
 LINEAR_API_URL="${LINEAR_API_URL:-https://api.linear.app/graphql}"
 
 # Check LINEAR_API_KEY is set
@@ -60,14 +64,23 @@ _retry_classify() {
     return
   fi
 
+  # HTTP 429 Too Many Requests — rate limiting is transient by definition
+  if [ "$http_code" = "429" ]; then
+    echo "transient"
+    return
+  fi
+
   # HTTP 5xx server errors
   if [[ "$http_code" =~ ^5 ]]; then
     echo "transient"
     return
   fi
 
-  # GraphQL-level transient messages
-  if echo "$body" | grep -qiE 'rate.limit|timeout|temporar'; then
+  # GraphQL-level transient messages. Match "429" anywhere in the body
+  # (Linear often returns 200 with rate-limit info in the payload), plus
+  # timeout/temporary keywords. Use rate[.]limit to avoid the unescaped
+  # dot matching any character.
+  if echo "$body" | grep -qiE '429|rate[.]limit|timeout|temporar'; then
     echo "transient"
     return
   fi
@@ -126,26 +139,42 @@ linear_graphql() {
     fi
 
     if [ "$class" = "transient" ] && [ "$attempt" -lt "$max_retries" ]; then
-      echo "linear_graphql: transient error (attempt $((attempt + 1))/$max_retries, http=${http_code:-curl-err}), retrying in ${delays[$attempt]}s" >&2
-      sleep "${delays[$attempt]}"
+      # Bounds-safe delay lookup: fall back to last array element when
+      # attempt index exceeds the configured delays array length.
+      local delay
+      if [ -n "${delays[$attempt]:-}" ]; then
+        delay="${delays[$attempt]}"
+      else
+        delay="${delays[-1]:-4}"
+      fi
+      echo "linear_graphql: transient error (attempt $((attempt + 1))/$max_retries, http=${http_code:-curl-err}), retrying in ${delay}s" >&2
+      sleep "$delay"
       ((attempt++)) || true
       continue
     fi
 
     if [ "$curl_exit" -ne 0 ]; then
       echo "curl error after $attempt retries: $resp" >&2
-      exit 2
+      error_exit 10 "linear_api: API request failed after retries"
     fi
 
     if [ "$class" = "transient" ]; then
       echo "linear_graphql: transient error persisted after $max_retries attempts (http=$http_code)" >&2
-      exit 2
+      error_exit 10 "linear_api: API request failed after retries"
+    fi
+
+    # Empty-body guard: an HTTP 200 with no response body is a transient
+    # read-after-write consistency gap — retry if attempts remain.
+    if [ -z "$resp" ] && [ "$attempt" -lt "$max_retries" ]; then
+      echo "linear_graphql: empty response body (attempt $((attempt + 1))/$max_retries), retrying" >&2
+      ((attempt++)) || true
+      continue
     fi
 
     # Check for GraphQL errors in the body
     if echo "$resp" | jq -e '.errors' >/dev/null 2>&1; then
       echo "GraphQL error: $(echo "$resp" | jq -r '.errors[0].message // "unknown"')" >&2
-      exit 2
+      error_exit 10 "linear_api: API request failed after retries"
     fi
 
     echo "$resp"

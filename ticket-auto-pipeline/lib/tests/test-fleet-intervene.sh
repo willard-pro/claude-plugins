@@ -71,6 +71,10 @@ test_flow_mutex_held_lock_held() {
     mkdir -p logs
     source "$LIB_DIR/fleet-intervene.sh"
     local tid="TEST-MUTEX-02"
+    # _flow_mutex_held resolves lock dir from TICKET_FLOW_LOCK_DIR
+    # or falls back to $HOME/.claude/skills/ticket-flow/locks.
+    # Point it at our temp workspace so it finds the lock we create.
+    export TICKET_FLOW_LOCK_DIR="./logs"
     local lockfile="./logs/.ticket-flow-${tid}.lock"
     touch "$lockfile"
     # Acquire lock in a background subshell
@@ -145,12 +149,12 @@ test_fleet_kill_pipeline_normal() {
     source "$LIB_DIR/fleet-intervene.sh"
     fleet_kill_pipeline "CRE-47" "test-kill" "./logs"
     # Verify intervention entry written
-    grep -q "META|fleet-intervention|warn|KILL|reason=test-kill" "./logs/CRE-47-pipeline.log" || {
+    grep -q "META|fleet-intervention|warn|KILL; reason=test-kill" "./logs/CRE-47-pipeline.log" || {
       echo "missing intervention entry" >&2
       exit 1
     }
     # Verify outcome entry written
-    grep -q "META|outcome|info|stopped: fleet-kill" "./logs/CRE-47-pipeline.log" || {
+    grep -q "META|outcome|info|stopped: fleet-kill; test-kill" "./logs/CRE-47-pipeline.log" || {
       echo "missing outcome entry" >&2
       exit 1
     }

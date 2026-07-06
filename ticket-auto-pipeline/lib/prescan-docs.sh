@@ -206,21 +206,68 @@ MD
 # This is the critical file: appraise Step 3a reads it for Tier 1 routing.
 _write_index() {
   local docs_dir="$1"
+  local meta_path
+  meta_path="$(dirname "$docs_dir")/meta.json"
+
+  # Load cached doc_titles from meta.json (canonical title source).
+  # Falls back to {} if meta.json is absent or has no doc_titles key.
+  local doc_titles_json="{}"
+  if [ -f "$meta_path" ]; then
+    doc_titles_json=$(jq -r '.doc_titles // {}' "$meta_path" 2>/dev/null || echo "{}")
+  fi
+
+  # Resolve a service title: meta.json cache → heading scrape → basename fallback.
+  _resolve_title() {
+    local rel_path="$1" doc_path="$2"
+    local title
+    title=$(echo "$doc_titles_json" | jq -r --arg k "$rel_path" '.[$k] // empty' 2>/dev/null || true)
+    if [ -n "$title" ]; then
+      echo "$title"
+      return
+    fi
+    # Only accept heading scrape if first line is actually a markdown heading
+    local first_line
+    first_line=$(head -1 "$doc_path" 2>/dev/null || echo "")
+    case "$first_line" in
+    '# '*) title=$(echo "$first_line" | sed 's/^# //') ;;
+    esac
+    if [ -n "$title" ]; then
+      echo "$title"
+      return
+    fi
+    basename "$doc_path" .md
+  }
 
   local services_dir="$docs_dir/services"
   local topic_entries=""
   local service_entries=""
+  local new_titles="{}"
 
   # Build Lookup by Topic from doc files
   if [ -d "$services_dir" ] && [ -n "$(ls -A "$services_dir" 2>/dev/null)" ]; then
     for f in "$services_dir"/*.md; do
       [ -f "$f" ] || continue
-      local basename service_name
+      local basename rel_path service_name
       basename=$(basename "$f" .md)
-      service_name=$(head -1 "$f" 2>/dev/null | sed 's/^# //' || echo "$basename")
+      rel_path="services/${basename}.md"
+      service_name=$(_resolve_title "$rel_path" "$f")
       topic_entries="${topic_entries}| ${service_name} | services/${basename}.md |\n"
       service_entries="${service_entries}| ${service_name} | services/${basename}.md |\n"
+      # Track resolved title for write-back to meta.json
+      new_titles=$(echo "$new_titles" | jq --arg k "$rel_path" --arg v "$service_name" '. + {($k): $v}' 2>/dev/null || echo "$new_titles")
     done
+  fi
+
+  # Persist resolved titles to meta.json (atomic tmp→mv).
+  # Only writes if meta.json exists and new_titles is non-empty.
+  if [ -f "$meta_path" ] && [ "$new_titles" != "{}" ]; then
+    local tmp_meta="${meta_path}.tmp.$$"
+    jq --argjson titles "$new_titles" '. + {doc_titles: $titles}' "$meta_path" >"$tmp_meta" 2>/dev/null || true
+    if [ -s "$tmp_meta" ]; then
+      mv "$tmp_meta" "$meta_path"
+    else
+      rm -f "$tmp_meta"
+    fi
   fi
 
   # Add processes
@@ -278,7 +325,7 @@ _write_index() {
 _update_meta() {
   local meta_path="$1"
   local symbol_count="${2:-0}"
-  local indexed="${3:-true}"
+  local indexed="${3:-false}"
 
   if [ ! -f "$meta_path" ]; then
     return 0
@@ -375,7 +422,15 @@ main() {
     if [ -n "$clusters_file" ] && [ -f "$clusters_file" ]; then
       symbol_count=$(jq '[.[]?.symbols? // [] | length] | add // 0' "$clusters_file" 2>/dev/null || echo "0")
     fi
-    _update_meta "$meta_path" "$symbol_count"
+    # gitnexus_indexed reflects whether any real gitnexus JSON was supplied — not an assumption.
+    local indexed="false"
+    for f in "$clusters_file" "$routes_file" "$processes_file" "$tools_file"; do
+      if [ -n "$f" ] && [ -s "$f" ]; then
+        indexed="true"
+        break
+      fi
+    done
+    _update_meta "$meta_path" "$symbol_count" "$indexed"
   fi
 
   printf 'PRESCAN_DOCS_STATUS=%q\n' "done"

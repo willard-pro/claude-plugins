@@ -13,12 +13,12 @@ If `$LOG_FILE` is set (passed by the `ticket-auto` orchestrator): read `~/.claud
 
 ## Heartbeat (--from-auto)
 
-If `$HB_LOG_FILE` is set (passed by the orchestrator): call `source ~/.claude/skills/lib/heartbeat.sh` then write heartbeat entries at these points:
-- **Wiki bootstrap**: if WIKI_ROOT not set in environment or CLAUDE.md, write `hb_fallback "wiki-bootstrap" "fail" "WIKI_ROOT not configured" '{"reason":"no WIKI_ROOT configured"}'`
-- **Errata discovered**: after scanning all wiki files, write `hb_decision "errata-count" "info" "{N} unresolved entries found" '{"count":"{N}"}'`; if none found, write `hb_decision "errata-count" "info" "all errata resolved"`
-- **New file created**: if a fix requires creating a new wiki file, write `hb_decision "wiki-file-created" "fired" "created {filename}" '{"file":"{filename}"}'`
-- **Unclear entry**: if an errata entry is unclear and skipped, write `hb_decision "errata-skipped" "warn" "unclear entry skipped" '{"ticket":"{TICKET-ID}"}'`
-- **Maintenance complete**: after all entries processed, write `hb_decision "maintenance-complete" "fired" "{N} errata processed, {M} ai-context findings promoted, {K} files modified" '{"errata_processed":"{N}","ai_context_findings":"{M}","modified":"{K}"}'`
+If `$HB_LOG_FILE` is set (passed by the orchestrator): call `~/.claude/skills/lib/hb-wrap.sh` then write heartbeat entries at these points:
+- **Wiki bootstrap**: if WIKI_ROOT not set in environment or CLAUDE.md, write `hb-wrap.sh fallback "wiki-bootstrap" "fail" "WIKI_ROOT not configured" '{"reason":"no WIKI_ROOT configured"}'`
+- **Errata discovered**: after scanning all wiki files, write `hb-wrap.sh decision "errata-count" "info" "{N} unresolved entries found" '{"count":"{N}"}'`; if none found, write `hb-wrap.sh decision "errata-count" "info" "all errata resolved"`
+- **New file created**: if a fix requires creating a new wiki file, write `hb-wrap.sh decision "wiki-file-created" "fired" "created {filename}" '{"file":"{filename}"}'`
+- **Unclear entry**: if an errata entry is unclear and skipped, write `hb-wrap.sh decision "errata-skipped" "warn" "unclear entry skipped" '{"ticket":"{TICKET-ID}"}'`
+- **Maintenance complete**: after all entries processed, write `hb-wrap.sh decision "maintenance-complete" "fired" "{N} errata processed, {M} ai-context findings promoted, {K} files modified" '{"errata_processed":"{N}","ai_context_findings":"{M}","modified":"{K}"}'`
 
 ---
 
@@ -191,6 +191,32 @@ The human-facing section (`(human)`) is for quick skimming — it answers "what'
 ### 2.5d — Count and track
 
 Track the number of ai-context.md files processed and the number of findings promoted to wiki. These counts are included in the Step 3 report alongside errata counts.
+
+---
+
+## Step 2.6 — Incorporate CORRECTIONS from ai-context.md
+
+When `ticket-document` writes ai-context.md, it carries forward CORRECTIONS blocks written by `ticket-implement` Step 4c Part 4. These corrections identify mismatches between predicted complexity and actual outcome, tagged with a source (`appraise`, `exec`, `prescan`, or `wiki`). This step processes corrections alongside errata entries.
+
+For each `ai-context.md` file read in Step 2.5, check the `## Corrections from Implementation` section:
+
+1. **source=wiki**: Treat these as direct wiki errata — they describe gaps in wiki flow files discovered during implementation. Apply the same fix workflow as Step 2b (read context, apply fix to the appropriate wiki file). If the fix lands cleanly, strike through the correction as resolved. If unclear, append a `<!-- UNCLEAR: {why} -->` comment and skip.
+
+2. **source=prescan** or **source=appraise**: These describe appraisal/investigation gaps, not wiki file defects. Evaluate each entry: if it reveals a reproducible pattern that the wiki should warn about (e.g., "entity X always needs field Y but the wiki doesn't mention it"), promote it to a wiki entry under the relevant flow file. If it is a one-off ticket-specific miss (e.g., "ticket description was vague"), skip — it is not actionable for the wiki.
+
+3. **source=exec**: These describe plan-artifact gaps. Skip — exec-level corrections are plan-specific and not wiki-material.
+
+Append resolved corrections to the wiki errata sections in the same struck-through format as Step 2c, with a `[corrections]` tag to distinguish them from implement-phase errata:
+
+```markdown
+### ~~{TICKET-ID} — {Smooth|Rough|Hard} (predicted {simple|complex}) [corrections] — incorporated {date}~~
+~~**Date:** {date}~~
+~~**Fact:** {fact from corrections block}~~
+~~**Source:** {appraise|prescan|wiki}~~
+~~**Corrected:** {corrected detail}~~
+```
+
+Track resolved correction count separately from errata count. Include both in the Step 3 report.
 
 ---
 

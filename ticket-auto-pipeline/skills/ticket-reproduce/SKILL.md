@@ -18,9 +18,9 @@ If `--from-auto` is present in the arguments, follow the auto-pipeline preamble 
 When `--from-auto` is set, source `~/.claude/skills/lib/heartbeat.sh` and write pipeline log entries.
 
 ### Heartbeat points
-- **Reproduce start**: on skill entry with `--from-auto`, write `hb_heartbeat "reproduce-start" "start" "reproduction attempt begins"`
-- **Reproduce result**: after final determination, write `hb_heartbeat "reproduce-result" "{REPRODUCED|NOT_REPRODUCED|BLOCKED}" "reproduction complete" '{"result":"...","assertion_field":"...","blocker":"..."}'`
-- **Sufficiency fail**: if Step 3b blocks on missing info, write `hb_heartbeat "reproduce-blocked" "fail" "insufficient detail to reproduce" '{"gaps":["..."]}'`
+- **Reproduce start**: on skill entry with `--from-auto`, write `hb-wrap.sh heartbeat "reproduce-start" "start" "reproduction attempt begins"`
+- **Reproduce result**: after final determination, write `hb-wrap.sh heartbeat "reproduce-result" "{REPRODUCED|NOT_REPRODUCED|BLOCKED}" "reproduction complete" '{"result":"...","assertion_field":"...","blocker":"..."}'`
+- **Sufficiency fail**: if Step 3b blocks on missing info, write `hb-wrap.sh heartbeat "reproduce-blocked" "fail" "insufficient detail to reproduce" '{"gaps":["..."]}'`
 
 ### Step dispatch
 | `--from-step` value | Skip to |
@@ -167,7 +167,7 @@ Before writing the plan, assess whether the ticket provides enough detail to act
 
 3. When `--from-auto`:
    - Write `echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|done|BLOCKED" >> "$LOG_FILE"`
-   - Fire `hb_heartbeat "reproduce-result" "BLOCKED" "insufficient detail" '{"gaps":["..."]}'`
+   - Fire `hb-wrap.sh heartbeat "reproduce-result" "BLOCKED" "insufficient detail" '{"gaps":["..."]}'`
    - Output `REPRODUCE_RESULT=BLOCKED` and stop. Do NOT prompt the user.
 
 4. When interactive (no `--from-auto`), report to the user:
@@ -345,7 +345,7 @@ When `--from-auto`, write pipeline log and heartbeat before the report:
 
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|REPRODUCE|reproduce|done|{REPRODUCED|NOT_REPRODUCED|BLOCKED}" >> "$LOG_FILE"
-hb_heartbeat "reproduce-result" "{result}" "reproduction complete" '{"result":"{REPRODUCED|NOT_REPRODUCED|BLOCKED}","assertion_field":"{field}","screenshot":"{path}"}'
+hb-wrap.sh heartbeat "reproduce-result" "{result}" "reproduction complete" '{"result":"{REPRODUCED|NOT_REPRODUCED|BLOCKED}","assertion_field":"{field}","screenshot":"{path}"}'
 ```
 
 Then output the orchestrator handoff block (both `--from-auto` and interactive):

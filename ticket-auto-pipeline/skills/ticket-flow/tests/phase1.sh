@@ -124,9 +124,11 @@ test_flow_concurrent_lock() {
   local holder=$!
   sleep 0.2 # let the holder acquire the lock
 
-  # Second invocation should exit 42
+  # Second invocation should exit 42. Point flow.sh at the same lock
+  # directory the test holder is using so the mutex conflict is detected.
   local exit_code=0
-  CLAUDE_SKILLS_LIB="$PLUGIN_DIR/lib" \
+  TICKET_FLOW_LOCK_DIR="$tmpdir/logs" \
+    CLAUDE_SKILLS_LIB="$PLUGIN_DIR/lib" \
     bash -c "cd \"$tmpdir\" && \"$FLOW_SH\" WIL-99 appraise-start" >/dev/null 2>&1 || exit_code=$?
 
   kill "$holder" 2>/dev/null || true
@@ -216,7 +218,7 @@ test_detect_resume_maintenance_document_done() {
   local log="$tmpdir/logs/WIL-99-pipeline.log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple, 5 files traced" >>"$log"
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|simple-fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|create-artifact|done|simple-fix" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|Smooth, branch: wil-99--fix" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|ai-context.md (3 patterns, 2 decisions, non-trivial)" >>"$log"
@@ -238,7 +240,7 @@ test_detect_resume_maintenance_document_waiting() {
   local log="$tmpdir/logs/WIL-99-pipeline.log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple, 5 files traced" >>"$log"
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|simple-fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|create-artifact|done|simple-fix" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|Smooth, branch: wil-99--fix" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|waiting|Agent launched — generating ai-context.md" >>"$log"
@@ -260,7 +262,7 @@ test_detect_resume_maintenance_document_fail() {
   local log="$tmpdir/logs/WIL-99-pipeline.log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple, 5 files traced" >>"$log"
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|simple-fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|create-artifact|done|simple-fix" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|Smooth, branch: wil-99--fix" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|fail|Agent failed — continuing" >>"$log"
@@ -282,7 +284,7 @@ test_detect_resume_maintenance_maintenance_done() {
   local log="$tmpdir/logs/WIL-99-pipeline.log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple, 5 files traced" >>"$log"
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|simple-fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|create-artifact|done|simple-fix" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|Smooth, branch: wil-99--fix" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|ai-context.md" >>"$log"
@@ -305,7 +307,7 @@ test_detect_resume_maintenance_maintenance_waiting() {
   local log="$tmpdir/logs/WIL-99-pipeline.log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple, 5 files traced" >>"$log"
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|simple-fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|create-artifact|done|simple-fix" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|Smooth, branch: wil-99--fix" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|ai-context.md" >>"$log"
@@ -328,7 +330,7 @@ test_detect_resume_maintenance_maintenance_fail() {
   local log="$tmpdir/logs/WIL-99-pipeline.log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple, 5 files traced" >>"$log"
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|simple-fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|create-artifact|done|simple-fix" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|Smooth, branch: wil-99--fix" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|ai-context.md" >>"$log"
@@ -351,7 +353,7 @@ test_detect_resume_maintenance_fallback_document() {
   local log="$tmpdir/logs/WIL-99-pipeline.log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple, 5 files traced" >>"$log"
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|exec|done|simple-fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|create-artifact|done|simple-fix" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|Smooth, branch: wil-99--fix" >>"$log"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|start|Generating ai-context.md" >>"$log"
@@ -402,8 +404,10 @@ test_ticket_dir_disambiguation() {
 # ── test_gen_mermaid_roundtrip ────────────────────────────────────────────────
 
 test_gen_mermaid_roundtrip() {
-  local gen="$SCRIPT_DIR/../gen-mermaid.sh"
-  local sm="$SCRIPT_DIR/../state-machine.json"
+  # Use PLUGIN_DIR (set at script startup, never overwritten) rather than
+  # SCRIPT_DIR which ticket-dir.sh clobbers when sourced by earlier tests.
+  local gen="$PLUGIN_DIR/skills/ticket-flow/gen-mermaid.sh"
+  local sm="$PLUGIN_DIR/skills/ticket-flow/state-machine.json"
   [ -f "$gen" ] || {
     echo "gen-mermaid.sh missing" >&2
     return 1
@@ -425,6 +429,300 @@ test_gen_mermaid_roundtrip() {
   [ "$generated" = "$committed" ]
 }
 
+# ── test_detect_resume_verify_attempts_excludes_pass ───────────────────────
+
+test_detect_resume_verify_attempts_excludes_pass() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs"
+  local log="$tmpdir/logs/WIL-99-pipeline.log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|create-artifact|done|simple-fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|Smooth" >>"$log"
+  # One PASS — should NOT count toward VERIFY_ATTEMPTS
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|done|PASS" >>"$log"
+
+  local out
+  out=$(CLAUDE_SKILLS_LIB="$PLUGIN_DIR/lib" cd "$tmpdir" && bash "$DETECT_RESUME_SH" WIL-99 2>/dev/null || true)
+  local verify_attempts
+  verify_attempts=$(echo "$out" | grep 'VERIFY_ATTEMPTS:' | awk '{print $2}')
+  rm -rf "$tmpdir"
+  [ "${verify_attempts:-1}" -eq 0 ]
+}
+
+# ── test_detect_resume_verify_attempts_counts_fails ───────────────────────
+
+test_detect_resume_verify_attempts_counts_fails() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs"
+  local log="$tmpdir/logs/WIL-99-pipeline.log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|create-artifact|done|simple-fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|Smooth" >>"$log"
+  # One FAIL — SHOULD count toward VERIFY_ATTEMPTS
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|fail|timeout" >>"$log"
+
+  local out
+  out=$(CLAUDE_SKILLS_LIB="$PLUGIN_DIR/lib" cd "$tmpdir" && bash "$DETECT_RESUME_SH" WIL-99 2>/dev/null || true)
+  local verify_attempts
+  verify_attempts=$(echo "$out" | grep 'VERIFY_ATTEMPTS:' | awk '{print $2}')
+  rm -rf "$tmpdir"
+  [ "${verify_attempts:-0}" -eq 1 ]
+}
+
+# ── test_detect_resume_no_step3 ───────────────────────────────────────────
+
+test_detect_resume_no_step3() {
+  # STEP_3 must never appear in detect-resume.sh output — it was deleted
+  # from the dispatch table and is unreachable.
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs"
+  local log="$tmpdir/logs/WIL-99-pipeline.log"
+  # A log with EXEC done but no GATE — historically this could produce STEP_3
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|create-artifact|done|simple-fix" >>"$log"
+
+  local out
+  out=$(CLAUDE_SKILLS_LIB="$PLUGIN_DIR/lib" cd "$tmpdir" && bash "$DETECT_RESUME_SH" WIL-99 2>/dev/null || true)
+  rm -rf "$tmpdir"
+  # RESUME_STEP must not be STEP_3 (without _5 suffix)
+  echo "$out" | grep -q 'RESUME_STEP:.*STEP_3$' && return 1
+  return 0
+}
+
+# ── test_detect_resume_pr_number_from_checkout_only ───────────────────────
+
+test_detect_resume_pr_number_from_checkout_only() {
+  # PR number must be resolved from checkout-pr|done| line — the old
+  # emoji-based fallback regex has been removed. This test verifies the
+  # primary extraction still works.
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs"
+  local log="$tmpdir/logs/WIL-99-pipeline.log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|schema|info|1" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|appraise|done|simple" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|create-artifact|done|simple-fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|gate|done|auto-approved" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement|done|Smooth, branch: wil-99--fix" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|verify|done|PASS" >>"$log"
+  # checkout-pr|done|42 — the canonical PR number source
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|checkout-pr|done|42" >>"$log"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|pr-review|done|PASS" >>"$log"
+
+  # Verify detect-resume.sh runs without error and resolves to STEP_5 (past PR-REVIEW)
+  local out
+  out=$(CLAUDE_SKILLS_LIB="$PLUGIN_DIR/lib" cd "$tmpdir" && bash "$DETECT_RESUME_SH" WIL-99 2>/dev/null || true)
+  local resume_step
+  resume_step=$(echo "$out" | grep 'RESUME_STEP:' | awk '{print $2}')
+  rm -rf "$tmpdir"
+  # Should reach STEP_5 (past PR-REVIEW with PR done) since MAINTENANCE hasn't run yet.
+  # Without the dead fallback, this must still work via checkout-pr extraction.
+  [ "$resume_step" = "STEP_5" ]
+}
+
+# ── test_spawn_agent_post_loop_bearing_requires_verdict ───────────────────
+
+test_spawn_agent_post_loop_bearing_requires_verdict() {
+  # Source spawn-helper to get spawn_agent_post
+  source "$PLUGIN_DIR/lib/spawn-helper.sh" 2>/dev/null || true
+
+  # LOOP_BEARING=true without VERDICT or cycle# → must fail
+  if spawn_agent_post TICKET_ID=TEST-1 RESULT=done MSG="done" LOOP_BEARING=true 2>/dev/null; then
+    echo "FAIL: LOOP_BEARING=true with no VERDICT or cycle# should have failed"
+    return 1
+  fi
+
+  # LOOP_BEARING=true with VERDICT → must succeed (log-writing may fail, that's OK)
+  local rc=0
+  spawn_agent_post TICKET_ID=TEST-1 RESULT=done VERDICT=PASS MSG="ok" LOOP_BEARING=true 2>/dev/null || rc=$?
+  # rc may be non-zero from missing log files — that's fine, just not the VERDICT error
+  [ "$rc" -ne 1 ] || {
+    echo "FAIL: LOOP_BEARING=true with VERDICT should not fail on missing token"
+    return 1
+  }
+
+  # LOOP_BEARING=true with cycle# in MSG → must not fail on verdict requirement
+  rc=0
+  spawn_agent_post TICKET_ID=TEST-1 RESULT=done MSG="cycle#3 reconciled" LOOP_BEARING=true 2>/dev/null || rc=$?
+  [ "$rc" -ne 1 ] || {
+    echo "FAIL: LOOP_BEARING=true with cycle# in MSG should satisfy the requirement"
+    return 1
+  }
+
+  # LOOP_BEARING=false (default) without VERDICT → must succeed
+  rc=0
+  spawn_agent_post TICKET_ID=TEST-1 RESULT=done MSG="done" 2>/dev/null || rc=$?
+  [ "$rc" -ne 1 ] || {
+    echo "FAIL: non-loop phase without VERDICT should succeed"
+    return 1
+  }
+}
+
+# ── test_outcome_label_exact_match ─────────────────────────────────────────
+
+test_outcome_label_exact_match() {
+  # Verify that "Hard" does NOT match "Hard-blocked" via the jq exact-match
+  # check (the old grep -qw falsely matched on hyphen boundaries).
+  # NOTE: source of outcome-label-check.sh would overwrite SCRIPT_DIR,
+  # so we inline the jq check directly.
+
+  # "Hard" must NOT match when only "Hard-blocked" is present
+  local issue_json='{"labels":{"nodes":[{"name":"Hard-blocked"},{"name":"bug"}]}}'
+  if echo "$issue_json" | jq -e --arg ol "Hard" \
+    '[.labels.nodes[]?.name? // empty] | index($ol) != null' >/dev/null 2>&1; then
+    echo "FAIL: Hard falsely matched Hard-blocked"
+    return 1
+  fi
+
+  # But "Hard" SHOULD match when actually present
+  issue_json='{"labels":{"nodes":[{"name":"Hard"},{"name":"bug"}]}}'
+  if ! echo "$issue_json" | jq -e --arg ol "Hard" \
+    '[.labels.nodes[]?.name? // empty] | index($ol) != null' >/dev/null 2>&1; then
+    echo "FAIL: Hard should match when actually present"
+    return 1
+  fi
+}
+
+# ── test_retry_classify_429_transient ─────────────────────────────────────
+
+test_retry_classify_429_transient() {
+  # Source linear-api.sh to get _retry_classify
+  source "$PLUGIN_DIR/lib/linear-api.sh" 2>/dev/null || true
+  # HTTP 429 must be classified as transient
+  local result
+  result=$(_retry_classify 0 429 "{}")
+  [ "$result" = "transient" ] || {
+    echo "expected transient for HTTP 429, got $result"
+    return 1
+  }
+}
+
+# ── test_retry_classify_rate_limit_regex ──────────────────────────────────
+
+test_retry_classify_rate_limit_regex() {
+  source "$PLUGIN_DIR/lib/linear-api.sh" 2>/dev/null || true
+  # "rateXlimit" (with any char where dot was unescaped) must NOT match
+  local result
+  result=$(_retry_classify 0 200 '{"message":"rateXlimit exceeded"}')
+  [ "$result" = "permanent" ] || {
+    echo "expected permanent for rateXlimit (escaped dot), got $result"
+    return 1
+  }
+  # "rate.limit" (with literal dot) must match
+  result=$(_retry_classify 0 200 '{"message":"rate.limit exceeded"}')
+  [ "$result" = "transient" ] || {
+    echo "expected transient for rate.limit, got $result"
+    return 1
+  }
+  # "429" in body must match
+  result=$(_retry_classify 0 200 '{"errors":[{"message":"429 rate limit"}]}')
+  [ "$result" = "transient" ] || {
+    echo "expected transient for 429 in body, got $result"
+    return 1
+  }
+}
+
+# ── test_flow_from_precondition_logic ──────────────────────────────────────
+
+test_flow_from_precondition_logic() {
+  # Verify the from-precondition check: extract "from" field, compare against
+  # current state. This test exercises the jq extraction and comparison logic
+  # without needing a Linear API mock.
+  local tmpdir
+  tmpdir=$(mktemp -d)
+
+  # Test 1: "from" present and matches → no warning
+  local def='{"from":"Todo","to":"In Progress"}'
+  local expected_from current_state
+  expected_from=$(echo "$def" | jq -r '.from // empty')
+  current_state="Todo"
+  local should_warn="false"
+  if [ -n "$expected_from" ] && [ "$expected_from" != "null" ]; then
+    if [ "$current_state" != "$expected_from" ]; then
+      should_warn="true"
+    fi
+  fi
+  [ "$should_warn" = "false" ] || {
+    rm -rf "$tmpdir"
+    echo "legal transition incorrectly flagged"
+    return 1
+  }
+
+  # Test 2: "from" present and mismatches → warn
+  current_state="Backlog"
+  should_warn="false"
+  if [ -n "$expected_from" ] && [ "$expected_from" != "null" ]; then
+    if [ "$current_state" != "$expected_from" ]; then
+      should_warn="true"
+    fi
+  fi
+  [ "$should_warn" = "true" ] || {
+    rm -rf "$tmpdir"
+    echo "illegal transition not flagged"
+    return 1
+  }
+
+  # Test 3: "from" absent → skip check (no warn)
+  def='{"to":"Done"}'
+  expected_from=$(echo "$def" | jq -r '.from // empty')
+  current_state="Backlog"
+  should_warn="false"
+  if [ -n "$expected_from" ] && [ "$expected_from" != "null" ]; then
+    if [ "$current_state" != "$expected_from" ]; then
+      should_warn="true"
+    fi
+  fi
+  [ "$should_warn" = "false" ] || {
+    rm -rf "$tmpdir"
+    echo "absent from incorrectly flagged"
+    return 1
+  }
+
+  # Test 4: "from": null → skip check (no warn)
+  def='{"from":null,"to":"Done"}'
+  expected_from=$(echo "$def" | jq -r '.from // empty')
+  current_state="Backlog"
+  should_warn="false"
+  if [ -n "$expected_from" ] && [ "$expected_from" != "null" ]; then
+    if [ "$current_state" != "$expected_from" ]; then
+      should_warn="true"
+    fi
+  fi
+  [ "$should_warn" = "false" ] || {
+    rm -rf "$tmpdir"
+    echo "null from incorrectly flagged"
+    return 1
+  }
+
+  rm -rf "$tmpdir"
+}
+
+# ── test_state_machine_single_source ───────────────────────────────────────
+
+test_state_machine_single_source() {
+  # Exactly one state-machine.json must exist in the plugin tree —
+  # the canonical copy at skills/ticket-flow/state-machine.json.
+  local count
+  count=$(find "$PLUGIN_DIR" -name "state-machine.json" -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | wc -l)
+  [ "$count" -eq 1 ] || {
+    echo "expected exactly 1 state-machine.json, found $count"
+    return 1
+  }
+  # Verify the sole copy is at the expected path
+  [ -f "$PLUGIN_DIR/skills/ticket-flow/state-machine.json" ] || {
+    echo "canonical state-machine.json missing at skills/ticket-flow/"
+    return 1
+  }
+}
+
 # ── dispatch ─────────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -436,6 +734,10 @@ for fn in \
   test_flow_assertion_catches_silent_noop \
   test_flow_dispatcher_unknown_trigger \
   test_linear_api_retry_on_503 \
+  test_spawn_agent_post_loop_bearing_requires_verdict \
+  test_outcome_label_exact_match \
+  test_retry_classify_429_transient \
+  test_retry_classify_rate_limit_regex \
   test_detect_resume_schema_mismatch \
   test_detect_resume_maintenance_document_done \
   test_detect_resume_maintenance_document_waiting \
@@ -444,6 +746,12 @@ for fn in \
   test_detect_resume_maintenance_maintenance_waiting \
   test_detect_resume_maintenance_maintenance_fail \
   test_detect_resume_maintenance_fallback_document \
+  test_detect_resume_verify_attempts_excludes_pass \
+  test_detect_resume_verify_attempts_counts_fails \
+  test_detect_resume_no_step3 \
+  test_detect_resume_pr_number_from_checkout_only \
+  test_flow_from_precondition_logic \
+  test_state_machine_single_source \
   test_ticket_dir_disambiguation \
   test_gen_mermaid_roundtrip; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue

@@ -8,7 +8,7 @@ A marketplace of installable Claude Code plugins. Add this marketplace to Claude
 
 | Plugin | Version | Description |
 |--------|---------|-------------|
-| `ticket-auto-pipeline` | 0.12.12 | Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. 20+ slash commands, state-machine-driven flow control, pipeline safety gates, and retrospective analysis. |
+| `ticket-auto-pipeline` | 0.14.0 | Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. 20+ slash commands, state-machine-driven flow control, pipeline safety gates, and retrospective analysis. |
 
 See the [plugin README](ticket-auto-pipeline/README.md) for full documentation.
 
@@ -98,7 +98,7 @@ ticket-auto-pipeline/
   .claude-plugin/plugin.json    # Plugin manifest
   skills/                       # 20+ slash-command skill .md files
   lib/                          # Shared bash libraries
-  state-machine.json            # State/label transition definitions
+  skills/ticket-flow/state-machine.json  # State/label transition definitions
   pipeline-log-format.md        # Pipeline log schema
   pipeline-heartbeat-format.md  # Operational heartbeat log schema
   validate-linear-config.sh     # Linear team config validator

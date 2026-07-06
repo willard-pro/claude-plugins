@@ -29,10 +29,11 @@ _log_pipeline() {
 # Returns 0 if mutex is held (should defer), 1 otherwise.
 _flow_mutex_held() {
   local tid="$1"
-  # Lock file lives in the same directory as pipeline logs — flow.sh creates
-  # locks relative to its CWD, which is the same directory pipeline logs go to.
-  local logs_dir="${FLEET_PIPELINE_LOG_DIR:-./logs}"
-  local lockfile="${logs_dir}/.ticket-flow-${tid}.lock"
+  # Lock path matches flow.sh's anchored resolution: TICKET_FLOW_LOCK_DIR
+  # env var first, then $HOME/.claude/skills/ticket-flow/locks as fallback.
+  # Must resolve to the same directory flow.sh uses or the mutex check is blind.
+  local lock_dir="${TICKET_FLOW_LOCK_DIR:-$HOME/.claude/skills/ticket-flow/locks}"
+  local lockfile="${lock_dir}/.ticket-flow-${tid}.lock"
   # Try to acquire the same lock flow.sh holds. If we can't get it
   # (exit 42 = EWOULDBLOCK), flow.sh is mid-mutation.
   if [ -f "$lockfile" ]; then
@@ -98,10 +99,10 @@ fleet_kill_pipeline() {
   fleet_stop_background "$tid"
 
   # Write intervention log entry
-  _log_pipeline "$log_file" "META" "fleet-intervention" "warn" "KILL|reason=${reason}"
+  _log_pipeline "$log_file" "META" "fleet-intervention" "warn" "KILL; reason=${reason}"
 
   # Write outcome to finalize pipeline
-  _log_pipeline "$log_file" "META" "outcome" "info" "stopped: fleet-kill|${reason}"
+  _log_pipeline "$log_file" "META" "outcome" "info" "stopped: fleet-kill; ${reason}"
 
   # Write heartbeat audit entry
   export HB_LOG_FILE="${hb_file}"

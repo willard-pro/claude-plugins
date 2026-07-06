@@ -12,12 +12,12 @@ You have been given a ticket ID as the argument (e.g. `WIL-42`). Execute the inv
 If `--from-auto` is present in the arguments, follow the auto-pipeline preamble in `~/.claude/skills/lib/skill-preamble-auto.md` with parameters: TICKET_ID=<from args>, PHASE=APPRAISE, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,get_comments, HAS_LOGGING=true, HAS_HEARTBEAT=true. Before starting, source the project context: `source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true`. Otherwise, follow the full pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=APPRAISE, FROM_FLAG=none, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,get_comments, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=REPOS_ROOT,ISSUE_PREFIX,BE_SERVICES,WIKI_ROOT, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
 
 ### Heartbeat points
-- **Complexity axes**: after complexity sweep, write `hb_decision "complexity-score" "fired" "...score..." '{"axes":"...","score":"..."}'`
-- **Blast radius**: after codebase investigation, write `hb_decision "blast-radius" "fired" "...N files..." '{"file_count":"N"}'`
-- **Prior art**: if prior art found, write `hb_decision "prior-art" "fired" "...N matches..."`; if none found, write `hb_decision "prior-art" "info" "no prior art found"`
-- **Wiki bootstrap**: if WIKI_ROOT not found in CLAUDE.md and fallback path used, write `hb_fallback "wiki-bootstrap" "fired" "using default wiki path" '{"reason":"WIKI_ROOT not in CLAUDE.md"}'`
-- **Regression verdict**: after the regression check, write `hb_decision "regression-verdict" "fired" "risky|clean" '{"verdict":"risky|clean"}'`
-- **Impact data fallback**: if gitnexus impact unavailable, write `hb_fallback "impact-data" "fired" "using local grep" '{"reason":"MCP tool unavailable"}'`
+- **Complexity axes**: after complexity sweep, write `hb-wrap.sh decision "complexity-score" "fired" "...score..." '{"axes":"...","score":"..."}'`
+- **Blast radius**: after codebase investigation, write `hb-wrap.sh decision "blast-radius" "fired" "...N files..." '{"file_count":"N"}'`
+- **Prior art**: if prior art found, write `hb-wrap.sh decision "prior-art" "fired" "...N matches..."`; if none found, write `hb-wrap.sh decision "prior-art" "info" "no prior art found"`
+- **Wiki bootstrap**: if WIKI_ROOT not found in CLAUDE.md and fallback path used, write `hb-wrap.sh fallback "wiki-bootstrap" "fired" "using default wiki path" '{"reason":"WIKI_ROOT not in CLAUDE.md"}'`
+- **Regression verdict**: after the regression check, write `hb-wrap.sh decision "regression-verdict" "fired" "risky|clean" '{"verdict":"risky|clean"}'`
+- **Impact data fallback**: if gitnexus impact unavailable, write `hb-wrap.sh fallback "impact-data" "fired" "using local grep" '{"reason":"MCP tool unavailable"}'`
 
 ### Step dispatch
 Also: if `--from-step` is set, **suppress Resume Mode** in Step 1 — the workspace exists by definition, and re-evaluation is not needed.
@@ -514,7 +514,7 @@ Delegate to the flow executor (safe to re-call — `flow.sh` skips if nothing ch
 /ticket-flow {TICKET-ID} appraise-start --data complexity={simple|complex}
 _rc=$?
 if [ "$_rc" -ne 0 ]; then
-  hb_retry "flow-sh" "fail" "flow.sh appraise-start failed (exit ${_rc})" \
+  hb-wrap.sh retry "flow-sh" "fail" "flow.sh appraise-start failed (exit ${_rc})" \
     "{\"trigger\":\"appraise-start\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: appraise-start" >> {LOG_FILE}
 fi

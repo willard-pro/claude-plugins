@@ -18,16 +18,21 @@ source /tmp/ticket-auto-{TICKET-ID}-env.sh
 LOG_FILE="$PWD/logs/{TICKET-ID}-pipeline.log"
 HB_LOG_FILE="$PWD/logs/{TICKET-ID}-heartbeat.log"
 
-source ~/.claude/skills/lib/heartbeat.sh
+~/.claude/skills/lib/hb-wrap.sh
 source ~/.claude/skills/lib/linear-api.sh
 source ~/.claude/skills/lib/ticket-dir.sh
 source ~/.claude/skills/lib/notes-parse.sh
 
-# Extract COMPLEXITY from pipeline log
-COMPLEXITY=$(grep '^[^|]*|META|complexity|' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'|' -f5- || echo "simple")
-
-# Extract ARTIFACT_TYPE from EXEC done line
-ARTIFACT_TYPE=$(grep '^[^|]*|EXEC|exec|done|' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'|' -f5- || echo "simple-fix")
+# Extract ARTIFACT_TYPE from EXEC create-artifact line (canonical token), with
+# notes.md fallback matching the COMPLEXITY resolution pattern below.
+ARTIFACT_TYPE=$(grep '^[^|]*|EXEC|create-artifact|done|' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'|' -f5- || true)
+if [ -z "$ARTIFACT_TYPE" ]; then
+  # Fallback: read artifact type from notes.md (same source as COMPLEXITY)
+  if [ -f "$NOTES_PATH" ]; then
+    ARTIFACT_TYPE=$(grep -i 'artifact.type' "$NOTES_PATH" 2>/dev/null | tail -1 | cut -d: -f2- | sed 's/^[[:space:]]*//' || true)
+  fi
+  ARTIFACT_TYPE="${ARTIFACT_TYPE:-simple-fix}"
+fi
 
 # Resolve ticket directory
 TICKET_DIR=$(resolve_ticket_dir "{TICKET-ID}" "." 2>/dev/null || echo ".")
@@ -46,7 +51,7 @@ else
 fi
 
 hb_init
-hb_gate "reconcile" "start" "gate-reconcile agent starting" "{\"complexity\":\"$COMPLEXITY\"}"
+hb-wrap.sh gate "reconcile" "start" "gate-reconcile agent starting" "{\"complexity\":\"$COMPLEXITY\"}"
 ```
 
 ## Step 2 — Resolve gate cycle and fetch comments
@@ -152,7 +157,7 @@ Write the held log entry:
 
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|reconcile|done|cycle#${RECONCILE_N}|held: ${HOLD_REASON}" >> "$LOG_FILE"
-hb_decision "reconcile-result" "fired" "held: ${HOLD_REASON}" "{\"cycle\":\"${RECONCILE_N}\",\"reason\":\"${HOLD_REASON}\"}"
+hb-wrap.sh decision "reconcile-result" "fired" "held: ${HOLD_REASON}" "{\"cycle\":\"${RECONCILE_N}\",\"reason\":\"${HOLD_REASON}\"}"
 ```
 
 Stop with a user-facing report:
@@ -178,9 +183,9 @@ No hold conditions active. All open questions are answered and no unprocessed us
 
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|GATE|reconcile|done|clean" >> "$LOG_FILE"
-hb_decision "reconcile-result" "fired" "clean pass — no unprocessed comments or unanswered questions" "{\"cycle\":\"${RECONCILE_N}\"}"
-hb_gate "reconcile" "ok" "clean pass — proceeding to implement"
-hb_gate "phase-transition" "ok" "GATE → IMPLEMENT"
+hb-wrap.sh decision "reconcile-result" "fired" "clean pass — no unprocessed comments or unanswered questions" "{\"cycle\":\"${RECONCILE_N}\"}"
+hb-wrap.sh gate "reconcile" "ok" "clean pass — proceeding to implement"
+hb-wrap.sh gate "phase-transition" "ok" "GATE → IMPLEMENT"
 ```
 
 The router will detect this gate event and proceed to STEP_4.

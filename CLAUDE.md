@@ -17,11 +17,11 @@ ticket-auto-pipeline/
   skills/                          # 20+ slash-command skill .md files
   lib/                             # Shared bash libraries
   docs/                            # Deep-dive reference docs & design notes
-  state-machine.json               # Linear state/label transition definitions
+  skills/ticket-flow/state-machine.json  # Linear state/label transition definitions (canonical)
   pipeline-log-format.md           # Shared log schema (ISO|PHASE|STEP|STATUS|MSG)
   pipeline-heartbeat-format.md     # Heartbeat log schema
   docs/pipeline-diagram.html       # Interactive state diagram (GitHub Pages)
-  validate-linear-config.sh        # Validates Linear team states/labels match state machine
+  skills/ticket-flow/validate-linear-config.sh  # Validates Linear team states/labels match state machine
   install.sh                       # Post-install migration from host-side skills
 ```
 
@@ -39,7 +39,7 @@ When a skill or command references a file by name (e.g., `openspec-propose` poin
 
 ## Determinism boundary
 
-All Linear API mutations flow through `flow.sh` (the `ticket-flow` skill executor) — a deterministic bash script. Skills never call Linear mutation endpoints directly. `flow.sh` handles: state transitions, label add/remove, assignee changes, idempotency checks, and post-trigger state assertions. The state machine definition lives in `state-machine.json` — `flow.sh` reads it, so changes to the JSON take effect without script changes.
+All Linear API mutations flow through `flow.sh` (the `ticket-flow` skill executor) — a deterministic bash script. Skills never call Linear mutation endpoints directly. `flow.sh` handles: state transitions, label add/remove, assignee changes, idempotency checks, and post-trigger state assertions. The state machine definition lives in `skills/ticket-flow/state-machine.json` — `flow.sh` reads it, so changes to the JSON take effect without script changes.
 
 ## Shared libraries (`lib/`)
 
@@ -49,7 +49,8 @@ All Linear API mutations flow through `flow.sh` (the `ticket-flow` skill executo
 - `notes-parse.sh` — Extracts complexity score from `notes.md` `## Complexity` section.
 - `gate-check.sh` — Deterministic bash gate logic (entry + reapprove modes). Replaces inline LLM reasoning at the gate step.
 - `outcome-label-check.sh` — Bash-only post-implement guard for Smooth/Rough/Hard outcome label.
-- `detect-resume.sh` — Pipeline log state parser. Called directly as bash by the thin router (not via Claude skill spawn). Outputs 19 routing variables.
+- `detect-resume.sh` — Pipeline log state parser. Called directly as bash by the thin router (not via Claude skill spawn). Outputs 21 routing variables.
+- `corrections-parse.sh` — `append_correction`, `get_corrections`, `get_corrections_by_source`. Atomic `.tmp`→`mv` append of CORRECTIONS blocks to notes.md. Parse with last-match-wins dedup. Torn-block tolerant.
 
 ## Pipeline log format
 
@@ -60,7 +61,7 @@ Pipe-delimited: `ISO|PHASE|STEP|STATUS|MSG`. Statuses: `start`, `done`, `fail`, 
 - **Crash recovery**: `detect-resume.sh` reads the pipeline log to find the last completed step. The thin router calls it directly as bash (no Claude agent spawn) and resumes from there. The log is the checkpoint mechanism.
 - **Sub-agent isolation**: The thin router spawns named agent types (`ticket-appraise-agent`, `ticket-implement-agent`, `ticket-verify-agent`, `ticket-pr-review-agent`, `ticket-maintenance-agent`, `ticket-gate-reconcile-agent`) for each phase. Each agent runs in a fresh isolated session with clean context. Agents write progress entries directly to `$LOG_FILE`. Each agent spawn is bracketed by a 3-step pattern: `spawn_agent_pre` → agent spawn → `spawn_capture` → `spawn_agent_post`.
 - **Bash gates**: Gate decisions (artifact existence, complexity coherence, autonomy routing, outcome labels) are deterministic bash scripts — zero Claude agent involvement, zero tokens burned on deterministic comparisons.
-- **Router-managed retry loops**: Verify retry (max 3) and PR iteration (max 3) are managed by the router tracking counters from the pipeline log. Each iteration spawns a fresh agent with clean context.
+- **Router-managed retry loops**: Verify retry (max 3), PR iteration (max 3), and PR feedback reconciliation (max 3) are managed by the router tracking counters from the pipeline log. Each iteration spawns a fresh agent with clean context.
 - **Complexity gating**: Simple tickets auto-approve in `auto`/`semi-auto` mode. Complex tickets always gate (require human `approved` label). The `manual` mode gates everything.
 - **Phase context file**: Before each agent spawn, the router writes both a ctx file (`/tmp/ticket-auto-{ID}-ctx.txt`) and a spawn-meta file (`/tmp/ticket-auto-{ID}-spawn-meta.txt`). The token-tracker hook reads PHASE from the spawn-meta file (stable per-spawn snapshot) with fallback to the ctx file (legacy).
 - **Post-trigger assertions**: After every Linear mutation, `flow.sh` re-fetches the issue and asserts the state/labels match expectations. Mismatch → exit 7 with `STATE_ASSERTION_FAILED`.

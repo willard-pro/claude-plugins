@@ -55,7 +55,8 @@ test_missing_notes_file() {
   local exit_code=0
   bash -c "source $LIB_DIR/notes-parse.sh; get_complexity '$tmpdir'" 2>/dev/null || exit_code=$?
   rm -rf "$tmpdir"
-  [ "$exit_code" -eq 1 ]
+  # Migration to error-handler.sh: E_ENV=12 for file-not-found
+  [ "$exit_code" -eq 12 ]
 }
 
 test_missing_score_section() {

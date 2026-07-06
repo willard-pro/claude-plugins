@@ -8,12 +8,17 @@
 # errors in this bash version when nounset is active.
 set -eo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/error-handler.sh" ]; then
+  source "$SCRIPT_DIR/error-handler.sh"
+fi
+
 get_complexity() {
   local ticket_dir="$1"
   local notes="$ticket_dir/notes.md"
 
   if [ ! -f "$notes" ]; then
-    return 1
+    error_return 12 "notes-parse: file not found"
   fi
 
   local score
@@ -39,7 +44,7 @@ get_critique_score() {
   local notes="$ticket_dir/notes.md"
 
   if [ ! -f "$notes" ]; then
-    return 1
+    error_return 12 "notes-parse: file not found"
   fi
 
   local score
@@ -67,7 +72,7 @@ get_critique_status() {
   local notes="$ticket_dir/notes.md"
 
   if [ ! -f "$notes" ]; then
-    return 1
+    error_return 12 "notes-parse: file not found"
   fi
 
   local status
@@ -95,7 +100,7 @@ get_ac_count() {
   local ctx="$ticket_dir/context.md"
 
   if [ ! -f "$ctx" ]; then
-    return 1
+    error_return 12 "notes-parse: file not found"
   fi
 
   local count
@@ -124,7 +129,7 @@ get_critique_warning_count() {
   local notes="$ticket_dir/notes.md"
 
   if [ ! -f "$notes" ]; then
-    return 1
+    error_return 12 "notes-parse: file not found"
   fi
 
   # Check section exists before counting
@@ -148,7 +153,7 @@ get_critique_blocker_count() {
   local notes="$ticket_dir/notes.md"
 
   if [ ! -f "$notes" ]; then
-    return 1
+    error_return 12 "notes-parse: file not found"
   fi
 
   # Check section exists before counting
@@ -211,7 +216,7 @@ get_ticket_type() {
   local ctx="$ticket_dir/context.md"
 
   if [ ! -f "$ctx" ]; then
-    return 1
+    error_return 12 "notes-parse: file not found"
   fi
 
   # Check for bug label
@@ -249,7 +254,7 @@ get_has_repro_steps() {
   local ctx="$ticket_dir/context.md"
 
   if [ ! -f "$ctx" ]; then
-    return 1
+    error_return 12 "notes-parse: file not found"
   fi
 
   # Pattern 1: "Steps to reproduce" or "Reproduction" heading
@@ -288,11 +293,11 @@ get_critique_has_finding() {
   local notes="$ticket_dir/notes.md"
 
   if [ ! -f "$notes" ]; then
-    return 1
+    error_return 12 "notes-parse: file not found"
   fi
 
   if ! grep -q '## Readiness Critique' "$notes" 2>/dev/null; then
-    return 1
+    error_return 12 "notes-parse: file not found"
   fi
 
   sed -n '/## Readiness Critique/,/^## /p' "$notes" 2>/dev/null | grep -q "$pattern" 2>/dev/null
@@ -313,7 +318,7 @@ get_test_users_by_role() {
 
   if [ -z "$catalog_path" ] || [ ! -f "$catalog_path" ]; then
     echo "[]"
-    return 1
+    error_return 12 "notes-parse: file not found"
   fi
 
   jq -c --arg role "$role" '[.[] | select(.roles[]? == $role)]' "$catalog_path" 2>/dev/null || echo "[]"
@@ -334,7 +339,7 @@ get_test_users_by_env() {
 
   if [ -z "$catalog_path" ] || [ ! -f "$catalog_path" ]; then
     echo "[]"
-    return 1
+    error_return 12 "notes-parse: file not found"
   fi
 
   jq -c --arg env "$env" '[.[] | select(.environments[]? == $env)]' "$catalog_path" 2>/dev/null || echo "[]"

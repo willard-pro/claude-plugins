@@ -16,16 +16,19 @@ If `--from-auto` is present in the arguments, follow the auto-pipeline preamble 
 Prescan uses its own repo-scoped log at `~/.claude/logs/prescan-<repo-slug>.log`. This is NOT a pipeline phase log — `detect-resume.sh` does not recognize a PRESCAN phase. Crash recovery: idempotent re-run (freshness gate re-evaluates).
 
 ```bash
+mkdir -p "$HOME/.claude/logs"
 PRESCAN_LOG="$HOME/.claude/logs/prescan-<repo-slug>.log"
 _plog() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|$1|$2|$3|$4" >> "$PRESCAN_LOG"; }
 ```
 
+Run the `mkdir -p` once, before the first `_plog` call. Without it, `_plog`'s `>>` redirect fails silently against a missing directory and every log line is lost.
+
 ## Heartbeat
 
-- **Freshness gate**: `hb_decision "prescan-gate" "fired" "<status>:<reason>" '{"status":"...","reason":"..."}'`
-- **Fallback**: if gitnexus unavailable, `hb_fallback "gitnexus" "fired" "gitnexus MCP unavailable" '{"section":"..."}'`
-- **Corpus build**: if corpus build fails, `hb_fallback "corpus-build" "fired" "corpus unavailable" '{"repo":"<slug>"}'`
-- **Scaffold verify**: `hb_gate "prescan-scaffold" "<ok|fail>" "<msg>" '{"docs_dir":"..."}'`
+- **Freshness gate**: `hb-wrap.sh decision "prescan-gate" "fired" "<status>:<reason>" '{"status":"...","reason":"..."}'`
+- **Fallback**: if gitnexus unavailable, `hb-wrap.sh fallback "gitnexus" "fired" "gitnexus MCP unavailable" '{"section":"..."}'`
+- **Corpus build**: if corpus build fails, `hb-wrap.sh fallback "corpus-build" "fired" "corpus unavailable" '{"repo":"<slug>"}'`
+- **Scaffold verify**: `hb-wrap.sh gate "prescan-scaffold" "<ok|fail>" "<msg>" '{"docs_dir":"..."}'`
 
 ---
 
@@ -78,7 +81,7 @@ for repo in "${REPOS[@]}"; do
 
   eval $(bash "$HOME/.claude/skills/lib/prescan-check.sh" "$repo" --repos-root "$REPOS_ROOT")
 
-  hb_decision "prescan-gate" "fired" "$PRESCAN_STATUS:$PRESCAN_REASON" \
+  hb-wrap.sh decision "prescan-gate" "fired" "$PRESCAN_STATUS:$PRESCAN_REASON" \
     "{\"status\":\"$PRESCAN_STATUS\",\"reason\":\"$PRESCAN_REASON\"}"
 
   case "$PRESCAN_STATUS" in
@@ -123,14 +126,19 @@ Existing hand-written `CLAUDE.md` content MUST NOT be modified. Only managed blo
 
 ## Step 3 — GitNexus index and refresh
 
-For each non-fresh repo, ensure gitnexus is indexed:
+**First, load the gitnexus tool schemas**: `ToolSearch(query="select:mcp__gitnexus__list_repos,mcp__gitnexus__detect_changes")`. `mcp__gitnexus__*` tools are harness-deferred — calling one before its schema is loaded via `ToolSearch` fails with `InputValidationError`. That failure means "schema not loaded yet," not "gitnexus MCP unavailable" — do not treat it as the unavailable-fallback case below. Only fall back if the MCP server itself is unreachable (e.g., `list_repos` still errors after `ToolSearch` succeeded).
 
-1. Check if repo is indexed: `mcp__gitnexus__list_repos` → look for repo name.
-2. If not indexed: run `npx gitnexus analyze` on the repo.
-3. If indexed but stale: `mcp__gitnexus__detect_changes` to confirm freshness.
-4. If `--wiki` flag: generate wiki prose (optional, not required for prescan).
+For each non-fresh repo, ensure gitnexus is indexed and current:
 
-If gitnexus MCP is unavailable, log `hb_fallback "gitnexus"` and continue with partial docs (structural data from local file scan only).
+1. Check if repo is indexed: `mcp__gitnexus__list_repos` → look for repo name/path match. If found, note `stats.nodes` (symbol count) and `staleness.commitsBehind`.
+2. If not indexed: run `npx gitnexus analyze` on the repo. Set `GITNEXUS_INDEXED=true`.
+3. If indexed but `staleness.commitsBehind > 0`: run `npx gitnexus analyze` again to refresh the index — `mcp__gitnexus__detect_changes` only *reports* staleness, it does not refresh anything, so it must not be the only action taken here. Set `GITNEXUS_INDEXED=true` after the refresh completes.
+4. If indexed and fresh (`commitsBehind == 0`): `GITNEXUS_INDEXED=true`, no action needed.
+5. If `--wiki` flag: generate wiki prose (optional, not required for prescan).
+
+Record `GITNEXUS_INDEXED` (true/false) and `GITNEXUS_SYMBOL_COUNT` (from `list_repos` `stats.nodes`, or 0 if not indexed) — Step 6 writes both into `meta.json`.
+
+If the MCP server is genuinely unreachable (not just a not-yet-loaded schema), log `hb-wrap.sh fallback "gitnexus"`, set `GITNEXUS_INDEXED=false`, and continue with partial docs (structural data from local file scan only).
 
 ---
 
@@ -142,12 +150,55 @@ Branch on cadence:
 
 For a first-time scan or decay-prompted re-dive, spawn multiple agents in parallel, each producing one persona-specific doc file.
 
-1. **Resolve persona set**:
+**You (the orchestrating session) MUST NOT write `overview.md`, `processes.md`, `security-surfaces.md`, `backend.md`, `frontend.md`, `services/*.md`, or `INDEX.md` yourself with a direct `Write`/`Edit` call.** Each of those files is produced by a spawned `Agent`, never by you directly. If you find yourself about to `Write` one of them without having spawned its persona agent first in this run, stop — spawn the agent instead. This is a hard rule, not a suggestion: skipping the fan-out defeats the reason the docs exist (persona-isolated context) and this has silently happened before.
+
+1. **Resolve persona set** — required before any agent spawn, and log it so the run is auditable:
    ```bash
    eval $(bash "$HOME/.claude/skills/lib/persona-select.sh" \
      --repo "$repo" --phase prescan ${WITH_QA:+--with-qa})
    # PERSONA_SET contains newline-separated persona paths
+   _plog "PRESCAN" "persona-select" "done" "$slug: $PERSONA_SET"
    ```
+
+### Step 4.0 — Collect prescan corrections
+
+Before spawning persona agents, scan recent ticket workspaces for corrections with `source=prescan`. These corrections were written by `ticket-implement` Step 4c Part 4 when a pre-scan doc contributed to a complexity mismatch — they tell persona agents what the docs got wrong last time.
+
+```bash
+source "$HOME/.claude/skills/lib/corrections-parse.sh"
+
+_corrections_summary=""
+for _ticket_dir in $(find . -maxdepth 3 -type d -name "*--*" -path "*/tickets/*" 2>/dev/null | head -20); do
+  _notes_file="$_ticket_dir/notes.md"
+  [ -f "$_notes_file" ] || continue
+  eval $(get_corrections_by_source "$_notes_file" "prescan" 2>/dev/null) || true
+  if [ "${CORRECTION_COUNT:-0}" -gt 0 ]; then
+    for _i in $(seq 0 $((CORRECTION_COUNT - 1))); do
+      _f_var="CORRECTION_${_i}_FACT"
+      _c_var="CORRECTION_${_i}_CORRECTED"
+      _corrections_summary="${_corrections_summary}  - ${!_f_var}: ${!_c_var}
+"
+    done
+  fi
+done
+
+if [ -n "$_corrections_summary" ]; then
+  _plog "PRESCAN" "corrections-collect" "done" "$slug: $(echo "$_corrections_summary" | wc -l) prescan corrections found"
+else
+  _plog "PRESCAN" "corrections-collect" "done" "$slug: no prescan corrections found"
+fi
+```
+
+Pass `_corrections_summary` as "Known corrections" context to each persona agent in wave 1. The prompt for each agent should include:
+
+```
+**Known corrections (from prior ticket runs):**
+{_corrections_summary or "None — prior prescan docs were accurate."}
+
+Use these to avoid repeating documented mistakes. If a correction says a service list was incomplete,
+verify the full service set. If it says a call chain was wrong, trace it fresh rather than trusting
+the prior doc.
+```
 
 2. **Spawn content agents in parallel** (wave 1 — each writes exactly one file):
    - **Architect agent** → `overview.md`: Architecture overview, layer map, component diagram, key design decisions.
@@ -157,10 +208,14 @@ For a first-time scan or decay-prompted re-dive, spawn multiple agents in parall
 
    Each agent prompt includes: persona file path, repo path, assigned output file (absolute path), existing CLAUDE.md context, gitnexus data if available. Agents MUST NOT modify source, create branches, or commit.
 
+   After dispatching wave 1, log the count so a skipped fan-out is visible in the log rather than silent: `_plog "PRESCAN" "fanout-wave1" "done" "$slug: N agents spawned"` (N must equal the number of persona docs owed for this repo — if N is lower because a persona doesn't apply, e.g. no `frontend.md` for a backend-only repo, that's fine; N being 0 is not).
+
 3. **Wait for all wave 1 agents** to complete.
 
 4. **Spawn technical-writer agent** (wave 2 — runs solo after all content exists):
    - **Technical writer agent** → reads all wave 1 output files, synthesizes `INDEX.md` with Lookup by Topic and Lookup by Service tables. This MUST run after wave 1 completes — it reads the other agents' files to build the index.
+
+   Log the spawn: `_plog "PRESCAN" "fanout-wave2" "done" "$slug: technical-writer agent spawned"`.
 
 ### Path B: Incremental (stale)
 
@@ -189,11 +244,11 @@ bash "$HOME/.claude/skills/lib/prescan-verify.sh" \
 _rc=$?
 if [ $_rc -ne 0 ]; then
   _plog "META" "gate-stop" "fail" "PRESCAN_NO_DOCS — quality violations: $(grep PRESCAN_VERIFY_VIOLATION | wc -l)"
-  hb_gate "prescan-scaffold" "fail" "quality violations" \
+  hb-wrap.sh gate "prescan-scaffold" "fail" "quality violations" \
     "{\"cadence\":\"$CADENCE\",\"violations\":\"$PRESCAN_VERIFY_VIOLATIONS\"}"
   exit 1
 fi
-hb_gate "prescan-scaffold" "ok" "all docs present and valid" \
+hb-wrap.sh gate "prescan-scaffold" "ok" "all docs present and valid" \
   "{\"cadence\":\"$CADENCE\"}"
 ```
 
@@ -201,24 +256,31 @@ hb_gate "prescan-scaffold" "ok" "all docs present and valid" \
 
 ## Step 5 — Build claude-mem corpus
 
-After scaffold-verify passes, build a queryable knowledge corpus for Tier 2 semantic search:
+**Mandatory for every repo scanned in this run — do not skip.** After scaffold-verify passes, build a queryable knowledge corpus for Tier 2 semantic search:
 
 ```bash
 # Collect all generated doc files
 DOC_FILES=$(find "$REPOS_ROOT/.ticket-auto/$slug/docs" -type f -name "*.md" | tr '\n' ',' | sed 's/,$//')
 
-# Build corpus (non-blocking)
 mcp__plugin_claude-mem_mcp-search__build_corpus \
   name="prescan-$slug" \
   description="Prescan knowledge for $slug: architecture, services, processes, security surfaces" \
-  files="$DOC_FILES" \
-  || hb_fallback "corpus-build" "fired" "corpus build failed, Tier 2 search unavailable" \
-       "{\"repo\":\"$slug\"}"
-
-_plog "PRESCAN" "corpus" "done" "$slug: corpus built"
+  files="$DOC_FILES"
 ```
 
-If claude-mem MCP is unavailable, log `hb_fallback` and continue — Tier 1 INDEX.md routing still works.
+**Then verify it actually landed** — a call that doesn't error is not proof the corpus exists:
+
+```bash
+mcp__plugin_claude-mem_mcp-search__list_corpora
+# confirm "prescan-$slug" is present in the result
+```
+
+Log the outcome **unconditionally** — this `_plog` call must run regardless of whether `HB_LOG_FILE` is set, because `hb_fallback` is a silent no-op outside `--from-auto` runs and is not sufficient on its own to record a skip or failure:
+
+- Corpus confirmed present: `_plog "PRESCAN" "corpus" "done" "$slug: corpus built and verified"`
+- Corpus missing after the build call, or the build call itself failed: `_plog "PRESCAN" "corpus" "fail" "$slug: corpus build failed or unverified"`, plus `hb-wrap.sh fallback "corpus-build" "fired" "corpus unavailable" '{"repo":"$slug"}'` for `--from-auto` runs.
+
+If claude-mem MCP is genuinely unavailable, this is a degraded (not fatal) path — Tier 1 INDEX.md routing in `ticket-appraise` still works — but the degradation MUST be logged via the `_plog "fail"` line above, never silently skipped.
 
 ---
 
@@ -260,7 +322,7 @@ done)
 SYSEOF
 
 _plog "PRESCAN" "system-index" "done" "system.md rebuilt from $(echo "$INDEX_FILES" | wc -l) repos"
-hb_decision "system-index" "fired" "system.md rebuilt" "{\"repo_count\":\"$(echo "$INDEX_FILES" | wc -l)\"}"
+hb-wrap.sh decision "system-index" "fired" "system.md rebuilt" "{\"repo_count\":\"$(echo "$INDEX_FILES" | wc -l)\"}"
 ```
 
 The contract map table is populated by the prescan agent when it detects cross-repo API calls during fan-out. On incremental scans, only new contracts are added — existing rows are preserved.
@@ -287,8 +349,8 @@ cat > "$REPOS_ROOT/.ticket-auto/$slug/meta.json" <<METAEOF
   "last_full_dive_sha": "$HEAD_SHA",
   "last_full_dive_ts": "$NOW",
   "incremental_scan_count": 0,
-  "gitnexus_indexed": true,
-  "gitnexus_symbol_count": 0,
+  "gitnexus_indexed": ${GITNEXUS_INDEXED:-false},
+  "gitnexus_symbol_count": ${GITNEXUS_SYMBOL_COUNT:-0},
   "doc_count": $(find "$REPOS_ROOT/.ticket-auto/$slug/docs" -name "*.md" | wc -l)
 }
 METAEOF

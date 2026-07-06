@@ -179,6 +179,37 @@ test_outcome_read_from_pipeline_log() {
   }
 }
 
+# 6. Label already present → still writes META|outcome-label so auto-merge (R1)
+# has an authoritative source regardless of which branch confirmed the label.
+test_outcome_label_present_writes_meta_line() {
+  _setup
+  _plog_raw "IMPLEMENT" "implement-outcome" "info" "Smooth"
+  _fake_issue='{"id":"CRE-47","title":"Test","labels":{"nodes":[{"name":"Smooth"}]}}'
+
+  _outcome_label_check
+  local rc=$?
+  local meta_line
+  meta_line=$(grep '|META|outcome-label|info|Smooth' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 0 ] && [ -n "$meta_line" ]
+}
+
+# 7. Label missing and applied → META|outcome-label written with the applied value
+test_outcome_label_missing_writes_meta_line_after_apply() {
+  _setup
+  _plog_raw "IMPLEMENT" "implement-outcome" "info" "Rough"
+  _fake_issue='{"id":"CRE-47","title":"Test","labels":{"nodes":[{"name":"bug"}]}}'
+
+  _outcome_label_check
+  local rc=$?
+  local meta_line
+  meta_line=$(grep '|META|outcome-label|info|Rough' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 0 ] && [ -n "$meta_line" ]
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Dispatcher
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -190,7 +221,9 @@ for fn in \
   test_outcome_rough_present_exits_0 \
   test_outcome_hard_present_exits_0 \
   test_outcome_label_missing_calls_flow \
-  test_outcome_read_from_pipeline_log; do
+  test_outcome_read_from_pipeline_log \
+  test_outcome_label_present_writes_meta_line \
+  test_outcome_label_missing_writes_meta_line_after_apply; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done
