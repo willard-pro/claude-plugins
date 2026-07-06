@@ -1,8 +1,8 @@
 SCRIPTS := $(shell find . -name "*.sh" -not -path "./.git/*")
 
-.PHONY: test test-lib test-flow lint fmt-check fmt
+.PHONY: test test-lib test-flow test-kc lint fmt-check fmt
 
-test: test-lib test-flow
+test: test-lib test-flow test-kc
 
 test-lib:
 	@echo "=== lib unit tests ==="
@@ -51,6 +51,13 @@ test-flow:
 	@echo "=== ticket-flow tests ==="
 	CLAUDE_SKILLS_LIB="$(CURDIR)/ticket-auto-pipeline/lib" bash ticket-auto-pipeline/skills/ticket-flow/tests/phase1.sh
 	CLAUDE_SKILLS_LIB="$(CURDIR)/ticket-auto-pipeline/lib" bash ticket-auto-pipeline/skills/ticket-flow/tests/phase2.sh
+
+test-kc:
+	@echo "=== knowledge-curator unit tests ==="
+	bash knowledge-curator/test/test-kc-index.sh
+	bash knowledge-curator/test/test-kc-item.sh
+	bash knowledge-curator/test/test-kc-resurface.sh
+	bash knowledge-curator/test/test-kc-prompt-match.sh
 
 lint:
 	shellcheck -S error $(SCRIPTS)
