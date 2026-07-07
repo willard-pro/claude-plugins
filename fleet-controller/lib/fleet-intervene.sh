@@ -12,9 +12,11 @@ if [ -f "$_INTERVENE_DIR/config.sh" ]; then
   source "$_INTERVENE_DIR/config.sh"
 fi
 
-# Source heartbeat library (provides hb_decision, hb_heartbeat for audit entries)
+# Source heartbeat library from canonical path (synced by ticket-auto-pipeline SessionStart hook)
 if ! declare -f _plog >/dev/null 2>&1; then
-  [ -f "$_INTERVENE_DIR/heartbeat.sh" ] && source "$_INTERVENE_DIR/heartbeat.sh"
+  for _hp in "$_INTERVENE_DIR/heartbeat.sh" "$HOME/.claude/skills/lib/heartbeat.sh"; do
+    [ -f "$_hp" ] && source "$_hp" && break
+  done
 fi
 
 # ── Helpers ──────────────────────────────────────────────────────────────────────

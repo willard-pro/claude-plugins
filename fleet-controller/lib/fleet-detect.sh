@@ -409,6 +409,265 @@ detect_tool_errors() {
   fi
 }
 
+# 9. Planner feedback detection — scan pipeline logs for META|planner-feedback
+#    entries and check whether corresponding feedback files exist.
+#    Severity: 0 = OBSERVE (none), 1 = WARN (uncollected feedback found).
+detect_planner_feedback() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local log_file="${workspace}/${tid}-pipeline.log"
+
+  if [ ! -f "$log_file" ]; then
+    echo "0"
+    return
+  fi
+
+  # Find META|planner-feedback entries
+  local fb_entries
+  fb_entries=$(command grep '|META|planner-feedback|' "$log_file" 2>/dev/null || true)
+  [ -z "$fb_entries" ] && echo "0" && return
+
+  # For each feedback entry, check if it's already been collected
+  # (i.e., a feedback file exists with matching initiative-id + ticket)
+  local repos_root="${REPOS_ROOT:-}"
+  local uncollected=0
+
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    # Extract ticket initiative labels from the pipeline log
+    # Feedback entries are collected by initiative-id label on the source ticket
+    local fb_payload
+    fb_payload=$(echo "$line" | awk -F'|' '{for(i=5;i<=NF;i++) printf "%s%s", $i, (i<NF?"|":"")}')
+    [ -z "$fb_payload" ] && continue
+
+    # Check for feedback file at expected location
+    # We need the initiative ID — try common label patterns
+    local fb_found=0
+    if [ -n "$repos_root" ] && [ -d "$repos_root/.ticket-auto/initiatives" ]; then
+      for init_dir in "$repos_root/.ticket-auto/initiatives"/*/; do
+        [ -d "$init_dir" ] || continue
+        local feedback_dir="${init_dir}feedback"
+        [ -d "$feedback_dir" ] && [ -n "$(ls -A "$feedback_dir" 2>/dev/null)" ] && fb_found=1 && break
+      done
+    fi
+
+    [ "$fb_found" -eq 0 ] && uncollected=$((uncollected + 1))
+  done <<<"$fb_entries"
+
+  if [ "$uncollected" -gt 0 ]; then
+    echo "1"
+  else
+    echo "0"
+  fi
+}
+
+# 10. Blocked-by resolution detection — find tickets with blocked-by:{ID}
+#     labels where the blocking ticket has reached Done state.
+#     Fleet-wide detector: uses linear-api.sh to query ticket labels.
+#     Severity: 0 = OBSERVE, 1 = WARN (unblocked tickets found).
+detect_blocked_by() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local log_file="${workspace}/${tid}-pipeline.log"
+
+  # This is primarily a fleet-wide detector — per-ticket invocation
+  # checks whether THIS ticket has a blocked-by label and whether its
+  # blocker is Done. The fleet-wide scan aggregates all.
+  #
+  # We need linear-api.sh for this check. If unavailable, return OBSERVE.
+  if ! declare -f get_issue >/dev/null 2>&1; then
+    local _la_paths=("$HOME/.claude/skills/lib/linear-api.sh" "${_CONFIG_DIR}/../linear-api.sh")
+    for _lp in "${_la_paths[@]}"; do
+      [ -f "$_lp" ] && source "$_lp" && break
+    done
+  fi
+
+  # If linear-api.sh is still unavailable, return OBSERVE
+  if ! declare -f get_issue >/dev/null 2>&1; then
+    echo "0"
+    return
+  fi
+
+  # Per-ticket: check if this ticket has blocked-by labels in its pipeline log
+  # or check Linear for the ticket's labels
+  if [ ! -f "$log_file" ]; then
+    echo "0"
+    return
+  fi
+
+  # Check if the ticket's pipeline log references blocked-by labels
+  # We use the Linear API to get current label state
+  local issue_json
+  if ! issue_json=$(get_issue "$tid" 2>/dev/null); then
+    echo "0"
+    return
+  fi
+
+  # Extract labels from the issue JSON and check for blocked-by patterns
+  local blocked_by_ids
+  blocked_by_ids=$(echo "$issue_json" | jq -r '.data.issue.labels.nodes[]?.name // empty' 2>/dev/null | grep -oP 'blocked-by:\K[A-Z]+-\d+' || true)
+
+  if [ -z "$blocked_by_ids" ]; then
+    echo "0"
+    return
+  fi
+
+  # Check each blocker's state
+  local unblocked_count=0
+  while IFS= read -r blocker_id; do
+    [ -z "$blocker_id" ] && continue
+    local blocker_json
+    if blocker_json=$(get_issue "$blocker_id" 2>/dev/null); then
+      local blocker_state
+      blocker_state=$(echo "$blocker_json" | jq -r '.data.issue.state.name // empty' 2>/dev/null)
+      [ "$blocker_state" = "Done" ] && unblocked_count=$((unblocked_count + 1))
+    fi
+  done <<<"$blocked_by_ids"
+
+  if [ "$unblocked_count" -gt 0 ]; then
+    echo "1"
+  else
+    echo "0"
+  fi
+}
+
+# 11. Initiative dispatch detection — find epics with state:execution
+#     label that have undispatched planned child tickets in Backlog.
+#     Fleet-wide detector: uses linear-api.sh to query epics and children.
+#     Severity: 0 = OBSERVE, 1 = WARN (undispatched tickets found).
+detect_initiative_dispatch() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+
+  # This is a fleet-wide detector. Per-ticket invocation is a no-op —
+  # the fleet-wide scan in fleet_detect_all runs it once separately.
+  # However, for compatibility with the per-ticket loop, return 0.
+  echo "0"
+}
+
+# Fleet-wide initiative dispatch scan. Runs once per fleet_detect_all call.
+# Usage: _fleet_scan_initiative_dispatch
+_fleet_scan_initiative_dispatch() {
+  if ! declare -f get_issue >/dev/null 2>&1; then
+    local _la_paths=("$HOME/.claude/skills/lib/linear-api.sh" "${_CONFIG_DIR}/../linear-api.sh")
+    for _lp in "${_la_paths[@]}"; do
+      [ -f "$_lp" ] && source "$_lp" && break
+    done
+  fi
+
+  if ! declare -f get_issue >/dev/null 2>&1; then
+    echo '{"severity":0,"findings":""}'
+    return
+  fi
+
+  # Query Linear for epics with state:execution label
+  # Use GraphQL to find initiatives in execution state
+  local query='{"query":"{issues(filter:{state:{name:{eq:\\"Backlog\\"}},labels:{name:{eq:\\"state:execution\\"}}}){nodes{id identifier title children{nodes{id identifier state{name} labels{nodes{name}}}}}}}"}'
+
+  local epics_json
+  if ! epics_json=$(echo "$query" | curl -s -X POST "${LINEAR_API_URL:-https://api.linear.app/graphql}" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: ${LINEAR_API_KEY}" \
+    -d @- 2>/dev/null); then
+    echo '{"severity":0,"findings":""}'
+    return
+  fi
+
+  local undispatched=0
+  local initiative_ids=""
+
+  # Extract epics and check children
+  local epic_count
+  epic_count=$(echo "$epics_json" | jq -r '.data.issues.nodes | length // 0' 2>/dev/null)
+  [ "${epic_count:-0}" -eq 0 ] && echo '{"severity":0,"findings":""}' && return
+
+  for i in $(seq 0 $((epic_count - 1))); do
+    local epic_id epic_identifier
+    epic_id=$(echo "$epics_json" | jq -r ".data.issues.nodes[$i].identifier // empty" 2>/dev/null)
+    [ -z "$epic_id" ] && continue
+
+    # Check child tickets
+    local child_count
+    child_count=$(echo "$epics_json" | jq -r ".data.issues.nodes[$i].children.nodes | length // 0" 2>/dev/null)
+    [ "${child_count:-0}" -eq 0 ] && continue
+
+    local epic_undispatched=0
+    for j in $(seq 0 $((child_count - 1))); do
+      local child_state child_labels child_id
+      child_state=$(echo "$epics_json" | jq -r ".data.issues.nodes[$i].children.nodes[$j].state.name // empty" 2>/dev/null)
+      child_labels=$(echo "$epics_json" | jq -r ".data.issues.nodes[$i].children.nodes[$j].labels.nodes[].name // empty" 2>/dev/null)
+      child_id=$(echo "$epics_json" | jq -r ".data.issues.nodes[$i].children.nodes[$j].identifier // empty" 2>/dev/null)
+
+      # Check for planned label + Backlog state
+      if [ "$child_state" = "Backlog" ] && echo "$child_labels" | grep -q "planned" 2>/dev/null; then
+        epic_undispatched=$((epic_undispatched + 1))
+      fi
+    done
+
+    if [ "$epic_undispatched" -gt 0 ]; then
+      undispatched=$((undispatched + epic_undispatched))
+      initiative_ids="${initiative_ids} ${epic_id}(${epic_undispatched})"
+    fi
+  done
+
+  local findings
+  findings=$(echo "$initiative_ids" | sed 's/^ //')
+
+  if [ "$undispatched" -gt 0 ]; then
+    echo "{\"severity\":1,\"findings\":\"${undispatched} undispatched: ${findings}\"}"
+  else
+    echo '{"severity":0,"findings":""}'
+  fi
+}
+
+# Fleet-wide blocked-by scan. Runs once per fleet_detect_all call.
+# Checks all active tickets for resolved blocked-by dependencies.
+# Usage: _fleet_scan_blocked_by <workspace>
+_fleet_scan_blocked_by() {
+  local workspace="${1:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+
+  if ! declare -f get_issue >/dev/null 2>&1; then
+    local _la_paths=("$HOME/.claude/skills/lib/linear-api.sh" "${_CONFIG_DIR}/../linear-api.sh")
+    for _lp in "${_la_paths[@]}"; do
+      [ -f "$_lp" ] && source "$_lp" && break
+    done
+  fi
+
+  if ! declare -f get_issue >/dev/null 2>&1; then
+    echo '{"severity":0,"findings":""}'
+    return
+  fi
+
+  # Scan all active pipeline logs and check each ticket's blocked-by status
+  local unblocked_tids=""
+  local unblocked_count=0
+
+  for log_file in "$workspace"/*-pipeline.log; do
+    [ -f "$log_file" ] || continue
+    local tid
+    tid=$(basename "$log_file" | sed 's/-pipeline.log$//')
+    [ -z "$tid" ] && continue
+
+    # Skip completed pipelines
+    command grep -q '|META|outcome|' "$log_file" 2>/dev/null && continue
+
+    local sev
+    sev=$(detect_blocked_by "$tid" "$workspace")
+    if [ "$sev" -ge 1 ]; then
+      unblocked_tids="${unblocked_tids} ${tid}"
+      unblocked_count=$((unblocked_count + 1))
+    fi
+  done
+
+  if [ "$unblocked_count" -gt 0 ]; then
+    local findings
+    findings="$(echo "$unblocked_tids" | sed 's/^ //')"
+    echo "{\"severity\":1,\"findings\":\"${unblocked_count} unblocked: ${findings}\"}"
+  else
+    echo '{"severity":0,"findings":""}'
+  fi
+}
+
 # ── Diagnostic context extraction ────────────────────────────────────────────────
 # Reads: last 3 fail entries + last 5 RETRO hints from Claude log,
 #        last 20 lines from agent output log if it exists.
@@ -455,14 +714,14 @@ extract_diagnostics() {
 }
 
 # ── Aggregator ───────────────────────────────────────────────────────────────────
-# Enumerates active pipeline logs, runs all 7 detectors per pipeline,
+# Enumerates active pipeline logs, runs all 11 detectors per pipeline + fleet-wide,
 # outputs JSON results array.
 # Usage: fleet_detect_all <workspace>
 fleet_detect_all() {
   local workspace="${1:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
 
   if [ ! -d "$workspace" ]; then
-    echo '{"pipelines":[],"summary":{"total":0,"healthy":0,"warn":0,"kill":0,"restart":0}}'
+    echo '{"pipelines":[],"fleet_wide":[],"summary":{"total":0,"healthy":0,"warn":0,"kill":0,"restart":0}}'
     return
   fi
 
@@ -496,8 +755,8 @@ fleet_detect_all() {
 
     total=$((total + 1))
 
-    # Run all 8 detectors, collect max severity
-    local s1 s2 s3 s4 s5 s6 s7 s8 max_sev anomaly_types
+    # Run all 9 per-ticket detectors (1-8 + planner_feedback), collect max severity
+    local s1 s2 s3 s4 s5 s6 s7 s8 s9 max_sev anomaly_types
     s1=$(detect_phase_failures "$tid" "$workspace")
     s2=$(detect_stalls "$tid" "$workspace")
     s3=$(detect_zombies "$tid" "$workspace")
@@ -506,11 +765,12 @@ fleet_detect_all() {
     s6=$(detect_flow_failures "$tid" "$workspace")
     s7=$(detect_auto_mode_blocks "$tid" "$workspace")
     s8=$(detect_tool_errors "$tid" "$workspace")
+    s9=$(detect_planner_feedback "$tid" "$workspace")
 
     max_sev=0
     anomaly_types=""
 
-    for s in "$s1" "$s2" "$s3" "$s4" "$s5" "$s6" "$s7" "$s8"; do
+    for s in "$s1" "$s2" "$s3" "$s4" "$s5" "$s6" "$s7" "$s8" "$s9"; do
       [ "$s" -gt "$max_sev" ] && max_sev="$s"
     done
 
@@ -523,6 +783,7 @@ fleet_detect_all() {
     [ "$s6" -ge 1 ] && anomaly_types="${anomaly_types} flow-failure(S${s6})"
     [ "$s7" -ge 1 ] && anomaly_types="${anomaly_types} auto-block(S${s7})"
     [ "$s8" -ge 1 ] && anomaly_types="${anomaly_types} tool-errors(S${s8})"
+    [ "$s9" -ge 1 ] && anomaly_types="${anomaly_types} planner-feedback(S${s9})"
     anomaly_types=$(echo "$anomaly_types" | sed 's/^ //')
 
     # Cap severity at 2 (KILL) when auto-restart is disabled
@@ -566,6 +827,45 @@ fleet_detect_all() {
 
   results="$results]"
 
+  # ── Fleet-wide detectors (scan once, not per-ticket) ────────────────────────
+  local fleet_wide="["
+  local fw_first=true
+
+  # D-10: Blocked-by resolution scan
+  local bb_json
+  bb_json=$(_fleet_scan_blocked_by "$workspace" 2>/dev/null || echo '{"severity":0,"findings":""}')
+  [ "$fw_first" = "false" ] && fleet_wide="$fleet_wide,"
+  fw_first=false
+  fleet_wide="${fleet_wide}$(jq -nc \
+    --arg name "detect_blocked_by" \
+    --argjson severity "$(echo "$bb_json" | jq -r '.severity // 0')" \
+    --arg findings "$(echo "$bb_json" | jq -r '.findings // ""')" \
+    --arg type "fleet-wide" \
+    '{name: $name, severity: $severity, findings: $findings, type: $type}')"
+
+  local bb_sev
+  bb_sev=$(echo "$bb_json" | jq -r '.severity // 0')
+  [ "$bb_sev" -ge 1 ] && warn=$((warn + 1))
+
+  # D-11: Initiative dispatch scan
+  local id_json
+  id_json=$(_fleet_scan_initiative_dispatch 2>/dev/null || echo '{"severity":0,"findings":""}')
+  [ "$fw_first" = "false" ] && fleet_wide="$fleet_wide,"
+  fw_first=false
+  fleet_wide="${fleet_wide}$(jq -nc \
+    --arg name "detect_initiative_dispatch" \
+    --argjson severity "$(echo "$id_json" | jq -r '.severity // 0')" \
+    --arg findings "$(echo "$id_json" | jq -r '.findings // ""')" \
+    --arg type "fleet-wide" \
+    '{name: $name, severity: $severity, findings: $findings, type: $type}')"
+
+  local id_sev
+  id_sev=$(echo "$id_json" | jq -r '.severity // 0')
+  [ "$id_sev" -ge 1 ] && warn=$((warn + 1))
+
+  fleet_wide="$fleet_wide]"
+
+  # ── Summary ─────────────────────────────────────────────────────────────────
   local summary
   summary=$(jq -nc \
     --argjson total "$total" \
@@ -577,6 +877,7 @@ fleet_detect_all() {
 
   jq -nc \
     --argjson pipelines "$results" \
+    --argjson fleet_wide "$fleet_wide" \
     --argjson summary "$summary" \
-    '{pipelines: $pipelines, summary: $summary}'
+    '{pipelines: $pipelines, fleet_wide: $fleet_wide, summary: $summary}'
 }

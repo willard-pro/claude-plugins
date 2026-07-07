@@ -23,9 +23,11 @@ fi
 # Bridge: heartbeat.sh uses HB_LOG_FILE; fleet controller uses FLEET_HB_LOG_FILE.
 [ -z "${HB_LOG_FILE:-}" ] && HB_LOG_FILE="${FLEET_HB_LOG_FILE:-}"
 
-# Source heartbeat for _plog (and _source_if_missing) — must be first
+# Source heartbeat from canonical path (synced by ticket-auto-pipeline SessionStart hook)
 if ! declare -f _plog >/dev/null 2>&1; then
-  [ -f "$_MONITOR_DIR/heartbeat.sh" ] && source "$_MONITOR_DIR/heartbeat.sh"
+  for _hp in "$_MONITOR_DIR/heartbeat.sh" "$HOME/.claude/skills/lib/heartbeat.sh"; do
+    [ -f "$_hp" ] && source "$_hp" && break
+  done
 fi
 
 _source_if_missing fleet_detect_all "$_MONITOR_DIR/fleet-detect.sh"
@@ -86,6 +88,75 @@ _spawn_restart() {
   fi
 }
 
+# ── Spawn queue consumption ─────────────────────────────────────────────────────
+
+# Consume entries from the spawn queue, respecting FLEET_MAX_CONCURRENT.
+# Reads the queue file line-by-line, spawns pipelines for eligible entries,
+# and marks consumed entries by rewriting the queue without them.
+# In cron mode, emits ACTION:spawn lines to stdout for the skill layer.
+# Usage: _spawn_queue_consume <workspace> <active_count>
+_spawn_queue_consume() {
+  local workspace="$1"
+  local active_count="${2:-0}"
+  local instance_id="${FLEET_INSTANCE_ID:-default}"
+  local queue_file="/tmp/fleet-${instance_id}-spawn-queue.jsonl"
+  local max_concurrent="${FLEET_MAX_CONCURRENT:-3}"
+
+  if [ ! -f "$queue_file" ] || [ ! -s "$queue_file" ]; then
+    return 0
+  fi
+
+  local slots_available=$((max_concurrent - active_count))
+  [ "$slots_available" -le 0 ] && return 0
+
+  local consumed=0
+  local remaining_entries=""
+
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+
+    # Parse the JSONL entry
+    local tid reason
+    tid=$(echo "$line" | jq -r '.tid // empty' 2>/dev/null)
+    [ -z "$tid" ] && remaining_entries="${remaining_entries}${line}"$'\n' && continue
+
+    if [ "$consumed" -lt "$slots_available" ]; then
+      reason=$(echo "$line" | jq -r '.reason // "dispatched"' 2>/dev/null)
+      restarts=$(echo "$line" | jq -r '.restarts // 0' 2>/dev/null)
+
+      fl_write "INFO" "queue" "Consuming spawn queue entry: ${tid} (${reason})"
+
+      if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+        echo "ACTION:spawn-auto tid=${tid} reason=${reason}"
+      else
+        # Cron mode: write consumed marker as ACTION line
+        echo "ACTION:spawn-auto tid=${tid} reason=${reason} restarts=${restarts}"
+      fi
+
+      # Emit heartbeat for the spawn
+      hb_fleet_action "queue-dispatch" "info" "Spawning from queue: ${tid}" \
+        "{\"tid\":\"$tid\",\"reason\":\"$reason\"}"
+
+      consumed=$((consumed + 1))
+    else
+      # Keep unconsumed entries
+      remaining_entries="${remaining_entries}${line}"$'\n'
+    fi
+  done <"$queue_file"
+
+  # Rewrite queue with remaining (unconsumed) entries
+  if [ "$consumed" -gt 0 ]; then
+    if [ -n "$remaining_entries" ]; then
+      echo -n "$remaining_entries" >"$queue_file"
+    else
+      rm -f "$queue_file"
+    fi
+  fi
+
+  [ "$consumed" -gt 0 ] && fl_write "INFO" "queue" "Consumed ${consumed} queue entries, ${slots_available} slots used"
+  return 0
+}
+
 # ── fleet_monitor_cycle ──────────────────────────────────────────────────────────
 # Run one complete detection + intervention cycle.
 # Returns JSON detection results to stdout.
@@ -99,7 +170,7 @@ fleet_monitor_cycle() {
   local data
   if ! data=$(fleet_detect_all "$workspace" 2>/dev/null); then
     fl_write "ERROR" "monitor" "fleet_detect_all failed"
-    echo '{"pipelines":[],"summary":{"total":0,"healthy":0,"warn":0,"kill":0,"restart":0}}'
+    echo '{"pipelines":[],"fleet_wide":[],"summary":{"total":0,"healthy":0,"warn":0,"kill":0,"restart":0}}'
     return 1
   fi
 
@@ -140,6 +211,11 @@ fleet_monitor_cycle() {
   done
 
   fl_write "INFO" "monitor" "Monitor cycle complete"
+
+  # Consume spawn queue (dispatch + restart entries)
+  local active_count
+  active_count=$(echo "$data" | jq -r '.summary.total // 0' 2>/dev/null)
+  _spawn_queue_consume "$workspace" "${active_count:-0}" 2>/dev/null || true
 
   # Return the detection data for fleet-summary gating in the loop
   echo "$data"

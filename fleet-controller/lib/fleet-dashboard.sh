@@ -6,9 +6,11 @@
 
 _DASH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Source heartbeat for _plog/_iso_now (and _source_if_missing) — must be first
+# Source heartbeat from canonical path (synced by ticket-auto-pipeline SessionStart hook)
 if ! declare -f _plog >/dev/null 2>&1; then
-  [ -f "$_DASH_DIR/heartbeat.sh" ] && source "$_DASH_DIR/heartbeat.sh"
+  for _hp in "$_DASH_DIR/heartbeat.sh" "$HOME/.claude/skills/lib/heartbeat.sh"; do
+    [ -f "$_hp" ] && source "$_hp" && break
+  done
 fi
 # Source fleet-detect.sh for fleet_detect_all if not already loaded
 _source_if_missing fleet_detect_all "$_DASH_DIR/fleet-detect.sh"
@@ -96,6 +98,19 @@ fleet_render_dashboard_from_data() {
 
   echo ""
   echo "Summary: ${total} active — ${healthy} healthy, ${warn} warn, ${kill} kill, ${restart} restart"
+
+  # Fleet-wide detectors
+  local fw_count
+  fw_count=$(echo "$data" | jq -r '.fleet_wide | length // 0' 2>/dev/null || echo "0")
+  if [ "${fw_count:-0}" -gt 0 ]; then
+    echo ""
+    echo "--- Fleet-Wide Detectors ---"
+    echo "$data" | jq -r '.fleet_wide[] | "\(.name)|\(.severity)|\(.findings)"' 2>/dev/null | while IFS='|' read -r dname dsev dfindings; do
+      local icon label
+      IFS='|' read -r icon label <<<"$(_severity_info "${dsev:-0}")"
+      [ -n "$dfindings" ] && echo "  ${icon} ${dname}: ${dfindings}" || echo "  ${icon} ${dname}: clear"
+    done
+  fi
 }
 
 # ── fleet_write_report_from_data ─────────────────────────────────────────────────
@@ -142,6 +157,23 @@ fleet_write_report_from_data() {
 
     echo ""
     echo "**Summary:** ${total} active — ${healthy} 🟢 healthy, ${warn} 🟡 warn, ${kill} 🔴 kill, ${restart} 💀 restart"
+
+    # Fleet-wide detector section in markdown
+    local fw_count
+    fw_count=$(echo "$data" | jq -r '.fleet_wide | length // 0' 2>/dev/null || echo "0")
+    if [ "${fw_count:-0}" -gt 0 ]; then
+      echo "## Fleet-Wide Detectors"
+      echo ""
+      echo "| Detector | Severity | Findings |"
+      echo "|----------|----------|----------|"
+
+      echo "$data" | jq -r '.fleet_wide[] | "\(.name)|\(.severity)|\(.findings // \"clear\")"' 2>/dev/null | while IFS='|' read -r dname dsev dfindings; do
+        local icon label
+        IFS='|' read -r icon label <<<"$(_severity_info "${dsev:-0}")"
+        echo "| ${dname} | ${icon} ${label} (${dsev}) | ${dfindings:-clear} |"
+      done
+      echo ""
+    fi
 
     # Alert detail section — one subsection per pipeline with severity ≥ WARN
     local alerts

@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "ticket-auto-pipeline",
-      "version": "0.14.0",
+      "version": "0.14.1",
       "source": "./ticket-auto-pipeline",
       "description": "Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. Bundles 20+ skills, state machine config, pipeline safety gates, and retrospective analysis."
     },
@@ -18,6 +18,12 @@
       "version": "0.1.0",
       "source": "./knowledge-curator",
       "description": "Durable cross-project knowledge tracking — capture ideas, decisions, lessons, and discoveries with low friction, automatic resurfacing, and a dispatchable work stack."
+    },
+    {
+      "name": "fleet-controller",
+      "version": "0.1.0",
+      "source": "./fleet-controller",
+      "description": "Parent orchestrator above ticket-planner and ticket-auto — dispatches planned tickets from initiative epics, monitors all active pipeline health via 11 detection engines, and aggregates execution feedback back to the planner. Bash-only, zero Claude agents."
     }
   ]
 }
