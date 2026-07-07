@@ -1,0 +1,23 @@
+{
+  "description": "Knowledge Curator hooks — resurface and prompt-match",
+  "hooks": {
+    "SessionStart": {
+      "description": "Inject top-N priority knowledge items as session context",
+      "script": "hooks/kc-resurface.sh",
+      "timeout": 3,
+      "failOpen": true,
+      "conditions": {
+        "directoryExists": "knowledge/"
+      }
+    },
+    "UserPromptSubmit": {
+      "description": "Grep user prompt against knowledge INDEX.md tags/titles, inject matches",
+      "script": "hooks/kc-prompt-match.sh",
+      "timeout": 2,
+      "failOpen": true,
+      "conditions": {
+        "directoryExists": "knowledge/"
+      }
+    }
+  }
+}

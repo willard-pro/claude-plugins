@@ -1,0 +1,41 @@
+{
+  "name": "knowledge-curator",
+  "version": "0.1.0",
+  "description": "Durable cross-project knowledge tracking — capture ideas, decisions, lessons, and discoveries with low friction, automatic resurfacing, and a dispatchable work stack. Curates over existing systems (claude-mem, Linear, openspec) rather than creating a new silo.",
+  "author": {
+    "name": "John Willard"
+  },
+  "repository": "https://github.com/willard-pro/claude-plugins",
+  "license": "UNLICENSED",
+  "keywords": [
+    "knowledge",
+    "curation",
+    "cross-project",
+    "decision-tracking",
+    "memory"
+  ],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/kc-resurface.sh",
+            "timeout": 3
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/kc-prompt-match.sh",
+            "timeout": 2
+          }
+        ]
+      }
+    ]
+  }
+}
