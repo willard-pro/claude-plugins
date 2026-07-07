@@ -19,12 +19,33 @@ INDEX_FILE="$KNOWLEDGE_DIR/INDEX.md"
 [ -d "$KNOWLEDGE_DIR" ] || exit 0
 [ -f "$INDEX_FILE" ] || exit 0
 
-# Count p1 items from INDEX.md summary table
-p1_count=$(awk '/^\| [0-9]+ \| [0-9]+ \| [0-9]+ \|$/{print $4; exit}' "$INDEX_FILE" 2>/dev/null || echo "0")
+# Parse summary table by header names (not positional), so adding columns
+# to the index format doesn't silently break count extraction.
+# Table format: | Total | P1 | In Progress |
+extract_summary_col() {
+  local col_name="$1"
+  awk -v col="$col_name" '
+    BEGIN { FS=" *\\| *"; in_summary=0 }
+    /^## Summary/ { in_summary=1; next }
+    in_summary && /^## / { in_summary=0; exit }
+    in_summary && /\| Total \|/ {
+      for (i=2; i<=NF; i++) {
+        gsub(/^ +| +$/, "", $i)
+        if ($i == col) { col_idx=i; next }
+      }
+    }
+    in_summary && col_idx && /^\| [0-9]+/ {
+      gsub(/^ +| +$/, "", $(col_idx))
+      print $(col_idx)
+      exit
+    }
+  ' "$INDEX_FILE" 2>/dev/null
+}
+
+p1_count=$(extract_summary_col "P1")
 p1_count="${p1_count:-0}"
 
-# Count in_progress items
-in_progress_count=$(awk '/^\| [0-9]+ \| [0-9]+ \| [0-9]+ \|$/{print $6; exit}' "$INDEX_FILE" 2>/dev/null || echo "0")
+in_progress_count=$(extract_summary_col "In Progress")
 in_progress_count="${in_progress_count:-0}"
 
 # Get top-N items from the Items table (skip header rows)

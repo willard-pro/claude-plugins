@@ -30,19 +30,36 @@ extract_field() {
   local file="$1"
   local field="$2"
   awk -v field="${field}" '
-    BEGIN { in_fm=0 }
+    BEGIN { in_fm=0; in_list=0; in_dash_list=0 }
     /^---$/ { if (in_fm==0) { in_fm=1; next } else { exit } }
     in_fm==1 && $1 == field":" {
       sub(/^[^:]+:[[:space:]]*/, "")
-      print
-      if ($0 !~ /^\[/) { exit }
-      in_list=1
+      if ($0 != "") {
+        # Value on same line
+        print
+        if ($0 ~ /^\[/ && $0 !~ /\]/) { in_list=1 }
+        if ($0 !~ /^\[/ || $0 ~ /\]/) { exit }
+      } else {
+        # Value on subsequent lines (YAML dash-list or indented block)
+        in_dash_list=1
+      }
       next
     }
     in_list==1 {
       sub(/^[[:space:]]*/, "")
       print
       if ($0 ~ /\]/) { exit }
+      next
+    }
+    in_dash_list==1 {
+      # Capture indented continuation lines or dash-list items
+      if ($0 ~ /^[[:space:]]/ || $0 ~ /^[[:space:]]*-/) {
+        sub(/^[[:space:]]*/, "")
+        print
+        next
+      }
+      # Non-indented, non-empty line ends the list
+      if ($0 !~ /^[[:space:]]/ && $0 != "") { exit }
     }
   ' "$file" 2>/dev/null || true
 }
@@ -74,6 +91,13 @@ for item_file in "$KNOWLEDGE_DIR"/KC-[0-9][0-9][0-9][0-9]--*.md; do
   updated=$(extract_field "$item_file" "updated" | strip_quotes)
   source=$(extract_field "$item_file" "source" | strip_quotes)
   tags=$(extract_field "$item_file" "tags" | sed 's/[][]//g; s/,/ /g')
+  relates=$(extract_field "$item_file" "relates" | tr '\n' ' ' | sed 's/  */ /g; s/^ *//; s/ *$//')
+
+  # Validate required fields are non-empty — skip and warn if corrupt
+  if [ -z "$id" ] || [ -z "$type" ] || [ -z "$title" ] || [ -z "$status" ] || [ -z "$priority" ]; then
+    echo "WARNING: Skipping item with missing required fields in: $(basename "$item_file")" >&2
+    continue
+  fi
 
   # Skip done/obsolete in stack views
   if [ "$status" = "done" ] || [ "$status" = "obsolete" ]; then
@@ -90,9 +114,37 @@ for item_file in "$KNOWLEDGE_DIR"/KC-[0-9][0-9][0-9][0-9]--*.md; do
     p3) sort_key=3 ;;
   esac
 
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$sort_key" "$updated" "$id" "$type" "$title" "$status" "$priority" "$created" "$source" "$tags" >> "$ITEMS_TMP"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$sort_key" "$updated" "$id" "$type" "$title" "$status" "$priority" "$created" "$source" "$tags" "$relates" >> "$ITEMS_TMP"
 done
+
+# ── Warn about orphaned .md files that don't match the KC-NNNN pattern ──
+for f in "$KNOWLEDGE_DIR"/*.md; do
+  [ -f "$f" ] || continue
+  basename=$(basename "$f")
+  case "$basename" in
+    INDEX.md) continue ;;
+    KC-[0-9][0-9][0-9][0-9]--*) continue ;;
+    *) echo "WARNING: Orphaned file in knowledge/ (won't appear in index): ${basename}" >&2 ;;
+  esac
+done
+
+# ── Detect vanished items (present in previous build, missing now) ──
+REGISTRY_FILE="$KNOWLEDGE_DIR/.kc-item-registry"
+if [ -f "$REGISTRY_FILE" ]; then
+  while IFS= read -r prev_id; do
+    [ -z "$prev_id" ] && continue
+    if ! grep -qxF "$prev_id" "$ITEMS_TMP" 2>/dev/null && \
+       ! grep -qxF "$prev_id" <(for f in "$KNOWLEDGE_DIR"/KC-[0-9][0-9][0-9][0-9]--*.md; do [ -f "$f" ] && basename "$f" | grep -oE 'KC-[0-9]{4}'; done) 2>/dev/null; then
+      echo "WARNING: Previously tracked item vanished: ${prev_id} (file deleted or renamed)" >&2
+    fi
+  done < "$REGISTRY_FILE"
+fi
+# Write current item IDs to registry for next-run comparison
+for item_file in "$KNOWLEDGE_DIR"/KC-[0-9][0-9][0-9][0-9]--*.md; do
+  [ -f "$item_file" ] || continue
+  basename "$item_file" | grep -oE 'KC-[0-9]{4}'
+done > "$REGISTRY_FILE"
 
 # ── Write INDEX.md ───────────────────────────────────────────────────
 
@@ -113,12 +165,13 @@ now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   if [ "$item_count" -gt 0 ]; then
     echo "## Items"
     echo ""
-    echo "| ID | Type | Title | Status | Priority | Updated | Tags |"
-    echo "|----|------|-------|--------|----------|---------|------|"
+    echo "| ID | Type | Title | Status | Priority | Updated | Tags | Relates |"
+    echo "|----|------|-------|--------|----------|---------|------|---------|"
 
-    sort -t"${TAB}" -k1,1n -k2,2r "$ITEMS_TMP" | while IFS="${TAB}" read -r sort_key updated id type title status priority created source tags; do
-      printf '| %s | %s | %s | %s | %s | %s | %s |\n' \
-        "$id" "$type" "$title" "$status" "$priority" "$updated" "$tags"
+    sort -t"${TAB}" -k1,1n -k2,2r "$ITEMS_TMP" | while IFS="${TAB}" read -r sort_key updated id type title status priority created source tags relates; do
+      relate_short=$(echo "$relates" | grep -oE 'KC-[0-9]{4}' | tr '\n' ' ' | sed 's/ *$//' || true)
+      printf '| %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+        "$id" "$type" "$title" "$status" "$priority" "$updated" "$tags" "$relate_short"
     done
     echo ""
   else

@@ -46,8 +46,17 @@ mem-search query="<concept>" limit=5
 Allocate the next `KC-NNNN` id. Find the highest existing id:
 
 ```bash
-ls knowledge/KC-[0-9][0-9][0-9][0-9]--*.md 2>/dev/null | sort -V | tail -1
+latest=$(ls knowledge/KC-[0-9][0-9][0-9][0-9]--*.md 2>/dev/null | sort -V | tail -1)
+if [ -n "$latest" ]; then
+  latest_id=$(basename "$latest" | grep -oE 'KC-[0-9]{4}' | head -1)
+  next_num=$((10#${latest_id#KC-} + 1))
+  printf -v next_id "KC-%04d" "$next_num"
+else
+  next_id="KC-0001"
+fi
 ```
+
+This handles the zero-items case (first capture in a fresh repo starts at KC-0001).
 
 Write to `knowledge/KC-NNNN--<slug>.md` using the frontmatter schema:
 
@@ -97,9 +106,18 @@ bash "${CLAUDE_PLUGIN_ROOT}/lib/kc-index.sh" knowledge/
 ## Plan-mode behavior
 
 If plan mode is active, DO NOT write the item file. Instead:
-1. Draft the item content
-2. Queue it by writing the draft to `/tmp/kc-capture-queue-<id>.md`
-3. Tell the user: "Item queued — will be written after plan approval."
-4. After plan approval (PostToolUse on exitPlanMode), write the queued items to `knowledge/` and rebuild index.
+1. Allocate the next id (this is safe — the id isn't consumed until the file is written)
+2. Draft the item content with the allocated id
+3. Queue it by writing the draft to `/tmp/kc-capture-queue-<next_id>.md`
+4. Tell the user: "Item KC-NNNN queued — will be written after plan approval."
+5. After plan approval (`exitPlanMode`), immediately write ALL queued items from `/tmp/kc-capture-queue-*.md` to `knowledge/` and rebuild the index:
+   ```bash
+   for qf in /tmp/kc-capture-queue-*.md; do
+     [ -f "$qf" ] || continue
+     mv "$qf" "knowledge/$(basename "$qf" | sed 's/^kc-capture-queue-//')"
+   done
+   bash "${CLAUDE_PLUGIN_ROOT}/lib/kc-index.sh" knowledge/
+   ```
+6. This is a hard requirement — do not leave queued files in /tmp. If you cannot flush for any reason, tell the user explicitly which items are still queued and where.
 
-The sweep (`kc-sweep`) acts as a fallback net for any queued items that are lost.
+The sweep (`kc-sweep`) acts as a fallback net for any queued items that are lost — but it only scans claude-mem observations and `~/.claude/plans/`, not `/tmp/`. Manual recovery from `/tmp/kc-capture-queue-*.md` may be needed if the flush step is missed.

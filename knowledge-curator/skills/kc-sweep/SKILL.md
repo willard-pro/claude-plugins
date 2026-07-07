@@ -7,6 +7,11 @@ description: Scheduled curation sweep over recent claude-mem observations and pl
 
 Review recent claude-mem observations and new plan files since the last sweep, promote durable items, and run an administration pass over existing items.
 
+## Prerequisites
+
+- **claude-mem**: Required for observation review (Step 2). If claude-mem is not configured, the sweep skips observation promotion and only processes plan files + administration. Install via the claude-mem plugin if observation promotion is desired.
+- **Linear** (optional): Only needed if you want the sweep to cross-reference Linear ticket state. Not required for core sweep operation.
+
 ## Cron registration
 
 Register on a daily schedule:

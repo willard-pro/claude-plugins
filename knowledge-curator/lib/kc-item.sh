@@ -2,10 +2,12 @@
 # kc-item.sh — Deterministic knowledge item mutation (agent work contract).
 #
 # Subcommands:
-#   claim <id>         Mark item in_progress. Fails non-zero if already claimed.
-#   complete <id>      Mark item done. Removed from stack views; file stays on disk.
-#   add <file>         Validate and index a new item file (already written by caller).
-#   status <id>        Print current status of an item.
+#   claim <id>            Mark item in_progress. Fails non-zero if already claimed.
+#   complete <id>         Mark item done (only from in_progress). Fails if not claimed.
+#   release <id>          Release an in_progress item back to active. Fails if not in_progress.
+#   add <file>            Validate and index a new item file (already written by caller).
+#   edit <id> <f> <v>     Update a single frontmatter field (title, priority, tags, relates, project).
+#   status <id>           Print current status of an item.
 #
 # All subcommands: update `updated` timestamp, regenerate INDEX.md.
 # Serialized via flock on the knowledge directory. Sole agent mutation path.
@@ -14,7 +16,7 @@
 #   0 - success
 #   1 - usage / invalid arguments
 #   2 - item not found
-#   3 - item already claimed (claim conflict)
+#   3 - item already claimed (claim conflict) / item not in_progress (complete/release)
 #   4 - schema validation failure
 #   5 - flock failure
 
@@ -113,11 +115,14 @@ case "$subcommand" in
     ITEM_FILE=$(find_item_file "$id")
     [ -z "$ITEM_FILE" ] && die "Item not found: $id" 2
 
-    # Check not already claimed
+    # Guard: only claim active or dormant items (not done, obsolete, or already claimed)
     CURRENT_STATUS=$(awk '/^status:/ {print $2}' "$ITEM_FILE")
-    if [ "$CURRENT_STATUS" = "in_progress" ]; then
-      die "Item already claimed: $id (status: in_progress)" 3
-    fi
+    case "$CURRENT_STATUS" in
+      active|dormant) ;;
+      in_progress) die "Item already claimed: $id (status: in_progress)" 3 ;;
+      done|obsolete) die "Cannot claim completed/obsolete item: $id (status: ${CURRENT_STATUS})" 3 ;;
+      *) die "Cannot claim item with unknown status: $id (status: ${CURRENT_STATUS})" 3 ;;
+    esac
 
     # Atomic update with flock
     (
@@ -137,6 +142,12 @@ case "$subcommand" in
     ITEM_FILE=$(find_item_file "$id")
     [ -z "$ITEM_FILE" ] && die "Item not found: $id" 2
 
+    # Guard: must be in_progress to complete
+    CURRENT_STATUS=$(awk '/^status:/ {print $2}' "$ITEM_FILE")
+    if [ "$CURRENT_STATUS" != "in_progress" ]; then
+      die "Item not in_progress: $id (status: ${CURRENT_STATUS}). Claim it first." 3
+    fi
+
     (
       flock -x 9 || die "Failed to acquire lock" 5
       sed -i "s/^status:.*/status: done/" "$ITEM_FILE"
@@ -145,6 +156,28 @@ case "$subcommand" in
 
     "$SCRIPT_DIR/kc-index.sh" "$KNOWLEDGE_DIR"
     echo "Completed: $id → done"
+    ;;
+
+  release)
+    id="${1:-}"
+    [ -z "$id" ] && die "Usage: kc-item.sh release <id>" 1
+    ITEM_FILE=$(find_item_file "$id")
+    [ -z "$ITEM_FILE" ] && die "Item not found: $id" 2
+
+    # Guard: must be in_progress to release
+    CURRENT_STATUS=$(awk '/^status:/ {print $2}' "$ITEM_FILE")
+    if [ "$CURRENT_STATUS" != "in_progress" ]; then
+      die "Item not in_progress: $id (status: ${CURRENT_STATUS}). Nothing to release." 3
+    fi
+
+    (
+      flock -x 9 || die "Failed to acquire lock" 5
+      sed -i "s/^status:.*/status: active/" "$ITEM_FILE"
+      update_timestamp "$ITEM_FILE" "$(timestamp)"
+    ) 9>"$KNOWLEDGE_DIR/.lock"
+
+    "$SCRIPT_DIR/kc-index.sh" "$KNOWLEDGE_DIR"
+    echo "Released: $id → active"
     ;;
 
   add)
@@ -171,9 +204,13 @@ case "$subcommand" in
     slug=$(echo "$title" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g; s/--*/-/g; s/^-//; s/-$//' | head -c 60)
     target="$KNOWLEDGE_DIR/${id}--${slug}.md"
 
-    # Never overwrite existing
+    # Never overwrite existing. Check both exact filename AND id collision
+    # (two items with same id but different slugs would conflict in find_item_file).
     if [ -f "$target" ]; then
       die "Item already exists at $target — use a new id or update the existing item" 4
+    fi
+    if ls "$KNOWLEDGE_DIR/${id}--"*.md >/dev/null 2>&1; then
+      die "Item with id ${id} already exists — use a different id" 4
     fi
 
     (
@@ -194,7 +231,55 @@ case "$subcommand" in
     awk '/^status:/ {print $2}' "$ITEM_FILE"
     ;;
 
+  edit)
+    id="${1:-}"
+    field="${2:-}"
+    value="${3:-}"
+    [ -z "$id" ] && die "Usage: kc-item.sh edit <id> <field> <value>" 1
+    [ -z "$field" ] && die "Usage: kc-item.sh edit <id> <field> <value>" 1
+    [ -z "$value" ] && die "Usage: kc-item.sh edit <id> <field> <value>" 1
+    ITEM_FILE=$(find_item_file "$id")
+    [ -z "$ITEM_FILE" ] && die "Item not found: $id" 2
+
+    # Whitelist editable fields — prevents injection and protects structural fields
+    case "$field" in
+      title|priority|tags|relates|project)
+        ;;
+      status)
+        die "Cannot edit status via edit. Use: claim | release | complete" 1
+        ;;
+      id|type|created|updated|source)
+        die "Field '${field}' is structural and cannot be edited" 1
+        ;;
+      *)
+        die "Unknown or non-editable field: ${field}" 1
+        ;;
+    esac
+
+    # Validate enum values for restricted fields
+    case "$field" in
+      priority)
+        case "$value" in
+          p1|p2|p3) ;;
+          *) die "Invalid priority: ${value}. Must be p1, p2, or p3." 4 ;;
+        esac
+        ;;
+    esac
+
+    (
+      flock -x 9 || die "Failed to acquire lock" 5
+      # Escape sed-special characters in value (/ \ &) for safe substitution.
+      # Uses | as delimiter to avoid collisions with / in paths/titles.
+      escaped_value=$(echo "$value" | sed 's/[\\/&]/\\&/g')
+      sed -i "s|^${field}:.*|${field}: ${escaped_value}|" "$ITEM_FILE"
+      update_timestamp "$ITEM_FILE" "$(timestamp)"
+    ) 9>"$KNOWLEDGE_DIR/.lock"
+
+    "$SCRIPT_DIR/kc-index.sh" "$KNOWLEDGE_DIR"
+    echo "Edited: $id ${field} → ${value}"
+    ;;
+
   *)
-    die "Unknown subcommand: ${subcommand:-<empty>}. Use: claim | complete | add | status" 1
+    die "Unknown subcommand: ${subcommand:-<empty>}. Use: claim | complete | release | add | edit | status" 1
     ;;
 esac

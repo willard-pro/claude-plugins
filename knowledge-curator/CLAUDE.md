@@ -38,7 +38,7 @@ Each consuming repo gets a `knowledge/` directory at its root:
 | File | Purpose |
 |------|---------|
 | `kc-index.sh` | Rebuild `knowledge/INDEX.md` from item frontmatter. Called after every add/update. |
-| `kc-item.sh` | Deterministic item mutation: `claim`, `complete`, `add`. `flock`-serialized. Sole agent mutation path. |
+| `kc-item.sh` | Deterministic item mutation: `claim`, `complete`, `release`, `add`, `edit`, `status`. `flock`-serialized. Sole agent mutation path. |
 | `kc-resurface.sh` | SessionStart hook: inject top-N items as context when `knowledge/` exists. |
 | `kc-prompt-match.sh` | UserPromptSubmit hook: grep prompt against INDEX.md tags/titles, inject matches. |
 
@@ -73,5 +73,9 @@ relates:
 
 ## Related docs
 
+- [README.md](README.md) — user-facing documentation with architecture and lifecycle diagrams
+- [docs/kc-architecture.svg](docs/kc-architecture.svg) — system architecture flow diagram (triggers, capture, store, surface, agents)
+- [docs/kc-lifecycle.svg](docs/kc-lifecycle.svg) — item state machine (active → in_progress → done, release path)
+- [docs/qa-coverage-audit-2026-07-07.md](docs/qa-coverage-audit-2026-07-07.md) — test coverage audit (22 gaps found, all fixed)
 - [Repo-level CLAUDE.md](../CLAUDE.md)
 - [ticket-auto-pipeline CLAUDE.md](../ticket-auto-pipeline/CLAUDE.md) — plugin anatomy reference
