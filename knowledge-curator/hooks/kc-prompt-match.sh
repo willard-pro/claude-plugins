@@ -24,8 +24,8 @@ PROMPT=$(cat 2>/dev/null || echo "")
 # Extract potential search terms from prompt (words 2+ chars, skip common words).
 # Lowered from 3 to 2 chars to match short but meaningful terms like "KC", "UI", "DB",
 # "AI", "p1", "v2", "PR", "CI". Expanded stopword list to compensate for the extra noise.
-TERMS=$(echo "$PROMPT" | tr -c '[:alnum:]-\n' ' ' | tr '[:upper:]' '[:lower:]' | tr ' ' '\n' | \
-  grep -vE '^(the|and|for|that|this|with|from|have|are|was|not|but|all|can|has|had|been|were|will|would|which|their|about|when|what|each|some|them|more|also|into|than|other|very|just|like|over|after|then|only|new|now|its|may|such|should|could|these|said|there|being|your|our|want|need|know|tell|show|find|get|make|doing|does|still|already|here|see|look|take|give|come|think|say|ask|going|well|much|many|any|even|really|actually|probably|maybe|let|way|use|using|try|trying|how|who|why|where|is|it|at|in|on|to|be|by|my|we|he|so|go|no|up|us|if|or|an|am|as|do|me)$' | \
+TERMS=$(echo "$PROMPT" | tr -c '[:alnum:]-\n' ' ' | tr '[:upper:]' '[:lower:]' | tr ' ' '\n' |
+  grep -vE '^(the|and|for|that|this|with|from|have|are|was|not|but|all|can|has|had|been|were|will|would|which|their|about|when|what|each|some|them|more|also|into|than|other|very|just|like|over|after|then|only|new|now|its|may|such|should|could|these|said|there|being|your|our|want|need|know|tell|show|find|get|make|doing|does|still|already|here|see|look|take|give|come|think|say|ask|going|well|much|many|any|even|really|actually|probably|maybe|let|way|use|using|try|trying|how|who|why|where|is|it|at|in|on|to|be|by|my|we|he|so|go|no|up|us|if|or|an|am|as|do|me)$' |
   grep -E '^.{2,}$' | sort -u || true)
 
 [ -z "$TERMS" ] && exit 0

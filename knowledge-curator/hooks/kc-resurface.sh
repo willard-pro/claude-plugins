@@ -68,9 +68,9 @@ fi
 cat <<KC_CONTEXT
 <!-- KC-RESURFACE: knowledge-curator top items -->
 ## Knowledge Stack
-$( [ "$p1_count" -gt 0 ] && echo "**${p1_count} p1 item(s) need attention.**" )
-$( [ "$in_progress_count" -gt 0 ] && echo "${in_progress_count} item(s) in progress." )
-$( [ -n "$top_items" ] && echo "$top_items" )
+$([ "$p1_count" -gt 0 ] && echo "**${p1_count} p1 item(s) need attention.**")
+$([ "$in_progress_count" -gt 0 ] && echo "${in_progress_count} item(s) in progress.")
+$([ -n "$top_items" ] && echo "$top_items")
 <!-- /KC-RESURFACE -->
 KC_CONTEXT
 

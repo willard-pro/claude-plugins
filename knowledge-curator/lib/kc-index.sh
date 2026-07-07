@@ -109,13 +109,13 @@ for item_file in "$KNOWLEDGE_DIR"/KC-[0-9][0-9][0-9][0-9]--*.md; do
 
   sort_key=9
   case "$priority" in
-    p1) sort_key=1 ;;
-    p2) sort_key=2 ;;
-    p3) sort_key=3 ;;
+  p1) sort_key=1 ;;
+  p2) sort_key=2 ;;
+  p3) sort_key=3 ;;
   esac
 
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-    "$sort_key" "$updated" "$id" "$type" "$title" "$status" "$priority" "$created" "$source" "$tags" "$relates" >> "$ITEMS_TMP"
+    "$sort_key" "$updated" "$id" "$type" "$title" "$status" "$priority" "$created" "$source" "$tags" "$relates" >>"$ITEMS_TMP"
 done
 
 # ── Warn about orphaned .md files that don't match the KC-NNNN pattern ──
@@ -123,9 +123,9 @@ for f in "$KNOWLEDGE_DIR"/*.md; do
   [ -f "$f" ] || continue
   basename=$(basename "$f")
   case "$basename" in
-    INDEX.md) continue ;;
-    KC-[0-9][0-9][0-9][0-9]--*) continue ;;
-    *) echo "WARNING: Orphaned file in knowledge/ (won't appear in index): ${basename}" >&2 ;;
+  INDEX.md) continue ;;
+  KC-[0-9][0-9][0-9][0-9]--*) continue ;;
+  *) echo "WARNING: Orphaned file in knowledge/ (won't appear in index): ${basename}" >&2 ;;
   esac
 done
 
@@ -134,17 +134,17 @@ REGISTRY_FILE="$KNOWLEDGE_DIR/.kc-item-registry"
 if [ -f "$REGISTRY_FILE" ]; then
   while IFS= read -r prev_id; do
     [ -z "$prev_id" ] && continue
-    if ! grep -qxF "$prev_id" "$ITEMS_TMP" 2>/dev/null && \
-       ! grep -qxF "$prev_id" <(for f in "$KNOWLEDGE_DIR"/KC-[0-9][0-9][0-9][0-9]--*.md; do [ -f "$f" ] && basename "$f" | grep -oE 'KC-[0-9]{4}'; done) 2>/dev/null; then
+    if ! grep -qxF "$prev_id" "$ITEMS_TMP" 2>/dev/null &&
+      ! grep -qxF "$prev_id" <(for f in "$KNOWLEDGE_DIR"/KC-[0-9][0-9][0-9][0-9]--*.md; do [ -f "$f" ] && basename "$f" | grep -oE 'KC-[0-9]{4}'; done) 2>/dev/null; then
       echo "WARNING: Previously tracked item vanished: ${prev_id} (file deleted or renamed)" >&2
     fi
-  done < "$REGISTRY_FILE"
+  done <"$REGISTRY_FILE"
 fi
 # Write current item IDs to registry for next-run comparison
 for item_file in "$KNOWLEDGE_DIR"/KC-[0-9][0-9][0-9][0-9]--*.md; do
   [ -f "$item_file" ] || continue
   basename "$item_file" | grep -oE 'KC-[0-9]{4}'
-done > "$REGISTRY_FILE"
+done >"$REGISTRY_FILE"
 
 # ── Write INDEX.md ───────────────────────────────────────────────────
 
@@ -185,6 +185,6 @@ now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   echo "- **Priority**: p1 (critical) | p2 (important) | p3 (nice-to-have)"
   echo "- **Types**: idea | proposal | discovery | lesson | decision | reference | experiment"
   echo ""
-} > "$INDEX_FILE"
+} >"$INDEX_FILE"
 
 exit 0

@@ -13,8 +13,14 @@ KC_INDEX="$LIB_DIR/kc-index.sh"
 PASS=0
 FAIL=0
 
-pass() { echo "  ✓ $1"; PASS=$((PASS + 1)); }
-fail() { echo "  ✗ $1"; FAIL=$((FAIL + 1)); }
+pass() {
+  echo "  ✓ $1"
+  PASS=$((PASS + 1))
+}
+fail() {
+  echo "  ✗ $1"
+  FAIL=$((FAIL + 1))
+}
 
 setup() {
   TEST_DIR=$(mktemp -d)
@@ -45,7 +51,7 @@ teardown
 
 setup
 
-cat > "$TEST_DIR/knowledge/KC-0001--test-item.md" << 'EOF'
+cat >"$TEST_DIR/knowledge/KC-0001--test-item.md" <<'EOF'
 ---
 id: KC-0001
 type: idea
@@ -64,7 +70,7 @@ relates: []
 Content here.
 EOF
 
-cat > "$TEST_DIR/knowledge/KC-0002--another-item.md" << 'EOF'
+cat >"$TEST_DIR/knowledge/KC-0002--another-item.md" <<'EOF'
 ---
 id: KC-0002
 type: decision
@@ -104,7 +110,7 @@ teardown
 
 setup
 
-cat > "$TEST_DIR/knowledge/KC-0003--status-test.md" << 'EOF'
+cat >"$TEST_DIR/knowledge/KC-0003--status-test.md" <<'EOF'
 ---
 id: KC-0003
 type: lesson
@@ -166,7 +172,7 @@ teardown
 setup
 
 # Create a file that doesn't match the KC-NNNN pattern
-cat > "$TEST_DIR/knowledge/orphaned-notes.md" << 'EOF'
+cat >"$TEST_DIR/knowledge/orphaned-notes.md" <<'EOF'
 ---
 id: bad-format
 type: idea
@@ -191,7 +197,7 @@ else
 fi
 
 # KC-NNNN file should NOT trigger warning
-cat > "$TEST_DIR/knowledge/KC-0005--valid-item.md" << 'EOF'
+cat >"$TEST_DIR/knowledge/KC-0005--valid-item.md" <<'EOF'
 ---
 id: KC-0005
 type: idea
@@ -222,7 +228,7 @@ teardown
 
 setup
 
-cat > "$TEST_DIR/knowledge/KC-0006--corrupt.md" << 'EOF'
+cat >"$TEST_DIR/knowledge/KC-0006--corrupt.md" <<'EOF'
 ---
 id: KC-0006
 type: idea
@@ -252,7 +258,7 @@ teardown
 
 setup
 
-cat > "$TEST_DIR/knowledge/KC-0010--obsolete-item.md" << 'EOF'
+cat >"$TEST_DIR/knowledge/KC-0010--obsolete-item.md" <<'EOF'
 ---
 id: KC-0010
 type: idea
@@ -282,7 +288,7 @@ teardown
 setup
 
 # Active item
-cat > "$TEST_DIR/knowledge/KC-0011--active.md" << 'EOF'
+cat >"$TEST_DIR/knowledge/KC-0011--active.md" <<'EOF'
 ---
 id: KC-0011
 type: idea
@@ -300,7 +306,7 @@ relates: []
 EOF
 
 # Done item (excluded from count)
-cat > "$TEST_DIR/knowledge/KC-0012--done.md" << 'EOF'
+cat >"$TEST_DIR/knowledge/KC-0012--done.md" <<'EOF'
 ---
 id: KC-0012
 type: discovery
@@ -318,7 +324,7 @@ relates: []
 EOF
 
 # Corrupt item (skipped)
-cat > "$TEST_DIR/knowledge/KC-0013--bad.md" << 'EOF'
+cat >"$TEST_DIR/knowledge/KC-0013--bad.md" <<'EOF'
 ---
 id: KC-0013
 type:
@@ -347,9 +353,9 @@ else
 fi
 
 # KC-0011 should appear, KC-0012 and KC-0013 should not
-if grep -q "KC-0011" "$TEST_DIR/knowledge/INDEX.md" && \
-   ! grep -q "KC-0012" "$TEST_DIR/knowledge/INDEX.md" && \
-   ! grep -q "KC-0013" "$TEST_DIR/knowledge/INDEX.md"; then
+if grep -q "KC-0011" "$TEST_DIR/knowledge/INDEX.md" &&
+  ! grep -q "KC-0012" "$TEST_DIR/knowledge/INDEX.md" &&
+  ! grep -q "KC-0013" "$TEST_DIR/knowledge/INDEX.md"; then
   pass "Mixed statuses: only active item in INDEX"
 else
   fail "Mixed statuses: only active item in INDEX"
@@ -361,7 +367,7 @@ teardown
 setup
 
 # Create an item and build index (this writes .kc-item-registry)
-cat > "$TEST_DIR/knowledge/KC-0020--will-vanish.md" << 'EOF'
+cat >"$TEST_DIR/knowledge/KC-0020--will-vanish.md" <<'EOF'
 ---
 id: KC-0020
 type: idea
@@ -378,7 +384,7 @@ relates: []
 # Will vanish
 EOF
 
-"$KC_INDEX" "$TEST_DIR/knowledge" > /dev/null 2>&1
+"$KC_INDEX" "$TEST_DIR/knowledge" >/dev/null 2>&1
 
 # Registry should exist and contain KC-0020
 if [ -f "$TEST_DIR/knowledge/.kc-item-registry" ] && grep -q "KC-0020" "$TEST_DIR/knowledge/.kc-item-registry"; then
@@ -402,7 +408,7 @@ teardown
 setup
 
 # Both p2, KC-0031 updated later (newer) — should appear first
-cat > "$TEST_DIR/knowledge/KC-0030--older.md" << 'EOF'
+cat >"$TEST_DIR/knowledge/KC-0030--older.md" <<'EOF'
 ---
 id: KC-0030
 type: idea
@@ -419,7 +425,7 @@ relates: []
 # Older
 EOF
 
-cat > "$TEST_DIR/knowledge/KC-0031--newer.md" << 'EOF'
+cat >"$TEST_DIR/knowledge/KC-0031--newer.md" <<'EOF'
 ---
 id: KC-0031
 type: idea
@@ -451,7 +457,7 @@ teardown
 
 setup
 
-cat > "$TEST_DIR/knowledge/KC-0040--with-relates.md" << 'EOF'
+cat >"$TEST_DIR/knowledge/KC-0040--with-relates.md" <<'EOF'
 ---
 id: KC-0040
 type: decision

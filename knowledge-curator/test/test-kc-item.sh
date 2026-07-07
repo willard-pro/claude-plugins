@@ -14,8 +14,14 @@ KC_INDEX="$LIB_DIR/kc-index.sh"
 PASS=0
 FAIL=0
 
-pass() { echo "  ✓ $1"; PASS=$((PASS + 1)); }
-fail() { echo "  ✗ $1"; FAIL=$((FAIL + 1)); }
+pass() {
+  echo "  ✓ $1"
+  PASS=$((PASS + 1))
+}
+fail() {
+  echo "  ✗ $1"
+  FAIL=$((FAIL + 1))
+}
 
 setup() {
   TEST_DIR=$(mktemp -d)
@@ -23,7 +29,7 @@ setup() {
   mkdir -p "$KNOWLEDGE_DIR"
 
   # Create a test item on disk
-  cat > "$KNOWLEDGE_DIR/KC-0001--test-item.md" << 'EOF'
+  cat >"$KNOWLEDGE_DIR/KC-0001--test-item.md" <<'EOF'
 ---
 id: KC-0001
 type: idea
@@ -43,7 +49,7 @@ Content.
 EOF
 
   # Create second item for concurrency test
-  cat > "$KNOWLEDGE_DIR/KC-0002--second-item.md" << 'EOF'
+  cat >"$KNOWLEDGE_DIR/KC-0002--second-item.md" <<'EOF'
 ---
 id: KC-0002
 type: discovery
@@ -162,7 +168,7 @@ teardown
 setup
 
 # Missing required field
-cat > "$TEST_DIR/bad-item.md" << 'EOF'
+cat >"$TEST_DIR/bad-item.md" <<'EOF'
 ---
 id: KC-0003
 type: idea
@@ -177,7 +183,7 @@ else
 fi
 
 # Valid item
-cat > "$TEST_DIR/good-item.md" << 'EOF'
+cat >"$TEST_DIR/good-item.md" <<'EOF'
 ---
 id: KC-0003
 type: discovery
@@ -423,7 +429,7 @@ teardown
 # ── Test: add rejects file outside CWD/tmp (path traversal) ─────────
 
 setup
-cat > "$TEST_DIR/bad-path.md" << 'EOF'
+cat >"$TEST_DIR/bad-path.md" <<'EOF'
 ---
 id: KC-0099
 type: idea
@@ -451,7 +457,7 @@ teardown
 
 setup
 # KC-0001 already exists from setup()
-cat > "$TEST_DIR/dup-item.md" << 'EOF'
+cat >"$TEST_DIR/dup-item.md" <<'EOF'
 ---
 id: KC-0001
 type: discovery
@@ -589,7 +595,7 @@ else
   fail "status: initial is active (got: $OUTPUT)"
 fi
 
-"$KC_ITEM" claim KC-0001 > /dev/null
+"$KC_ITEM" claim KC-0001 >/dev/null
 OUTPUT=$("$KC_ITEM" status KC-0001)
 if [ "$OUTPUT" = "in_progress" ]; then
   pass "status: after claim is in_progress"
@@ -597,7 +603,7 @@ else
   fail "status: after claim is in_progress (got: $OUTPUT)"
 fi
 
-"$KC_ITEM" complete KC-0001 > /dev/null
+"$KC_ITEM" complete KC-0001 >/dev/null
 OUTPUT=$("$KC_ITEM" status KC-0001)
 if [ "$OUTPUT" = "done" ]; then
   pass "status: after complete is done"
@@ -643,27 +649,42 @@ setup
 
 # Start active
 OUTPUT=$("$KC_ITEM" status KC-0001)
-[ "$OUTPUT" = "active" ] || { fail "lifecycle: start active (got: $OUTPUT)"; teardown; }
+[ "$OUTPUT" = "active" ] || {
+  fail "lifecycle: start active (got: $OUTPUT)"
+  teardown
+}
 
 # Claim
-"$KC_ITEM" claim KC-0001 > /dev/null
+"$KC_ITEM" claim KC-0001 >/dev/null
 OUTPUT=$("$KC_ITEM" status KC-0001)
-[ "$OUTPUT" = "in_progress" ] || { fail "lifecycle: after claim (got: $OUTPUT)"; teardown; }
+[ "$OUTPUT" = "in_progress" ] || {
+  fail "lifecycle: after claim (got: $OUTPUT)"
+  teardown
+}
 
 # Release back to active
-"$KC_ITEM" release KC-0001 > /dev/null
+"$KC_ITEM" release KC-0001 >/dev/null
 OUTPUT=$("$KC_ITEM" status KC-0001)
-[ "$OUTPUT" = "active" ] || { fail "lifecycle: after release (got: $OUTPUT)"; teardown; }
+[ "$OUTPUT" = "active" ] || {
+  fail "lifecycle: after release (got: $OUTPUT)"
+  teardown
+}
 
 # Claim again
-"$KC_ITEM" claim KC-0001 > /dev/null
+"$KC_ITEM" claim KC-0001 >/dev/null
 OUTPUT=$("$KC_ITEM" status KC-0001)
-[ "$OUTPUT" = "in_progress" ] || { fail "lifecycle: after second claim (got: $OUTPUT)"; teardown; }
+[ "$OUTPUT" = "in_progress" ] || {
+  fail "lifecycle: after second claim (got: $OUTPUT)"
+  teardown
+}
 
 # Complete
-"$KC_ITEM" complete KC-0001 > /dev/null
+"$KC_ITEM" complete KC-0001 >/dev/null
 OUTPUT=$("$KC_ITEM" status KC-0001)
-[ "$OUTPUT" = "done" ] || { fail "lifecycle: after complete (got: $OUTPUT)"; teardown; }
+[ "$OUTPUT" = "done" ] || {
+  fail "lifecycle: after complete (got: $OUTPUT)"
+  teardown
+}
 
 # Done item excluded from INDEX
 if ! grep -q "KC-0001" "$KNOWLEDGE_DIR/INDEX.md" && [ -f "$KNOWLEDGE_DIR/KC-0001--test-item.md" ]; then
