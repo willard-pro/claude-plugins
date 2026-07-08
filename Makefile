@@ -24,6 +24,9 @@ test-lib:
 	bash fleet-controller/lib/tests/test-fleet-feedback.sh
 	bash fleet-controller/lib/tests/test-fleet-monitor.sh
 	bash fleet-controller/lib/tests/test-fleet-monitor-dispatch.sh
+	# ticket-planner enrichment tests
+	bash ticket-auto-pipeline/lib/tests/test-planned-ticket-check.sh
+	bash ticket-auto-pipeline/lib/tests/test-state-machine-labels.sh
 	bash ticket-auto-pipeline/lib/tests/test-config.sh
 	bash ticket-auto-pipeline/lib/test-persona-select.sh
 	CLAUDE_SKILLS_LIB="$(CURDIR)/ticket-auto-pipeline/lib" \

@@ -11,6 +11,7 @@ LIB_DIR="${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}"
 source "$LIB_DIR/heartbeat.sh"
 source "$LIB_DIR/linear-api.sh"
 source "$LIB_DIR/notes-parse.sh"
+source "$SCRIPT_DIR/planned-ticket-check.sh"
 
 # Source ticket-dir.sh for resolve_ticket_dir — check multiple locations
 if [ -f "$SCRIPT_DIR/ticket-dir.sh" ]; then
@@ -323,6 +324,26 @@ _gate_entry() {
       hb_gate "entry-gate" "fail" "held: critique-plan cross-validation failed" "{\"nav_gap\":\"${critique_nav_gap:-false}\",\"user_gap\":\"${critique_user_gap:-false}\",\"repro_gap\":\"${critique_repro_gap:-false}\",\"cross_failures\":\"$cross_failures\"}"
       return 1
     fi
+  fi
+
+  # Check 2.7: Planned ticket enrichment validation (Phase 1 — passive, observe-only)
+  # Detects planned tickets and validates their Planner Context block.
+  # Does NOT change gate behavior — logs results for observability.
+  # Phase 2 (appraise-fast-path) will act on exit codes.
+  local issue_json planned_check_rc
+  issue_json=$(get_issue "$TICKET_ID" 2>/dev/null || echo '{"description":"","labels":{"nodes":[]}}')
+  local has_planned_label
+  has_planned_label=$(echo "$issue_json" | jq -r '[.labels.nodes[].name] | index("planned") != null' 2>/dev/null || echo 'false')
+  if [ "$has_planned_label" = "true" ]; then
+    local planned_desc
+    planned_desc=$(echo "$issue_json" | jq -r '.description // ""')
+    check_planned_ticket_description "$planned_desc" 2>/dev/null || planned_check_rc=$?
+    case "${planned_check_rc:-0}" in
+    0) _plog "$LOG_FILE" "GATE" "planned-check" "done" "valid" ;;
+    1) _plog "$LOG_FILE" "GATE" "planned-check" "warn" "malformed — Planner Context block missing or invalid" ;;
+    2) _plog "$LOG_FILE" "GATE" "planned-check" "warn" "low-confidence — confidence below threshold, not pre-approved" ;;
+    esac
+    hb_gate "planned-check" "info" "planned ticket validated" "{\"exit_code\":\"${planned_check_rc:-0}\",\"result\":\"$CHECK_RESULT\"}"
   fi
 
   # Check 3: Complex tickets are always held

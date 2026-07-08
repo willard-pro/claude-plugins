@@ -28,59 +28,49 @@ _setup_workspace() {
   mktemp -d
 }
 
-# Mock: get_issue returns a JSON blob
-_mock_get_issue_state_execution() {
-  get_issue() {
+# Mock: _fleet_linear_query returns raw GraphQL response (with .data wrapper)
+# This is the epic query mock — fleet_dispatch_initiative calls _fleet_linear_query
+# then extracts .data.issue from the response.
+_mock_epic_query_state_execution() {
+  _fleet_linear_query() {
     echo '{"data":{"issue":{"identifier":"INIT-42","labels":{"nodes":[{"name":"state:execution"},{"name":"INIT-42"}]},"children":{"nodes":[]}}}}'
   }
 }
 
-_mock_get_issue_no_execution() {
-  get_issue() {
+_mock_epic_query_no_execution() {
+  _fleet_linear_query() {
     echo '{"data":{"issue":{"identifier":"INIT-42","labels":{"nodes":[{"name":"INIT-42"}]},"children":{"nodes":[]}}}}'
   }
 }
 
-_mock_get_issue_not_found() {
-  get_issue() {
-    return 1
+_mock_epic_query_with_children() {
+  _fleet_linear_query() {
+    echo '{"data":{"issue":{"identifier":"INIT-42","labels":{"nodes":[{"name":"state:execution"}]},"children":{"nodes":[
+        {"identifier":"CRE-101","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"}]},"priority":3},
+        {"identifier":"CRE-102","state":{"name":"In Progress"},"labels":{"nodes":[{"name":"planned"}]},"priority":1},
+        {"identifier":"CRE-103","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"},{"name":"blocked-by:CRE-100"}]},"priority":2}
+      ]}}}}'
   }
 }
 
-_mock_get_issue_with_children() {
+_mock_epic_query_blocker_done() {
+  _fleet_linear_query() {
+    echo '{"data":{"issue":{"identifier":"INIT-42","labels":{"nodes":[{"name":"state:execution"}]},"children":{"nodes":[
+        {"identifier":"CRE-103","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"},{"name":"blocked-by:CRE-100"}]},"priority":2}
+      ]}}}}'
+  }
+}
+
+# Mock: get_issue returns UNWRAPPED issue data (get_issue unwraps .data.issue)
+_mock_get_issue_blocker_in_progress() {
   get_issue() {
-    local id="$1"
-    case "$id" in
-    INIT-42)
-      echo '{"data":{"issue":{"identifier":"INIT-42","labels":{"nodes":[{"name":"state:execution"}]},"children":{"nodes":[
-          {"identifier":"CRE-101","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"}]},"priority":3},
-          {"identifier":"CRE-102","state":{"name":"In Progress"},"labels":{"nodes":[{"name":"planned"}]},"priority":1},
-          {"identifier":"CRE-103","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"},{"name":"blocked-by:CRE-100"}]},"priority":2}
-        ]}}}}'
-      ;;
-    CRE-100)
-      echo '{"data":{"issue":{"identifier":"CRE-100","state":{"name":"In Progress"},"labels":{"nodes":[]}}}}'
-      ;;
-    *)
-      echo '{"data":{"issue":{"identifier":"'"$id"'","state":{"name":"Done"},"labels":{"nodes":[]}}}}'
-      ;;
-    esac
+    echo '{"identifier":"CRE-100","state":{"name":"In Progress"},"labels":{"nodes":[]}}'
   }
 }
 
 _mock_get_issue_blocker_done() {
   get_issue() {
-    local id="$1"
-    case "$id" in
-    INIT-42)
-      echo '{"data":{"issue":{"identifier":"INIT-42","labels":{"nodes":[{"name":"state:execution"}]},"children":{"nodes":[
-          {"identifier":"CRE-103","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"},{"name":"blocked-by:CRE-100"}]},"priority":2}
-        ]}}}}'
-      ;;
-    CRE-100)
-      echo '{"data":{"issue":{"identifier":"CRE-100","state":{"name":"Done"},"labels":{"nodes":[]}}}}'
-      ;;
-    esac
+    echo '{"identifier":"CRE-100","state":{"name":"Done"},"labels":{"nodes":[]}}'
   }
 }
 
@@ -128,9 +118,10 @@ test_dispatch_no_state_execution() {
 
   local output
   output=$(bash -c "
+    FLEET_DRY_RUN=true FLEET_INSTANCE_ID=test-nose
     source '$LIB_DIR/fleet-dispatch.sh'
-    $(declare -f _mock_get_issue_no_execution)
-    _mock_get_issue_no_execution
+    $(declare -f _mock_epic_query_no_execution)
+    _mock_epic_query_no_execution
     fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
   " 2>/dev/null || true)
   echo "$output" | grep -qi "not in execution" && return 0 || {
@@ -145,9 +136,10 @@ test_dispatch_no_child_tickets() {
 
   local output
   output=$(bash -c "
+    FLEET_DRY_RUN=true FLEET_INSTANCE_ID=test-nochild
     source '$LIB_DIR/fleet-dispatch.sh'
-    $(declare -f _mock_get_issue_state_execution)
-    _mock_get_issue_state_execution
+    $(declare -f _mock_epic_query_state_execution)
+    _mock_epic_query_state_execution
     fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
   " 2>/dev/null || true)
   echo "$output" | grep -qi "no child tickets\|no dispatchable" && return 0 || {
@@ -162,9 +154,12 @@ test_dispatch_with_children_extracts_correctly() {
 
   local output
   output=$(bash -c "
+    FLEET_DRY_RUN=true FLEET_INSTANCE_ID=test-children
     source '$LIB_DIR/fleet-dispatch.sh'
-    $(declare -f _mock_get_issue_with_children)
-    _mock_get_issue_with_children
+    $(declare -f _mock_epic_query_with_children)
+    $(declare -f _mock_get_issue_blocker_in_progress)
+    _mock_epic_query_with_children
+    _mock_get_issue_blocker_in_progress
     fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
   " 2>/dev/null || true)
   # CRE-101: Backlog + planned → should be enqueued
@@ -182,8 +177,11 @@ test_dispatch_blocker_done_unblocks() {
 
   local output
   output=$(bash -c "
+    FLEET_DRY_RUN=true FLEET_INSTANCE_ID=test-unblock
     source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_blocker_done)
     $(declare -f _mock_get_issue_blocker_done)
+    _mock_epic_query_blocker_done
     _mock_get_issue_blocker_done
     fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
   " 2>/dev/null || true)
@@ -205,8 +203,10 @@ test_dispatch_dry_run_no_write() {
   output=$(bash -c "
     FLEET_DRY_RUN=true FLEET_INSTANCE_ID=test-dry-run
     source '$LIB_DIR/fleet-dispatch.sh'
-    $(declare -f _mock_get_issue_with_children)
-    _mock_get_issue_with_children
+    $(declare -f _mock_epic_query_with_children)
+    $(declare -f _mock_get_issue_blocker_in_progress)
+    _mock_epic_query_with_children
+    _mock_get_issue_blocker_in_progress
     fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
   " 2>/dev/null || true)
   echo "$output" | grep -qi "DRY-RUN" && return 0 || {
@@ -225,8 +225,10 @@ test_dispatch_queue_idempotent() {
   bash -c "
     FLEET_INSTANCE_ID=test-idem
     source '$LIB_DIR/fleet-dispatch.sh'
-    $(declare -f _mock_get_issue_with_children)
-    _mock_get_issue_with_children
+    $(declare -f _mock_epic_query_with_children)
+    $(declare -f _mock_get_issue_blocker_in_progress)
+    _mock_epic_query_with_children
+    _mock_get_issue_blocker_in_progress
     fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1 >/dev/null
   " 2>/dev/null || true
 
@@ -235,8 +237,10 @@ test_dispatch_queue_idempotent() {
   output=$(bash -c "
     FLEET_INSTANCE_ID=test-idem
     source '$LIB_DIR/fleet-dispatch.sh'
-    $(declare -f _mock_get_issue_with_children)
-    _mock_get_issue_with_children
+    $(declare -f _mock_epic_query_with_children)
+    $(declare -f _mock_get_issue_blocker_in_progress)
+    _mock_epic_query_with_children
+    _mock_get_issue_blocker_in_progress
     fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
   " 2>/dev/null || true)
   echo "$output" | grep -q "already queued" && return 0 || {
@@ -265,8 +269,10 @@ test_dispatch_fleet_max_concurrent_enforced() {
   output=$(bash -c "
     FLEET_INSTANCE_ID=test-cap FLEET_MAX_CONCURRENT=3
     source '$LIB_DIR/fleet-dispatch.sh'
-    $(declare -f _mock_get_issue_with_children)
-    _mock_get_issue_with_children
+    $(declare -f _mock_epic_query_with_children)
+    $(declare -f _mock_get_issue_blocker_in_progress)
+    _mock_epic_query_with_children
+    _mock_get_issue_blocker_in_progress
     fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
   " 2>/dev/null || true)
   # 2 active + max 3 → only 1 slot available

@@ -108,6 +108,7 @@ REPOS_ROOT/.ticket-auto/
 | `prescan-verify.sh` | Deterministic post-scan content quality assertions. Checks every expected doc file exists, is non-empty, meets minimum line/heading counts, is not placeholder-only, and has required structure (security warning header, INDEX.md tables, services/ dir). Replaces inline LLM scaffold-verify. |
 | `return-completeness-check.sh` | Deterministic bash gate for implement-phase completion. Counts unchecked `- [ ]` boxes in tasks.md (openspec) or `## Completion Checklist` in simple-fix.md. Exit 0 complete, 1 incomplete, 2 error. Zero LLM tokens. |
 | `corrections-parse.sh` | `append_correction`, `get_corrections`, `get_corrections_by_source`. Atomic `.tmp`→`mv` append of CORRECTIONS blocks to notes.md. Parse with last-match-wins dedup. Torn-block tolerant. |
+| `planned-ticket-check.sh` | `check_planned_ticket`, `check_planned_ticket_description`. Deterministic bash validator for `## Planner Context` blocks in planned tickets. Exit 0 (valid), 1 (missing/malformed), 2 (low confidence + not pre-approved). Schema-Version tolerance for forward compatibility. |
 
 ## Personas
 
@@ -140,6 +141,22 @@ UAT → Ready (uat-fail)
 ```
 
 `Blocked` is orthogonal — tickets enter it when waiting on external dependencies.
+
+### Planner labels (ticket-planner enrichment)
+
+Defined in `planner_labels` section of `state-machine.json`. Set by ticket-planner at ticket creation:
+
+| Label | Pattern | Lifecycle |
+|---|---|---|
+| `planned` | exact | Provenance marker. Once set, never removed. |
+| `INIT-*` | wildcard | Links ticket to initiative (e.g., `INIT-42`). Never removed. |
+| `pre-approved` | exact | Set when planner confidence ≥ 0.85. Removed by `human-reject` or `re-claim`. |
+| `blocked-by:*` | wildcard | Dependency enforcement (e.g., `blocked-by:CRE-100`). Auto-removed when blocker reaches Done. |
+| `state:execution` | exact | Epic-only. Marks initiative as ready for fleet dispatch. flow.sh rejects non-Epic issues (exit 8). |
+
+### Planner Context block
+
+When ticket-planner creates a ticket, it appends a `## Planner Context` markdown block to the Linear description. Schema defined in `docs/planner-context-schema.md`. Validated by `lib/planned-ticket-check.sh` (exit 0 = valid, 1 = malformed, 2 = low confidence + not pre-approved).
 
 ## Pipeline log format
 

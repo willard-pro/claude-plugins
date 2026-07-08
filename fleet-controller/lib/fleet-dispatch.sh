@@ -9,6 +9,17 @@
 # NOTE: Does NOT set -euo pipefail — this is a sourceable library.
 # Callers are responsible for shell flags.
 
+# ── GraphQL query helper (overridable for tests) ──────────────────────────────
+# Wraps curl call to Linear GraphQL API. Extracted as a function so tests can
+# mock it without overriding curl globally.
+_fleet_linear_query() {
+  local query="$1"
+  curl -s -X POST "${LINEAR_API_URL:-https://api.linear.app/graphql}" \
+    -H "Content-Type: application/json" \
+    -H "Authorization: ${LINEAR_API_KEY}" \
+    -d "$query" 2>/dev/null
+}
+
 _DISPATCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source linear-api.sh from canonical path (synced by ticket-auto-pipeline SessionStart hook)
@@ -61,21 +72,33 @@ fleet_dispatch_initiative() {
     return 1
   fi
 
+  # The epic query uses _fleet_linear_query (direct curl, no linear-api.sh dependency).
+  # Blocker resolution uses get_issue (from linear-api.sh) if available — degrades
+  # gracefully when unavailable, treating all blockers as unresolved.
   if ! declare -f get_issue >/dev/null 2>&1; then
-    echo "ERROR: linear-api.sh not available — cannot query Linear" >&2
-    return 1
+    echo "fleet_dispatch: linear-api.sh not available — blocker resolution will skip" >&2
   fi
 
-  # Step 1: Validate initiative epic exists and has state:execution label
+  # Step 1: Validate initiative epic exists and has state:execution label.
+  # Use a direct GraphQL query (not get_issue) to include children in one round-trip.
   echo "fleet_dispatch: validating initiative ${initiative_id}..."
-  local epic_json
-  if ! epic_json=$(get_issue "$initiative_id" 2>/dev/null); then
+  local epic_query epic_resp epic_json
+  epic_query=$(jq -n --arg id "$initiative_id" '{
+    query: "query($id: String!) { issue(id: $id) { id identifier title state { name } labels { nodes { name } } children { nodes { id identifier title state { name } labels { nodes { name } } priority } } } }",
+    variables: {id: $id}
+  }')
+  epic_resp=$(_fleet_linear_query "$epic_query") || {
+    echo "ERROR: initiative ${initiative_id} query failed" >&2
+    return 1
+  }
+  epic_json=$(echo "$epic_resp" | jq '.data.issue // empty' 2>/dev/null)
+  if [ -z "$epic_json" ] || [ "$epic_json" = "null" ]; then
     echo "ERROR: initiative ${initiative_id} not found in Linear" >&2
     return 1
   fi
 
   local epic_labels
-  epic_labels=$(echo "$epic_json" | jq -r '.data.issue.labels.nodes[]?.name // empty' 2>/dev/null)
+  epic_labels=$(echo "$epic_json" | jq -r '.labels.nodes[]?.name // empty' 2>/dev/null)
   if ! echo "$epic_labels" | grep -q "state:execution"; then
     echo "initiative ${initiative_id} not in execution state (missing state:execution label)"
     return 0
@@ -86,7 +109,7 @@ fleet_dispatch_initiative() {
   # Step 2: Find child tickets with planned label + Backlog state
   echo "fleet_dispatch: enumerating child tickets..."
   local children_json
-  children_json=$(echo "$epic_json" | jq -c '.data.issue.children.nodes[] // empty' 2>/dev/null)
+  children_json=$(echo "$epic_json" | jq -c '.children.nodes[] // empty' 2>/dev/null)
   if [ -z "$children_json" ]; then
     echo "no child tickets found for ${initiative_id}"
     return 0
@@ -120,7 +143,7 @@ fleet_dispatch_initiative() {
       [ -z "$blocker_id" ] && continue
       local blocker_json blocker_state
       if blocker_json=$(get_issue "$blocker_id" 2>/dev/null); then
-        blocker_state=$(echo "$blocker_json" | jq -r '.data.issue.state.name // empty' 2>/dev/null)
+        blocker_state=$(echo "$blocker_json" | jq -r '.state.name // empty' 2>/dev/null)
         if [ "$blocker_state" != "Done" ]; then
           echo "    blocked by ${blocker_id} (state: ${blocker_state}) — skipping"
           is_blocked=true
