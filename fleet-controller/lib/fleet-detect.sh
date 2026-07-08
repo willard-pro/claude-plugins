@@ -812,7 +812,8 @@ fleet_detect_all() {
       --argjson severity "$max_sev" \
       --arg anomalies "${anomaly_types:-none}" \
       --argjson hb_age "$hb_age" \
-      '{tid: $tid, phase: $phase, severity: $severity, anomalies: $anomalies, hb_age_secs: $hb_age}')
+      --arg type "pipeline" \
+      '{tid: $tid, phase: $phase, severity: $severity, anomalies: $anomalies, hb_age_secs: $hb_age, type: $type}')
 
     results="$results$entry"
 

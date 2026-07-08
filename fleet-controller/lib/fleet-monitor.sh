@@ -144,10 +144,13 @@ _spawn_queue_consume() {
     fi
   done <"$queue_file"
 
-  # Rewrite queue with remaining (unconsumed) entries
+  # Rewrite queue with remaining (unconsumed) entries — atomic rename to
+  # avoid losing entries appended by fleet-dispatch.sh between read and write.
   if [ "$consumed" -gt 0 ]; then
     if [ -n "$remaining_entries" ]; then
-      echo -n "$remaining_entries" >"$queue_file"
+      local tmp_queue="${queue_file}.tmp.$$"
+      echo -n "$remaining_entries" >"$tmp_queue"
+      mv "$tmp_queue" "$queue_file"
     else
       rm -f "$queue_file"
     fi
