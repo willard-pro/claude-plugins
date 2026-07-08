@@ -502,7 +502,7 @@ detect_blocked_by() {
 
   # Extract labels from the issue JSON and check for blocked-by patterns
   local blocked_by_ids
-  blocked_by_ids=$(echo "$issue_json" | jq -r '.data.issue.labels.nodes[]?.name // empty' 2>/dev/null | grep -oP 'blocked-by:\K[A-Z]+-\d+' || true)
+  blocked_by_ids=$(echo "$issue_json" | jq -r '.labels.nodes[]?.name // empty' 2>/dev/null | grep -oP 'blocked-by:\K[A-Z]+-\d+' || true)
 
   if [ -z "$blocked_by_ids" ]; then
     echo "0"
@@ -516,7 +516,7 @@ detect_blocked_by() {
     local blocker_json
     if blocker_json=$(get_issue "$blocker_id" 2>/dev/null); then
       local blocker_state
-      blocker_state=$(echo "$blocker_json" | jq -r '.data.issue.state.name // empty' 2>/dev/null)
+      blocker_state=$(echo "$blocker_json" | jq -r '.state.name // empty' 2>/dev/null)
       [ "$blocker_state" = "Done" ] && unblocked_count=$((unblocked_count + 1))
     fi
   done <<<"$blocked_by_ids"
