@@ -85,7 +85,10 @@ fleet_dispatch_initiative() {
     query: "query($id: String!) { issue(id: $id) { id identifier title state { name } labels { nodes { name } } children { nodes { id identifier title state { name } labels { nodes { name } } priority } } } }",
     variables: {id: $id}
   }')
-  epic_resp=$(_fleet_linear_query "$epic_query") || { echo "ERROR: initiative ${initiative_id} query failed" >&2; return 1; }
+  epic_resp=$(_fleet_linear_query "$epic_query") || {
+    echo "ERROR: initiative ${initiative_id} query failed" >&2
+    return 1
+  }
   epic_json=$(echo "$epic_resp" | jq '.data.issue // empty' 2>/dev/null)
   if [ -z "$epic_json" ] || [ "$epic_json" = "null" ]; then
     echo "ERROR: initiative ${initiative_id} not found in Linear" >&2

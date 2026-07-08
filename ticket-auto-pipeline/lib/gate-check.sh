@@ -339,9 +339,9 @@ _gate_entry() {
     planned_desc=$(echo "$issue_json" | jq -r '.description // ""')
     check_planned_ticket_description "$planned_desc" 2>/dev/null || planned_check_rc=$?
     case "${planned_check_rc:-0}" in
-      0) _plog "$LOG_FILE" "GATE" "planned-check" "done" "valid" ;;
-      1) _plog "$LOG_FILE" "GATE" "planned-check" "warn" "malformed — Planner Context block missing or invalid" ;;
-      2) _plog "$LOG_FILE" "GATE" "planned-check" "warn" "low-confidence — confidence below threshold, not pre-approved" ;;
+    0) _plog "$LOG_FILE" "GATE" "planned-check" "done" "valid" ;;
+    1) _plog "$LOG_FILE" "GATE" "planned-check" "warn" "malformed — Planner Context block missing or invalid" ;;
+    2) _plog "$LOG_FILE" "GATE" "planned-check" "warn" "low-confidence — confidence below threshold, not pre-approved" ;;
     esac
     hb_gate "planned-check" "info" "planned ticket validated" "{\"exit_code\":\"${planned_check_rc:-0}\",\"result\":\"$CHECK_RESULT\"}"
   fi

@@ -111,14 +111,15 @@ test_no_block() {
 
 test_missing_fields() {
   local desc
-  desc=$(cat <<'EOF'
+  desc=$(
+    cat <<'EOF'
 ## Planner Context
 **Schema-Version:** 1
 **Initiative:** INIT-42
 **Epic:** CRE-100
 **Confidence:** 0.92
 EOF
-)
+  )
   check_planned_ticket_description "$desc"
 }
 

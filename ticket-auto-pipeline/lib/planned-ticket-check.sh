@@ -123,45 +123,45 @@ check_planned_ticket_description() {
 
     # Type-specific validation
     case "$field" in
-      "Schema-Version")
-        if ! [[ "$value" =~ ^[0-9]+$ ]]; then
-          invalid_fields+=("$field: expected integer, got '$value'")
-        fi
-        ;;
-      "Confidence")
-        if ! _validate_confidence "$value"; then
-          invalid_fields+=("$field: expected float 0.0-1.0, got '$value'")
-        fi
-        ;;
-      "Strategy")
-        if ! _validate_enum "$value" "${VALID_STRATEGIES[@]}"; then
-          invalid_fields+=("$field: expected Conservative|Balanced|Innovative, got '$value'")
-        fi
-        ;;
-      "Pre-approved")
-        if [ "$value" != "true" ] && [ "$value" != "false" ]; then
-          invalid_fields+=("$field: expected true|false, got '$value'")
-        fi
-        ;;
-      "Generated")
-        if ! _validate_iso8601 "$value"; then
-          invalid_fields+=("$field: expected ISO 8601 timestamp, got '$value'")
-        fi
-        ;;
-      "Affected Services")
-        # CSV — no structural validation beyond presence (already checked)
-        ;;
-      "Target Symbols")
-        # semicolon-separated symbol:file:line — validate format
-        if ! _validate_target_symbols "$value"; then
-          invalid_fields+=("$field: expected semicolon-separated 'symbol:file:line' references, got '$value'")
-        fi
-        ;;
-      "Regenerate")
-        if [ "$value" != "true" ] && [ "$value" != "false" ]; then
-          invalid_fields+=("$field: expected true|false, got '$value'")
-        fi
-        ;;
+    "Schema-Version")
+      if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        invalid_fields+=("$field: expected integer, got '$value'")
+      fi
+      ;;
+    "Confidence")
+      if ! _validate_confidence "$value"; then
+        invalid_fields+=("$field: expected float 0.0-1.0, got '$value'")
+      fi
+      ;;
+    "Strategy")
+      if ! _validate_enum "$value" "${VALID_STRATEGIES[@]}"; then
+        invalid_fields+=("$field: expected Conservative|Balanced|Innovative, got '$value'")
+      fi
+      ;;
+    "Pre-approved")
+      if [ "$value" != "true" ] && [ "$value" != "false" ]; then
+        invalid_fields+=("$field: expected true|false, got '$value'")
+      fi
+      ;;
+    "Generated")
+      if ! _validate_iso8601 "$value"; then
+        invalid_fields+=("$field: expected ISO 8601 timestamp, got '$value'")
+      fi
+      ;;
+    "Affected Services")
+      # CSV — no structural validation beyond presence (already checked)
+      ;;
+    "Target Symbols")
+      # semicolon-separated symbol:file:line — validate format
+      if ! _validate_target_symbols "$value"; then
+        invalid_fields+=("$field: expected semicolon-separated 'symbol:file:line' references, got '$value'")
+      fi
+      ;;
+    "Regenerate")
+      if [ "$value" != "true" ] && [ "$value" != "false" ]; then
+        invalid_fields+=("$field: expected true|false, got '$value'")
+      fi
+      ;;
     esac
   done
 
@@ -243,13 +243,16 @@ _validate_target_symbols() {
   [ -z "$val" ] && return 0
   # Each entry must be symbol:file or symbol:file:line
   local IFS=';'
-  set -f  # disable pathname expansion (globbing) on unquoted $val split
+  set -f # disable pathname expansion (globbing) on unquoted $val split
   for entry in $val; do
     # Trim whitespace
     entry=$(echo "$entry" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     [ -z "$entry" ] && continue
     # Must have at least one colon (symbol:file)
-    [[ "$entry" =~ ^[^:]+:[^:]+ ]] || { set +f; return 1; }
+    [[ "$entry" =~ ^[^:]+:[^:]+ ]] || {
+      set +f
+      return 1
+    }
   done
   set +f
   return 0
