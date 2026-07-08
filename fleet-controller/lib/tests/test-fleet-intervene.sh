@@ -37,6 +37,30 @@ _make_pipeline_log() {
   echo "2026-06-02T10:01:00Z|APPRAISE|appraise|done|scored" >>"${dir}/${tid}-pipeline.log"
 }
 
+# ── CI-safe stubs ───────────────────────────────────────────────────────────────
+# heartbeat.sh may not be available in CI (no SessionStart hook). Provide
+# functional stubs so intervene tests don't depend on external sourcing.
+
+if ! declare -f _plog >/dev/null 2>&1; then
+  _plog() {
+    local file="$1" phase="$2" step="$3" status="$4" msg="$5"
+    mkdir -p "$(dirname "$file")"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|${phase}|${step}|${status}|${msg}" >>"$file"
+  }
+fi
+
+if ! declare -f hb_decision >/dev/null 2>&1; then
+  hb_decision() { return 0; }
+fi
+
+if ! declare -f _iso_now >/dev/null 2>&1; then
+  _iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+fi
+
+if ! declare -f _ensure_dir_for >/dev/null 2>&1; then
+  _ensure_dir_for() { mkdir -p "$(dirname "$1")" 2>/dev/null || true; }
+fi
+
 # ── _flow_mutex_held tests ───────────────────────────────────────────────────────
 
 test_flow_mutex_held_lockfile_absent() {

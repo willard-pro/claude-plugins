@@ -1,0 +1,31 @@
+{
+  "name": "fleet-controller",
+  "version": "0.1.0",
+  "description": "Parent orchestrator above ticket-planner and ticket-auto — dispatches planned tickets, monitors pipeline health, aggregates execution feedback. Bash-only detection + intervention; no Claude agents.",
+  "author": {
+    "name": "John Willard"
+  },
+  "repository": "https://github.com/willard-pro/claude-plugins",
+  "license": "UNLICENSED",
+  "keywords": [
+    "fleet",
+    "orchestration",
+    "monitoring",
+    "dispatch",
+    "pipeline-health"
+  ],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'mkdir -p ~/.claude/skills/lib && cp \"${CLAUDE_PLUGIN_ROOT}/lib/\"*.sh ~/.claude/skills/lib/'",
+            "timeout": 10,
+            "statusMessage": "Syncing fleet-controller lib scripts..."
+          }
+        ]
+      }
+    ]
+  }
+}

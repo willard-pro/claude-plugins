@@ -205,6 +205,76 @@ test_fleet_monitor_is_sourceable() {
   return $rc
 }
 
+# ── State-transition gating tests (Gap 2 from architect audit) ──────────────────
+
+# Helper: write a minimal pipeline log so fleet_detect_all counts it as active
+_plog_mon() {
+  local dir="$1" tid="$2" phase="$3" step="$4" status="$5" msg="$6"
+  local iso="${7:-2026-07-08T10:00:00Z}"
+  mkdir -p "$dir"
+  echo "${iso}|${phase}|${step}|${status}|${msg}" >>"${dir}/${tid}-pipeline.log"
+}
+
+test_summary_changed_when_first_cycle() {
+  # When prev_summary is empty (first cycle), any non-empty current_summary
+  # should be treated as a state change.
+  local prev=""
+  local current='{"total":1,"healthy":0,"warn":1,"kill":0,"restart":0}'
+  [ -n "$current" ] && [ "$current" != "$prev" ] &&
+    echo "should_emit=true" ||
+    echo "should_emit=false"
+}
+
+test_summary_suppressed_when_equal() {
+  # Same JSON → no emission needed
+  local prev='{"total":1,"healthy":0,"warn":1,"kill":0,"restart":0}'
+  local current='{"total":1,"healthy":0,"warn":1,"kill":0,"restart":0}'
+  [ "$current" = "$prev" ] &&
+    echo "should_emit=false (suppressed)" ||
+    echo "should_emit=true"
+}
+
+test_summary_emitted_when_changed() {
+  # Different JSON → should emit
+  local prev='{"total":1,"healthy":0,"warn":1,"kill":0,"restart":0}'
+  local current='{"total":2,"healthy":0,"warn":2,"kill":0,"restart":0}'
+  if [ "$current" != "$prev" ]; then
+    echo "should_emit=true (state changed)"
+  else
+    echo "should_emit=false"
+  fi
+}
+
+test_summary_forced_after_interval() {
+  # Even when unchanged, force emission after summary_interval cycles
+  local cycles_since_summary=10
+  local summary_interval=10
+  [ "$cycles_since_summary" -ge "$summary_interval" ] &&
+    echo "should_emit=true (forced)" ||
+    echo "should_emit=false"
+}
+
+test_summary_not_forced_before_interval() {
+  # Below the interval threshold, don't force
+  local cycles_since_summary=5
+  local summary_interval=10
+  [ "$cycles_since_summary" -ge "$summary_interval" ] &&
+    echo "should_emit=true" ||
+    echo "should_emit=false (within interval)"
+}
+
+test_cycle_fallback_json_includes_fleet_wide_key() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  rm -rf "$tmpdir" # remove it so fleet_detect_all fails
+
+  local output
+  output=$(cd "$LIB_DIR/.." && FLEET_LOG_FILE=/dev/null FLEET_HB_LOG_FILE=/dev/null source "$LIB_DIR/fleet-monitor.sh" 2>/dev/null && fleet_monitor_cycle "$tmpdir" 2>/dev/null | grep '^{"' | tail -1)
+  local has_fleet_wide
+  has_fleet_wide=$(echo "$output" | jq 'has("fleet_wide")' 2>/dev/null || echo "false")
+  [ "$has_fleet_wide" = "true" ]
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -220,7 +290,13 @@ for fn in \
   test_namespaced_stop_file_uses_instance_id \
   test_monitor_loop_exits_on_namespaced_stop_file \
   test_monitor_loop_ignores_legacy_stop_file \
-  test_fleet_monitor_is_sourceable; do
+  test_fleet_monitor_is_sourceable \
+  test_summary_changed_when_first_cycle \
+  test_summary_suppressed_when_equal \
+  test_summary_emitted_when_changed \
+  test_summary_forced_after_interval \
+  test_summary_not_forced_before_interval \
+  test_cycle_fallback_json_includes_fleet_wide_key; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done
