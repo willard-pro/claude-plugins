@@ -67,10 +67,12 @@ test_planner_feedback_collected() {
   _plog "$ws" "CRE-101" "IMPLEMENT" "implement" "done" "implemented fix"
   _plog "$ws" "CRE-101" "META" "planner-feedback" "info" "{\"decision_drift\":\"none\",\"confidence_actual\":0.85}"
 
-  # Create a mock feedback dir to simulate collected feedback
+  # Create a mock feedback file containing this ticket's source_tid reference.
+  # The detector greps file contents for \"source_tid\":\"<tid>\".
   REPOS_ROOT="$ws" FLEET_PIPELINE_LOG_DIR="$ws" \
     mkdir -p "$ws/.ticket-auto/initiatives/INIT-42/feedback"
-  touch "$ws/.ticket-auto/initiatives/INIT-42/feedback/2026-07-07.json"
+  echo '{"tickets":[{"source_tid":"CRE-101","confidence_actual":0.85}]}' \
+    >"$ws/.ticket-auto/initiatives/INIT-42/feedback/2026-07-07.json"
 
   local sev
   sev=$(REPOS_ROOT="$ws" detect_planner_feedback "CRE-101" "$ws")

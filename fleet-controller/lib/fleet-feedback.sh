@@ -18,14 +18,16 @@ fi
 # ── Helpers ──────────────────────────────────────────────────────────────────────
 
 # Extract initiative-id labels from a ticket's Linear issue.
+# Uses FLEET_INITIATIVE_LABEL_PREFIX to filter (default: INIT-).
 # Args: tid
 # Returns: space-separated initiative IDs (e.g., "INIT-42 INIT-43")
 _get_initiative_labels() {
   local tid="$1"
+  local label_prefix="${FLEET_INITIATIVE_LABEL_PREFIX:-INIT-}"
   if declare -f get_issue >/dev/null 2>&1; then
     local issue_json
     if issue_json=$(get_issue "$tid" 2>/dev/null); then
-      echo "$issue_json" | jq -r '.data.issue.labels.nodes[]?.name // empty' 2>/dev/null | grep -oP '^[A-Z]+-\d+$' || true
+      echo "$issue_json" | jq -r '.data.issue.labels.nodes[]?.name // empty' 2>/dev/null | grep "^${label_prefix}" || true
     fi
   fi
 }
@@ -46,13 +48,31 @@ _parse_feedback_payload() {
   fi
 }
 
+# Check bc availability once on first use. Emits warning to stderr if missing.
+# Without bc, drift computation degrades to 0 and labels to "none".
+_BC_WARNED=false
+_check_bc() {
+  if ! command -v bc >/dev/null 2>&1; then
+    if [ "$_BC_WARNED" = "false" ]; then
+      echo "WARNING: bc not installed — drift computation degraded to 0" >&2
+      _BC_WARNED=true
+    fi
+    return 1
+  fi
+  return 0
+}
+
 # Compute confidence drift between predicted and actual.
 # Args: predicted (float), actual (float)
 # Returns: drift value (negative = overestimated, positive = underestimated)
 _compute_drift() {
   local predicted="${1:-0}"
   local actual="${2:-0}"
-  echo "$actual - $predicted" | bc -l 2>/dev/null || echo "0"
+  if _check_bc; then
+    echo "$actual - $predicted" | bc -l 2>/dev/null || echo "0"
+  else
+    echo "0"
+  fi
 }
 
 # Determine drift severity label.
@@ -60,10 +80,14 @@ _compute_drift() {
 _drift_label() {
   local drift="${1:-0}"
   drift=$(printf "%.3f" "$drift" 2>/dev/null || echo "0")
-  if (( $(echo "$drift < -0.20" | bc -l 2>/dev/null) )); then
-    echo "major"
-  elif (( $(echo "$drift < -0.10" | bc -l 2>/dev/null) )); then
-    echo "minor"
+  if _check_bc; then
+    if (( $(echo "$drift < -0.20" | bc -l 2>/dev/null) )); then
+      echo "major"
+    elif (( $(echo "$drift < -0.10" | bc -l 2>/dev/null) )); then
+      echo "minor"
+    else
+      echo "none"
+    fi
   else
     echo "none"
   fi

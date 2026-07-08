@@ -427,28 +427,25 @@ detect_planner_feedback() {
   fb_entries=$(command grep '|META|planner-feedback|' "$log_file" 2>/dev/null || true)
   [ -z "$fb_entries" ] && echo "0" && return
 
-  # For each feedback entry, check if it's already been collected
-  # (i.e., a feedback file exists with matching initiative-id + ticket)
+  # For each feedback entry, check if this ticket's feedback has already
+  # been collected. Feedback files at REPOS_ROOT/.ticket-auto/initiatives/*/feedback/*.json
+  # carry a "source_tid" field — grep for this ticket's ID across all feedback files.
   local repos_root="${REPOS_ROOT:-}"
   local uncollected=0
 
   while IFS= read -r line; do
     [ -z "$line" ] && continue
-    # Extract ticket initiative labels from the pipeline log
-    # Feedback entries are collected by initiative-id label on the source ticket
     local fb_payload
     fb_payload=$(echo "$line" | awk -F'|' '{for(i=5;i<=NF;i++) printf "%s%s", $i, (i<NF?"|":"")}')
     [ -z "$fb_payload" ] && continue
 
-    # Check for feedback file at expected location
-    # We need the initiative ID — try common label patterns
+    # Check whether this ticket's feedback has been collected.
+    # Look for \"source_tid\":\"<tid>\" in any feedback JSON under the initiatives tree.
     local fb_found=0
     if [ -n "$repos_root" ] && [ -d "$repos_root/.ticket-auto/initiatives" ]; then
-      for init_dir in "$repos_root/.ticket-auto/initiatives"/*/; do
-        [ -d "$init_dir" ] || continue
-        local feedback_dir="${init_dir}feedback"
-        [ -d "$feedback_dir" ] && [ -n "$(ls -A "$feedback_dir" 2>/dev/null)" ] && fb_found=1 && break
-      done
+      if grep -rql "\"source_tid\":\"${tid}\"" "$repos_root/.ticket-auto/initiatives"/*/feedback/ 2>/dev/null; then
+        fb_found=1
+      fi
     fi
 
     [ "$fb_found" -eq 0 ] && uncollected=$((uncollected + 1))
@@ -560,15 +557,22 @@ _fleet_scan_initiative_dispatch() {
     return
   fi
 
-  # Query Linear for epics with state:execution label
-  # Use GraphQL to find initiatives in execution state
+  # Query Linear for epics with state:execution label.
+  # Use GraphQL bulk query for efficiency (single round-trip vs N+1 get_issue calls).
+  # Retry pattern matches linear-api.sh: 3 attempts with exponential backoff.
   local query='{"query":"{issues(filter:{state:{name:{eq:\\"Backlog\\"}},labels:{name:{eq:\\"state:execution\\"}}}){nodes{id identifier title children{nodes{id identifier state{name} labels{nodes{name}}}}}}}"}'
 
-  local epics_json
-  if ! epics_json=$(echo "$query" | curl -s -X POST "${LINEAR_API_URL:-https://api.linear.app/graphql}" \
-    -H "Content-Type: application/json" \
-    -H "Authorization: ${LINEAR_API_KEY}" \
-    -d @- 2>/dev/null); then
+  local epics_json attempt=1 max_attempts=3 delay=1
+  while [ "$attempt" -le "$max_attempts" ]; do
+    epics_json=$(echo "$query" | curl -s -X POST "${LINEAR_API_URL:-https://api.linear.app/graphql}" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: ${LINEAR_API_KEY}" \
+      -d @- 2>/dev/null) && break
+    attempt=$((attempt + 1))
+    [ "$attempt" -le "$max_attempts" ] && sleep "$delay" && delay=$((delay * 2))
+  done
+
+  if [ -z "$epics_json" ]; then
     echo '{"severity":0,"findings":""}'
     return
   fi
