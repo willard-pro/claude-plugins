@@ -1,6 +1,6 @@
 ---
 name: ticket-appraise
-description: Investigation planner for a Linear ticket. Fetches the issue, creates the local directory structure, runs a complexity sweep, searches prior art, and traces the full codebase call chain. Writes findings to notes.md. Use when the user says "appraise ticket <ID>", "/ticket-appraise <ID>", or "take on ticket <ID>". After this completes, run /ticket-appraise-exec to create artifacts and update Linear.
+description: Investigation planner for a Linear ticket. Fetches the issue, creates the local directory structure, runs a complexity sweep, searches prior art, and traces the full codebase call chain. Supports fast-path for planned tickets (planned label + Planner Context block) — skips complexity sweep, prior art, and codebase investigation when planner metadata is available. Writes findings to notes.md. Use when the user says "appraise ticket <ID>", "/ticket-appraise <ID>", or "take on ticket <ID>". After this completes, run /ticket-appraise-exec to create artifacts and update Linear.
 ---
 
 # Ticket Appraise — Planner
@@ -12,7 +12,8 @@ You have been given a ticket ID as the argument (e.g. `WIL-42`). Execute the inv
 If `--from-auto` is present in the arguments, follow the auto-pipeline preamble in `~/.claude/skills/lib/skill-preamble-auto.md` with parameters: TICKET_ID=<from args>, PHASE=APPRAISE, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,get_comments, HAS_LOGGING=true, HAS_HEARTBEAT=true. Before starting, source the project context: `source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true`. Otherwise, follow the full pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=APPRAISE, FROM_FLAG=none, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,get_comments, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=REPOS_ROOT,ISSUE_PREFIX,BE_SERVICES,WIKI_ROOT, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
 
 ### Heartbeat points
-- **Complexity axes**: after complexity sweep, write `hb-wrap.sh decision "complexity-score" "fired" "...score..." '{"axes":"...","score":"..."}'`
+- **Fast-path**: after fast-path check, write `hb-wrap.sh decision "fast-path" "fired" "eligible|skipped" '{"eligible":"true|false","reason":"..."}'`
+- **Complexity axes**: after complexity sweep (or fast-path complexity), write `hb-wrap.sh decision "complexity-score" "fired" "...score..." '{"axes":"...","score":"..."}'`
 - **Blast radius**: after codebase investigation, write `hb-wrap.sh decision "blast-radius" "fired" "...N files..." '{"file_count":"N"}'`
 - **Prior art**: if prior art found, write `hb-wrap.sh decision "prior-art" "fired" "...N matches..."`; if none found, write `hb-wrap.sh decision "prior-art" "info" "no prior art found"`
 - **Wiki bootstrap**: if WIKI_ROOT not found in CLAUDE.md and fallback path used, write `hb-wrap.sh fallback "wiki-bootstrap" "fired" "using default wiki path" '{"reason":"WIKI_ROOT not in CLAUDE.md"}'`
@@ -24,7 +25,10 @@ Also: if `--from-step` is set, **suppress Resume Mode** in Step 1 — the worksp
 
 | `--from-step` value | Skip to | Restore from |
 |---------------------|---------|--------------|
-| `setup-workspace` | Step 2 (complexity sweep) | ticket-setup output already in notes.md |
+| `setup-workspace` | Step 1.3 (fast-path check) | ticket-setup output already in notes.md |
+| `fast-path` | Step 2.7 (readiness critique) | Fast-path already populated notes.md — skip to critique |
+| `critique` | Step 2.8 (blast radius) | Readiness critique already completed |
+| `blast-radius` | Step 3 or 4 (codebase/ticket update) | Blast radius already completed |
 | `complexity-sweep` | Step 2.6 (prior art) | `## Complexity` in notes.md |
 | `prior-art` | Step 3 (codebase investigation) | `## Prior Art` in notes.md |
 | `codebase-investigation` | Step 5 (report/handoff) | `## Initial Investigation` in notes.md |
@@ -47,9 +51,93 @@ The ticket-setup output provides: directory path, title, user, status, priority,
 
 ---
 
+## Step 1.3 — Fast-Path Check (planned tickets)
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|fast-path|start|Checking planned ticket eligibility" >> "$LOG_FILE"
+
+**Before the task tracker and any LLM investigation**, check whether this ticket qualifies for accelerated appraisal via Planner Context metadata.
+
+### 1.3a — Run eligibility check
+
+Source the fast-path library and check eligibility:
+
+```bash
+source "$HOME/.claude/skills/lib/planned-ticket-check.sh"
+source "$HOME/.claude/skills/lib/appraise-fast-path.sh"
+check_fast_path_eligible "{TICKET-ID}"
+```
+
+This calls `get_issue` to fetch the ticket, checks for the `planned` label, validates the `## Planner Context` block, and determines eligibility based on Pre-approved status and Confidence.
+
+### 1.3b — Act on result
+
+| Exit | FAST_PATH_ELIGIBLE | FAST_PATH_REASON | Action |
+|------|-------------------|-------------------|--------|
+| 0 | `true` | `pre_approved` or `confidence_met` | **Fast-path active.** Continue to Step 1.3c. |
+| 1 | `false` | `not_planned` | No `planned` label. Proceed normally to Step 1.5. |
+| 1 | `false` | `malformed_block` | `planned` label present but Planner Context is missing or invalid. Log a warning and proceed normally — the planner enrichment is degraded but the ticket is still valid. |
+| 2 | `false` | `low_confidence_not_preapproved` | Confidence below threshold AND not pre-approved. Log a warning and proceed normally — this ticket needs full human review. |
+| 2 | `false` | `confidence_below_threshold` | Confidence below fast-path threshold (0.85). Proceed normally — the planner was uncertain. |
+
+### 1.3c — Fast-path active: populate notes.md from Planner Context
+
+If `FAST_PATH_ELIGIBLE=true`:
+
+1. **Generate fast-path notes.md:**
+
+   ```bash
+   generate_fast_path_notes "{ticket-dir}" "{TICKET-ID}"
+   ```
+
+   This writes the full notes.md with:
+   - `## Complexity` — derived from Strategy field (Conservative → simple, Balanced/Innovative → complex)
+   - `## Prior Art` — skipped (planner-provided context)
+   - `## Initial Investigation` — populated from Affected Services + Target Symbols + Decision
+
+2. **Write heartbeat:**
+
+   ```bash
+   [ -n "$HB_LOG_FILE" ] && hb-wrap.sh decision "fast-path" "fired" "eligible" \
+     '{"eligible":"true","reason":"'"$FAST_PATH_REASON"'","strategy":"'"$FAST_PATH_STRATEGY"'","confidence":"'"$FAST_PATH_CONFIDENCE"'"}'
+   ```
+
+3. **Write pipeline log:**
+
+   ```bash
+   [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|fast-path|done|Eligible — ${FAST_PATH_REASON}, Strategy=${FAST_PATH_STRATEGY}, Confidence=${FAST_PATH_CONFIDENCE}" >> "$LOG_FILE"
+   ```
+
+4. **Skip to Step 2.7 (Readiness critique).** The following steps are COVERED by fast-path:
+   - Step 2 (Expand notes.md) — fast-path already wrote it
+   - Step 2.5 (Complexity sweep) — derived from Strategy
+   - Step 2.6 (Prior-art search) — planner-provided context
+   - Step 3 (Codebase investigation) — Target Symbols provide starting points
+
+   **Still required** (run these normally):
+   - Step 2.7 (Readiness critique) — validates ticket completeness regardless of planner metadata
+   - Step 2.8 (Blast Radius Analysis) — provides real impact data the planner couldn't have
+   - Step 4 (Update ticket in Linear) — claim + label
+   - Step 5 (Hand off) — report to user
+
+### 1.3d — Fast-path skipped: proceed normally
+
+If `FAST_PATH_ELIGIBLE=false`:
+
+```bash
+[ -n "$HB_LOG_FILE" ] && hb-wrap.sh decision "fast-path" "fired" "skipped" \
+  '{"eligible":"false","reason":"'"$FAST_PATH_REASON"'"}'
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|fast-path|skip|Not eligible — ${FAST_PATH_REASON}" >> "$LOG_FILE"
+```
+
+Continue to Step 1.5 normally.
+
+---
+
 ## Step 1.5 — Create task tracker
 
-**Before proceeding further**, create a TaskCreate for every remaining step in this skill (Steps 2 through 5 below). Each task subject = the step heading (e.g. "Step 2: Expand notes.md for appraisal"). This ensures no step is skipped even when context scrolls.
+**Before proceeding further**, create a TaskCreate for every remaining step in this skill. Each task subject = the step heading (e.g. "Step 2: Expand notes.md for appraisal"). This ensures no step is skipped even when context scrolls.
+
+**If fast-path is active** (Step 1.3c), only create tasks for: Step 2.7 (Readiness critique), Step 2.8 (Blast Radius Analysis), Step 4 (Update ticket), Step 5 (Hand off). Skip Steps 2, 2.5, 2.6, and 3 — they are covered by planner metadata.
 
 After each step is fully done (including all sub-steps), mark it completed with TaskUpdate. At session end, write a trace file to the ticket directory:
 
@@ -58,13 +146,15 @@ cat > {ticket-dir}/appraise-session.md << 'TRACE'
 # appraise session — {ISSUE-ID}
 **Date:** {today}
 **Complexity:** {simple|complex}
+**Fast-path:** {yes — reason|no}
 
 ## Step trace
-- [x] Step 2: Expand notes.md — done
-- [x] Step 2.5: Complexity sweep — {score}, axes: {list}
-- [x] Step 2.6: Prior-art search — {hits} hits
+- [x] Step 1.3: Fast-path check — {eligible|skipped} ({reason})
+- [x] Step 2: Expand notes.md — {done|skipped (fast-path)}
+- [x] Step 2.5: Complexity sweep — {score}, axes: {list|skipped (fast-path: Strategy={strategy})}
+- [x] Step 2.6: Prior-art search — {hits} hits|skipped (fast-path)
 - [x] Step 2.7: Readiness critique — {BLOCKED|WARNINGS|CLEAR}
-- [x] Step 3: Investigate codebase — {N} files traced
+- [x] Step 3: Investigate codebase — {N} files traced|skipped (fast-path: {N} target symbols)
 - [x] Step 4: Label ticket — {complexity} label applied
 - [x] Step 5: Hand off — reported to user
 TRACE
@@ -73,6 +163,8 @@ TRACE
 ---
 
 ## Step 2 — Expand notes.md for appraisal
+
+> **Fast-path:** Skip this step if fast-path is active (Step 1.3c). notes.md was already written by `generate_fast_path_notes`.
 
 ticket-setup writes a minimal notes.md stub. Replace it with the full appraisal template:
 
@@ -104,6 +196,8 @@ ticket-setup writes a minimal notes.md stub. Replace it with the full appraisal 
 ---
 
 ## Step 2.5 — Complexity sweep
+
+> **Fast-path:** Skip this step if fast-path is active. Complexity is derived from the Planner Context Strategy field: Conservative → simple, Balanced/Innovative → complex. The `## Complexity` section in notes.md was already written.
 
 Activate the analyzer persona before scoring:
 
@@ -137,6 +231,8 @@ Record the decision in notes.md under a `## Complexity` heading:
 ---
 
 ## Step 2.6 — Prior-art search (claude-mem)
+
+> **Fast-path:** Skip this step if fast-path is active. Prior art context is provided by the Planner Context block (Decision, Affected Services, and Target Symbols fields). The `## Prior Art` section in notes.md was already written.
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|prior-art|start|Searching claude-mem" >> "$LOG_FILE"
 
@@ -272,7 +368,7 @@ If the symbol is ambiguous (multiple candidates), pick the highest-relevance res
 **Analysis:** {one sentence summarizing what the blast radius means for this ticket}
 ```
 
-**Re-evaluate complexity:** If any target reports HIGH or CRITICAL risk, OR any target has 3+ d=1 callers, OR 2+ execution flows are affected — and the current classification from Step 2.5 is `simple` — override to `complex` and update the `## Complexity` section in notes.md with the reason:
+**Re-evaluate complexity:** If any target reports HIGH or CRITICAL risk, OR any target has 3+ d=1 callers, OR 2+ execution flows are affected — and the current classification (from Step 2.5 or fast-path Strategy mapping) is `simple` — override to `complex` and update the `## Complexity` section in notes.md with the reason. **Fast-path interaction:** If fast-path set complexity to `simple` (from Conservative strategy), blast radius still runs and can override to `complex`. The override reads from notes.md and applies regardless of how complexity was originally set.
 
 ```markdown
 **Score:** complex (overridden from simple — blast radius: {reason})
@@ -291,6 +387,8 @@ Do NOT block the pipeline on GitNexus availability. The complexity classificatio
 ---
 
 ## Step 3 — Investigate the codebase (inline path — simple tickets only)
+
+> **Fast-path:** Skip this step if fast-path is active. The Planner Context provides Target Symbols as investigation starting points. The `## Initial Investigation` section in notes.md was already populated. A lightweight pass is still recommended: use `smart_search` or `smart_outline` to confirm each target symbol exists at its listed path, and note any discrepancies in `## Open Questions`. But do NOT run the full multi-tier investigation (3a–3e).
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|codebase-investigation|start|Tracing call chain" >> "$LOG_FILE"
 

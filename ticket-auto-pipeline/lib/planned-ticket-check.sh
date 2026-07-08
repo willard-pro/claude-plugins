@@ -239,7 +239,7 @@ _validate_iso8601() {
 # _validate_target_symbols <value> — true if semicolon-separated symbol:file:line
 _validate_target_symbols() {
   local val="$1"
-  # Empty is valid (optional field)
+  # Empty is handled upstream by required-field check (never reached here)
   [ -z "$val" ] && return 0
   # Each entry must be symbol:file or symbol:file:line
   local IFS=';'

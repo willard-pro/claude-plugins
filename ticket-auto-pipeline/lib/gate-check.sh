@@ -329,7 +329,9 @@ _gate_entry() {
   # Check 2.7: Planned ticket enrichment validation (Phase 1 — passive, observe-only)
   # Detects planned tickets and validates their Planner Context block.
   # Does NOT change gate behavior — logs results for observability.
-  # Phase 2 (appraise-fast-path) will act on exit codes.
+  # Phase 2 (appraise-fast-path) runs independently in ticket-appraise Step 1.3
+  # via check_fast_path_eligible, which re-validates the Planner Context block
+  # and routes to fast-path or full investigation based on the result.
   local issue_json planned_check_rc
   issue_json=$(get_issue "$TICKET_ID" 2>/dev/null || echo '{"description":"","labels":{"nodes":[]}}')
   local has_planned_label
