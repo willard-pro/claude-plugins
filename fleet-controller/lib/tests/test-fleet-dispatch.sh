@@ -51,19 +51,19 @@ _mock_get_issue_with_children() {
   get_issue() {
     local id="$1"
     case "$id" in
-      INIT-42)
-        echo '{"data":{"issue":{"identifier":"INIT-42","labels":{"nodes":[{"name":"state:execution"}]},"children":{"nodes":[
+    INIT-42)
+      echo '{"data":{"issue":{"identifier":"INIT-42","labels":{"nodes":[{"name":"state:execution"}]},"children":{"nodes":[
           {"identifier":"CRE-101","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"}]},"priority":3},
           {"identifier":"CRE-102","state":{"name":"In Progress"},"labels":{"nodes":[{"name":"planned"}]},"priority":1},
           {"identifier":"CRE-103","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"},{"name":"blocked-by:CRE-100"}]},"priority":2}
         ]}}}}'
-        ;;
-      CRE-100)
-        echo '{"data":{"issue":{"identifier":"CRE-100","state":{"name":"In Progress"},"labels":{"nodes":[]}}}}'
-        ;;
-      *)
-        echo '{"data":{"issue":{"identifier":"'"$id"'","state":{"name":"Done"},"labels":{"nodes":[]}}}}'
-        ;;
+      ;;
+    CRE-100)
+      echo '{"data":{"issue":{"identifier":"CRE-100","state":{"name":"In Progress"},"labels":{"nodes":[]}}}}'
+      ;;
+    *)
+      echo '{"data":{"issue":{"identifier":"'"$id"'","state":{"name":"Done"},"labels":{"nodes":[]}}}}'
+      ;;
     esac
   }
 }
@@ -72,14 +72,14 @@ _mock_get_issue_blocker_done() {
   get_issue() {
     local id="$1"
     case "$id" in
-      INIT-42)
-        echo '{"data":{"issue":{"identifier":"INIT-42","labels":{"nodes":[{"name":"state:execution"}]},"children":{"nodes":[
+    INIT-42)
+      echo '{"data":{"issue":{"identifier":"INIT-42","labels":{"nodes":[{"name":"state:execution"}]},"children":{"nodes":[
           {"identifier":"CRE-103","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"},{"name":"blocked-by:CRE-100"}]},"priority":2}
         ]}}}}'
-        ;;
-      CRE-100)
-        echo '{"data":{"issue":{"identifier":"CRE-100","state":{"name":"Done"},"labels":{"nodes":[]}}}}'
-        ;;
+      ;;
+    CRE-100)
+      echo '{"data":{"issue":{"identifier":"CRE-100","state":{"name":"Done"},"labels":{"nodes":[]}}}}'
+      ;;
     esac
   }
 }
@@ -101,7 +101,10 @@ test_dispatch_no_linear_api() {
     fleet_dispatch_initiative 'INIT-99' '$ws' 2>&1
   " 2>/dev/null || true)
   # Either "not found", "not available", or "not in execution" → all valid
-  echo "$output" | grep -qi "not found\|not available\|not in execution" && return 0 || { echo "output: $output"; return 1; }
+  echo "$output" | grep -qi "not found\|not available\|not in execution" && return 0 || {
+    echo "output: $output"
+    return 1
+  }
 }
 
 test_dispatch_missing_initiative_arg() {
@@ -113,7 +116,10 @@ test_dispatch_missing_initiative_arg() {
     source '$LIB_DIR/fleet-dispatch.sh' 2>/dev/null
     fleet_dispatch_initiative '' '$ws' 2>&1
   " 2>/dev/null || true)
-  echo "$output" | grep -qi "required" && return 0 || { echo "output: $output"; return 1; }
+  echo "$output" | grep -qi "required" && return 0 || {
+    echo "output: $output"
+    return 1
+  }
 }
 
 test_dispatch_no_state_execution() {
@@ -127,7 +133,10 @@ test_dispatch_no_state_execution() {
     _mock_get_issue_no_execution
     fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
   " 2>/dev/null || true)
-  echo "$output" | grep -qi "not in execution" && return 0 || { echo "output: $output"; return 1; }
+  echo "$output" | grep -qi "not in execution" && return 0 || {
+    echo "output: $output"
+    return 1
+  }
 }
 
 test_dispatch_no_child_tickets() {
@@ -141,7 +150,10 @@ test_dispatch_no_child_tickets() {
     _mock_get_issue_state_execution
     fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
   " 2>/dev/null || true)
-  echo "$output" | grep -qi "no child tickets\|no dispatchable" && return 0 || { echo "output: $output"; return 1; }
+  echo "$output" | grep -qi "no child tickets\|no dispatchable" && return 0 || {
+    echo "output: $output"
+    return 1
+  }
 }
 
 test_dispatch_with_children_extracts_correctly() {
@@ -158,7 +170,10 @@ test_dispatch_with_children_extracts_correctly() {
   # CRE-101: Backlog + planned → should be enqueued
   # CRE-102: In Progress → skipped (not Backlog)
   # CRE-103: Backlog + planned + blocked-by:CRE-100 (In Progress) → skipped
-  echo "$output" | grep -q "CRE-101" && return 0 || { echo "output: $output"; return 1; }
+  echo "$output" | grep -q "CRE-101" && return 0 || {
+    echo "output: $output"
+    return 1
+  }
 }
 
 test_dispatch_blocker_done_unblocks() {
@@ -173,7 +188,10 @@ test_dispatch_blocker_done_unblocks() {
     fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
   " 2>/dev/null || true)
   # CRE-103: blocker CRE-100 is Done → should be enqueued
-  echo "$output" | grep -q "CRE-103" && return 0 || { echo "output: $output"; return 1; }
+  echo "$output" | grep -q "CRE-103" && return 0 || {
+    echo "output: $output"
+    return 1
+  }
 }
 
 test_dispatch_dry_run_no_write() {
@@ -191,7 +209,10 @@ test_dispatch_dry_run_no_write() {
     _mock_get_issue_with_children
     fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
   " 2>/dev/null || true)
-  echo "$output" | grep -qi "DRY-RUN" && return 0 || { echo "output: $output"; return 1; }
+  echo "$output" | grep -qi "DRY-RUN" && return 0 || {
+    echo "output: $output"
+    return 1
+  }
 }
 
 test_dispatch_queue_idempotent() {
@@ -218,7 +239,10 @@ test_dispatch_queue_idempotent() {
     _mock_get_issue_with_children
     fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
   " 2>/dev/null || true)
-  echo "$output" | grep -q "already queued" && return 0 || { echo "output: $output"; return 1; }
+  echo "$output" | grep -q "already queued" && return 0 || {
+    echo "output: $output"
+    return 1
+  }
 }
 
 test_dispatch_fleet_max_concurrent_enforced() {
@@ -246,7 +270,10 @@ test_dispatch_fleet_max_concurrent_enforced() {
     fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
   " 2>/dev/null || true)
   # 2 active + max 3 → only 1 slot available
-  echo "$output" | grep -q "can enqueue up to 1" && return 0 || { echo "output: $output"; return 1; }
+  echo "$output" | grep -q "can enqueue up to 1" && return 0 || {
+    echo "output: $output"
+    return 1
+  }
 }
 
 # ── Run all tests ────────────────────────────────────────────────────────────────

@@ -47,7 +47,10 @@ test_planner_feedback_none() {
 
   local sev
   sev=$(detect_planner_feedback "CRE-101" "$ws")
-  [ "$sev" = "0" ] || { echo "expected 0, got $sev"; return 1; }
+  [ "$sev" = "0" ] || {
+    echo "expected 0, got $sev"
+    return 1
+  }
 }
 
 test_planner_feedback_found() {
@@ -58,7 +61,10 @@ test_planner_feedback_found() {
   # No REPOS_ROOT set → no feedback dir exists → should report uncollected (WARN)
   local sev
   sev=$(detect_planner_feedback "CRE-101" "$ws")
-  [ "$sev" = "1" ] || { echo "expected 1, got $sev"; return 1; }
+  [ "$sev" = "1" ] || {
+    echo "expected 1, got $sev"
+    return 1
+  }
 }
 
 test_planner_feedback_collected() {
@@ -76,7 +82,10 @@ test_planner_feedback_collected() {
 
   local sev
   sev=$(REPOS_ROOT="$ws" detect_planner_feedback "CRE-101" "$ws")
-  [ "$sev" = "0" ] || { echo "expected 0 (collected), got $sev"; return 1; }
+  [ "$sev" = "0" ] || {
+    echo "expected 0 (collected), got $sev"
+    return 1
+  }
 }
 
 test_planner_feedback_no_log_file() {
@@ -84,7 +93,10 @@ test_planner_feedback_no_log_file() {
   ws=$(_setup_workspace)
   local sev
   sev=$(detect_planner_feedback "CRE-999" "$ws")
-  [ "$sev" = "0" ] || { echo "expected 0, got $sev"; return 1; }
+  [ "$sev" = "0" ] || {
+    echo "expected 0, got $sev"
+    return 1
+  }
 }
 
 # ── Tests: _fleet_scan_initiative_dispatch (no Linear API → returns OBSERVE) ────
@@ -95,7 +107,10 @@ test_initiative_dispatch_no_linear_api() {
   result=$(_fleet_scan_initiative_dispatch 2>/dev/null)
   local sev
   sev=$(echo "$result" | jq -r '.severity // -1')
-  [ "$sev" = "0" ] || { echo "expected severity 0 without Linear API, got $sev"; return 1; }
+  [ "$sev" = "0" ] || {
+    echo "expected severity 0 without Linear API, got $sev"
+    return 1
+  }
 }
 
 # ── Tests: _fleet_scan_blocked_by (no Linear API → returns OBSERVE) ──────────────
@@ -108,7 +123,10 @@ test_blocked_by_no_linear_api() {
   result=$(_fleet_scan_blocked_by "$ws" 2>/dev/null)
   local sev
   sev=$(echo "$result" | jq -r '.severity // -1')
-  [ "$sev" = "0" ] || { echo "expected severity 0 without Linear API, got $sev"; return 1; }
+  [ "$sev" = "0" ] || {
+    echo "expected severity 0 without Linear API, got $sev"
+    return 1
+  }
 }
 
 # ── Tests: fleet_detect_all includes fleet_wide key ──────────────────────────────
@@ -126,7 +144,10 @@ test_fleet_detect_all_includes_fleet_wide() {
   # Verify fleet_wide key exists
   local fw_count
   fw_count=$(echo "$data" | jq -r '.fleet_wide | length // -1' 2>/dev/null)
-  [ "${fw_count:-0}" -ge 0 ] || { echo "missing fleet_wide key"; return 1; }
+  [ "${fw_count:-0}" -ge 0 ] || {
+    echo "missing fleet_wide key"
+    return 1
+  }
 }
 
 test_fleet_detect_all_empty_workspace() {
@@ -136,8 +157,14 @@ test_fleet_detect_all_empty_workspace() {
   data=$(fleet_detect_all "$ws" 2>/dev/null)
   local total
   total=$(echo "$data" | jq -r '.summary.total // -1')
-  [ "$total" = "0" ] || { echo "expected 0 pipelines, got $total"; return 1; }
-  echo "$data" | jq -e '.fleet_wide' >/dev/null 2>&1 || { echo "missing fleet_wide key in empty workspace"; return 1; }
+  [ "$total" = "0" ] || {
+    echo "expected 0 pipelines, got $total"
+    return 1
+  }
+  echo "$data" | jq -e '.fleet_wide' >/dev/null 2>&1 || {
+    echo "missing fleet_wide key in empty workspace"
+    return 1
+  }
 }
 
 test_fleet_detect_all_with_active_pipeline() {
@@ -150,7 +177,10 @@ test_fleet_detect_all_with_active_pipeline() {
   data=$(fleet_detect_all "$ws" 2>/dev/null)
   local total
   total=$(echo "$data" | jq -r '.summary.total // 0')
-  [ "$total" = "1" ] || { echo "expected 1 active pipeline, got $total"; return 1; }
+  [ "$total" = "1" ] || {
+    echo "expected 1 active pipeline, got $total"
+    return 1
+  }
 }
 
 # ── Schema validation tests (Gap 3 from architect audit) ────────────────────────
@@ -165,7 +195,10 @@ test_schema_pipeline_entries_have_type() {
   data=$(fleet_detect_all "$ws" 2>/dev/null)
   local ptype
   ptype=$(echo "$data" | jq -r '.pipelines[0].type // "MISSING"' 2>/dev/null)
-  [ "$ptype" = "pipeline" ] || { echo "expected 'pipeline', got '$ptype'"; return 1; }
+  [ "$ptype" = "pipeline" ] || {
+    echo "expected 'pipeline', got '$ptype'"
+    return 1
+  }
 }
 
 test_schema_fleet_wide_entries_have_type() {
@@ -180,7 +213,10 @@ test_schema_fleet_wide_entries_have_type() {
   if [ "${fw_count:-0}" -gt 0 ]; then
     local fw_type
     fw_type=$(echo "$data" | jq -r '.fleet_wide[0].type // "MISSING"' 2>/dev/null)
-    [ "$fw_type" = "fleet-wide" ] || { echo "expected 'fleet-wide', got '$fw_type'"; return 1; }
+    [ "$fw_type" = "fleet-wide" ] || {
+      echo "expected 'fleet-wide', got '$fw_type'"
+      return 1
+    }
   fi
   return 0
 }
@@ -193,7 +229,10 @@ test_schema_fleet_wide_always_array() {
   data=$(fleet_detect_all "$ws" 2>/dev/null)
   local fw_type
   fw_type=$(echo "$data" | jq -r '.fleet_wide | type' 2>/dev/null)
-  [ "$fw_type" = "array" ] || { echo "expected 'array', got '$fw_type'"; return 1; }
+  [ "$fw_type" = "array" ] || {
+    echo "expected 'array', got '$fw_type'"
+    return 1
+  }
 }
 
 test_schema_summary_has_all_keys() {
@@ -206,7 +245,10 @@ test_schema_summary_has_all_keys() {
   local keys
   keys=$(echo "$data" | jq -r '.summary | keys | sort | join(",")' 2>/dev/null)
   local expected="healthy,kill,restart,total,warn"
-  [ "$keys" = "$expected" ] || { echo "expected '$expected', got '$keys'"; return 1; }
+  [ "$keys" = "$expected" ] || {
+    echo "expected '$expected', got '$keys'"
+    return 1
+  }
 }
 
 test_schema_top_level_keys() {
@@ -219,7 +261,10 @@ test_schema_top_level_keys() {
   local keys
   keys=$(echo "$data" | jq -r 'keys | sort | join(",")' 2>/dev/null)
   local expected="fleet_wide,pipelines,summary"
-  [ "$keys" = "$expected" ] || { echo "expected '$expected', got '$keys'"; return 1; }
+  [ "$keys" = "$expected" ] || {
+    echo "expected '$expected', got '$keys'"
+    return 1
+  }
 }
 
 test_schema_pipeline_entry_keys() {
@@ -232,7 +277,10 @@ test_schema_pipeline_entry_keys() {
   local keys
   keys=$(echo "$data" | jq -r '.pipelines[0] | keys | sort | join(",")' 2>/dev/null)
   local expected="anomalies,hb_age_secs,phase,severity,tid,type"
-  [ "$keys" = "$expected" ] || { echo "expected '$expected', got '$keys'"; return 1; }
+  [ "$keys" = "$expected" ] || {
+    echo "expected '$expected', got '$keys'"
+    return 1
+  }
 }
 
 test_schema_fleet_wide_entry_keys() {
@@ -248,7 +296,10 @@ test_schema_fleet_wide_entry_keys() {
     local keys
     keys=$(echo "$data" | jq -r '.fleet_wide[0] | keys | sort | join(",")' 2>/dev/null)
     local expected="findings,name,severity,type"
-    [ "$keys" = "$expected" ] || { echo "expected '$expected', got '$keys'"; return 1; }
+    [ "$keys" = "$expected" ] || {
+      echo "expected '$expected', got '$keys'"
+      return 1
+    }
   fi
   return 0
 }

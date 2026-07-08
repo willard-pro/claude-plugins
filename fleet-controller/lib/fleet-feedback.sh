@@ -81,9 +81,9 @@ _drift_label() {
   local drift="${1:-0}"
   drift=$(printf "%.3f" "$drift" 2>/dev/null || echo "0")
   if _check_bc; then
-    if (( $(echo "$drift < -0.20" | bc -l 2>/dev/null) )); then
+    if (($(echo "$drift < -0.20" | bc -l 2>/dev/null))); then
       echo "major"
-    elif (( $(echo "$drift < -0.10" | bc -l 2>/dev/null) )); then
+    elif (($(echo "$drift < -0.10" | bc -l 2>/dev/null))); then
       echo "minor"
     else
       echo "none"
@@ -104,10 +104,19 @@ fleet_aggregate_feedback() {
   # Parse optional flags. First positional arg (if not a flag) is workspace.
   while [ $# -gt 0 ]; do
     case "$1" in
-      --initiative) filter_initiative="$2"; shift 2 ;;
-      --dry-run) dry_run="true"; shift ;;
-      --*) shift ;;  # skip unknown flags
-      *) workspace="$1"; shift ;;
+    --initiative)
+      filter_initiative="$2"
+      shift 2
+      ;;
+    --dry-run)
+      dry_run="true"
+      shift
+      ;;
+    --*) shift ;; # skip unknown flags
+    *)
+      workspace="$1"
+      shift
+      ;;
     esac
   done
 
@@ -128,7 +137,7 @@ fleet_aggregate_feedback() {
   fi
 
   # Collect feedback entries by initiative
-  declare -A FEEDBACK_SOURCES  # initiative_id → JSON array of feedback entries
+  declare -A FEEDBACK_SOURCES # initiative_id → JSON array of feedback entries
   local total_entries=0
 
   for log_file in "$workspace"/*-pipeline.log; do

@@ -66,7 +66,10 @@ test_queue_consume_at_capacity() {
     _spawn_queue_consume '$ws' 3 2>&1
   " 2>/dev/null || true)
   # 3 active + max 3 → 0 slots → should consume nothing
-  [ -f "$queue_file" ] && return 0 || { echo "queue should still exist at capacity"; return 1; }
+  [ -f "$queue_file" ] && return 0 || {
+    echo "queue should still exist at capacity"
+    return 1
+  }
 }
 
 test_queue_consume_entry() {
@@ -90,7 +93,10 @@ test_queue_consume_entry() {
     _spawn_queue_consume '$ws' 0 2>&1
   " 2>/dev/null || true)
   # Should emit ACTION:spawn-auto
-  echo "$output" | grep -q "ACTION:spawn-auto" && return 0 || { echo "output missing ACTION:spawn-auto: $output"; return 1; }
+  echo "$output" | grep -q "ACTION:spawn-auto" && return 0 || {
+    echo "output missing ACTION:spawn-auto: $output"
+    return 1
+  }
 }
 
 test_queue_consume_malformed_skipped() {
@@ -128,8 +134,14 @@ test_queue_write_creates_entry() {
     _spawn_queue_write 'CRE-101' 'test-reason' 0 2>/dev/null
   " 2>/dev/null || true
 
-  [ -f "$queue_file" ] || { echo "queue file not created"; return 1; }
-  grep -q '"tid":"CRE-101"' "$queue_file" && return 0 || { echo "entry not found in queue"; return 1; }
+  [ -f "$queue_file" ] || {
+    echo "queue file not created"
+    return 1
+  }
+  grep -q '"tid":"CRE-101"' "$queue_file" && return 0 || {
+    echo "entry not found in queue"
+    return 1
+  }
 }
 
 # ── Run all tests ────────────────────────────────────────────────────────────────

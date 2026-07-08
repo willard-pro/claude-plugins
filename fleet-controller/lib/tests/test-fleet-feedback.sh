@@ -46,7 +46,10 @@ test_feedback_no_logs() {
   local output
   output=$(fleet_aggregate_feedback "$ws" 2>&1 || true)
   # A fresh workspace with no pipeline logs → should report "no feedback"
-  echo "$output" | grep -q "does not exist\|no pipeline logs\|no feedback" && return 0 || { echo "output: $output"; return 1; }
+  echo "$output" | grep -q "does not exist\|no pipeline logs\|no feedback" && return 0 || {
+    echo "output: $output"
+    return 1
+  }
 }
 
 test_feedback_no_entries() {
@@ -57,7 +60,10 @@ test_feedback_no_entries() {
 
   local output
   output=$(fleet_aggregate_feedback "$ws" 2>&1 || true)
-  echo "$output" | grep -q "no feedback to aggregate" && return 0 || { echo "output: $output"; return 1; }
+  echo "$output" | grep -q "no feedback to aggregate" && return 0 || {
+    echo "output: $output"
+    return 1
+  }
 }
 
 test_feedback_malformed_json_skipped() {
@@ -68,7 +74,10 @@ test_feedback_malformed_json_skipped() {
   local output
   output=$(fleet_aggregate_feedback "$ws" 2>&1 || true)
   # With no initiative labels, it should skip or report no feedback
-  echo "$output" | grep -q "no feedback\|skipping" && return 0 || { echo "output: $output"; return 1; }
+  echo "$output" | grep -q "no feedback\|skipping" && return 0 || {
+    echo "output: $output"
+    return 1
+  }
 }
 
 test_feedback_dry_run_flag_accepted() {
@@ -78,7 +87,10 @@ test_feedback_dry_run_flag_accepted() {
   local output
   output=$(FLEET_DRY_RUN=true REPOS_ROOT="$ws" fleet_aggregate_feedback "$ws" --dry-run 2>&1 || true)
   # Should still say "no feedback" (no entries) but not crash
-  echo "$output" | grep -q "no feedback" && return 0 || { echo "output: $output"; return 1; }
+  echo "$output" | grep -q "no feedback" && return 0 || {
+    echo "output: $output"
+    return 1
+  }
 }
 
 test_feedback_empty_workspace() {
@@ -88,39 +100,58 @@ test_feedback_empty_workspace() {
   local output
   output=$(fleet_aggregate_feedback "$ws" 2>&1 || true)
   # Workspace exists but has no pipeline logs
-  echo "$output" | grep -q "no pipeline logs\|no feedback\|does not exist" && return 0 || { echo "output: $output"; return 1; }
+  echo "$output" | grep -q "no pipeline logs\|no feedback\|does not exist" && return 0 || {
+    echo "output: $output"
+    return 1
+  }
 }
 
 test_drift_none_label() {
   local result
   result=$(_drift_label "0.0" 2>/dev/null)
-  [ "$result" = "none" ] || { echo "expected 'none', got '$result'"; return 1; }
+  [ "$result" = "none" ] || {
+    echo "expected 'none', got '$result'"
+    return 1
+  }
 }
 
 test_drift_minor_label() {
   local result
   result=$(_drift_label "-0.15" 2>/dev/null)
-  [ "$result" = "minor" ] || { echo "expected 'minor', got '$result'"; return 1; }
+  [ "$result" = "minor" ] || {
+    echo "expected 'minor', got '$result'"
+    return 1
+  }
 }
 
 test_drift_major_label() {
   local result
   result=$(_drift_label "-0.25" 2>/dev/null)
-  [ "$result" = "major" ] || { echo "expected 'major', got '$result'"; return 1; }
+  [ "$result" = "major" ] || {
+    echo "expected 'major', got '$result'"
+    return 1
+  }
 }
 
 test_parse_feedback_payload_valid() {
   local line="2026-07-07T10:00:00Z|META|planner-feedback|info|{\"decision_drift\":\"none\"}"
   local payload
   payload=$(_parse_feedback_payload "$line" 2>/dev/null || echo "FAIL")
-  [ "$payload" != "FAIL" ] || { echo "failed to parse valid payload"; return 1; }
-  echo "$payload" | jq -e '.decision_drift == "none"' >/dev/null 2>&1 || { echo "wrong decision_drift"; return 1; }
+  [ "$payload" != "FAIL" ] || {
+    echo "failed to parse valid payload"
+    return 1
+  }
+  echo "$payload" | jq -e '.decision_drift == "none"' >/dev/null 2>&1 || {
+    echo "wrong decision_drift"
+    return 1
+  }
 }
 
 test_parse_feedback_payload_invalid() {
   local line="2026-07-07T10:00:00Z|META|planner-feedback|info|{broken"
   if _parse_feedback_payload "$line" 2>/dev/null; then
-    echo "expected failure for invalid JSON"; return 1
+    echo "expected failure for invalid JSON"
+    return 1
   fi
   return 0
 }

@@ -167,8 +167,8 @@ test_render_fleet_wide_warn_detector() {
   local output
   output=$(fleet_render_dashboard_from_data "$data" "/tmp/test-ws")
   # Should show fleet-wide section with detector name and findings
-  echo "$output" | grep -q "Fleet-Wide Detectors" && \
-    echo "$output" | grep -q "detect_blocked_by" && \
+  echo "$output" | grep -q "Fleet-Wide Detectors" &&
+    echo "$output" | grep -q "detect_blocked_by" &&
     echo "$output" | grep -q "CRE-101"
 }
 
@@ -177,7 +177,7 @@ test_render_fleet_wide_clear_detector() {
   data='{"summary":{"total":1,"healthy":1,"warn":0,"kill":0,"restart":0},"pipelines":[{"tid":"WIL-1","phase":"IMPLEMENT","hb_age_secs":30,"severity":0,"anomalies":"none","type":"pipeline"}],"fleet_wide":[{"name":"detect_initiative_dispatch","severity":0,"findings":"","type":"fleet-wide"}]}'
   local output
   output=$(fleet_render_dashboard_from_data "$data" "/tmp/test-ws")
-  echo "$output" | grep -q "detect_initiative_dispatch" && \
+  echo "$output" | grep -q "detect_initiative_dispatch" &&
     echo "$output" | grep -q "clear"
 }
 
@@ -188,8 +188,8 @@ test_write_report_includes_fleet_wide_section() {
   data='{"summary":{"total":0,"healthy":0,"warn":0,"kill":0,"restart":0},"pipelines":[],"fleet_wide":[{"name":"detect_planner_feedback","severity":1,"findings":"3 uncollected","type":"fleet-wide"}]}'
   fleet_write_report_from_data "$data" "$tmpdir" 2>/dev/null
   local report_file="$tmpdir/reports/fleet-dashboard.md"
-  grep -q "Fleet-Wide Detectors" "$report_file" && \
-    grep -q "detect_planner_feedback" "$report_file" && \
+  grep -q "Fleet-Wide Detectors" "$report_file" &&
+    grep -q "detect_planner_feedback" "$report_file" &&
     grep -q "3 uncollected" "$report_file"
   rm -rf "$tmpdir"
 }
@@ -202,9 +202,9 @@ test_write_report_fleet_wide_table_has_detector_row() {
   fleet_write_report_from_data "$data" "$tmpdir" 2>/dev/null
   local report_file="$tmpdir/reports/fleet-dashboard.md"
   # Table header present
-  grep -q "| Detector | Severity | Findings |" "$report_file" && \
-    grep -q "detect_blocked_by" "$report_file" && \
-    grep -q "detect_initiative_dispatch" "$report_file" && \
+  grep -q "| Detector | Severity | Findings |" "$report_file" &&
+    grep -q "detect_blocked_by" "$report_file" &&
+    grep -q "detect_initiative_dispatch" "$report_file" &&
     grep -q "5 undispatched" "$report_file"
   rm -rf "$tmpdir"
 }

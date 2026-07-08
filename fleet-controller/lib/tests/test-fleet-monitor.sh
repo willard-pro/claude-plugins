@@ -220,18 +220,18 @@ test_summary_changed_when_first_cycle() {
   # should be treated as a state change.
   local prev=""
   local current='{"total":1,"healthy":0,"warn":1,"kill":0,"restart":0}'
-  [ -n "$current" ] && [ "$current" != "$prev" ] \
-    && echo "should_emit=true" \
-    || echo "should_emit=false"
+  [ -n "$current" ] && [ "$current" != "$prev" ] &&
+    echo "should_emit=true" ||
+    echo "should_emit=false"
 }
 
 test_summary_suppressed_when_equal() {
   # Same JSON → no emission needed
   local prev='{"total":1,"healthy":0,"warn":1,"kill":0,"restart":0}'
   local current='{"total":1,"healthy":0,"warn":1,"kill":0,"restart":0}'
-  [ "$current" = "$prev" ] \
-    && echo "should_emit=false (suppressed)" \
-    || echo "should_emit=true"
+  [ "$current" = "$prev" ] &&
+    echo "should_emit=false (suppressed)" ||
+    echo "should_emit=true"
 }
 
 test_summary_emitted_when_changed() {
@@ -249,24 +249,24 @@ test_summary_forced_after_interval() {
   # Even when unchanged, force emission after summary_interval cycles
   local cycles_since_summary=10
   local summary_interval=10
-  [ "$cycles_since_summary" -ge "$summary_interval" ] \
-    && echo "should_emit=true (forced)" \
-    || echo "should_emit=false"
+  [ "$cycles_since_summary" -ge "$summary_interval" ] &&
+    echo "should_emit=true (forced)" ||
+    echo "should_emit=false"
 }
 
 test_summary_not_forced_before_interval() {
   # Below the interval threshold, don't force
   local cycles_since_summary=5
   local summary_interval=10
-  [ "$cycles_since_summary" -ge "$summary_interval" ] \
-    && echo "should_emit=true" \
-    || echo "should_emit=false (within interval)"
+  [ "$cycles_since_summary" -ge "$summary_interval" ] &&
+    echo "should_emit=true" ||
+    echo "should_emit=false (within interval)"
 }
 
 test_cycle_fallback_json_includes_fleet_wide_key() {
   local tmpdir
   tmpdir=$(mktemp -d)
-  rm -rf "$tmpdir"  # remove it so fleet_detect_all fails
+  rm -rf "$tmpdir" # remove it so fleet_detect_all fails
 
   local output
   output=$(cd "$LIB_DIR/.." && FLEET_LOG_FILE=/dev/null FLEET_HB_LOG_FILE=/dev/null source "$LIB_DIR/fleet-monitor.sh" 2>/dev/null && fleet_monitor_cycle "$tmpdir" 2>/dev/null | grep '^{"' | tail -1)
