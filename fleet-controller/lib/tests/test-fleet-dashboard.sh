@@ -158,6 +158,58 @@ test_write_report_skips_alerts_when_all_healthy() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# fleet_wide rendering tests (4) — Gap 1 from architect audit
+# ═══════════════════════════════════════════════════════════════════════════════
+
+test_render_fleet_wide_warn_detector() {
+  local data
+  data='{"summary":{"total":1,"healthy":1,"warn":0,"kill":0,"restart":0},"pipelines":[{"tid":"WIL-1","phase":"IMPLEMENT","hb_age_secs":30,"severity":0,"anomalies":"none","type":"pipeline"}],"fleet_wide":[{"name":"detect_blocked_by","severity":1,"findings":"2 unblocked: CRE-101 CRE-102","type":"fleet-wide"}]}'
+  local output
+  output=$(fleet_render_dashboard_from_data "$data" "/tmp/test-ws")
+  # Should show fleet-wide section with detector name and findings
+  echo "$output" | grep -q "Fleet-Wide Detectors" && \
+    echo "$output" | grep -q "detect_blocked_by" && \
+    echo "$output" | grep -q "CRE-101"
+}
+
+test_render_fleet_wide_clear_detector() {
+  local data
+  data='{"summary":{"total":1,"healthy":1,"warn":0,"kill":0,"restart":0},"pipelines":[{"tid":"WIL-1","phase":"IMPLEMENT","hb_age_secs":30,"severity":0,"anomalies":"none","type":"pipeline"}],"fleet_wide":[{"name":"detect_initiative_dispatch","severity":0,"findings":"","type":"fleet-wide"}]}'
+  local output
+  output=$(fleet_render_dashboard_from_data "$data" "/tmp/test-ws")
+  echo "$output" | grep -q "detect_initiative_dispatch" && \
+    echo "$output" | grep -q "clear"
+}
+
+test_write_report_includes_fleet_wide_section() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local data
+  data='{"summary":{"total":0,"healthy":0,"warn":0,"kill":0,"restart":0},"pipelines":[],"fleet_wide":[{"name":"detect_planner_feedback","severity":1,"findings":"3 uncollected","type":"fleet-wide"}]}'
+  fleet_write_report_from_data "$data" "$tmpdir" 2>/dev/null
+  local report_file="$tmpdir/reports/fleet-dashboard.md"
+  grep -q "Fleet-Wide Detectors" "$report_file" && \
+    grep -q "detect_planner_feedback" "$report_file" && \
+    grep -q "3 uncollected" "$report_file"
+  rm -rf "$tmpdir"
+}
+
+test_write_report_fleet_wide_table_has_detector_row() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local data
+  data='{"summary":{"total":0,"healthy":0,"warn":0,"kill":0,"restart":0},"pipelines":[],"fleet_wide":[{"name":"detect_blocked_by","severity":0,"findings":"clear","type":"fleet-wide"},{"name":"detect_initiative_dispatch","severity":1,"findings":"5 undispatched","type":"fleet-wide"}]}'
+  fleet_write_report_from_data "$data" "$tmpdir" 2>/dev/null
+  local report_file="$tmpdir/reports/fleet-dashboard.md"
+  # Table header present
+  grep -q "| Detector | Severity | Findings |" "$report_file" && \
+    grep -q "detect_blocked_by" "$report_file" && \
+    grep -q "detect_initiative_dispatch" "$report_file" && \
+    grep -q "5 undispatched" "$report_file"
+  rm -rf "$tmpdir"
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Runner
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -176,7 +228,11 @@ for fn in \
   test_render_formats_stall_under_1m \
   test_write_report_creates_file \
   test_write_report_includes_alerts_section \
-  test_write_report_skips_alerts_when_all_healthy; do
+  test_write_report_skips_alerts_when_all_healthy \
+  test_render_fleet_wide_warn_detector \
+  test_render_fleet_wide_clear_detector \
+  test_write_report_includes_fleet_wide_section \
+  test_write_report_fleet_wide_table_has_detector_row; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

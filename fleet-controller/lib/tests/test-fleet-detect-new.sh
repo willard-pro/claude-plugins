@@ -151,6 +151,106 @@ test_fleet_detect_all_with_active_pipeline() {
   [ "$total" = "1" ] || { echo "expected 1 active pipeline, got $total"; return 1; }
 }
 
+# ── Schema validation tests (Gap 3 from architect audit) ────────────────────────
+
+test_schema_pipeline_entries_have_type() {
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-101" "APPRAISE" "appraise" "start" "investigating"
+  # No outcome → pipeline is active
+
+  local data
+  data=$(fleet_detect_all "$ws" 2>/dev/null)
+  local ptype
+  ptype=$(echo "$data" | jq -r '.pipelines[0].type // "MISSING"' 2>/dev/null)
+  [ "$ptype" = "pipeline" ] || { echo "expected 'pipeline', got '$ptype'"; return 1; }
+}
+
+test_schema_fleet_wide_entries_have_type() {
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-101" "APPRAISE" "appraise" "start" "investigating"
+
+  local data
+  data=$(fleet_detect_all "$ws" 2>/dev/null)
+  local fw_count
+  fw_count=$(echo "$data" | jq -r '.fleet_wide | length' 2>/dev/null)
+  if [ "${fw_count:-0}" -gt 0 ]; then
+    local fw_type
+    fw_type=$(echo "$data" | jq -r '.fleet_wide[0].type // "MISSING"' 2>/dev/null)
+    [ "$fw_type" = "fleet-wide" ] || { echo "expected 'fleet-wide', got '$fw_type'"; return 1; }
+  fi
+  return 0
+}
+
+test_schema_fleet_wide_always_array() {
+  local ws
+  ws=$(_setup_workspace)
+  # Empty workspace should still have fleet_wide as an array
+  local data
+  data=$(fleet_detect_all "$ws" 2>/dev/null)
+  local fw_type
+  fw_type=$(echo "$data" | jq -r '.fleet_wide | type' 2>/dev/null)
+  [ "$fw_type" = "array" ] || { echo "expected 'array', got '$fw_type'"; return 1; }
+}
+
+test_schema_summary_has_all_keys() {
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-101" "APPRAISE" "appraise" "start" "investigating"
+
+  local data
+  data=$(fleet_detect_all "$ws" 2>/dev/null)
+  local keys
+  keys=$(echo "$data" | jq -r '.summary | keys | sort | join(",")' 2>/dev/null)
+  local expected="healthy,kill,restart,total,warn"
+  [ "$keys" = "$expected" ] || { echo "expected '$expected', got '$keys'"; return 1; }
+}
+
+test_schema_top_level_keys() {
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-101" "APPRAISE" "appraise" "start" "investigating"
+
+  local data
+  data=$(fleet_detect_all "$ws" 2>/dev/null)
+  local keys
+  keys=$(echo "$data" | jq -r 'keys | sort | join(",")' 2>/dev/null)
+  local expected="fleet_wide,pipelines,summary"
+  [ "$keys" = "$expected" ] || { echo "expected '$expected', got '$keys'"; return 1; }
+}
+
+test_schema_pipeline_entry_keys() {
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-101" "APPRAISE" "appraise" "start" "investigating"
+
+  local data
+  data=$(fleet_detect_all "$ws" 2>/dev/null)
+  local keys
+  keys=$(echo "$data" | jq -r '.pipelines[0] | keys | sort | join(",")' 2>/dev/null)
+  local expected="anomalies,hb_age_secs,phase,severity,tid,type"
+  [ "$keys" = "$expected" ] || { echo "expected '$expected', got '$keys'"; return 1; }
+}
+
+test_schema_fleet_wide_entry_keys() {
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-101" "APPRAISE" "appraise" "start" "investigating"
+
+  local data
+  data=$(fleet_detect_all "$ws" 2>/dev/null)
+  local fw_count
+  fw_count=$(echo "$data" | jq -r '.fleet_wide | length' 2>/dev/null)
+  if [ "${fw_count:-0}" -gt 0 ]; then
+    local keys
+    keys=$(echo "$data" | jq -r '.fleet_wide[0] | keys | sort | join(",")' 2>/dev/null)
+    local expected="findings,name,severity,type"
+    [ "$keys" = "$expected" ] || { echo "expected '$expected', got '$keys'"; return 1; }
+  fi
+  return 0
+}
+
 # ── Run all tests ────────────────────────────────────────────────────────────────
 
 _run "planner_feedback_no_entries" test_planner_feedback_none
@@ -162,6 +262,13 @@ _run "blocked_by_no_linear_api_graceful" test_blocked_by_no_linear_api
 _run "fleet_detect_all_includes_fleet_wide" test_fleet_detect_all_includes_fleet_wide
 _run "fleet_detect_all_empty_workspace" test_fleet_detect_all_empty_workspace
 _run "fleet_detect_all_with_active_pipeline" test_fleet_detect_all_with_active_pipeline
+_run "schema_pipeline_type" test_schema_pipeline_entries_have_type
+_run "schema_fleet_wide_type" test_schema_fleet_wide_entries_have_type
+_run "schema_fleet_wide_always_array" test_schema_fleet_wide_always_array
+_run "schema_summary_keys" test_schema_summary_has_all_keys
+_run "schema_top_level_keys" test_schema_top_level_keys
+_run "schema_pipeline_entry_keys" test_schema_pipeline_entry_keys
+_run "schema_fleet_wide_entry_keys" test_schema_fleet_wide_entry_keys
 
 echo ""
 echo "=== Results ==="
