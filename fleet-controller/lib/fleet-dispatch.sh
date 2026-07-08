@@ -72,9 +72,11 @@ fleet_dispatch_initiative() {
     return 1
   fi
 
+  # The epic query uses _fleet_linear_query (direct curl, no linear-api.sh dependency).
+  # Blocker resolution uses get_issue (from linear-api.sh) if available — degrades
+  # gracefully when unavailable, treating all blockers as unresolved.
   if ! declare -f get_issue >/dev/null 2>&1; then
-    echo "ERROR: linear-api.sh not available — cannot query Linear" >&2
-    return 1
+    echo "fleet_dispatch: linear-api.sh not available — blocker resolution will skip" >&2
   fi
 
   # Step 1: Validate initiative epic exists and has state:execution label.
