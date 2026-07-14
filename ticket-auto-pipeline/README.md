@@ -209,6 +209,7 @@ All tickets flow through a state machine with eight states. Skills never mutate 
 stateDiagram-v2
     [*] --> Backlog : ticket created
     Backlog --> Todo : appraise-start
+    Todo --> Todo : appraise-start
     Todo --> Approve : appraise-complete
     Approve --> Ready : human-approve
     Approve --> Todo : human-reject

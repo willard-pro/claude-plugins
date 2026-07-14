@@ -19,9 +19,12 @@ echo 'stateDiagram-v2'
 # Hardcoded framing lines — not modelled as state-machine triggers
 echo '    [*] --> Backlog : ticket created'
 
-# Emit one line per trigger that has non-null from/to
+# Emit one line per trigger that has non-null from/to.
+# When "from" is an array, emit a line for each element.
 jq -r '.triggers | to_entries[]
   | select(.value.from != null and .value.to != null)
-  | "    \(.value.from) --> \(.value.to) : \(.key)"' "$SM"
+  | .value.from as $from | .value.to as $to | .key as $key
+  | if ($from | type == "array") then $from[] else $from end
+  | "    \(.) --> \($to) : \($key)"' "$SM"
 
 echo '    Done --> [*]'
