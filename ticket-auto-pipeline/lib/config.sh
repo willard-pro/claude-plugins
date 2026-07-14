@@ -102,6 +102,16 @@ TOOL_ERROR_DEDUP_WINDOW="${TOOL_ERROR_DEDUP_WINDOW:-300}"
 # TOOL_NAME|ERROR_TYPE key separated by less than this window count as one.
 FLEET_TOOL_ERROR_WINDOW="${FLEET_TOOL_ERROR_WINDOW:-300}"
 
+# ── GitHub Issues (retro --post-to-github) ──────────────────────────────────────
+
+# Target repository for auto-created GitHub issues.
+GITHUB_ISSUE_REPO="${GITHUB_ISSUE_REPO:-willard-pro/claude-plugins}"
+# Days before a tracked issue is considered stale (no new evidence).
+# Reserved for v2 auto-close feature — not yet consumed by any code path.
+GITHUB_ISSUE_STALE_DAYS="${GITHUB_ISSUE_STALE_DAYS:-30}"
+# Maximum byte size for a single GitHub issue comment body.
+GITHUB_ISSUE_MAX_COMMENT_SIZE="${GITHUB_ISSUE_MAX_COMMENT_SIZE:-60000}"
+
 # ── Conventions for lib/ scripts ────────────────────────────────────────────────
 # Temp files: always pair mktemp with trap cleanup:
 #   TEMP_FILE=$(mktemp)

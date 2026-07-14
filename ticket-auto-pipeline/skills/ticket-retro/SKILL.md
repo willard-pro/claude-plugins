@@ -10,11 +10,12 @@ You are the `/ticket-retro` skill. Your job is to aggregate pipeline log failure
 ## Invocation
 
 ```
-/ticket-retro [--window Nd] [--post-to-linear] [--force]
+/ticket-retro [--window Nd] [--post-to-linear] [--post-to-github] [--force]
 ```
 
 - `--window Nd`: days of log history to scan (default: `7d`)
 - `--post-to-linear`: if present, post a summary comment to the Linear retro issue configured in `RETRO_LINEAR_ISSUE`
+- `--post-to-github`: if present, auto-create GitHub issues for recurring failure patterns (count ≥ 2) with severity labels
 - `--force`: re-scan all logs even if unchanged since last retro (bypasses the cursor deduplication)
 
 ## Guard — Ensure state directory
@@ -161,6 +162,25 @@ The template identifies which skill file(s) to inspect. Read the relevant sectio
 | `RETURN_INCOMPLETE` | `ticket-auto/SKILL.md` (STEP_4), `lib/return-completeness-check.sh` |
 
 For the `complexity-drift` meta-code (accuracy < 0.5): inspect `ticket-appraise/SKILL.md`.
+
+### 3b.5 — GitHub severity mapping (for --post-to-github)
+
+When `--post-to-github` is active, map each failure code to severity and type labels:
+
+| Failure Code | Severity | Type Label |
+|-------------|----------|------------|
+| `EXEC_NO_ARTIFACT` | P0 | bug |
+| `APPROVAL_REVOKED` | P0 | bug |
+| `PR_REVIEW_VERDICT_UNPARSEABLE` | P1 | bug |
+| `COMPLEXITY_ARTIFACT_MISMATCH` | P2 | bug |
+| `REMEDIATION_BRIEF_TRUNCATED` | P2 | bug |
+| `RETURN_INCOMPLETE` | P3 | improvement |
+| `complexity-drift` | P3 | improvement |
+| Unknown / new codes | P2 | bug |
+
+Gate-stop codes (those emitted as `|META|gate-stop|fail|<CODE>`) map to `bug`. Warning/drift codes map to `improvement`. The combined label string is `{type},{severity}` (e.g., `bug,P0`, `improvement,P3`).
+
+**Authoritative implementation**: The bash function `github_retro_map_severity()` in `lib/github-issue-retro.sh` is the canonical source — it uses a case statement, not AI table parsing. The table above is documentation; the bash function is execution.
 
 ### 3c — Generate a unified diff
 
@@ -326,7 +346,34 @@ If no diffs were proposed (empty Pattern Analysis):
 No diffs proposed — review single-occurrence notes above. Re-run with a wider window (`--window 30d`) if patterns haven't emerged yet.
 ```
 
-**Post-write proposal verify** — confirm the file was written before reporting success:
+### Section: GitHub Issues (if --post-to-github)
+
+If `--post-to-github` was used and GitHub operations completed, include this section:
+
+```markdown
+## GitHub Issues
+
+| Failure Code | Action | Issue |
+|-------------|--------|-------|
+| EXEC_NO_ARTIFACT | Created | [willard-pro/claude-plugins#99](https://github.com/willard-pro/claude-plugins/issues/99) |
+| APPROVAL_REVOKED | Updated | [willard-pro/claude-plugins#85](https://github.com/willard-pro/claude-plugins/issues/85) |
+```
+
+If no failure codes met the count ≥ 2 threshold:
+```markdown
+## GitHub Issues
+
+No new issues — all failure codes below the count ≥ 2 threshold.
+```
+
+If `--post-to-github` was used but auth failed:
+```markdown
+## GitHub Issues
+
+GitHub posting skipped — `gh` CLI not authenticated. Run `gh auth login` and re-run retro with `--post-to-github`.
+```
+
+**Proposal verify** — confirm the file was written before reporting success:
 
 ```bash
 _proposal_file="$HOME/.claude/state/ticket-retro/proposals/{YYYY-MM-DD}-retro.md"
@@ -374,6 +421,124 @@ If `RETRO_LINEAR_ISSUE` is unset, log the warning and skip — the proposal is s
 
 ---
 
+## Step 5.5 — Post to GitHub (if --post-to-github)
+
+If `--post-to-github` is present:
+
+### 5.5a — Source library and check auth
+
+```bash
+GITHUB_ISSUES_LIB="$HOME/.claude/skills/lib/github-issues.sh"
+if [ -f "$GITHUB_ISSUES_LIB" ]; then
+  source "$GITHUB_ISSUES_LIB"
+else
+  echo "WARN: github-issues.sh not found at $GITHUB_ISSUES_LIB — skipping GitHub post"
+fi
+
+if ! declare -f github_check_auth >/dev/null 2>&1; then
+  echo "WARN: github_check_auth not available — skipping GitHub post"
+elif ! github_check_auth; then
+  echo "WARN: gh CLI not authenticated — skipping GitHub post (proposal still written)"
+fi
+```
+
+If `github_check_auth` fails or the library is unavailable, skip all GitHub operations. The proposal is still written — this is graceful degradation.
+
+### 5.5b — Generate issue body and comment files
+
+For each failure code in `{FAILURE_HISTOGRAM}` where count ≥ 2:
+
+1. **Map severity** using the table in Step 3b.5 (the authoritative mapping is the bash `github_retro_map_severity` function — the table is documentation)
+
+2. **Fill the issue body template** (`lib/github-issue-body.template.md`) with placeholders from the pattern analysis in Step 3:
+   - `{FAILURE_CODE}`, `{PATTERN_SUMMARY}`, `{PATTERN_DESCRIPTION}`, `{EXPECTED_BEHAVIOR}`, `{STEPS}`, `{ROOT_CAUSE}`, `{FILES}`, `{FIX_APPROACH}`, `{CONSTRAINTS}`, `{VERIFICATION_CHECKLIST}`, `{RELATED}`, `{WINDOW}`, `{COUNT}`
+   - Write the filled body to a temp file: `/tmp/issue-body-{CODE}.md`
+
+3. **Prepare the evidence comment** (used if an existing open issue is found):
+   ```markdown
+   ## New evidence — window: {WINDOW}, occurrences: {COUNT}
+   
+   **Date:** {YYYY-MM-DD}
+   
+   Additional occurrence(s) of this failure pattern detected in the current retro window.
+   See proposal at `~/.claude/state/ticket-retro/proposals/{YYYY-MM-DD}-retro.md` for updated analysis.
+   ```
+   - Write to a temp file: `/tmp/evidence-{CODE}.md`
+
+4. **Build the input JSON** for `github_retro_process`:
+   ```json
+   {
+     "codes": {
+       "EXEC_NO_ARTIFACT": {
+         "count": 4,
+         "title": "Fix EXEC_NO_ARTIFACT — artifact not found after exec phase",
+         "body_file": "/tmp/issue-body-EXEC_NO_ARTIFACT.md",
+         "comment_file": "/tmp/evidence-EXEC_NO_ARTIFACT.md"
+       }
+     }
+   }
+   ```
+   The `title` format is: `Fix {FAILURE_CODE} — {PATTERN_SUMMARY}`
+
+5. **Write the input JSON** to a temp file:
+   ```bash
+   INPUT_FILE=$(mktemp)
+   echo "$INPUT_JSON" > "$INPUT_FILE"
+   ```
+
+### 5.5c — Execute deterministic state machine
+
+```bash
+GITHUB_RETRO_LIB="$HOME/.claude/skills/lib/github-issue-retro.sh"
+if [ -f "$GITHUB_RETRO_LIB" ]; then
+  source "$GITHUB_RETRO_LIB"
+  RESULT=$(github_retro_process "$INPUT_FILE")
+  echo "$RESULT"
+else
+  echo "WARN: github-issue-retro.sh not found — skipping GitHub post"
+fi
+```
+
+This single call handles ALL deterministic mechanics:
+- Threshold check (count ≥ 2 → gate, <2 → skip)
+- State file read (`~/.claude/state/ticket-retro/github-issues.json`)
+- Severity mapping (bash case statement — no AI interpretation)
+- Open-issue check (`github_issue_lookup` → OPEN, CLOSED, or NOT_FOUND)
+- Create vs. comment decision
+- State file update (atomic write + JSON validation)
+- Incremental state writes (after each successful operation)
+
+The result JSON has the shape:
+```json
+{
+  "created": [{"code": "EXEC_NO_ARTIFACT", "url": "https://..."}],
+  "updated": [{"code": "APPROVAL_REVOKED", "url": "https://..."}],
+  "skipped": ["RETURN_INCOMPLETE"]
+}
+```
+
+### 5.5d — Report
+
+Extract counts from the result:
+```bash
+GITHUB_CREATED=$(echo "$RESULT" | jq '.created | length')
+GITHUB_UPDATED=$(echo "$RESULT" | jq '.updated | length')
+```
+
+Emit summary:
+```
+GitHub issues: {GITHUB_CREATED} created, {GITHUB_UPDATED} updated
+```
+
+Store `{GITHUB_CREATED}` and `{GITHUB_UPDATED}` for the proposal GitHub Issues subsection and the completion summary.
+
+Clean up temp files:
+```bash
+rm -f "$INPUT_FILE" /tmp/issue-body-*.md /tmp/evidence-*.md
+```
+
+---
+
 ## Completion
 
 Report to the user:
@@ -390,7 +555,13 @@ Report to the user:
 
 **Proposal written:** ~/.claude/state/ticket-retro/proposals/{YYYY-MM-DD}-retro.md
 {Diff count} diff proposals generated.
+{GitHub summary line}
 
 Apply with:
   cd ~/.claude/skills && git apply < ~/.claude/state/ticket-retro/proposals/{YYYY-MM-DD}-retro.md
 ```
+
+The `{GitHub summary line}` is:
+- If `--post-to-github` was used and succeeded: `**GitHub issues:** {GITHUB_CREATED} created, {GITHUB_UPDATED} updated`
+- If `--post-to-github` was used but auth failed: `**GitHub issues:** skipped — gh not authenticated`
+- If `--post-to-github` was not used: omitted entirely
