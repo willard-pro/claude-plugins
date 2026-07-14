@@ -25,7 +25,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source planner-artifacts.sh for has_planner_proposal / resolve_planner_dir
 # — declare-guard so re-sourcing by a caller that already loaded it is harmless.
 if ! declare -f has_planner_proposal >/dev/null 2>&1; then
-	source "$SCRIPT_DIR/planner-artifacts.sh"
+  source "$SCRIPT_DIR/planner-artifacts.sh"
 fi
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -35,122 +35,122 @@ fi
 # Returns 0 if adopted, 1 if no proposal exists (caller should run /opsx:propose),
 # 2 if the copy operation fails.
 adopt_planner_proposal() {
-	local ticket_id="$1"
-	local change_name="$2"
-	local log_file="${3:-}"
+  local ticket_id="$1"
+  local change_name="$2"
+  local log_file="${3:-}"
 
-	# Guard: required args
-	if [ -z "$ticket_id" ] || [ -z "$change_name" ]; then
-		echo "adopt_planner_proposal: missing required arguments (ticket-id and change-name)" >&2
-		return 1
-	fi
+  # Guard: required args
+  if [ -z "$ticket_id" ] || [ -z "$change_name" ]; then
+    echo "adopt_planner_proposal: missing required arguments (ticket-id and change-name)" >&2
+    return 1
+  fi
 
-	# Check for planner proposal
-	if ! has_planner_proposal "$ticket_id" 2>/dev/null; then
-		return 1
-	fi
+  # Check for planner proposal
+  if ! has_planner_proposal "$ticket_id" 2>/dev/null; then
+    return 1
+  fi
 
-	local planner_dir
-	planner_dir=$(resolve_planner_dir "$ticket_id" 2>/dev/null) || {
-		echo "adopt_planner_proposal: failed to resolve planner dir for $ticket_id" >&2
-		return 2
-	}
+  local planner_dir
+  planner_dir=$(resolve_planner_dir "$ticket_id" 2>/dev/null) || {
+    echo "adopt_planner_proposal: failed to resolve planner dir for $ticket_id" >&2
+    return 2
+  }
 
-	# Validate change_name: lowercase alphanumeric + hyphens, no traversal.
-	# Same pattern as planner-artifacts.sh path validation.
-	if ! [[ "$change_name" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
-		echo "adopt_planner_proposal: invalid change_name '$change_name'" >&2
-		return 2
-	fi
+  # Validate change_name: lowercase alphanumeric + hyphens, no traversal.
+  # Same pattern as planner-artifacts.sh path validation.
+  if ! [[ "$change_name" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+    echo "adopt_planner_proposal: invalid change_name '$change_name'" >&2
+    return 2
+  fi
 
-	local src="$planner_dir/proposal.md"
-	local dest_dir="openspec/changes/$change_name"
-	local dest="$dest_dir/proposal.md"
+  local src="$planner_dir/proposal.md"
+  local dest_dir="openspec/changes/$change_name"
+  local dest="$dest_dir/proposal.md"
 
-	# Verify source exists (has_planner_proposal already checked, but be defensive)
-	if [ ! -f "$src" ]; then
-		echo "adopt_planner_proposal: proposal not found at $src" >&2
-		return 1
-	fi
+  # Verify source exists (has_planner_proposal already checked, but be defensive)
+  if [ ! -f "$src" ]; then
+    echo "adopt_planner_proposal: proposal not found at $src" >&2
+    return 1
+  fi
 
-	mkdir -p "$dest_dir" || {
-		echo "adopt_planner_proposal: failed to create $dest_dir" >&2
-		return 2
-	}
+  mkdir -p "$dest_dir" || {
+    echo "adopt_planner_proposal: failed to create $dest_dir" >&2
+    return 2
+  }
 
-	# Defense-in-depth: verify destination stays within expected prefix
-	local resolved_dest expected_prefix
-	resolved_dest=$(realpath "$dest" 2>/dev/null) || true
-	expected_prefix=$(realpath "openspec/changes/" 2>/dev/null) || true
-	if [ -n "$expected_prefix" ] && [ -n "$resolved_dest" ]; then
-		if [[ "$resolved_dest" != "$expected_prefix"/* ]]; then
-			echo "adopt_planner_proposal: path traversal rejected — '$dest' resolves outside '$expected_prefix'" >&2
-			return 2
-		fi
-		dest="$resolved_dest"
-	fi
+  # Defense-in-depth: verify destination stays within expected prefix
+  local resolved_dest expected_prefix
+  resolved_dest=$(realpath "$dest" 2>/dev/null) || true
+  expected_prefix=$(realpath "openspec/changes/" 2>/dev/null) || true
+  if [ -n "$expected_prefix" ] && [ -n "$resolved_dest" ]; then
+    if [[ "$resolved_dest" != "$expected_prefix"/* ]]; then
+      echo "adopt_planner_proposal: path traversal rejected — '$dest' resolves outside '$expected_prefix'" >&2
+      return 2
+    fi
+    dest="$resolved_dest"
+  fi
 
-	cp "$src" "$dest" || {
-		echo "adopt_planner_proposal: failed to copy $src → $dest" >&2
-		return 2
-	}
+  cp "$src" "$dest" || {
+    echo "adopt_planner_proposal: failed to copy $src → $dest" >&2
+    return 2
+  }
 
-	# Log adoption (log_file must be under /tmp/ or a ticket workspace)
-	if [ -n "$log_file" ]; then
-		if ! [[ "$log_file" =~ ^(/tmp/|[./]?[A-Za-z0-9]) ]]; then
-			echo "adopt_planner_proposal: log_file path rejected '$log_file'" >&2
-			return 2
-		fi
-		echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|create-artifact|done|openspec (planner proposal reused)" >>"$log_file"
-	fi
+  # Log adoption (log_file must be under /tmp/ or a ticket workspace)
+  if [ -n "$log_file" ]; then
+    if ! [[ "$log_file" =~ ^(/tmp/|[./]?[A-Za-z0-9]) ]]; then
+      echo "adopt_planner_proposal: log_file path rejected '$log_file'" >&2
+      return 2
+    fi
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|create-artifact|done|openspec (planner proposal reused)" >>"$log_file"
+  fi
 
-	return 0
+  return 0
 }
 
 # ── Self-test mode ────────────────────────────────────────────────────────────
 
 if [ "${1:-}" = "--self-test" ]; then
-	echo "Running self-tests..."
-	tmpdir=$(mktemp -d)
-	trap 'rm -rf "$tmpdir"' EXIT
+  echo "Running self-tests..."
+  tmpdir=$(mktemp -d)
+  trap 'rm -rf "$tmpdir"' EXIT
 
-	# Set up fake planner plane
-	PLANE_DIR="$tmpdir/.ticket-auto/initiatives/INIT-1/tickets/TEST-1/planner"
-	mkdir -p "$PLANE_DIR"
-	echo "# Test Proposal" >"$PLANE_DIR/proposal.md"
+  # Set up fake planner plane
+  PLANE_DIR="$tmpdir/.ticket-auto/initiatives/INIT-1/tickets/TEST-1/planner"
+  mkdir -p "$PLANE_DIR"
+  echo "# Test Proposal" >"$PLANE_DIR/proposal.md"
 
-	# Override REPOS_ROOT for testing
-	export REPOS_ROOT="$tmpdir"
+  # Override REPOS_ROOT for testing
+  export REPOS_ROOT="$tmpdir"
 
-	# Override planner-artifacts functions to use test plane
-	has_planner_proposal() { true; }
-	resolve_planner_dir() { echo "$PLANE_DIR"; }
+  # Override planner-artifacts functions to use test plane
+  has_planner_proposal() { true; }
+  resolve_planner_dir() { echo "$PLANE_DIR"; }
 
-	# Test 1: Successful adoption
-	cd "$tmpdir"
-	if adopt_planner_proposal "TEST-1" "test-1-fix" "/tmp/test-adopt.log"; then
-		if [ -f "openspec/changes/test-1-fix/proposal.md" ]; then
-			echo "✓ successful adoption"
-		else
-			echo "✗ adoption returned 0 but file missing"
-		fi
-	else
-		echo "✗ adoption failed (exit $?)"
-	fi
+  # Test 1: Successful adoption
+  cd "$tmpdir"
+  if adopt_planner_proposal "TEST-1" "test-1-fix" "/tmp/test-adopt.log"; then
+    if [ -f "openspec/changes/test-1-fix/proposal.md" ]; then
+      echo "✓ successful adoption"
+    else
+      echo "✗ adoption returned 0 but file missing"
+    fi
+  else
+    echo "✗ adoption failed (exit $?)"
+  fi
 
-	# Test 2: No proposal → exit 1
-	has_planner_proposal() { false; }
-	if ! adopt_planner_proposal "TEST-2" "test-2-fix" 2>/dev/null; then
-		rc=$?
-		[ "$rc" = "1" ] && echo "✓ no proposal → exit 1" || echo "✗ no proposal → exit $rc (expected 1)"
-	fi
+  # Test 2: No proposal → exit 1
+  has_planner_proposal() { false; }
+  if ! adopt_planner_proposal "TEST-2" "test-2-fix" 2>/dev/null; then
+    rc=$?
+    [ "$rc" = "1" ] && echo "✓ no proposal → exit 1" || echo "✗ no proposal → exit $rc (expected 1)"
+  fi
 
-	# Test 3: Missing args → exit 1
-	if ! adopt_planner_proposal "" "name" 2>/dev/null; then
-		rc=$?
-		[ "$rc" = "1" ] && echo "✓ missing ticket-id → exit 1" || echo "✗ missing ticket-id → exit $rc"
-	fi
+  # Test 3: Missing args → exit 1
+  if ! adopt_planner_proposal "" "name" 2>/dev/null; then
+    rc=$?
+    [ "$rc" = "1" ] && echo "✓ missing ticket-id → exit 1" || echo "✗ missing ticket-id → exit $rc"
+  fi
 
-	echo "Self-tests complete — run test-appraise-exec-planned.sh for full coverage."
-	exit 0
+  echo "Self-tests complete — run test-appraise-exec-planned.sh for full coverage."
+  exit 0
 fi

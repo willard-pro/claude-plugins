@@ -8,10 +8,10 @@ LIB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 # ── CI-safe declare guards ───────────────────────────────────────────────────
 if ! declare -f get_issue >/dev/null 2>&1; then
-	get_issue() { echo '{"description":"","labels":{"nodes":[]}}'; }
+  get_issue() { echo '{"description":"","labels":{"nodes":[]}}'; }
 fi
 if ! declare -f _plog >/dev/null 2>&1; then
-	_plog() { :; }
+  _plog() { :; }
 fi
 
 export REPOS_ROOT="${REPOS_ROOT:-/tmp/test-repos-root}"
@@ -27,13 +27,13 @@ FAIL=0
 # Runs a function inside a temp directory, capturing its exit code.
 # Works around set -e by using set +e inside the subshell.
 _run_in_dir() {
-	local dir="$1" func="$2"
-	shift 2
-	(
-		set +e
-		cd "$dir"
-		"$func" "$@" 2>/dev/null
-	)
+  local dir="$1" func="$2"
+  shift 2
+  (
+    set +e
+    cd "$dir"
+    "$func" "$@" 2>/dev/null
+  )
 }
 
 # ── Setup test plane ─────────────────────────────────────────────────────────
@@ -47,14 +47,14 @@ echo "# Planner Proposal for TEST-1" >"$PLANE_DIR/proposal.md"
 # get_issue → description → Planner Context block chain that can't resolve
 # in CI with the empty-description get_issue stub).
 has_planner_proposal() {
-	[ -f "$PLANE_DIR/proposal.md" ]
+  [ -f "$PLANE_DIR/proposal.md" ]
 }
 resolve_planner_dir() {
-	if [ -d "$PLANE_DIR" ]; then
-		echo "$PLANE_DIR"
-		return 0
-	fi
-	return 1
+  if [ -d "$PLANE_DIR" ]; then
+    echo "$PLANE_DIR"
+    return 0
+  fi
+  return 1
 }
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
@@ -64,11 +64,11 @@ WORK_DIR=$(mktemp -d)
 rc=0
 _run_in_dir "$WORK_DIR" adopt_planner_proposal "TEST-1" "test-1-fix-bug" "/tmp/test-adopt-planned.log" || rc=$?
 if [ "$rc" = "0" ] && [ -f "$WORK_DIR/openspec/changes/test-1-fix-bug/proposal.md" ]; then
-	echo "PASS: successful proposal adoption (exit=0, file created)"
-	((PASS++)) || true
+  echo "PASS: successful proposal adoption (exit=0, file created)"
+  ((PASS++)) || true
 else
-	echo "FAIL: successful proposal adoption (exit=$rc, file=$(ls "$WORK_DIR/openspec/changes/test-1-fix-bug/proposal.md" 2>/dev/null || echo 'missing'))"
-	((FAIL++)) || true
+  echo "FAIL: successful proposal adoption (exit=$rc, file=$(ls "$WORK_DIR/openspec/changes/test-1-fix-bug/proposal.md" 2>/dev/null || echo 'missing'))"
+  ((FAIL++)) || true
 fi
 rm -rf "$WORK_DIR"
 
@@ -94,8 +94,8 @@ WORK_DIR=$(mktemp -d)
 rc=0
 # Override resolve_planner_dir to simulate failure
 resolve_planner_dir() {
-	echo "mock failure" >&2
-	return 2
+  echo "mock failure" >&2
+  return 2
 }
 _run_in_dir "$WORK_DIR" adopt_planner_proposal "TEST-FAIL" "test-fail" "" || rc=$?
 [ "$rc" = "2" ] && echo "PASS: resolve failure → exit 2" && ((PASS++)) || true
@@ -104,14 +104,14 @@ rm -rf "$WORK_DIR"
 
 # Restore stubs for Test 5
 has_planner_proposal() {
-	[ -f "$PLANE_DIR/proposal.md" ]
+  [ -f "$PLANE_DIR/proposal.md" ]
 }
 resolve_planner_dir() {
-	if [ -d "$PLANE_DIR" ]; then
-		echo "$PLANE_DIR"
-		return 0
-	fi
-	return 1
+  if [ -d "$PLANE_DIR" ]; then
+    echo "$PLANE_DIR"
+    return 0
+  fi
+  return 1
 }
 
 # Test 5: Log file written on successful adoption
@@ -121,11 +121,11 @@ WORK_DIR=$(mktemp -d)
 rc=0
 _run_in_dir "$WORK_DIR" adopt_planner_proposal "TEST-1" "test-1-log" "$LOG_FILE" || rc=$?
 if [ "$rc" = "0" ] && [ -f "$LOG_FILE" ] && grep -q "planner proposal reused" "$LOG_FILE"; then
-	echo "PASS: log file written with adoption marker"
-	((PASS++)) || true
+  echo "PASS: log file written with adoption marker"
+  ((PASS++)) || true
 else
-	echo "FAIL: log file missing or missing adoption marker (rc=$rc)"
-	((FAIL++)) || true
+  echo "FAIL: log file missing or missing adoption marker (rc=$rc)"
+  ((FAIL++)) || true
 fi
 rm -rf "$WORK_DIR" "$LOG_FILE"
 
