@@ -30,6 +30,7 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-template-select.sh
 	bash ticket-auto-pipeline/lib/tests/test-planner-artifacts.sh
 	bash ticket-auto-pipeline/lib/tests/test-planned-body-check.sh
+	bash ticket-auto-pipeline/lib/tests/test-appraise-exec-planned.sh
 	CLAUDE_SKILLS_LIB="$(CURDIR)/ticket-auto-pipeline/lib" \
 	bash ticket-auto-pipeline/lib/tests/test-gate-no-template.sh
 	bash ticket-auto-pipeline/lib/tests/test-state-machine-labels.sh

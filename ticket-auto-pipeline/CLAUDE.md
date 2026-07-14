@@ -112,6 +112,7 @@ REPOS_ROOT/.ticket-auto/
 | `template-select.sh` | `resolve_template <type>`. Deterministic type-to-template resolver. Maps `bug`/`feature`/`improvement`/`security`/`chore`/`refactor` (alias → improvement). Exit 3 on unknown/empty type — no silent fallback. Pure bash, zero LLM. |
 | `planner-artifacts.sh` | `resolve_planner_dir <TID>`, `has_planner_body <TID>`, `has_planner_proposal <TID>`. Resolves `$REPOS_ROOT/.ticket-auto/initiatives/{INIT}/tickets/{TID}/planner/` from the Planner Context block's Initiative field. Exit 0 present, 1 dir missing, 2 no Initiative. |
 | `planned-ticket-body-check.sh` | `check_planned_body <TID> <type>`. Validates ticket body has all required sections per type (universal: AC, Test User, Scope; bug: +Repro Steps, Test Data; feature/improvement: +Nav Path). Sets `BODY_CHECK_MISSING` and `BODY_CHECK_EXIT_CODE`. Plane body.md preferred over Linear description. |
+| `appraise-exec-planned.sh` | `adopt_planner_proposal <TID> <change-name> [log-file]`. Adopts planner-authored proposal.md into openspec/changes/ for planned tickets. Exit 0 adopted, 1 no proposal (run /opsx:propose), 2 copy error. Extracted from SKILL.md inline bash — deterministic, zero LLM. |
 
 ## Personas
 

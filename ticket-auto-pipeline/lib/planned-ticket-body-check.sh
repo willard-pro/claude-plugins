@@ -12,10 +12,22 @@
 # Dependencies: planner-artifacts.sh (for plane resolution), linear-api.sh,
 #               planned-ticket-check.sh (for block extraction)
 #
+# Sources planner-artifacts.sh explicitly so consumers don't need a
+# separate source just to call check_planned_body (declared-guard safe).
+#
 # Usage:
 #   source lib/planned-ticket-body-check.sh
 #   check_planned_body "CRE-123" "bug"               # fetches via API
 #   check_planned_body "CRE-123" "feature" "$desc" "true"  # inline for testing
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/planned-ticket-check.sh"
+
+# Source planner-artifacts.sh for resolve_planner_dir — declare-guard so
+# re-sourcing by a caller that already loaded it is harmless.
+if ! declare -f resolve_planner_dir >/dev/null 2>&1; then
+  source "$SCRIPT_DIR/planner-artifacts.sh"
+fi
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 
@@ -152,8 +164,17 @@ _has_section_ac() {
 # _has_section_test_user <body> — true if body identifies a test user
 _has_section_test_user() {
   local body="$1"
-  # Test User heading OR explicit user reference (email, role, "log in as")
-  if echo "$body" | grep -qiP '(test user|##\s*Test User)' 2>/dev/null; then
+  # Test User heading — must have non-whitespace content after it
+  if echo "$body" | grep -qiP '##\s*Test User' 2>/dev/null; then
+    local section_content
+    section_content=$(echo "$body" | awk '/^##[[:space:]]*Test User/ {found=1; next} found && /^##/ {exit} found {print}')
+    if [ -n "$(echo "$section_content" | tr -d '[:space:]')" ]; then
+      return 0
+    fi
+    return 1  # heading present but empty — spec requires non-empty sections
+  fi
+  # Legacy "test user" loose text match (case-insensitive, anywhere in body)
+  if echo "$body" | grep -qiP 'test user' 2>/dev/null; then
     return 0
   fi
   # User identification patterns
@@ -166,11 +187,20 @@ _has_section_test_user() {
 # _has_section_scope <body> — true if body has a Scope table
 _has_section_scope() {
   local body="$1"
-  # Scope heading OR a markdown table with Layer|Service|Area columns
-  if echo "$body" | grep -qiP '(##\s*Scope|\*\*Scope:?\*\*)' 2>/dev/null; then
+  # Scope heading — must have a table row following it
+  if echo "$body" | grep -qiP '##\s*Scope' 2>/dev/null; then
+    local section_content
+    section_content=$(echo "$body" | awk '/^##[[:space:]]*Scope/ {found=1; next} found && /^##/ {exit} found {print}')
+    if echo "$section_content" | grep -qiP '\|\s*Layer\s*\|' 2>/dev/null; then
+      return 0
+    fi
+    return 1  # heading present but no table — spec requires non-empty sections
+  fi
+  # Fallback: bold Scope label with content OR a scope table anywhere in the body
+  if echo "$body" | grep -qiP '(\*\*Scope:?\*\*\s*\S)' 2>/dev/null; then
     return 0
   fi
-  # Check for scope table pattern: | Layer | Service | Area |
+  # Scope table pattern: | Layer | Service | Area | (anywhere, even without heading)
   if echo "$body" | grep -qiP '\|\s*Layer\s*\|' 2>/dev/null; then
     return 0
   fi

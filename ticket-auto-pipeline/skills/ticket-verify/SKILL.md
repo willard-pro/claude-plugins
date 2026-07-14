@@ -106,18 +106,9 @@ find "$TICKETS_ROOT" -type d -name "{TICKET-ID}*"
 ```
 
 If found, read:
-- `context.md` — for any additional reproduction detail. For `planned` tickets, `context.md` was seeded from the planner's `body.md` (the authoritative body content). Prefer content from `context.md` over the Linear description when both exist — the planner body is richer and more structured.
+- `context.md` — for any additional reproduction detail. For `planned` tickets, `context.md` was already seeded from the planner's `body.md` during `ticket-setup` (bash-resolved, not LLM-resolved). The Description section contains the authoritative body — no source-preference decision needed.
 - `notes.md` — for the fix summary and any UAT notes left by the implement session
 - `artifacts/` — check for any playwright scripts, test plans, or snapshots left by the implementer
-
-**Planned ticket context resolution:** When the ticket has the `planned` label, the Description section of `context.md` contains the planner-authored body (seeded during `ticket-setup`). Use this as the primary source for:
-- Acceptance Criteria (the `- [ ]` checkboxes)
-- Test User (the `**User:**` or `## Test User` section)
-- Navigation Path (the `## Navigation Path` or click-path notation)
-- Steps to Reproduce (the `## Steps to Reproduce` section)
-- Test Data Prerequisites (the `## Test Data Prerequisites` section)
-
-Fall back to the Linear ticket description only when `context.md` is missing these sections — the planner body takes precedence.
 
 If not found, continue — the Linear description alone is sufficient.
 

@@ -457,7 +457,9 @@ _gate_reapprove() {
 
 # _resolve_type_label <label-names-csv>
 # Extracts the Type label from a comma-separated list of Linear label names.
-# Known Type labels: bug, feature, improvement, security, chore.
+# Known Type labels: bug, feature, improvement, security, chore, refactor.
+# refactor is an alias for improvement — it resolves to the same template
+# but is a valid Type label that must not trigger NO_TEMPLATE_FOR_TYPE.
 # Emits the first matching type, or empty string if none found.
 _resolve_type_label() {
   local labels="$1"
@@ -466,7 +468,7 @@ _resolve_type_label() {
     # Trim whitespace
     label=$(echo "$label" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     case "$label" in
-    bug | feature | improvement | security | chore)
+    bug | feature | improvement | security | chore | refactor)
       echo "$label"
       return 0
       ;;

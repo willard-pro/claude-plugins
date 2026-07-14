@@ -177,6 +177,32 @@ _run_check "chore body with universal sections passes" 0 "" \
 _run_check "security body with universal sections passes" 0 "" \
   "TEST-8" "security" "$CHORE_BODY" "true"
 
+# 9. Complete improvement body (requires Nav Path) — passes
+IMPROVEMENT_BODY='## Acceptance Criteria
+- [ ] Filter persists across page navigation
+## Test User
+`admin@example.com` — password `admin`
+## Scope
+| Layer | Service | Area |
+| ----- | ------- | ---- |
+| FE    | gateway | handover-list |
+## Navigation Path
+`Handover > List > Apply Filter`'
+_run_check "complete improvement body passes" 0 "" \
+  "TEST-9" "improvement" "$IMPROVEMENT_BODY" "true"
+
+# 10. Improvement missing Nav Path → exit 1
+IMPROVEMENT_MISSING_NAV='## Acceptance Criteria
+- [ ] Pagination controls added
+## Test User
+`admin@example.com` — password `admin`
+## Scope
+| Layer | Service | Area |
+| ----- | ------- | ---- |
+| FE    | gateway | user-list |'
+_run_check "improvement missing Nav Path fails" 1 "Navigation Path" \
+  "TEST-10" "improvement" "$IMPROVEMENT_MISSING_NAV" "true"
+
 # Cleanup
 rm -rf "$REPOS_ROOT/.ticket-auto"
 
