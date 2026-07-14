@@ -124,14 +124,14 @@ _gate_entry() {
   # (they are equivalent) and catches the reverse mismatch (simple + openspec).
   local _norm_complexity _norm_artifact
   case "$complexity" in
-    simple|simple-fix) _norm_complexity="simple" ;;
-    complex|openspec)  _norm_complexity="complex" ;;
-    *)                _norm_complexity="$complexity" ;;
+  simple | simple-fix) _norm_complexity="simple" ;;
+  complex | openspec) _norm_complexity="complex" ;;
+  *) _norm_complexity="$complexity" ;;
   esac
   case "$artifact_type" in
-    simple-fix|simple) _norm_artifact="simple" ;;
-    openspec|complex)  _norm_artifact="complex" ;;
-    *)                _norm_artifact="$artifact_type" ;;
+  simple-fix | simple) _norm_artifact="simple" ;;
+  openspec | complex) _norm_artifact="complex" ;;
+  *) _norm_artifact="$artifact_type" ;;
   esac
   if [ "$_norm_complexity" != "$_norm_artifact" ]; then
     _plog "$LOG_FILE" "META" "gate-stop" "fail" "COMPLEXITY_ARTIFACT_MISMATCH — complexity=$complexity (normalized=$_norm_complexity) artifact=$artifact_type (normalized=$_norm_artifact)"
@@ -339,8 +339,8 @@ _gate_entry() {
 
     # Hold if 2+ missing for browser tickets, or any missing for API-only
     # (INCOMPLETE threshold from appraise-exec Step 3.8)
-    if { $_is_api_only && [ "$missing_count" -ge 1 ] 2>/dev/null; } || \
-       { ! $_is_api_only && [ "$missing_count" -ge 2 ] 2>/dev/null; }; then
+    if { $_is_api_only && [ "$missing_count" -ge 1 ] 2>/dev/null; } ||
+      { ! $_is_api_only && [ "$missing_count" -ge 2 ] 2>/dev/null; }; then
       local _ticket_mode="browser"
       $_is_api_only && _ticket_mode="api-only"
       _plog "$LOG_FILE" "GATE" "gate" "fail" "held: plan missing $missing_count/${_required_count} verification prerequisites (mode=$_ticket_mode test_user=$has_test_user nav=$has_nav_path expected=$has_expected_behavior env=$has_env_prereqs)"
