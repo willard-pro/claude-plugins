@@ -21,54 +21,54 @@ GH_MOCK_MODE=""
 
 gh() {
   case "$GH_MOCK_MODE" in
-    auth-ok)
-      [ "$1" = "auth" ] && return 0
-      ;;
-    auth-fail)
-      [ "$1" = "auth" ] && return 1
-      ;;
-    lookup-open)
-      if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
-        echo '{"state":"OPEN","title":"Test Issue"}'
-        return 0
-      fi
-      ;;
-    lookup-closed)
-      if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
-        echo '{"state":"CLOSED","title":"Resolved Issue"}'
-        return 0
-      fi
-      ;;
-    lookup-none)
-      if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
-        echo "gh: issue 99999 not found" >&2
-        return 1
-      fi
-      ;;
-    create-ok)
-      if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
-        echo "https://github.com/willard-pro/claude-plugins/issues/99"
-        return 0
-      fi
-      ;;
-    create-fail)
-      if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
-        echo "gh: permission denied" >&2
-        return 1
-      fi
-      ;;
-    comment-ok)
-      if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then
-        echo "https://github.com/willard-pro/claude-plugins/issues/42#issuecomment-1"
-        return 0
-      fi
-      ;;
-    comment-fail)
-      if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then
-        echo "gh: not found" >&2
-        return 1
-      fi
-      ;;
+  auth-ok)
+    [ "$1" = "auth" ] && return 0
+    ;;
+  auth-fail)
+    [ "$1" = "auth" ] && return 1
+    ;;
+  lookup-open)
+    if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+      echo '{"state":"OPEN","title":"Test Issue"}'
+      return 0
+    fi
+    ;;
+  lookup-closed)
+    if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+      echo '{"state":"CLOSED","title":"Resolved Issue"}'
+      return 0
+    fi
+    ;;
+  lookup-none)
+    if [ "$1" = "issue" ] && [ "$2" = "view" ]; then
+      echo "gh: issue 99999 not found" >&2
+      return 1
+    fi
+    ;;
+  create-ok)
+    if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
+      echo "https://github.com/willard-pro/claude-plugins/issues/99"
+      return 0
+    fi
+    ;;
+  create-fail)
+    if [ "$1" = "issue" ] && [ "$2" = "create" ]; then
+      echo "gh: permission denied" >&2
+      return 1
+    fi
+    ;;
+  comment-ok)
+    if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then
+      echo "https://github.com/willard-pro/claude-plugins/issues/42#issuecomment-1"
+      return 0
+    fi
+    ;;
+  comment-fail)
+    if [ "$1" = "issue" ] && [ "$2" = "comment" ]; then
+      echo "gh: not found" >&2
+      return 1
+    fi
+    ;;
   esac
   echo "gh: unexpected call: $*" >&2
   return 1
@@ -137,7 +137,13 @@ CODE=$(run_test github_check_auth)
 assert_fail "unauthenticated when gh auth status fails" "$CODE"
 
 # Test gh CLI not installed — subshell with empty PATH so command -v fails
-CODE=$( (unset -f gh; PATH='' github_check_auth) 2>/dev/null; echo $?)
+CODE=$(
+  (
+    unset -f gh
+    PATH='' github_check_auth
+  ) 2>/dev/null
+  echo $?
+)
 assert_fail "returns 1 when gh not on PATH" "$CODE"
 
 # ── Test: github_issue_lookup ───────────────────────────────────────────────
@@ -167,7 +173,7 @@ assert_fail "returns non-zero for missing number" "$CODE"
 echo "### github_issue_create"
 
 BODY_FILE=$(mktemp)
-echo "Test body" > "$BODY_FILE"
+echo "Test body" >"$BODY_FILE"
 trap 'rm -f "$BODY_FILE"' EXIT
 
 GH_MOCK_MODE="create-ok"
@@ -192,7 +198,7 @@ assert_fail "returns non-zero for missing body file" "$CODE"
 echo "### github_issue_comment"
 
 COMMENT_FILE=$(mktemp)
-echo "Test comment" > "$COMMENT_FILE"
+echo "Test comment" >"$COMMENT_FILE"
 trap 'rm -f "$BODY_FILE" "$COMMENT_FILE"' EXIT
 
 GH_MOCK_MODE="comment-ok"
@@ -215,7 +221,7 @@ echo "### state file roundtrip"
 STATE_FILE=$(mktemp)
 trap 'rm -f "$BODY_FILE" "$COMMENT_FILE" "$STATE_FILE"' EXIT
 
-cat > "$STATE_FILE" <<'EOF'
+cat >"$STATE_FILE" <<'EOF'
 {
   "EXEC_NO_ARTIFACT": {"issue_number": 84, "issue_url": "https://github.com/willard-pro/claude-plugins/issues/84", "last_evidence": "2026-07-10", "count": 4}
 }
@@ -229,12 +235,12 @@ assert_eq "reads count from state file" "4" "$READ_COUNT"
 
 # Test writing updated state
 jq --arg code "APPROVAL_REVOKED" \
-   --arg num "85" \
-   --arg url "https://github.com/willard-pro/claude-plugins/issues/85" \
-   --arg date "2026-07-14" \
-   --arg count "2" \
-   '. + {($code): {issue_number: $num, issue_url: $url, last_evidence: $date, count: $count}}' \
-   "$STATE_FILE" > "${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
+  --arg num "85" \
+  --arg url "https://github.com/willard-pro/claude-plugins/issues/85" \
+  --arg date "2026-07-14" \
+  --arg count "2" \
+  '. + {($code): {issue_number: $num, issue_url: $url, last_evidence: $date, count: $count}}' \
+  "$STATE_FILE" >"${STATE_FILE}.tmp" && mv "${STATE_FILE}.tmp" "$STATE_FILE"
 
 READ_NEW=$(jq -r '.APPROVAL_REVOKED.issue_number' "$STATE_FILE")
 assert_eq "writes new entry to state file" "85" "$READ_NEW"

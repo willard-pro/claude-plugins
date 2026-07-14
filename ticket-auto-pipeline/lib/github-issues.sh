@@ -142,7 +142,7 @@ github_issue_comment() {
 
   # Guard against oversized comments
   local body_size
-  body_size=$(wc -c < "$body_file" 2>/dev/null || echo 0)
+  body_size=$(wc -c <"$body_file" 2>/dev/null || echo 0)
   local max_size="${GITHUB_ISSUE_MAX_COMMENT_SIZE:-60000}"
   if [ "$body_size" -gt "$max_size" ]; then
     echo "github_issue_comment: body file exceeds max size (${body_size} > ${max_size})" >&2

@@ -55,14 +55,14 @@ github_retro_map_severity() {
   local code="$1"
 
   case "$code" in
-    EXEC_NO_ARTIFACT)              echo "bug,P0" ;;
-    APPROVAL_REVOKED)              echo "bug,P0" ;;
-    PR_REVIEW_VERDICT_UNPARSEABLE) echo "bug,P1" ;;
-    COMPLEXITY_ARTIFACT_MISMATCH)  echo "bug,P2" ;;
-    REMEDIATION_BRIEF_TRUNCATED)   echo "bug,P2" ;;
-    RETURN_INCOMPLETE)             echo "improvement,P3" ;;
-    complexity-drift)              echo "improvement,P3" ;;
-    *)                             echo "bug,P2" ;;  # Unknown → bug,P2
+  EXEC_NO_ARTIFACT) echo "bug,P0" ;;
+  APPROVAL_REVOKED) echo "bug,P0" ;;
+  PR_REVIEW_VERDICT_UNPARSEABLE) echo "bug,P1" ;;
+  COMPLEXITY_ARTIFACT_MISMATCH) echo "bug,P2" ;;
+  REMEDIATION_BRIEF_TRUNCATED) echo "bug,P2" ;;
+  RETURN_INCOMPLETE) echo "improvement,P3" ;;
+  complexity-drift) echo "improvement,P3" ;;
+  *) echo "bug,P2" ;; # Unknown → bug,P2
   esac
 }
 
@@ -73,7 +73,7 @@ github_retro_map_severity() {
 github_retro_read_state() {
   mkdir -p "$STATE_DIR"
   if [ ! -f "$STATE_FILE" ]; then
-    echo '{}' > "$STATE_FILE"
+    echo '{}' >"$STATE_FILE"
   fi
   cat "$STATE_FILE"
 }
@@ -90,7 +90,7 @@ github_retro_write_state() {
   fi
 
   mkdir -p "$STATE_DIR"
-  echo "$new_state" > "$STATE_FILE"
+  echo "$new_state" >"$STATE_FILE"
 }
 
 # Look up an existing issue number for a failure code in the state.
@@ -193,37 +193,37 @@ github_retro_process() {
       fi
 
       case "$issue_state" in
-        OPEN)
-          # ── Comment on existing open issue ──────────────────────────────
-          if [ -n "$comment_file" ] && [ -f "$comment_file" ]; then
-            issue_url=$(github_issue_comment "$existing_num" "$comment_file")
-            state_json=$(github_retro_state_record_comment "$state_json" "$code" "$count")
-            github_retro_write_state "$state_json"
-            updated=$(echo "$updated" | jq \
-              --arg code "$code" \
-              --arg url "$issue_url" \
-              '. + [{"code": $code, "url": $url}]')
-          else
-            # No comment file — nothing to do, still track as "seen"
-            skipped=$(echo "$skipped" | jq --arg code "$code" '. + [$code]')
-          fi
-          ;;
-        *)
-          # ── Closed or not found → create new issue ──────────────────────
-          if [ -n "$body_file" ] && [ -f "$body_file" ]; then
-            issue_url=$(github_issue_create "$title" "$labels" "$body_file")
-            new_num=$(echo "$issue_url" | grep -oP 'issues/\K\d+' || echo "0")
-            state_json=$(github_retro_state_record_create "$state_json" "$code" "$new_num" "$issue_url" "$count")
-            github_retro_write_state "$state_json"
-            created=$(echo "$created" | jq \
-              --arg code "$code" \
-              --arg url "$issue_url" \
-              '. + [{"code": $code, "url": $url}]')
-          else
-            echo "github_retro_process: no body_file for $code — skipping" >&2
-            skipped=$(echo "$skipped" | jq --arg code "$code" '. + [$code]')
-          fi
-          ;;
+      OPEN)
+        # ── Comment on existing open issue ──────────────────────────────
+        if [ -n "$comment_file" ] && [ -f "$comment_file" ]; then
+          issue_url=$(github_issue_comment "$existing_num" "$comment_file")
+          state_json=$(github_retro_state_record_comment "$state_json" "$code" "$count")
+          github_retro_write_state "$state_json"
+          updated=$(echo "$updated" | jq \
+            --arg code "$code" \
+            --arg url "$issue_url" \
+            '. + [{"code": $code, "url": $url}]')
+        else
+          # No comment file — nothing to do, still track as "seen"
+          skipped=$(echo "$skipped" | jq --arg code "$code" '. + [$code]')
+        fi
+        ;;
+      *)
+        # ── Closed or not found → create new issue ──────────────────────
+        if [ -n "$body_file" ] && [ -f "$body_file" ]; then
+          issue_url=$(github_issue_create "$title" "$labels" "$body_file")
+          new_num=$(echo "$issue_url" | grep -oP 'issues/\K\d+' || echo "0")
+          state_json=$(github_retro_state_record_create "$state_json" "$code" "$new_num" "$issue_url" "$count")
+          github_retro_write_state "$state_json"
+          created=$(echo "$created" | jq \
+            --arg code "$code" \
+            --arg url "$issue_url" \
+            '. + [{"code": $code, "url": $url}]')
+        else
+          echo "github_retro_process: no body_file for $code — skipping" >&2
+          skipped=$(echo "$skipped" | jq --arg code "$code" '. + [$code]')
+        fi
+        ;;
       esac
     else
       # ── No existing entry → create new issue ────────────────────────────

@@ -62,6 +62,8 @@ test-lib:
 	# pipeline-integrity tests
 	bash ticket-auto-pipeline/lib/tests/test-return-completeness.sh
 	bash ticket-auto-pipeline/lib/tests/test-corrections.sh
+	# retro GitHub issues tests
+	bash ticket-auto-pipeline/lib/tests/test-github-issues.sh
 
 test-flow:
 	@echo "=== ticket-flow tests ==="
