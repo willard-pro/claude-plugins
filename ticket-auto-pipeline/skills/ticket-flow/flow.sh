@@ -13,7 +13,10 @@ source "$LIB_DIR/linear-api.sh"
 SM="$SCRIPT_DIR/state-machine.json"
 
 usage() {
-  echo "Usage: $0 <TICKET-ID> <TRIGGER> [--data key=value ...] [--dry-run]" >&2
+  echo "Usage: $0 <TICKET-ID> <TRIGGER> [--generation N] [--state-dir DIR] [--data key=value ...] [--dry-run]" >&2
+  echo "" >&2
+  echo "  --generation N   Caller's generation token (required when fence is active)" >&2
+  echo "  --state-dir DIR   Fleet state directory for fence marker lookup" >&2
   echo "" >&2
   echo "Valid triggers (from state-machine.json):" >&2
   jq -r '.triggers | keys[]' "$SM" 2>/dev/null | sed 's/^/  /' >&2
@@ -46,10 +49,20 @@ fi
 # ── Parse optional flags ────────────────────────────────────────────────────
 
 DRY_RUN=false
+CALLER_GENERATION=""
+FLEET_STATE_DIR="${FLEET_STATE_DIR:-}"
 declare -A DATA=()
 while [ $# -gt 0 ]; do
   case "$1" in
   --dry-run) DRY_RUN=true ;;
+  --generation)
+    CALLER_GENERATION="$2"
+    shift
+    ;;
+  --state-dir)
+    FLEET_STATE_DIR="$2"
+    shift
+    ;;
   --data)
     key="${2%%=*}"
     val="${2#*=}"
@@ -170,6 +183,40 @@ for label_name in "${ADD_LABEL_NAMES[@]}"; do
 done
 
 TEAM_JSON=$(get_team "$TEAM_ID")
+
+# ── Generation fence guard ────────────────────────────────────────────────────
+# Gate behind FLEET_FENCE_ENFORCE (default: true).
+# If a fence marker exists for this ticket, refuse mutations from superseded
+# generations. Missing generation token on a fenced ticket → fail-closed.
+FENCE_ENFORCE="${FLEET_FENCE_ENFORCE:-true}"
+if [ "$FENCE_ENFORCE" = "true" ]; then
+  _state_dir="${FLEET_STATE_DIR:-/tmp}"
+  _fence_file="${_state_dir}/${TICKET_ID}-fence"
+
+  if [ -f "$_fence_file" ]; then
+    _fenced_gen=$(jq -r '.fenced_generation // 0' "$_fence_file" 2>/dev/null || echo "0")
+
+    # Missing generation token on a fenced ticket → refuse
+    if [ -z "$CALLER_GENERATION" ]; then
+      echo "flow.sh: fence guard — missing generation token for fenced ticket ${TICKET_ID} (fenced at generation ${_fenced_gen})" >&2
+      _log "META|fence-guard|fail|missing generation token for fenced ticket ${TICKET_ID}"
+      hb_gate "fence-guard" "fail" "missing generation token" "{\"ticket\":\"${TICKET_ID}\",\"fenced_gen\":${_fenced_gen}}"
+      exit 9
+    fi
+
+    # caller_gen <= fenced_gen → superseded, refuse
+    if [ "$CALLER_GENERATION" -le "$_fenced_gen" ] 2>/dev/null; then
+      echo "flow.sh: fence guard — generation ${CALLER_GENERATION} is superseded by fenced generation ${_fenced_gen} for ${TICKET_ID}" >&2
+      _log "META|fence-guard|fail|generation ${CALLER_GENERATION} <= fenced ${_fenced_gen}"
+      hb_gate "fence-guard" "fail" "superseded generation" "{\"ticket\":\"${TICKET_ID}\",\"caller_gen\":${CALLER_GENERATION},\"fenced_gen\":${_fenced_gen}}"
+      exit 10
+    fi
+
+    # caller_gen > fenced_gen → current generation, allowed
+    _log "META|fence-guard|info|generation ${CALLER_GENERATION} > fenced ${_fenced_gen}, allowed"
+  fi
+  # No fence marker → unrestricted (backward compatible)
+fi
 
 # Helper: look up state ID by name
 resolve_state_id() {

@@ -28,8 +28,9 @@ _setup_workspace() {
 }
 
 _setup_queue() {
-  local instance_id="${1:-test-dispatch}"
-  local queue_file="/tmp/fleet-${instance_id}-spawn-queue.jsonl"
+  local state_dir="${1:-/tmp}"
+  local instance_id="${2:-test-dispatch}"
+  local queue_file="${state_dir}/fleet-${instance_id}-spawn-queue.jsonl"
   rm -f "$queue_file"
   echo "$queue_file"
 }
@@ -39,11 +40,11 @@ _setup_queue() {
 test_queue_consume_empty() {
   local ws queue_file
   ws=$(_setup_workspace)
-  queue_file=$(_setup_queue "test-empty")
+  queue_file=$(_setup_queue "$ws" "test-empty")
 
   local output
   output=$(bash -c "
-    FLEET_INSTANCE_ID=test-empty
+    FLEET_STATE_DIR='$ws' FLEET_INSTANCE_ID=test-empty
     source '$LIB_DIR/fleet-monitor.sh' 2>/dev/null
     _spawn_queue_consume '$ws' 0 2>&1
   " 2>/dev/null || true)
@@ -54,14 +55,14 @@ test_queue_consume_empty() {
 test_queue_consume_at_capacity() {
   local ws queue_file
   ws=$(_setup_workspace)
-  queue_file=$(_setup_queue "test-cap")
+  queue_file=$(_setup_queue "$ws" "test-cap")
 
   # Write an entry to the queue
   echo '{"tid":"CRE-101","reason":"planned-dispatch","timestamp":"2026-07-07T10:00:00Z","restarts":0,"dispatch_type":"initial"}' >"$queue_file"
 
   local output
   output=$(bash -c "
-    FLEET_INSTANCE_ID=test-cap FLEET_MAX_CONCURRENT=3
+    FLEET_STATE_DIR='$ws' FLEET_INSTANCE_ID=test-cap FLEET_MAX_CONCURRENT=3
     source '$LIB_DIR/fleet-monitor.sh' 2>/dev/null
     _spawn_queue_consume '$ws' 3 2>&1
   " 2>/dev/null || true)
@@ -75,14 +76,14 @@ test_queue_consume_at_capacity() {
 test_queue_consume_entry() {
   local ws queue_file
   ws=$(_setup_workspace)
-  queue_file=$(_setup_queue "test-consume")
+  queue_file=$(_setup_queue "$ws" "test-consume")
 
   # Write an entry to the queue
   echo '{"tid":"CRE-101","reason":"planned-dispatch","timestamp":"2026-07-07T10:00:00Z","restarts":0,"dispatch_type":"initial"}' >"$queue_file"
 
   local output
   output=$(bash -c "
-    FLEET_INSTANCE_ID=test-consume FLEET_MAX_CONCURRENT=3 FLEET_LOG_FILE=/dev/null CLAUDE_CODE_SESSION_ID=dummy
+    FLEET_STATE_DIR='$ws' FLEET_INSTANCE_ID=test-consume FLEET_MAX_CONCURRENT=3 FLEET_LOG_FILE=/dev/null CLAUDE_CODE_SESSION_ID=dummy
     unset -f _iso_now 2>/dev/null || true
     unset -f _ensure_dir_for 2>/dev/null || true
     unset -f hb_fleet_action 2>/dev/null || true
@@ -102,14 +103,14 @@ test_queue_consume_entry() {
 test_queue_consume_malformed_skipped() {
   local ws queue_file
   ws=$(_setup_workspace)
-  queue_file=$(_setup_queue "test-malform")
+  queue_file=$(_setup_queue "$ws" "test-malform")
 
   # Write malformed JSON line (no tid field)
   echo '{"reason":"bad entry","timestamp":"2026-07-07T10:00:00Z"}' >"$queue_file"
 
   local output
   output=$(bash -c "
-    FLEET_INSTANCE_ID=test-malform FLEET_MAX_CONCURRENT=3 FLEET_LOG_FILE=/dev/null CLAUDE_CODE_SESSION_ID=dummy
+    FLEET_STATE_DIR='$ws' FLEET_INSTANCE_ID=test-malform FLEET_MAX_CONCURRENT=3 FLEET_LOG_FILE=/dev/null CLAUDE_CODE_SESSION_ID=dummy
     unset -f _iso_now 2>/dev/null || true
     unset -f _ensure_dir_for 2>/dev/null || true
     unset -f hb_fleet_action 2>/dev/null || true
@@ -126,12 +127,12 @@ test_queue_consume_malformed_skipped() {
 test_queue_write_creates_entry() {
   local ws queue_file
   ws=$(_setup_workspace)
-  queue_file=$(_setup_queue "test-write")
+  queue_file=$(_setup_queue "$ws" "test-write")
 
   bash -c "
-    FLEET_INSTANCE_ID=test-write
+    FLEET_STATE_DIR='$ws' FLEET_INSTANCE_ID=test-write
     source '$LIB_DIR/fleet-monitor.sh' 2>/dev/null
-    _spawn_queue_write 'CRE-101' 'test-reason' 0 2>/dev/null
+    _spawn_queue_write 'CRE-101' 'test-reason' 0 '$ws' 2>/dev/null
   " 2>/dev/null || true
 
   [ -f "$queue_file" ] || {

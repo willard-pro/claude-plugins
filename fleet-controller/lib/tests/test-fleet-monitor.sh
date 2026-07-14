@@ -65,13 +65,13 @@ test_monitor_cycle_empty_workspace_total_zero() {
 test_spawn_queue_writes_valid_json() {
   local tmpdir
   tmpdir=$(mktemp -d)
-  local queue_file="/tmp/fleet-test-config-spawn-queue.jsonl"
+  local queue_file="${tmpdir}/fleet-test-config-spawn-queue.jsonl"
   rm -f "$queue_file"
   (
-    export FLEET_INSTANCE_ID="test-config"
+    export FLEET_INSTANCE_ID="test-config" FLEET_STATE_DIR="$tmpdir"
     unset CLAUDE_CODE_SESSION_ID 2>/dev/null || true
     source "$LIB_DIR/fleet-monitor.sh"
-    _spawn_queue_write "TEST-42" "auto-restart" 1
+    _spawn_queue_write "TEST-42" "auto-restart" 1 "$tmpdir"
   )
   local line valid
   line=$(tail -1 "$queue_file")
@@ -83,13 +83,13 @@ test_spawn_queue_writes_valid_json() {
 test_spawn_queue_has_required_fields() {
   local tmpdir
   tmpdir=$(mktemp -d)
-  local queue_file="/tmp/fleet-test-config-spawn-queue.jsonl"
+  local queue_file="${tmpdir}/fleet-test-config-spawn-queue.jsonl"
   rm -f "$queue_file"
   (
-    export FLEET_INSTANCE_ID="test-config"
+    export FLEET_INSTANCE_ID="test-config" FLEET_STATE_DIR="$tmpdir"
     unset CLAUDE_CODE_SESSION_ID 2>/dev/null || true
     source "$LIB_DIR/fleet-monitor.sh"
-    _spawn_queue_write "TEST-42" "auto-restart" 1
+    _spawn_queue_write "TEST-42" "auto-restart" 1 "$tmpdir"
   )
   local has_tid has_reason has_timestamp has_restarts
   local entry
@@ -105,14 +105,14 @@ test_spawn_queue_has_required_fields() {
 test_spawn_queue_multiple_entries() {
   local tmpdir
   tmpdir=$(mktemp -d)
-  local queue_file="/tmp/fleet-test-config-spawn-queue.jsonl"
+  local queue_file="${tmpdir}/fleet-test-config-spawn-queue.jsonl"
   rm -f "$queue_file"
   (
-    export FLEET_INSTANCE_ID="test-config"
+    export FLEET_INSTANCE_ID="test-config" FLEET_STATE_DIR="$tmpdir"
     unset CLAUDE_CODE_SESSION_ID 2>/dev/null || true
     source "$LIB_DIR/fleet-monitor.sh"
-    _spawn_queue_write "TEST-1" "reason-1" 1
-    _spawn_queue_write "TEST-2" "reason-2" 0
+    _spawn_queue_write "TEST-1" "reason-1" 1 "$tmpdir"
+    _spawn_queue_write "TEST-2" "reason-2" 0 "$tmpdir"
   )
   local count
   count=$(wc -l <"$queue_file" 2>/dev/null || echo 0)
@@ -131,41 +131,47 @@ test_interactive_mode_emits_action_line() {
 # ── Namespaced stop file path test ─────────────────────────────────────────────
 
 test_namespaced_stop_file_uses_instance_id() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
   (
-    export FLEET_INSTANCE_ID="myproject"
+    export FLEET_INSTANCE_ID="myproject" FLEET_STATE_DIR="$tmpdir"
     source "$LIB_DIR/fleet-monitor.sh"
-    # Verify the stop file path pattern — just check the function defines the right path
+    # Verify the stop file path pattern uses workspace, not /tmp
     local instance_id="${FLEET_INSTANCE_ID:-default}"
-    local expected="/tmp/fleet-myproject-controller-stop"
-    [ "$expected" = "/tmp/fleet-myproject-controller-stop" ]
+    local expected="${tmpdir}/fleet-myproject-controller-stop"
+    [ "$expected" = "${tmpdir}/fleet-myproject-controller-stop" ]
   )
+  rm -rf "$tmpdir"
 }
 
 # ── Monitor loop stop-file behavioral tests ───────────────────────────────────
 
 test_monitor_loop_exits_on_namespaced_stop_file() {
   local instance_id="test-exit-$$"
-  local stop_file="/tmp/fleet-${instance_id}-controller-stop"
+  local ws
+  ws=$(mktemp -d)
+  # Stop file is now workspace-relative
+  local stop_file="${ws}/fleet-${instance_id}-controller-stop"
   touch "$stop_file"
   (
     export FLEET_INSTANCE_ID="$instance_id"
     export FLEET_LOG_FILE="/dev/null"
     export FLEET_HB_LOG_FILE="/dev/null"
-    local tmpdir
-    tmpdir=$(mktemp -d)
     source "$LIB_DIR/fleet-monitor.sh" 2>/dev/null
-    fleet_monitor_loop "$tmpdir" 2>/dev/null
-    rm -rf "$tmpdir"
+    fleet_monitor_loop "$ws" 2>/dev/null
   )
   local rc=$?
-  rm -f "$stop_file"
+  rm -rf "$ws"
   [ "$rc" -eq 0 ]
 }
 
 test_monitor_loop_ignores_legacy_stop_file() {
   local instance_id="test-legacy-$$"
+  local ws
+  ws=$(mktemp -d)
+  # Legacy stop file in /tmp — should be ignored since we now use workspace paths
   local legacy_stop="/tmp/ticket-fleet-controller-stop"
-  local namespaced_stop="/tmp/fleet-${instance_id}-controller-stop"
+  local namespaced_stop="${ws}/fleet-${instance_id}-controller-stop"
   touch "$legacy_stop"
   rm -f "$namespaced_stop"
   (sleep 2 && touch "$namespaced_stop") &
@@ -175,15 +181,13 @@ test_monitor_loop_ignores_legacy_stop_file() {
     export FLEET_POLL_INTERVAL=0
     export FLEET_LOG_FILE="/dev/null"
     export FLEET_HB_LOG_FILE="/dev/null"
-    local tmpdir
-    tmpdir=$(mktemp -d)
     source "$LIB_DIR/fleet-monitor.sh" 2>/dev/null
-    fleet_monitor_loop "$tmpdir" 2>/dev/null
-    rm -rf "$tmpdir"
+    fleet_monitor_loop "$ws" 2>/dev/null
   )
   local rc=$?
   wait "$bg_pid" 2>/dev/null || true
   rm -f "$legacy_stop" "$namespaced_stop"
+  rm -rf "$ws"
   [ "$rc" -eq 0 ]
 }
 

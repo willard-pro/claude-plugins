@@ -11,6 +11,10 @@ _INTERVENE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if [ -f "$_INTERVENE_DIR/config.sh" ]; then
   source "$_INTERVENE_DIR/config.sh"
 fi
+# Source registry/fence helpers if available
+if [ -f "$_INTERVENE_DIR/fleet-registry.sh" ]; then
+  source "$_INTERVENE_DIR/fleet-registry.sh"
+fi
 
 # Source heartbeat library from canonical path (synced by ticket-auto-pipeline SessionStart hook)
 if ! declare -f _plog >/dev/null 2>&1; then
@@ -53,32 +57,38 @@ _count_restarts() {
     echo "0"
     return
   fi
-  grep -c 'fleet-restart' "$file" 2>/dev/null || echo "0"
+  grep -c '|META|fleet-restart|' "$file" 2>/dev/null || echo "0"
 }
 
 # ── fleet_stop_background ────────────────────────────────────────────────────────
 # Touch both stop files to signal background pinger/watchdog to shut down.
 # Idempotent — touching files that already exist succeeds.
-# Usage: fleet_stop_background <tid>
+# Usage: fleet_stop_background <tid> [state_dir]
 fleet_stop_background() {
   local tid="$1"
-  local pinger_stop="/tmp/ticket-auto-${tid}-pinger-stop"
-  local watchdog_stop="/tmp/ticket-auto-${tid}-watchdog-stop"
+  local state_dir="${2:-/tmp}"
+  local pinger_stop="${state_dir}/ticket-auto-${tid}-pinger-stop"
+  local watchdog_stop="${state_dir}/ticket-auto-${tid}-watchdog-stop"
 
   touch "$pinger_stop" 2>/dev/null || true
   touch "$watchdog_stop" 2>/dev/null || true
 }
 
 # ── fleet_kill_pipeline ──────────────────────────────────────────────────────────
-# Kill a pipeline: touch stop files, write intervention + outcome to pipeline log,
-# write hb_decision audit entry.
+# Kill a pipeline with verified escalation:
+#   stop-files → grace → kill -0 → SIGTERM → grace → kill -0 → SIGKILL → re-verify
+# META|outcome is written ONLY after PID is confirmed gone.
+# Writes a generation fence marker to prevent superseded zombie mutations.
 # Usage: fleet_kill_pipeline <tid> [reason] [workspace]
 fleet_kill_pipeline() {
   local tid="$1"
   local reason="${2:-fleet-kill}"
   local workspace="${3:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local state_dir="${FLEET_STATE_DIR:-$workspace}"
   local log_file="${workspace}/${tid}-pipeline.log"
   local hb_file="${workspace}/${tid}-heartbeat.log"
+  local kill_grace="${FLEET_KILL_GRACE_SECS:-10}"
+  local kill_verify="${FLEET_KILL_VERIFY:-true}"
 
   # Pre-kill existence check — prevent creating log directories for nonexistent tickets
   if [ ! -f "$log_file" ]; then
@@ -88,6 +98,13 @@ fleet_kill_pipeline() {
 
   if [ "${FLEET_DRY_RUN:-false}" = "true" ]; then
     echo "[DRY-RUN] would KILL ticket ${tid}: ${reason}"
+    local dry_registry_pid
+    dry_registry_pid=$(registry_pid "$tid" "$state_dir" 2>/dev/null)
+    if [ -n "$dry_registry_pid" ] && [ "$dry_registry_pid" != "0" ]; then
+      echo "[DRY-RUN]   would escalate: stop-files → grace ${kill_grace}s → SIGTERM → grace → SIGKILL for PID ${dry_registry_pid}"
+    else
+      echo "[DRY-RUN]   stop-files only (no registry PID)"
+    fi
     return 0
   fi
 
@@ -97,21 +114,131 @@ fleet_kill_pipeline() {
     return 2
   fi
 
-  # Touch stop files
-  fleet_stop_background "$tid"
-
   # Write intervention log entry
   _log_pipeline "$log_file" "META" "fleet-intervention" "warn" "KILL; reason=${reason}"
 
-  # Write outcome to finalize pipeline
-  _log_pipeline "$log_file" "META" "outcome" "info" "stopped: fleet-kill; ${reason}"
+  # Touch stop files (workspace-relative state dir)
+  fleet_stop_background "$tid" "$state_dir"
 
-  # Write heartbeat audit entry
+  # ── Verified escalation ────────────────────────────────────────────────────────
+  # If kill-verify is disabled, fall back to stop-file-only (pre-escalation compat).
+  if [ "$kill_verify" != "true" ]; then
+    _log_pipeline "$log_file" "META" "outcome" "info" "stopped: fleet-kill (stop-files only); ${reason}"
+    export HB_LOG_FILE="${hb_file}"
+    hb_decision "fleet-kill" "fired" "reason=${reason}"
+    echo "fleet_kill_pipeline: killed ${tid} (stop-files only) — ${reason}"
+    return 0
+  fi
+
+  # ── Registry-aware escalation ──────────────────────────────────────────────────
+  local registry_pid registry_gen
+  registry_pid=$(registry_pid "$tid" "$state_dir" 2>/dev/null)
+  registry_gen=$(registry_generation "$tid" "$state_dir" 2>/dev/null || echo "0")
+
+  if [ -z "$registry_pid" ] || [ "$registry_pid" = "0" ]; then
+    # No registry PID — fall back to stop-file-only (backward compatible)
+    _log_pipeline "$log_file" "META" "outcome" "info" "stopped: fleet-kill (no registry PID); ${reason}"
+    export HB_LOG_FILE="${hb_file}"
+    hb_decision "fleet-kill" "fired" "reason=${reason}"
+    echo "fleet_kill_pipeline: killed ${tid} (no registry PID, stop-files only) — ${reason}"
+    return 0
+  fi
+
+  # Wait for cooperative shutdown (stop-files signal the pinger/watchdog)
+  sleep "$kill_grace"
+
+  # Check if process exited cooperatively
+  if ! kill -0 "$registry_pid" 2>/dev/null; then
+    # PID already gone — cooperative shutdown succeeded
+    _log_pipeline "$log_file" "META" "outcome" "info" "stopped: fleet-kill (cooperative); ${reason}"
+    export HB_LOG_FILE="${hb_file}"
+    hb_decision "fleet-kill" "fired" "reason=${reason}"
+
+    # Write fence marker for the killed generation
+    if [ "$registry_gen" -gt 0 ] 2>/dev/null; then
+      fence_write "$tid" "$registry_gen" "$state_dir"
+    fi
+
+    echo "fleet_kill_pipeline: killed ${tid} (cooperative exit) — ${reason}"
+    return 0
+  fi
+
+  # ── PID-reuse guard ────────────────────────────────────────────────────────────
+  # Before signalling, corroborate the PID is still our worker (not a reused PID).
+  # Check: process start time newer than registry started_at, OR cmdline contains tid.
+  local registry_started_at
+  registry_started_at=$(registry_read "$tid" "$state_dir" 2>/dev/null | jq -r '.started_at // empty')
+  local pid_verified=true
+  if [ -n "$registry_started_at" ] && command -v ps >/dev/null 2>&1; then
+    # Check if the PID's process start time is plausibly ours
+    local pid_start
+    pid_start=$(ps -o lstart= -p "$registry_pid" 2>/dev/null | head -1 || true)
+    if [ -n "$pid_start" ]; then
+      # If the process started before our registry entry, it's not ours
+      local pid_start_epoch registry_start_epoch
+      pid_start_epoch=$(date -d "$pid_start" +%s 2>/dev/null || echo "0")
+      registry_start_epoch=$(date -d "$registry_started_at" +%s 2>/dev/null || echo "0")
+      if [ "$pid_start_epoch" != "0" ] && [ "$registry_start_epoch" != "0" ] &&
+        [ "$pid_start_epoch" -lt "$((registry_start_epoch - 5))" ] 2>/dev/null; then
+        pid_verified=false
+      fi
+    fi
+  fi
+
+  if ! $pid_verified; then
+    # PID reuse suspected — downgrade to kill-unverified, do NOT signal
+    _log_pipeline "$log_file" "META" "kill-unverified" "warn" "PID ${registry_pid} ownership unverified for ${tid}; no signal sent"
+    export HB_LOG_FILE="${hb_file}"
+    hb_decision "kill-unverified" "warn" "PID reuse suspected for ${tid}"
+    echo "fleet_kill_pipeline: kill-unverified — PID ${registry_pid} ownership unconfirmed for ${tid}"
+    return 0
+  fi
+
+  # ── SIGTERM escalation ─────────────────────────────────────────────────────────
+  kill -TERM "$registry_pid" 2>/dev/null || true
+  sleep "$kill_grace"
+
+  if ! kill -0 "$registry_pid" 2>/dev/null; then
+    # SIGTERM succeeded
+    _log_pipeline "$log_file" "META" "outcome" "info" "stopped: fleet-kill (SIGTERM); ${reason}"
+    export HB_LOG_FILE="${hb_file}"
+    hb_decision "fleet-kill" "fired" "reason=${reason}"
+
+    if [ "$registry_gen" -gt 0 ] 2>/dev/null; then
+      fence_write "$tid" "$registry_gen" "$state_dir"
+    fi
+
+    echo "fleet_kill_pipeline: killed ${tid} (SIGTERM) — ${reason}"
+    return 0
+  fi
+
+  # ── SIGKILL escalation ─────────────────────────────────────────────────────────
+  kill -KILL "$registry_pid" 2>/dev/null || true
+  sleep 1 # Brief wait for kernel to reap
+
+  if ! kill -0 "$registry_pid" 2>/dev/null; then
+    # SIGKILL succeeded — PID confirmed gone, finalize
+    _log_pipeline "$log_file" "META" "outcome" "info" "stopped: fleet-kill (SIGKILL); ${reason}"
+    export HB_LOG_FILE="${hb_file}"
+    hb_decision "fleet-kill" "fired" "reason=${reason}"
+
+    if [ "$registry_gen" -gt 0 ] 2>/dev/null; then
+      fence_write "$tid" "$registry_gen" "$state_dir"
+    fi
+
+    echo "fleet_kill_pipeline: killed ${tid} (SIGKILL) — ${reason}"
+    return 0
+  fi
+
+  # ── kill-unverified fallthrough ────────────────────────────────────────────────
+  # PID still alive after SIGKILL — something is very wrong.
+  # Emit kill-unverified WARN, do NOT finalize as stopped.
+  _log_pipeline "$log_file" "META" "kill-unverified" "warn" "PID ${registry_pid} survived SIGKILL for ${tid}; NOT finalized"
   export HB_LOG_FILE="${hb_file}"
-  hb_decision "fleet-kill" "fired" "reason=${reason}"
+  hb_decision "kill-unverified" "warn" "PID ${registry_pid} survived SIGKILL for ${tid}"
 
-  echo "fleet_kill_pipeline: killed ${tid} — ${reason}"
-  return 0
+  echo "fleet_kill_pipeline: kill-unverified — PID ${registry_pid} survived escalation for ${tid}" >&2
+  return 3
 }
 
 # ── fleet_can_restart ────────────────────────────────────────────────────────────

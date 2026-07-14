@@ -33,6 +33,8 @@ fi
 _source_if_missing fleet_detect_all "$_MONITOR_DIR/fleet-detect.sh"
 _source_if_missing fleet_kill_pipeline "$_MONITOR_DIR/fleet-intervene.sh"
 _source_if_missing fleet_render_dashboard_from_data "$_MONITOR_DIR/fleet-dashboard.sh"
+# Source registry/fence helpers if available
+[ -f "$_MONITOR_DIR/fleet-registry.sh" ] && source "$_MONITOR_DIR/fleet-registry.sh"
 
 # ── Fleet controller log writer ───────────────────────────────────────────────────
 # Write a timestamped entry to the fleet controller's own log file.
@@ -53,38 +55,41 @@ fl_write() {
 
 # Write a restart entry to the cron spawn queue JSONL file.
 # No-op in interactive mode (CLAUDE_CODE_SESSION_ID is set).
-# Args: tid reason restarts
+# Args: tid reason restarts [state_dir]
 _spawn_queue_write() {
   local tid="$1"
   local reason="$2"
   local restarts="${3:-0}"
+  local state_dir="${4:-/tmp}"
   local instance_id="${FLEET_INSTANCE_ID:-default}"
-  local queue_file="/tmp/fleet-${instance_id}-spawn-queue.jsonl"
+  local queue_file="${state_dir}/fleet-${instance_id}-spawn-queue.jsonl"
   local entry
   entry=$(jq -nc \
     --arg tid "$tid" \
     --arg reason "$reason" \
     --arg timestamp "$(_iso_now)" \
     --argjson restarts "$restarts" \
-    '{tid: $tid, reason: $reason, timestamp: $timestamp, restarts: $restarts}')
+    --argjson generation "$((restarts + 1))" \
+    '{tid: $tid, reason: $reason, timestamp: $timestamp, restarts: $restarts, generation: $generation}')
 
   echo "$entry" >>"$queue_file"
 }
 
 # Emit a restart spawn action. In interactive mode (CLAUDE_CODE_SESSION_ID is set),
 # emits ACTION:spawn-restart to stdout. In cron mode, writes to spawn queue JSONL.
-# Args: tid reason [restarts]
+# Args: tid reason [restarts] [state_dir]
 _spawn_restart() {
   local tid="$1"
   local reason="$2"
   local restarts="${3:-0}"
+  local state_dir="${4:-/tmp}"
 
   if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
     # Interactive mode — Claude Code parses these ACTION: lines
     echo "ACTION:spawn-restart tid=${tid}"
   else
     # Cron mode — write to spawn queue for external consumer
-    _spawn_queue_write "$tid" "$reason" "$restarts"
+    _spawn_queue_write "$tid" "$reason" "$restarts" "$state_dir"
   fi
 }
 
@@ -93,14 +98,21 @@ _spawn_restart() {
 # Consume entries from the spawn queue, respecting FLEET_MAX_CONCURRENT.
 # Reads the queue file line-by-line, spawns pipelines for eligible entries,
 # and marks consumed entries by rewriting the queue without them.
+# The entire read+rewrite is serialized under flock to prevent the race where
+# fleet-dispatch.sh appends an entry between consume-read and consume-rewrite
+# (which would destroy the newly appended entry).
 # In cron mode, emits ACTION:spawn lines to stdout for the skill layer.
 # Usage: _spawn_queue_consume <workspace> <active_count>
 _spawn_queue_consume() {
   local workspace="$1"
   local active_count="${2:-0}"
   local instance_id="${FLEET_INSTANCE_ID:-default}"
-  local queue_file="/tmp/fleet-${instance_id}-spawn-queue.jsonl"
+  local state_dir
+  state_dir=$(_fleet_state_dir "$workspace")
+  local queue_file="${state_dir}/fleet-${instance_id}-spawn-queue.jsonl"
+  local lock_file="${queue_file}.lock"
   local max_concurrent="${FLEET_MAX_CONCURRENT:-3}"
+  local lock_timeout="${FLEET_QUEUE_LOCK_TIMEOUT:-5}"
 
   if [ ! -f "$queue_file" ] || [ ! -s "$queue_file" ]; then
     return 0
@@ -109,54 +121,71 @@ _spawn_queue_consume() {
   local slots_available=$((max_concurrent - active_count))
   [ "$slots_available" -le 0 ] && return 0
 
-  local consumed=0
-  local remaining_entries=""
+  # Acquire exclusive lock for read+rewrite. On timeout, skip this cycle
+  # rather than blocking the monitor loop indefinitely.
+  (
+    if ! flock -w "$lock_timeout" 9 2>/dev/null; then
+      fl_write "WARN" "queue" "flock timeout on spawn queue — skipping cycle"
+      exit 0
+    fi
 
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
+    local consumed=0
+    local remaining_entries=""
 
-    # Parse the JSONL entry
-    local tid reason
-    tid=$(echo "$line" | jq -r '.tid // empty' 2>/dev/null)
-    [ -z "$tid" ] && remaining_entries="${remaining_entries}${line}"$'\n' && continue
+    while IFS= read -r line; do
+      [ -z "$line" ] && continue
 
-    if [ "$consumed" -lt "$slots_available" ]; then
-      reason=$(echo "$line" | jq -r '.reason // "dispatched"' 2>/dev/null)
-      restarts=$(echo "$line" | jq -r '.restarts // 0' 2>/dev/null)
+      # Parse the JSONL entry
+      local tid reason
+      tid=$(echo "$line" | jq -r '.tid // empty' 2>/dev/null)
+      [ -z "$tid" ] && remaining_entries="${remaining_entries}${line}"$'\n' && continue
 
-      fl_write "INFO" "queue" "Consuming spawn queue entry: ${tid} (${reason})"
+      if [ "$consumed" -lt "$slots_available" ]; then
+        reason=$(echo "$line" | jq -r '.reason // "dispatched"' 2>/dev/null)
+        restarts=$(echo "$line" | jq -r '.restarts // 0' 2>/dev/null)
+        generation=$(echo "$line" | jq -r '.generation // 1' 2>/dev/null)
 
-      if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
-        echo "ACTION:spawn-auto tid=${tid} reason=${reason}"
+        fl_write "INFO" "queue" "Consuming spawn queue entry: ${tid} (${reason})"
+
+        # Write run registry: record that we own this ticket at this generation.
+        # PID=0 sentinel means "spawned, PID not yet captured by ticket-auto spawn."
+        if declare -f registry_write >/dev/null 2>&1; then
+          registry_write "$tid" "0" "$generation" "$reason" "$state_dir"
+        fi
+
+        if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
+          echo "ACTION:spawn-auto tid=${tid} reason=${reason} generation=${generation}"
+        else
+          # Cron mode: write consumed marker as ACTION line
+          echo "ACTION:spawn-auto tid=${tid} reason=${reason} restarts=${restarts} generation=${generation}"
+        fi
+
+        # Emit heartbeat for the spawn
+        hb_fleet_action "queue-dispatch" "info" "Spawning from queue: ${tid}" \
+          "{\"tid\":\"$tid\",\"reason\":\"$reason\",\"generation\":$generation}"
+
+        consumed=$((consumed + 1))
       else
-        # Cron mode: write consumed marker as ACTION line
-        echo "ACTION:spawn-auto tid=${tid} reason=${reason} restarts=${restarts}"
+        # Keep unconsumed entries
+        remaining_entries="${remaining_entries}${line}"$'\n'
       fi
+    done <"$queue_file"
 
-      # Emit heartbeat for the spawn
-      hb_fleet_action "queue-dispatch" "info" "Spawning from queue: ${tid}" \
-        "{\"tid\":\"$tid\",\"reason\":\"$reason\"}"
-
-      consumed=$((consumed + 1))
-    else
-      # Keep unconsumed entries
-      remaining_entries="${remaining_entries}${line}"$'\n'
+    # Rewrite queue with remaining (unconsumed) entries — atomic rename.
+    # Protected by flock so concurrent appends cannot be lost.
+    if [ "$consumed" -gt 0 ]; then
+      if [ -n "$remaining_entries" ]; then
+        local tmp_queue="${queue_file}.tmp.$$"
+        echo -n "$remaining_entries" >"$tmp_queue"
+        mv "$tmp_queue" "$queue_file"
+      else
+        rm -f "$queue_file"
+      fi
     fi
-  done <"$queue_file"
 
-  # Rewrite queue with remaining (unconsumed) entries — atomic rename to
-  # avoid losing entries appended by fleet-dispatch.sh between read and write.
-  if [ "$consumed" -gt 0 ]; then
-    if [ -n "$remaining_entries" ]; then
-      local tmp_queue="${queue_file}.tmp.$$"
-      echo -n "$remaining_entries" >"$tmp_queue"
-      mv "$tmp_queue" "$queue_file"
-    else
-      rm -f "$queue_file"
-    fi
-  fi
+    [ "$consumed" -gt 0 ] && fl_write "INFO" "queue" "Consumed ${consumed} queue entries, ${slots_available} slots used"
+  ) 9>"$lock_file"
 
-  [ "$consumed" -gt 0 ] && fl_write "INFO" "queue" "Consumed ${consumed} queue entries, ${slots_available} slots used"
   return 0
 }
 
@@ -203,7 +232,7 @@ fleet_monitor_cycle() {
           # Scan for fresh restart-intent markers
           if command grep -q "META|fleet-restart-marker|info|restart-intent" "${workspace}/${tid}-pipeline.log" 2>/dev/null; then
             fl_write "INFO" "monitor" "Spawning restart for ${tid}"
-            _spawn_restart "$tid" "auto-restart" 0
+            _spawn_restart "$tid" "auto-restart" 0 "$(_fleet_state_dir "$workspace")"
           fi
         fi
       else
@@ -231,7 +260,9 @@ fleet_monitor_cycle() {
 fleet_monitor_loop() {
   local workspace="${1:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local instance_id="${FLEET_INSTANCE_ID:-default}"
-  local stop_file="/tmp/fleet-${instance_id}-controller-stop"
+  local state_dir
+  state_dir=$(_fleet_state_dir "$workspace")
+  local stop_file="${state_dir}/fleet-${instance_id}-controller-stop"
   local poll_interval="${FLEET_POLL_INTERVAL:-30}"
   local summary_interval="${FLEET_SUMMARY_INTERVAL_CYCLES:-10}"
 

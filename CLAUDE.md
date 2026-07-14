@@ -40,7 +40,7 @@ When a skill or command references a file by name (e.g., `openspec-propose` poin
 
 ## Determinism boundary
 
-All Linear API mutations flow through `flow.sh` (the `ticket-flow` skill executor) — a deterministic bash script. Skills never call Linear mutation endpoints directly. `flow.sh` handles: state transitions, label add/remove, assignee changes, idempotency checks, and post-trigger state assertions. The state machine definition lives in `skills/ticket-flow/state-machine.json` — `flow.sh` reads it, so changes to the JSON take effect without script changes.
+All Linear API mutations flow through `flow.sh` (the `ticket-flow` skill executor) — a deterministic bash script. Skills never call Linear mutation endpoints directly. `flow.sh` handles: state transitions, label add/remove, assignee changes, idempotency checks, post-trigger state assertions, and generation fence checks (`{tid}-fence` — rejects mutations from superseded generations, gated behind `FLEET_FENCE_ENFORCE=true`). The state machine definition lives in `skills/ticket-flow/state-machine.json` — `flow.sh` reads it, so changes to the JSON take effect without script changes.
 
 ## Shared libraries (`lib/`)
 
