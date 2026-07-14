@@ -56,6 +56,13 @@ adopt_planner_proposal() {
     return 2
   }
 
+  # Validate change_name: lowercase alphanumeric + hyphens, no traversal.
+  # Same pattern as planner-artifacts.sh path validation.
+  if ! [[ "$change_name" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+    echo "adopt_planner_proposal: invalid change_name '$change_name'" >&2
+    return 2
+  fi
+
   local src="$planner_dir/proposal.md"
   local dest_dir="openspec/changes/$change_name"
   local dest="$dest_dir/proposal.md"
@@ -71,13 +78,29 @@ adopt_planner_proposal() {
     return 2
   }
 
+  # Defense-in-depth: verify destination stays within expected prefix
+  local resolved_dest expected_prefix
+  resolved_dest=$(realpath "$dest" 2>/dev/null) || true
+  expected_prefix=$(realpath "openspec/changes/" 2>/dev/null) || true
+  if [ -n "$expected_prefix" ] && [ -n "$resolved_dest" ]; then
+    if [[ "$resolved_dest" != "$expected_prefix"/* ]]; then
+      echo "adopt_planner_proposal: path traversal rejected — '$dest' resolves outside '$expected_prefix'" >&2
+      return 2
+    fi
+    dest="$resolved_dest"
+  fi
+
   cp "$src" "$dest" || {
     echo "adopt_planner_proposal: failed to copy $src → $dest" >&2
     return 2
   }
 
-  # Log adoption
+  # Log adoption (log_file must be under /tmp/ or a ticket workspace)
   if [ -n "$log_file" ]; then
+    if ! [[ "$log_file" =~ ^(/tmp/|[./]?[A-Za-z0-9]) ]]; then
+      echo "adopt_planner_proposal: log_file path rejected '$log_file'" >&2
+      return 2
+    fi
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|create-artifact|done|openspec (planner proposal reused)" >> "$log_file"
   fi
 
