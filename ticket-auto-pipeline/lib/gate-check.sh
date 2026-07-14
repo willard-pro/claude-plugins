@@ -12,6 +12,9 @@ source "$LIB_DIR/heartbeat.sh"
 source "$LIB_DIR/linear-api.sh"
 source "$LIB_DIR/notes-parse.sh"
 source "$SCRIPT_DIR/planned-ticket-check.sh"
+source "$SCRIPT_DIR/template-select.sh"
+source "$SCRIPT_DIR/planned-ticket-body-check.sh"
+source "$SCRIPT_DIR/planner-artifacts.sh"
 
 # Source ticket-dir.sh for resolve_ticket_dir — check multiple locations
 if [ -f "$SCRIPT_DIR/ticket-dir.sh" ]; then
@@ -326,9 +329,11 @@ _gate_entry() {
     fi
   fi
 
-  # Check 2.7: Planned ticket enrichment validation (Phase 1 — passive, observe-only)
-  # Detects planned tickets and validates their Planner Context block.
-  # Does NOT change gate behavior — logs results for observability.
+  # Check 2.7: Planned ticket validation (template + body completeness)
+  # For planned-labeled tickets, validates:
+  #   1. Planner Context block is well-formed (passive, observe-only)
+  #   2. Type label resolves to a known template (active gate-stop)
+  #   3. Body has all required sections for the type (active gate-stop)
   # Phase 2 (appraise-fast-path) runs independently in ticket-appraise Step 1.3
   # via check_fast_path_eligible, which re-validates the Planner Context block
   # and routes to fast-path or full investigation based on the result.
@@ -337,8 +342,11 @@ _gate_entry() {
   local has_planned_label
   has_planned_label=$(echo "$issue_json" | jq -r '[.labels.nodes[].name] | index("planned") != null' 2>/dev/null || echo 'false')
   if [ "$has_planned_label" = "true" ]; then
-    local planned_desc
+    local planned_desc label_names
     planned_desc=$(echo "$issue_json" | jq -r '.description // ""')
+    label_names=$(echo "$issue_json" | jq -r '[.labels.nodes[].name] | join(",")' 2>/dev/null || echo '')
+
+    # 2.7a: Passive Planner Context block validation (existing behavior)
     check_planned_ticket_description "$planned_desc" 2>/dev/null || planned_check_rc=$?
     case "${planned_check_rc:-0}" in
     0) _plog "$LOG_FILE" "GATE" "planned-check" "done" "valid" ;;
@@ -346,6 +354,31 @@ _gate_entry() {
     2) _plog "$LOG_FILE" "GATE" "planned-check" "warn" "low-confidence — confidence below threshold, not pre-approved" ;;
     esac
     hb_gate "planned-check" "info" "planned ticket validated" "{\"exit_code\":\"${planned_check_rc:-0}\",\"result\":\"$CHECK_RESULT\"}"
+
+    # 2.7b: Resolve Type label → template (active gate-stop)
+    local ticket_type
+    ticket_type=$(_resolve_type_label "$label_names")
+    local template_path
+    template_path=$(resolve_template "$ticket_type" 2>/dev/null) || true
+    local template_rc=$?
+    if [ "$template_rc" = "3" ] || [ -z "$template_path" ]; then
+      local display_type="${ticket_type:-<none>}"
+      _plog "$LOG_FILE" "META" "gate-stop" "fail" "NO_TEMPLATE_FOR_TYPE — no template for task type '$display_type'; add templates/${display_type}.md"
+      hb_gate "entry-gate" "fail" "NO_TEMPLATE_FOR_TYPE" "{\"type\":\"$display_type\"}"
+      return 2
+    fi
+    _plog "$LOG_FILE" "GATE" "planned-check" "done" "template resolved: $template_path"
+
+    # 2.7c: Body completeness check (active gate-stop)
+    local body_check_rc=0
+    check_planned_body "$TICKET_ID" "$ticket_type" "$planned_desc" "true" 2>/dev/null || body_check_rc=$?
+    if [ "$body_check_rc" != "0" ]; then
+      local missing_sections="${BODY_CHECK_MISSING:-unknown}"
+      _plog "$LOG_FILE" "META" "gate-stop" "fail" "PLANNED_BODY_INCOMPLETE — $ticket_type ticket missing $missing_sections"
+      hb_gate "entry-gate" "fail" "PLANNED_BODY_INCOMPLETE" "{\"type\":\"$ticket_type\",\"missing\":\"$missing_sections\"}"
+      return 2
+    fi
+    _plog "$LOG_FILE" "GATE" "planned-check" "done" "body complete for type $ticket_type"
   fi
 
   # Check 3: Complex tickets are always held
@@ -420,6 +453,28 @@ _gate_reapprove() {
   _plog "$LOG_FILE" "META" "gate-stop" "fail" "APPROVAL_REVOKED"
   hb_gate "reapprove-gate" "fail" "APPROVAL_REVOKED" "{\"reason\":\"$reason\"}"
   return 2
+}
+
+# _resolve_type_label <label-names-csv>
+# Extracts the Type label from a comma-separated list of Linear label names.
+# Known Type labels: bug, feature, improvement, security, chore, refactor.
+# refactor is an alias for improvement — it resolves to the same template
+# but is a valid Type label that must not trigger NO_TEMPLATE_FOR_TYPE.
+# Emits the first matching type, or empty string if none found.
+_resolve_type_label() {
+  local labels="$1"
+  local IFS=','
+  for label in $labels; do
+    # Trim whitespace
+    label=$(echo "$label" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    case "$label" in
+    bug | feature | improvement | security | chore | refactor)
+      echo "$label"
+      return 0
+      ;;
+    esac
+  done
+  return 0
 }
 
 # ── Dispatch (only when executed directly, not when sourced for testing) ──────

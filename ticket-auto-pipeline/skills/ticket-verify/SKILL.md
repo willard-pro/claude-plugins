@@ -106,7 +106,7 @@ find "$TICKETS_ROOT" -type d -name "{TICKET-ID}*"
 ```
 
 If found, read:
-- `context.md` — for any additional reproduction detail
+- `context.md` — for any additional reproduction detail. For `planned` tickets, `context.md` was already seeded from the planner's `body.md` during `ticket-setup` (bash-resolved, not LLM-resolved). The Description section contains the authoritative body — no source-preference decision needed.
 - `notes.md` — for the fix summary and any UAT notes left by the implement session
 - `artifacts/` — check for any playwright scripts, test plans, or snapshots left by the implementer
 

@@ -1,6 +1,6 @@
 # Linear Ticket Templates
 
-Three templates for creating well-structured Linear tickets that work cleanly with the ticket-auto pipeline.
+Four templates for creating well-structured Linear tickets that work cleanly with the ticket-auto pipeline.
 
 | Template | Label to set | Use when |
 | -------- | ------------ | -------- |
@@ -8,6 +8,9 @@ Three templates for creating well-structured Linear tickets that work cleanly wi
 | `feature.md` | `feature` | Net-new capability that doesn't exist yet |
 | `improvement.md` | `improvement` | Improving or extending an existing feature |
 | `security.md` | `security` + `bug` or `improvement` | Vulnerability, auth bypass, data exposure, or hardening |
+| `chore.md` | `chore` | Maintenance tasks — dependency updates, refactoring, tooling, infra changes |
+
+> **Note:** Task type is set via the Linear `Type` label (`bug`, `feature`, `improvement`, `security`, `chore`), not a field within the template body. The `Type` label drives template selection and body validation at the pipeline entry gate.
 
 ## Why These Fields
 

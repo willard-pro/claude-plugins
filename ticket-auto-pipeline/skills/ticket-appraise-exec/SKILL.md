@@ -152,7 +152,21 @@ Omit this section if there are none.}
 
 ### Step 3-Complex (complexity = complex)
 
-Run the `/opsx:propose` skill to create the change artifacts for this ticket.
+**Planner proposal reuse (planned tickets):** Before running `/opsx:propose`, check whether the ticket has a planner-authored proposal that can be adopted verbatim:
+
+```bash
+source ~/.claude/skills/lib/planner-artifacts.sh
+source ~/.claude/skills/lib/appraise-exec-planned.sh
+adopt_planner_proposal "{TICKET-ID}" "{change-name}" "$LOG_FILE"
+case $? in
+  0) echo "Planner proposal adopted — skipping /opsx:propose re-derivation" ;;
+  1) echo "No planner proposal found — running /opsx:propose to derive plan"
+     RUN_OPSX_PROPOSE=true ;;
+  2) echo "ERROR: proposal copy failed — aborting" && exit 1 ;;
+esac
+```
+
+**If RUN_OPSX_PROPOSE is true**, run the `/opsx:propose` skill to create the change artifacts for this ticket.
 
 **Derive the change name:** `{ticket-id-lowercase}-{title-slug}` (e.g. `wil-42-upload-page-scroll`).
 

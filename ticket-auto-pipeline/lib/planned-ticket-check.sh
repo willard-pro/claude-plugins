@@ -83,14 +83,9 @@ check_planned_ticket_description() {
   local description="$1"
 
   # ── Block detection ───────────────────────────────────────────────────────
-  # Find the ## Planner Context block: everything after the heading until the
-  # next ## heading, end of file, or a horizontal rule.
+  # Find the ## Planner Context block via the canonical shared helper.
   local block
-  block=$(echo "$description" | awk '
-    /^## Planner Context[[:space:]]*$/ { found=1; next }
-    found && /^## / { exit }
-    found { print }
-  ')
+  block=$(_extract_planner_context_block "$description")
 
   if [ -z "$block" ]; then
     echo "planned-ticket-check: planned label present but no '## Planner Context' block found" >&2
@@ -198,6 +193,20 @@ check_planned_ticket_description() {
 }
 
 # ── Internal helpers ────────────────────────────────────────────────────────
+
+# _extract_planner_context_block <description>
+# Extracts the ## Planner Context block from a markdown description.
+# Canonical implementation — ALL consumers (appraise-fast-path.sh,
+# planner-artifacts.sh, planned-ticket-body-check.sh) MUST call this
+# single function. Changes to block-delimiter rules update ONE site.
+_extract_planner_context_block() {
+  local description="$1"
+  echo "$description" | awk '
+    /^## Planner Context[[:space:]]*$/ { found=1; next }
+    found && /^## / { exit }
+    found { print }
+  '
+}
 
 # _extract_field <field-name> — reads from stdin (the block), outputs value
 _extract_field() {

@@ -37,7 +37,7 @@ The `## Planner Context` block is a structured markdown section appended to Line
 | `Decision` | string | Yes | One-sentence summary of the key architectural or implementation decision. |
 | `Affected Services` | CSV | Yes | Comma-separated service names this ticket touches. Used by appraise to scope prescan routing. |
 | `Target Symbols` | semicolon-list | Yes | `symbol:file:line` references serving as investigation starting points. Example: `DebtCollector.collect:src/collector.ts:42; PaymentGateway.charge:src/gateway.ts:128` |
-| `Pre-approved` | boolean | Yes | `true` if planner declares this ticket skips human approval (must have Confidence ≥ 0.85). `false` otherwise. |
+| `Pre-approved` | boolean | Yes | `true` if planner declares this ticket is ready for accelerated appraisal (must have Confidence ≥ 0.85). Makes the ticket eligible for fast-path in ticket-appraise — skips full codebase investigation. Does NOT bypass the human approval gate; standard gate rules still apply. `false` otherwise. |
 | `Generated` | ISO 8601 | Yes | When the Planner Context was created or last regenerated. Example: `2026-07-07T18:00:00Z`. |
 | `Regenerate` | boolean | Yes | `true` if the planner recommends re-generating this ticket's plan. Used by feedback loop to flag stale plans. |
 
