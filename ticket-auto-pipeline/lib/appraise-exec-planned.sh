@@ -95,9 +95,12 @@ adopt_planner_proposal() {
     return 2
   }
 
-  # Log adoption (log_file must be under /tmp/ or a ticket workspace)
+  # Log adoption — validate log_file stays under /tmp/ (realpath, not regex)
   if [ -n "$log_file" ]; then
-    if ! [[ "$log_file" =~ ^(/tmp/|[./]?[A-Za-z0-9]) ]]; then
+    local resolved_log allowed_log_prefix
+    resolved_log=$(realpath -m "$log_file" 2>/dev/null) || true
+    allowed_log_prefix=$(realpath "/tmp/" 2>/dev/null) || true
+    if [ -z "$resolved_log" ] || [ -z "$allowed_log_prefix" ] || [[ "$resolved_log" != "$allowed_log_prefix"/* ]]; then
       echo "adopt_planner_proposal: log_file path rejected '$log_file'" >&2
       return 2
     fi
