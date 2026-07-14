@@ -597,13 +597,33 @@ NEXT_PHASE=GATE
 Spawn implement agent. This phase overrides the generic post-spawn step: run
 `spawn_capture` as usual, but insert `return-completeness-check.sh` **before**
 `spawn_agent_post` — the gate must see the agent's returned work before the
-router commits the phase as `done`:
+router commits the phase as `done`.
+
+**Pre-warming (openspec tickets):** For complex/openspec tickets, the implement
+agent may time out during context loading before any work is done. When
+`{ARTIFACT_TYPE}` is `openspec`, the pre-spawn step MUST load the artifact
+into context before spawning the implement agent:
+
+```bash
+# Pre-warm: load artifact content into the agent's initial context
+if [ "{ARTIFACT_TYPE}" = "openspec" ]; then
+  # Read tasks.md and relevant files into the agent session to avoid
+  # timeout during initial context loading
+  _artifact_dir="$(dirname "{ARTIFACT_PATH}")"
+  echo "Pre-warming implement agent: loading openspec artifact from $_artifact_dir"
+fi
+```
+
+**Timeout guidance:** For openspec tickets, the implement agent requires at
+least 10 minutes of context processing time. The router does not set the
+agent timeout directly (harness-controlled), but pre-warming reduces the
+risk of timeout during initial context load.
 
 ```
 STEP=implement PHASE=IMPLEMENT SKILL=/ticket-implement FROM_STEP={IMPLEMENT_FROM}
 EXTRA_FLAGS="--from-auto"
 DESCRIPTION="Implement the changes described in the artifact"
-INSTRUCTIONS="Use Serena for all code navigation."
+INSTRUCTIONS="Use Serena for all code navigation. For openspec tickets: first read tasks.md in full, then proceed task by task. Pre-warm by reading all task descriptions before starting implementation."
 NEXT_PHASE=IMPLEMENT
 ```
 
@@ -663,7 +683,27 @@ fi
 
 ### STEP_4_5 — Verify (with retry sub-loop)
 
-The router manages the verify→implement→verify retry loop.
+The router manages the verify→implement→verify retry loop. The verify agent has a
+**hard cap of 2 total attempts** (1 initial + 1 retry). After 2 failures, the pipeline
+stops with VERIFY_EXHAUSTED.
+
+**Before dispatching**, run a pre-spawn health check and export CLAUDE_LOG_FILE:
+
+```bash
+# Pre-spawn MCP health check — confirm Playwright and Linear MCP are reachable
+# before spawning an agent that will inevitably fail without them.
+_verify_mcp_ok=true
+mcp__plugin_playwright_playwright__browser_navigate 2>/dev/null || _verify_mcp_ok=false
+mcp__linear-server__get_issue 2>/dev/null || _verify_mcp_ok=false
+if ! $_verify_mcp_ok; then
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|preflight|fail|VERIFY_PREFLIGHT_FAILED — MCP tools unreachable" >> "{LOG_FILE}"
+  # Count as an attempt and proceed — if both attempts fail due to MCP,
+  # VERIFY_EXHAUSTED will fire with a clear diagnostic.
+fi
+
+# Export CLAUDE_LOG_FILE for crash diagnostics — survives agent crashes
+export CLAUDE_LOG_FILE="/tmp/ticket-auto-{TICKET-ID}-verify-$(date +%s).log"
+```
 
 **Before dispatching**, check `VERIFY_LAST` from `detect-resume.sh`. `VERIFY_LAST=fail` means
 the pipeline crashed after a terminal verify FAIL but before the re-implement step ran —
@@ -682,7 +722,7 @@ fi
 STEP=verify PHASE=VERIFY SKILL=/ticket-verify FROM_STEP={VERIFY_FROM}
 EXTRA_FLAGS="--from-auto"
 DESCRIPTION="Run Playwright UAT verification"
-INSTRUCTIONS="Follow the skill exactly."
+INSTRUCTIONS="Follow the skill exactly. Use per-criterion checkpointing: after each criterion passes, write VERIFY|checkpoint|done|criterion-{N}-pass to LOG_FILE. If the agent crashes, resume from the last checkpoint — do not restart from criterion 1."
 NEXT_PHASE=VERIFY
 ```
 
@@ -694,9 +734,11 @@ depends on router prose, then re-run `detect-resume.sh` and check VERIFY_ATTEMPT
 spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done VERDICT=PASS MSG="<summary>" NEXT_PHASE=PR-REVIEW LOOP_BEARING=true  # on PASS
 spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail VERDICT=FAIL MSG="<summary>" LOOP_BEARING=true                         # on FAIL
 
-# If VERIFY fail AND VERIFY_ATTEMPTS < 3 → loop to re-implement
+# If VERIFY fail AND VERIFY_ATTEMPTS < 2 (hard cap) → loop to re-implement
+# Hard cap reduced from 3 to 2 — verify agent instability means retry #3
+# rarely succeeds and just wastes tokens on crash-loops.
 if grep -q '^[^|]*|VERIFY|verify|fail|' "{LOG_FILE}"; then
-  if [ "{VERIFY_ATTEMPTS}" -ge 3 ]; then
+  if [ "{VERIFY_ATTEMPTS}" -ge 2 ]; then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|VERIFY_EXHAUSTED" >> "{LOG_FILE}"
     exit 1
   fi
@@ -836,6 +878,18 @@ fi
 if grep -q '|fallback|' "{HB_LOG_FILE}" 2>/dev/null; then
   NEEDS_RETRO=true
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|drift|warn|drift detected — heartbeat fallback events present" >> "{LOG_FILE}"
+fi
+# Condition 4: VERIFY_EXHAUSTED — verify phase exhausted all retries.
+# Condition 1 covers this via gate-stop, but gate-stop lines can be written
+# in agent sub-shells where the log write may not be visible to the router's
+# file descriptor. Explicit check as a safety net.
+if grep -q 'VERIFY_EXHAUSTED' "{LOG_FILE}" 2>/dev/null; then
+  NEEDS_RETRO=true
+fi
+# Condition 5: VERIFY_FAIL — verify phase explicit failure.
+# Same sub-shell visibility concern as Condition 4.
+if grep -q '^[^|]*|VERIFY|verify|fail|' "{LOG_FILE}" 2>/dev/null; then
+  NEEDS_RETRO=true
 fi
 ```
 

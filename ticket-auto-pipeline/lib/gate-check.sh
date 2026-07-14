@@ -117,9 +117,25 @@ _gate_entry() {
   fi
 
   # Check 2: Complexity-artifact coherence
-  if [ "$complexity" = "complex" ] && [ "$artifact_type" = "simple-fix" ]; then
-    _plog "$LOG_FILE" "META" "gate-stop" "fail" "COMPLEXITY_ARTIFACT_MISMATCH"
-    hb_gate "entry-gate" "fail" "complexity-artifact mismatch" "{\"complexity\":\"$complexity\",\"artifact\":\"$artifact_type\"}"
+  # Normalize both values to canonical forms before comparison:
+  #   simple / simple-fix → "simple"
+  #   complex / openspec  → "complex"
+  # This prevents false positives when complexity="simple" and artifact="simple-fix"
+  # (they are equivalent) and catches the reverse mismatch (simple + openspec).
+  local _norm_complexity _norm_artifact
+  case "$complexity" in
+    simple|simple-fix) _norm_complexity="simple" ;;
+    complex|openspec)  _norm_complexity="complex" ;;
+    *)                _norm_complexity="$complexity" ;;
+  esac
+  case "$artifact_type" in
+    simple-fix|simple) _norm_artifact="simple" ;;
+    openspec|complex)  _norm_artifact="complex" ;;
+    *)                _norm_artifact="$artifact_type" ;;
+  esac
+  if [ "$_norm_complexity" != "$_norm_artifact" ]; then
+    _plog "$LOG_FILE" "META" "gate-stop" "fail" "COMPLEXITY_ARTIFACT_MISMATCH — complexity=$complexity (normalized=$_norm_complexity) artifact=$artifact_type (normalized=$_norm_artifact)"
+    hb_gate "entry-gate" "fail" "complexity-artifact mismatch" "{\"complexity\":\"$complexity\",\"normalized_complexity\":\"$_norm_complexity\",\"artifact\":\"$artifact_type\",\"normalized_artifact\":\"$_norm_artifact\"}"
     return 2
   fi
 
@@ -187,9 +203,19 @@ _gate_entry() {
   # Check 2.5a: Zero-AC structural gate
   # A ticket with zero acceptance criteria has nothing to verify — hard stop.
   # Runs even without critique (reads context.md directly).
+  # When ac_count resolves empty (context.md missing or unreadable), default to
+  # blocking — a missing context.md is not a signal that ACs exist. This prevents
+  # the ZERO_AC→auto-approve inconsistency where the gate blocks on attempts 1-2
+  # but auto-approves on attempt 3 when context.md resolution silently fails.
   local ac_count
   ac_count=$(get_ac_count "$td" 2>/dev/null || echo "")
-  if [ -n "$ac_count" ] && [ "$ac_count" = "0" ]; then
+  if [ -z "$ac_count" ]; then
+    # context.md missing or unreadable — can't determine AC count
+    _plog "$LOG_FILE" "META" "gate-stop" "fail" "ZERO_AC — unable to determine acceptance criteria count (context.md missing or unreadable)"
+    hb_gate "entry-gate" "fail" "zero acceptance criteria — count unresolvable" "{\"ac_count\":\"unresolvable\"}"
+    return 2
+  fi
+  if [ "$ac_count" = "0" ]; then
     _plog "$LOG_FILE" "META" "gate-stop" "fail" "ZERO_AC — ticket has zero acceptance criteria; nothing verifiable exists"
     hb_gate "entry-gate" "fail" "zero acceptance criteria" "{\"ac_count\":\"0\"}"
     return 2
@@ -279,17 +305,46 @@ _gate_entry() {
       has_env_prereqs=$(grep -ciP '(seed[- ]?data|(test|data|environment|seed)\s+\w+\s+setup|setup\s+(test|data|seed)\s|prerequisite|before (testing|running)|database|migration|service.{0,10}start|data\.sql|fixture|test data)' "$artifact_path" 2>/dev/null || true)
     fi
 
-    # Count missing prerequisites
-    missing_count=0
-    [ "$has_test_user" = "0" ] && missing_count=$((missing_count + 1))
-    [ "$has_nav_path" = "0" ] && missing_count=$((missing_count + 1))
-    [ "$has_expected_behavior" = "0" ] && missing_count=$((missing_count + 1))
-    [ "$has_env_prereqs" = "0" ] && missing_count=$((missing_count + 1))
+    # Count missing prerequisites, adjusted for ticket type.
+    # API-only tickets (no browser nav patterns in artifact, no test user refs)
+    # only require expected_behavior + env_prereqs. Browser tickets require all 4.
+    # Detection: artifact contains no browser navigation patterns AND no test user
+    # references → treat as API-only.
+    local _is_api_only=false _required_count
+    if [ "${has_nav_path:-0}" = "0" ] && [ "${has_test_user:-0}" = "0" ]; then
+      # Neither nav paths nor test users found in artifact — check if it's
+      # a structural API-only plan (has expected behavior + env prereqs but
+      # zero browser signals across all grep patterns).
+      local _browser_signals
+      _browser_signals=$(grep -ciP '(navigate|go to|open|visit|click|browser|playwright|page\.|selector|screenshot|viewport)' "$artifact_path" 2>/dev/null || echo "0")
+      if [ "${_browser_signals//[^0-9]/}" = "0" ] 2>/dev/null; then
+        _is_api_only=true
+      fi
+    fi
 
-    # Hold if 2+ missing (INCOMPLETE threshold from appraise-exec Step 3.8)
-    if [ "$missing_count" -ge 2 ] 2>/dev/null; then
-      _plog "$LOG_FILE" "GATE" "gate" "fail" "held: plan missing $missing_count/4 verification prerequisites (test_user=$has_test_user nav=$has_nav_path expected=$has_expected_behavior env=$has_env_prereqs)"
-      hb_gate "entry-gate" "fail" "held: plan missing verification prerequisites" "{\"artifact\":\"$artifact_path\",\"missing\":\"$missing_count\",\"test_user\":\"$has_test_user\",\"nav\":\"$has_nav_path\",\"expected\":\"$has_expected_behavior\",\"env\":\"$has_env_prereqs\"}"
+    missing_count=0
+    _required_count=4
+    if $_is_api_only; then
+      # API-only: skip browser-specific prerequisites
+      _required_count=2
+      [ "$has_expected_behavior" = "0" ] && missing_count=$((missing_count + 1))
+      [ "$has_env_prereqs" = "0" ] && missing_count=$((missing_count + 1))
+    else
+      # Browser: all 4 required
+      [ "$has_test_user" = "0" ] && missing_count=$((missing_count + 1))
+      [ "$has_nav_path" = "0" ] && missing_count=$((missing_count + 1))
+      [ "$has_expected_behavior" = "0" ] && missing_count=$((missing_count + 1))
+      [ "$has_env_prereqs" = "0" ] && missing_count=$((missing_count + 1))
+    fi
+
+    # Hold if 2+ missing for browser tickets, or any missing for API-only
+    # (INCOMPLETE threshold from appraise-exec Step 3.8)
+    if { $_is_api_only && [ "$missing_count" -ge 1 ] 2>/dev/null; } || \
+       { ! $_is_api_only && [ "$missing_count" -ge 2 ] 2>/dev/null; }; then
+      local _ticket_mode="browser"
+      $_is_api_only && _ticket_mode="api-only"
+      _plog "$LOG_FILE" "GATE" "gate" "fail" "held: plan missing $missing_count/${_required_count} verification prerequisites (mode=$_ticket_mode test_user=$has_test_user nav=$has_nav_path expected=$has_expected_behavior env=$has_env_prereqs)"
+      hb_gate "entry-gate" "fail" "held: plan missing verification prerequisites" "{\"artifact\":\"$artifact_path\",\"missing\":\"$missing_count\",\"required\":\"$_required_count\",\"mode\":\"$_ticket_mode\",\"test_user\":\"$has_test_user\",\"nav\":\"$has_nav_path\",\"expected\":\"$has_expected_behavior\",\"env\":\"$has_env_prereqs\"}"
       return 1
     fi
 
@@ -388,8 +443,19 @@ _gate_entry() {
     return 1
   fi
 
-  # Check 4: Manual mode tickets are held
+  # Check 4: Manual mode tickets are held UNLESS already approved in Linear.
+  # If the ticket has the `approved` label AND is in `Ready` state, the human
+  # has already approved it — override the local autonomy setting and pass.
   if [ "$autonomy" = "manual" ]; then
+    local _live_json _live_state _live_approved
+    _live_json=$(get_issue "$TICKET_ID" 2>/dev/null || echo 'null')
+    _live_state=$(echo "$_live_json" | jq -r '.state.name // empty' 2>/dev/null || true)
+    _live_approved=$(echo "$_live_json" | jq -r '[.labels.nodes[]?.name? // empty | ascii_downcase] | index("approved") != null' 2>/dev/null || echo 'false')
+    if [ "$_live_state" = "Ready" ] && [ "$_live_approved" = "true" ]; then
+      _plog "$LOG_FILE" "GATE" "gate" "done" "manual mode overridden: approved label + Ready state confirmed in Linear"
+      hb_gate "entry-gate" "ok" "manual mode overridden by Linear approval" "{\"autonomy\":\"manual\",\"linear_state\":\"$_live_state\"}"
+      return 0
+    fi
     _plog "$LOG_FILE" "GATE" "gate" "fail" "held: manual mode"
     hb_gate "entry-gate" "fail" "held: manual mode" "{\"autonomy\":\"$autonomy\"}"
     return 1

@@ -420,6 +420,8 @@ Tell the user: `"Saved navigation hint for '{feature area}' to nav-hints.md for 
 
 ## Step 4b — Execute verification steps
 
+**Phase timeout:** The verify phase has a 30-minute wall-clock limit from this step. If 30 minutes elapse, checkpoint progress and emit a clean diagnostic — do not crash.
+
 With the browser now on the correct page, work through each remaining step in the Verification Plan sequentially. For **every step**:
 
 1. Perform the Playwright action (navigate, click, fill, select, etc.)
@@ -430,6 +432,13 @@ Capture after each step:
 - The snapshot YAML (accessibility tree)
 - The current URL
 - Any new console errors: `mcp__plugin_playwright_playwright__browser_console_messages`
+
+**Per-criterion checkpointing:** After EACH criterion passes, write a checkpoint entry to the pipeline log. On crash restart, the router reads the last checkpoint and the verify agent resumes from the NEXT criterion instead of restarting from criterion 1:
+
+```bash
+# After criterion N passes, write checkpoint:
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|checkpoint|done|criterion-{N}-pass" >> "$LOG_FILE"
+```
 
 At any point, if the observed result contradicts a pass criterion, mark that criterion **FAIL** and record:
 - The step number
@@ -650,6 +659,34 @@ rather than guessing.}
 ### 7c5 — Write REMEDIATION_BRIEF to plan artifact
 
 After emitting the brief in chat, persist it to the plan artifact so `ticket-implement` can read the structured remediation data (SUGGESTED_FIX, SNAPSHOT_EXCERPT, diagnostics, context files).
+
+### 7d — Post VERIFY_EXHAUSTED summary to Linear
+
+When the verify phase has exhausted its retries (2 attempts), post a structured failure summary to the Linear ticket. This is the final communication — no further retries will occur:
+
+```
+❌ Verify exhausted — {PASSED_N}/{TOTAL_N} criteria passed after 2 attempts
+
+**Passed criteria:**
+{list of passing criteria, or "none"}
+
+**Failed criteria:**
+{list of failing criteria with brief reason for each}
+
+**Last failure diagnostics:**
+- Failed at step: {N} — {description}
+- URL at failure: {url}
+- Console errors: {count or "none"}
+- Tested as: {user} on {env}
+- Date: {today}
+
+The REMEDIATION_BRIEF below contains structured fix guidance for /ticket-implement.
+```
+
+Post via the Linear access strategy (bash `save_comment` when `LINEAR_API_KEY` is set, MCP fallback otherwise). This ensures the ticket author knows:
+- Which criteria passed (so they don't need to re-test those)
+- Which criteria failed (so they know what to fix)
+- That no further automated retries will occur
 
 **Detect plan artifact** (same detection as `ticket-implement` Step 2):
 

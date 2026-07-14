@@ -114,6 +114,46 @@ if [ "${_MODE:-full}" = "validate" ]; then
   failures=0
 
   echo ""
+  say "check" "pre-flight infrastructure"
+
+  # Docker registry lock check
+  # cnb-local-registry uses jgit for config storage — stale lock files from
+  # crashed processes block env-start.sh. Check and auto-clean if stale (>1h).
+  _docker_jgit_lock=$(find / -path "*/cnb-local-registry/*/jgit/config.lock" -type f 2>/dev/null | head -1 || true)
+  if [ -n "$_docker_jgit_lock" ]; then
+    _lock_age=$(($(date +%s) - $(stat -c %Y "$_docker_jgit_lock" 2>/dev/null || echo 0)))
+    if [ "$_lock_age" -gt 3600 ]; then
+      rm -f "$_docker_jgit_lock" 2>/dev/null && pass "Docker jgit lock (stale, auto-cleaned)" || warn "Docker jgit lock (stale, could not auto-clean: $_docker_jgit_lock)"
+    else
+      warn "Docker jgit lock (active: ${_lock_age}s old — env-start may fail if this is stale)"
+    fi
+  else
+    pass "Docker jgit lock (none found)"
+  fi
+
+  # GitHub PAT scope validation (non-fatal: falls back to listing if API unreachable)
+  # Pipe the Authorization header via stdin to avoid exposing the token in
+  # /proc/*/cmdline (curl -H would leak it in process listings).
+  if [ -n "${GITHUB_PERSONAL_ACCESS_TOKEN:-}" ]; then
+    _pat_scopes=$(printf 'Authorization: token %s\r\n' "$GITHUB_PERSONAL_ACCESS_TOKEN" | curl -s -f -H @- https://api.github.com/user 2>/dev/null | grep -c '"login"' || echo "0")
+    if [ "${_pat_scopes:-0}" -gt 0 ]; then
+      # Check if PAT has repo scope — needed for PR creation
+      _repo_scope=$(printf 'Authorization: token %s\r\n' "$GITHUB_PERSONAL_ACCESS_TOKEN" | curl -s -I -H @- https://api.github.com/orgs/willard-pro/repos 2>/dev/null | head -1 | grep -c '200' || echo "0")
+      if [ "${_repo_scope:-0}" -gt 0 ]; then
+        pass "GitHub PAT (authenticated, repo scope confirmed)"
+      else
+        warn "GitHub PAT (authenticated but repo scope unconfirmed — PR creation may fail)"
+      fi
+    else
+      # PAT validation API call failed — token might still work, just can't verify
+      warn "GitHub PAT (scope validation unavailable — GitHub API unreachable or token is scoped)"
+    fi
+  else
+    fail "GITHUB_PERSONAL_ACCESS_TOKEN not set" "add to .claude/settings.local.json"
+    failures=$((failures + 1))
+  fi
+
+  echo ""
   say "check" "shell environment variables"
 
   # LINEAR_API_KEY
