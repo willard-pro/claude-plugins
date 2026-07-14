@@ -21,7 +21,7 @@
       "conditions": {
         "confidence_min": 0.85
       },
-      "description": "Set by planner when confidence >= 0.85. Bypasses human approval gate. Revoked by human-reject or re-claim triggers."
+      "description": "Set by planner when confidence >= 0.85. Accelerates ticket-appraise fast-path eligibility (skips full codebase investigation). Does NOT bypass the human approval gate — the standard gate rules (complex → human approved, simple+auto → auto-approve) still apply regardless of pre-approved."
     },
     "blocked-by:*": {
       "pattern": "blocked-by:*",
@@ -36,6 +36,36 @@
       "removed_by": [],
       "precondition": "issue_type_must_be_epic",
       "description": "Marks an initiative Epic as ready for fleet controller dispatch. Epic-only — flow.sh rejects if added to non-Epic issues."
+    },
+    "bug": {
+      "pattern": "bug",
+      "set_by": "planner",
+      "removed_by": [],
+      "description": "Type label — task is a bug fix. Set by planner at ticket creation. Never removed."
+    },
+    "feature": {
+      "pattern": "feature",
+      "set_by": "planner",
+      "removed_by": [],
+      "description": "Type label — task is a new feature. Set by planner at ticket creation. Never removed."
+    },
+    "improvement": {
+      "pattern": "improvement",
+      "set_by": "planner",
+      "removed_by": [],
+      "description": "Type label — task is an improvement to existing functionality. Set by planner at ticket creation. Never removed."
+    },
+    "security": {
+      "pattern": "security",
+      "set_by": "planner",
+      "removed_by": [],
+      "description": "Type label — task is a security fix or hardening. Set by planner at ticket creation. Never removed."
+    },
+    "chore": {
+      "pattern": "chore",
+      "set_by": "planner",
+      "removed_by": [],
+      "description": "Type label — task is a maintenance chore (dependency updates, refactoring, tooling). Set by planner at ticket creation. Never removed."
     }
   },
   "triggers": {

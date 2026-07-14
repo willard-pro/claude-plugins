@@ -108,7 +108,10 @@ REPOS_ROOT/.ticket-auto/
 | `prescan-verify.sh` | Deterministic post-scan content quality assertions. Checks every expected doc file exists, is non-empty, meets minimum line/heading counts, is not placeholder-only, and has required structure (security warning header, INDEX.md tables, services/ dir). Replaces inline LLM scaffold-verify. |
 | `return-completeness-check.sh` | Deterministic bash gate for implement-phase completion. Counts unchecked `- [ ]` boxes in tasks.md (openspec) or `## Completion Checklist` in simple-fix.md. Exit 0 complete, 1 incomplete, 2 error. Zero LLM tokens. |
 | `corrections-parse.sh` | `append_correction`, `get_corrections`, `get_corrections_by_source`. Atomic `.tmp`→`mv` append of CORRECTIONS blocks to notes.md. Parse with last-match-wins dedup. Torn-block tolerant. |
-| `planned-ticket-check.sh` | `check_planned_ticket`, `check_planned_ticket_description`. Deterministic bash validator for `## Planner Context` blocks in planned tickets. Exit 0 (valid), 1 (missing/malformed), 2 (low confidence + not pre-approved). Schema-Version tolerance for forward compatibility. |
+| `planned-ticket-check.sh` | `check_planned_ticket`, `check_planned_ticket_description`. Deterministic bash validator for `## Planner Context` blocks in planned tickets. Exit 0 (valid), 1 (missing/malformed), 2 (low confidence + not pre-approved). Schema-Version tolerance for forward compatibility. Also exports `_extract_planner_context_block` — canonical shared block parser. |
+| `template-select.sh` | `resolve_template <type>`. Deterministic type-to-template resolver. Maps `bug`/`feature`/`improvement`/`security`/`chore`/`refactor` (alias → improvement). Exit 3 on unknown/empty type — no silent fallback. Pure bash, zero LLM. |
+| `planner-artifacts.sh` | `resolve_planner_dir <TID>`, `has_planner_body <TID>`, `has_planner_proposal <TID>`. Resolves `$REPOS_ROOT/.ticket-auto/initiatives/{INIT}/tickets/{TID}/planner/` from the Planner Context block's Initiative field. Exit 0 present, 1 dir missing, 2 no Initiative. |
+| `planned-ticket-body-check.sh` | `check_planned_body <TID> <type>`. Validates ticket body has all required sections per type (universal: AC, Test User, Scope; bug: +Repro Steps, Test Data; feature/improvement: +Nav Path). Sets `BODY_CHECK_MISSING` and `BODY_CHECK_EXIT_CODE`. Plane body.md preferred over Linear description. |
 
 ## Personas
 
@@ -150,9 +153,14 @@ Defined in `planner_labels` section of `state-machine.json`. Set by ticket-plann
 |---|---|---|
 | `planned` | exact | Provenance marker. Once set, never removed. |
 | `INIT-*` | wildcard | Links ticket to initiative (e.g., `INIT-42`). Never removed. |
-| `pre-approved` | exact | Set when planner confidence ≥ 0.85. Removed by `human-reject` or `re-claim`. |
+| `pre-approved` | exact | Set when planner confidence ≥ 0.85. Accelerates ticket-appraise fast-path (skips full codebase investigation). Does NOT bypass human approval gate — standard gate rules still apply. Removed by `human-reject` or `re-claim`. |
 | `blocked-by:*` | wildcard | Dependency enforcement (e.g., `blocked-by:CRE-100`). Auto-removed when blocker reaches Done. |
 | `state:execution` | exact | Epic-only. Marks initiative as ready for fleet dispatch. flow.sh rejects non-Epic issues (exit 8). |
+| `bug` | exact | Type label — task is a bug fix. Set by planner at ticket creation. Never removed. Drives template selection and body validation. |
+| `feature` | exact | Type label — task is a new feature. Set by planner at ticket creation. Never removed. Drives template selection and body validation. |
+| `improvement` | exact | Type label — task is an improvement to existing functionality. Set by planner at ticket creation. Never removed. Drives template selection and body validation. |
+| `security` | exact | Type label — task is a security fix or hardening. Set by planner at ticket creation. Never removed. Drives template selection and body validation. |
+| `chore` | exact | Type label — task is a maintenance chore. Set by planner at ticket creation. Never removed. Drives template selection and body validation. |
 
 ### Planner Context block
 
@@ -180,7 +188,7 @@ Consumers: `skills/ticket-auto/dashboard.py` (dual-panel), `skills/ticket-overse
 - **Stateless routing**: Router reads all state from pipeline log via `detect-resume.sh` (direct bash invocation, not a Claude skill spawn). After every phase dispatch, router re-reads state. Zero in-memory state between dispatches.
 - **Complexity gating**: Simple tickets auto-approve in `auto`/`semi-auto` mode. Complex tickets always gate (require human `approved` label). `manual` mode gates everything.
 - **Phase context**: Before each agent spawn, orchestrator writes both a ctx file (`/tmp/ticket-auto-{ID}-ctx.txt`) and a spawn-meta file (`/tmp/ticket-auto-{ID}-spawn-meta.txt`). The token-tracker hook reads PHASE from the spawn-meta file (stable per-spawn snapshot) with fallback to the ctx file (legacy). The spawn-meta file persists until the next `spawn_agent_pre` call overwrites it — this avoids a race where the ctx file shows the next phase before the async SubagentStop hook fires.
-- **Safety gates**: 11 structural gate-stop codes (EXEC_NO_ARTIFACT, COMPLEXITY_ARTIFACT_MISMATCH, CRITIQUE_SCORE_MISSING, CRITIQUE_BLOCKED, CRITIQUE_SCORE_IMPLAUSIBLE, ZERO_AC, BUG_NO_REPRO, APPROVAL_REVOKED, VERIFY_EXHAUSTED, PR_REVIEW_VERDICT_UNPARSEABLE, PR_FEEDBACK_EXHAUSTED). Violations emit `|META|gate-stop|fail|<CODE>`.
+- **Safety gates**: 13 structural gate-stop codes (EXEC_NO_ARTIFACT, COMPLEXITY_ARTIFACT_MISMATCH, CRITIQUE_SCORE_MISSING, CRITIQUE_BLOCKED, CRITIQUE_SCORE_IMPLAUSIBLE, ZERO_AC, BUG_NO_REPRO, NO_TEMPLATE_FOR_TYPE, PLANNED_BODY_INCOMPLETE, APPROVAL_REVOKED, VERIFY_EXHAUSTED, PR_REVIEW_VERDICT_UNPARSEABLE, PR_FEEDBACK_EXHAUSTED). Violations emit `|META|gate-stop|fail|<CODE>`.
 - **Idempotency**: flow.sh computes desired end state from current + adds - removes. No change → exit 0 without mutation.
 
 ## Known sharp edges

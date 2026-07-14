@@ -152,7 +152,31 @@ Omit this section if there are none.}
 
 ### Step 3-Complex (complexity = complex)
 
-Run the `/opsx:propose` skill to create the change artifacts for this ticket.
+**Planner proposal reuse (planned tickets):** Before running `/opsx:propose`, check whether the ticket has a planner-authored proposal that can be adopted verbatim:
+
+```bash
+if [ -f ~/.claude/skills/lib/planner-artifacts.sh ]; then
+  source ~/.claude/skills/lib/planner-artifacts.sh
+  if has_planner_proposal "{TICKET-ID}" 2>/dev/null; then
+    PLANNER_PROPOSAL_DIR=$(resolve_planner_dir "{TICKET-ID}" 2>/dev/null)
+    echo "Reusing planner proposal from $PLANNER_PROPOSAL_DIR/proposal.md"
+    # Copy proposal to the openspec directory — adopt, don't re-derive
+    mkdir -p openspec/changes/{change-name}/
+    cp "$PLANNER_PROPOSAL_DIR/proposal.md" openspec/changes/{change-name}/proposal.md
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|create-artifact|done|openspec (planner proposal reused)" >> "$LOG_FILE"
+    # Skip to Step 3.4 — complexity-coherence gate still runs
+    echo "Planner proposal adopted — skipping /opsx:propose re-derivation"
+    # The existing complexity↔artifact coherence gate at Step 3.4 still applies unchanged
+  else
+    echo "No planner proposal found — running /opsx:propose to derive plan"
+    RUN_OPSX_PROPOSE=true
+  fi
+else
+  RUN_OPSX_PROPOSE=true
+fi
+```
+
+**If RUN_OPSX_PROPOSE is true**, run the `/opsx:propose` skill to create the change artifacts for this ticket.
 
 **Derive the change name:** `{ticket-id-lowercase}-{title-slug}` (e.g. `wil-42-upload-page-scroll`).
 

@@ -8,6 +8,8 @@ set -eo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}"
 source "$LIB_DIR/linear-api.sh"
+source "$LIB_DIR/planned-ticket-check.sh"
+source "$LIB_DIR/planner-artifacts.sh"
 
 usage() {
   echo "Usage: $0 <TICKET-ID>" >&2
@@ -99,6 +101,23 @@ TICKET_DIR="$PWD/$DIR_NAME"
 mkdir -p "$TICKET_DIR/artifacts" "$TICKET_DIR/attachments"
 touch "$TICKET_DIR/artifacts/.gitkeep" "$TICKET_DIR/attachments/.gitkeep"
 
+# ── Resolve planner body (planned tickets only) ──────────────────────────
+
+BODY_SOURCE="linear"
+PLANNER_BODY=""
+HAS_PLANNED_LABEL=$(echo "$ISSUE_JSON" | jq -r '[.labels.nodes[].name] | index("planned") != null')
+
+if [ "$HAS_PLANNED_LABEL" = "true" ]; then
+  # Check if planner/body.md exists on the artifact plane
+  PLANNER_DIR=$(resolve_planner_dir "$TICKET_ID" "$DESCRIPTION" "true" 2>/dev/null) || true
+  if [ -n "$PLANNER_DIR" ] && [ -f "$PLANNER_DIR/body.md" ]; then
+    PLANNER_BODY=$(cat "$PLANNER_DIR/body.md" 2>/dev/null || true)
+    if [ -n "$PLANNER_BODY" ]; then
+      BODY_SOURCE="planner"
+    fi
+  fi
+fi
+
 # ── Write context.md ────────────────────────────────────────────────────
 
 cat >"$TICKET_DIR/context.md" <<MDEOF
@@ -119,7 +138,7 @@ cat >"$TICKET_DIR/context.md" <<MDEOF
 
 ## Description
 
-${DESCRIPTION}
+$([ "$BODY_SOURCE" = "planner" ] && echo "${PLANNER_BODY}" || echo "${DESCRIPTION}")
 
 ---
 

@@ -237,16 +237,11 @@ generate_fast_path_notes() {
 
 # _extract_planner_block <description>
 # Extracts the ## Planner Context block into FAST_PATH_BLOCK.
-# NOTE: extraction logic must stay synchronized with planned-ticket-check.sh's
-# block detection in check_planned_ticket_description. Both use the same awk
-# pattern — changes to block-delimiter rules must update both sites.
+# Delegates to planned-ticket-check.sh's canonical _extract_planner_context_block
+# — the single source of truth for block-delimiter rules.
 _extract_planner_block() {
   local description="$1"
-  FAST_PATH_BLOCK=$(echo "$description" | awk '
-    /^## Planner Context[[:space:]]*$/ { found=1; next }
-    found && /^## / { exit }
-    found { print }
-  ')
+  FAST_PATH_BLOCK=$(_extract_planner_context_block "$description")
 }
 
 # _extract_field_from_block <field-name>
