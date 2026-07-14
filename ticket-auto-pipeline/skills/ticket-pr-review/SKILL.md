@@ -122,13 +122,17 @@ This produces the full set of changes introduced by the branch relative to its b
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|gitnexus-impact|start|Running detect_changes" >> "$LOG_FILE"
 
+**Pre-flight: GitNexus health check.** Before calling `detect_changes`, verify GitNexus MCP is reachable by calling `mcp__gitnexus__list_repos`. If the call fails or times out after 5 seconds, GitNexus is unavailable — skip to the fallback below. Log: `gitnexus-health|fail|unreachable` in the heartbeat.
+
 Call `mcp__gitnexus__detect_changes` with `scope: "compare"` and `base_ref: "{baseRefName}"`. This maps the full PR diff against the knowledge graph.
 
 **If results are returned:**
 - Record each affected execution flow with its risk level
-- If any flow has HIGH or CRITICAL risk, flag it prominently in the findings
+- **Constructor DI filter:** For each HIGH or CRITICAL risk flow, check if the change is limited to constructor parameter additions (new DI params, no logic changes). If so — downgrade risk to LOW. Constructor DI additions are structural, not behavioral — they add a new dependency parameter without changing call paths, control flow, or side effects. Log: `gitnexus-filter|info|constructor-DI downgrade: {flow-name} HIGH→LOW`
+- If any non-DI flow remains at HIGH or CRITICAL risk, flag it prominently in the findings
 
 **If zero results or GitNexus unavailable:**
+- Run pre-flight health check: `mcp__gitnexus__list_repos` (5s timeout). If unreachable, log: `gitnexus-health|fail|unreachable` in heartbeat.
 - Note that changed files have no indexed execution flows (shell scripts, config, docs — expected for some repos)
 - Log a warning and proceed — never block on GitNexus availability
 

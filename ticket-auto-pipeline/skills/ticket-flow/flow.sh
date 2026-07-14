@@ -131,9 +131,22 @@ CURRENT_STATE_NAME=$(echo "$ISSUE_JSON" | jq -r '.state.name // empty')
 # trigger's declared "from" field, but does NOT block the mutation. Ship
 # warn-only first, gather telemetry, then decide whether to hard-enforce.
 # If "from" is null or absent, the check is skipped entirely.
+# "from" can be a single string or an array of acceptable states.
 EXPECTED_FROM=$(echo "$def" | jq -r '.from // empty')
 if [ -n "$EXPECTED_FROM" ] && [ "$EXPECTED_FROM" != "null" ]; then
-  if [ "$CURRENT_STATE_NAME" != "$EXPECTED_FROM" ]; then
+  _from_match=false
+  # Check if "from" is an array — if so, any element matching current state is valid
+  if echo "$def" | jq -e '.from | type == "array"' >/dev/null 2>&1; then
+    if echo "$def" | jq -e --arg state "$CURRENT_STATE_NAME" '.from | index($state) != null' >/dev/null 2>&1; then
+      _from_match=true
+    fi
+  else
+    # Single string value
+    if [ "$CURRENT_STATE_NAME" = "$EXPECTED_FROM" ]; then
+      _from_match=true
+    fi
+  fi
+  if ! $_from_match; then
     _log "META|flow-warn|info|ILLEGAL_TRANSITION — ${TICKET_ID} attempted ${TRIGGER} from ${CURRENT_STATE_NAME}, expected from ${EXPECTED_FROM}"
     hb_gate "flow-warn" "warn" "ILLEGAL_TRANSITION" "{\"ticket\":\"${TICKET_ID}\",\"trigger\":\"${TRIGGER}\",\"actual\":\"${CURRENT_STATE_NAME}\",\"expected_from\":\"${EXPECTED_FROM}\"}"
   fi

@@ -70,7 +70,7 @@
   },
   "triggers": {
     "appraise-start": {
-      "from": "Backlog",
+      "from": ["Backlog", "Todo"],
       "to": "Todo",
       "adds": ["claimed", "{complexity}"],
       "removes": [],

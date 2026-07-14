@@ -76,10 +76,24 @@ _retry_classify() {
     return
   fi
 
-  # GraphQL-level transient messages. Match "429" anywhere in the body
-  # (Linear often returns 200 with rate-limit info in the payload), plus
-  # timeout/temporary keywords. Use rate[.]limit to avoid the unescaped
-  # dot matching any character.
+  # ── GraphQL error detection (run BEFORE transient keyword scan) ─────────────
+  # HTTP 200 with {"errors":[...]} is a terminal GraphQL error — NOT transient.
+  # Only rate-limit GraphQL errors qualify for retry. All other GraphQL-level
+  # errors (validation, auth, field-not-found, etc.) are permanent failures.
+  if echo "$body" | jq -e '.errors' >/dev/null 2>&1; then
+    # Check if the errors are specifically about rate limiting
+    if echo "$body" | jq -r '.errors[].message // ""' 2>/dev/null | grep -qiE '429|rate[.]limit'; then
+      echo "transient"
+      return
+    fi
+    # All other GraphQL errors are terminal — no retry
+    echo "permanent"
+    return
+  fi
+
+  # HTTP-level transient messages in the body (non-GraphQL-error responses).
+  # Rate-limit info embedded in a 200 response body, timeout/temporary keywords.
+  # Use rate[.]limit to avoid the unescaped dot matching any character.
   if echo "$body" | grep -qiE '429|rate[.]limit|timeout|temporar'; then
     echo "transient"
     return
@@ -165,21 +179,55 @@ linear_graphql() {
 
     # Empty-body guard: an HTTP 200 with no response body is a transient
     # read-after-write consistency gap — retry if attempts remain.
+    # Only retry when _retry_classify didn't already identify a terminal
+    # GraphQL error (checked above — this path only reached for non-error bodies).
     if [ -z "$resp" ] && [ "$attempt" -lt "$max_retries" ]; then
       echo "linear_graphql: empty response body (attempt $((attempt + 1))/$max_retries), retrying" >&2
       ((attempt++)) || true
       continue
     fi
 
-    # Check for GraphQL errors in the body
+    # Guard: validate resp is valid JSON before querying with jq.
+    # Malformed responses (HTML error pages, connection resets, etc.)
+    # surface here rather than producing cryptic jq parse errors.
+    if ! echo "$resp" | jq empty 2>/dev/null; then
+      echo "linear_graphql: response is not valid JSON (HTTP $http_code)" >&2
+      # If this was classified as permanent (terminal), error out immediately.
+      # Otherwise retry if attempts remain.
+      if [ "$class" = "permanent" ]; then
+        error_exit 10 "linear_api: non-JSON response (HTTP $http_code)"
+      elif [ "$attempt" -lt "$max_retries" ]; then
+        ((attempt++)) || true
+        continue
+      fi
+      error_exit 10 "linear_api: non-JSON response after retries (HTTP $http_code)"
+    fi
+
+    # Check for GraphQL errors in the body — terminal, surface the message
     if echo "$resp" | jq -e '.errors' >/dev/null 2>&1; then
-      echo "GraphQL error: $(echo "$resp" | jq -r '.errors[0].message // "unknown"')" >&2
-      error_exit 10 "linear_api: API request failed after retries"
+      local gql_msg
+      gql_msg=$(echo "$resp" | jq -r '.errors[0].message // "unknown"' 2>/dev/null || echo "unknown")
+      echo "GraphQL error: $gql_msg" >&2
+      error_exit 10 "linear_api: GraphQL error — $gql_msg"
     fi
 
     echo "$resp"
     return 0
   done
+}
+
+# ── jq type-guard helpers ────────────────────────────────────────────────────
+
+# Guard: ensure the JSON path exists and is the expected type before querying.
+# Usage: _jq_guard <json> <jq_filter> <expected_type>
+# Returns 0 if the path exists and matches the type, 1 otherwise.
+# expected_type: "array", "object", "string", "number", "boolean", "null"
+_jq_guard() {
+  local json="$1"
+  local filter="$2"
+  local expected_type="$3"
+  echo "$json" | jq -e --arg t "$expected_type" \
+    "($filter) != null and (($filter) | type == \$t)" >/dev/null 2>&1
 }
 
 # Fetch an issue with all relevant fields. Returns JSON on stdout.
@@ -192,6 +240,12 @@ get_issue() {
   }')
   local resp
   resp=$(linear_graphql "$query")
+  # Type guard: verify .data.issue exists before querying
+  if ! _jq_guard "$resp" ".data.issue" "object"; then
+    echo "get_issue: unexpected response shape — .data.issue missing or not an object" >&2
+    echo "null"
+    return 1
+  fi
   echo "$resp" | jq '.data.issue'
 }
 
@@ -205,6 +259,12 @@ get_comments() {
   }')
   local resp
   resp=$(linear_graphql "$query")
+  # Type guard: verify .data.issue.comments.nodes exists as array
+  if ! _jq_guard "$resp" ".data.issue.comments.nodes" "array"; then
+    # Graceful: may be empty (no comments) — return empty array
+    echo "[]"
+    return 0
+  fi
   echo "$resp" | jq '.data.issue.comments.nodes'
 }
 
@@ -231,6 +291,12 @@ get_team() {
   }')
   local resp
   resp=$(linear_graphql "$query")
+  # Type guard: verify .data.team exists before querying sub-fields
+  if ! _jq_guard "$resp" ".data.team" "object"; then
+    echo "get_team: unexpected response shape" >&2
+    echo '{"states":[],"labels":[]}'
+    return 1
+  fi
   echo "$resp" | jq '{states: .data.team.states.nodes, labels: .data.team.labels.nodes}'
 }
 
