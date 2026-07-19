@@ -190,6 +190,8 @@ TEAM_JSON=$(get_team "$TEAM_ID")
 # generations. Missing generation token on a fenced ticket → fail-closed.
 FENCE_ENFORCE="${FLEET_FENCE_ENFORCE:-true}"
 if [ "$FENCE_ENFORCE" = "true" ]; then
+  # Resolve state directory consistently with fleet-controller/lib/config.sh:
+  # FLEET_STATE_DIR if set (fleet controller writes fences there), else /tmp.
   _state_dir="${FLEET_STATE_DIR:-/tmp}"
   _fence_file="${_state_dir}/${TICKET_ID}-fence"
 

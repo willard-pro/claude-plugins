@@ -14,6 +14,30 @@ if ! declare -f _plog >/dev/null 2>&1; then
   [ -f "$_HB_LIB" ] && source "$_HB_LIB"
 fi
 
+# ── State-directory resolution ──────────────────────────────────────────────────
+# Resolve stop-file and progress-file paths from FLEET_STATE_DIR so the worker
+# watches the same directory the fleet controller writes to. Without this, the
+# worker watches /tmp while fleet-intervene.sh writes to the workspace — cooperative
+# kill never reaches the worker. Fall back to /tmp when FLEET_STATE_DIR is unset
+# (backward compatible with non-fleet-controller environments).
+# Usage: _worker_stop_file <type>
+#   type: pinger | watchdog
+_worker_state_dir() {
+  if [ -n "${FLEET_STATE_DIR:-}" ]; then
+    echo "$FLEET_STATE_DIR"
+  else
+    echo "/tmp"
+  fi
+}
+_worker_stop_file() {
+  local type="$1"
+  echo "$(_worker_state_dir)/ticket-auto-${TICKET_ID}-${type}-stop"
+}
+_worker_progress_file() {
+  local tid="${1:-${TICKET_ID:-}}"
+  echo "$(_worker_state_dir)/ticket-auto-${tid}-progress.txt"
+}
+
 # ── Diagnostic ERR trap ────────────────────────────────────────────────────────────
 # Logs crash location before exiting. Opt-in via SPAWN_DIAGNOSTICS=true to avoid
 # log noise in normal operation. When a pipeline crashes at an agent-spawn boundary,
@@ -202,8 +226,9 @@ spawn_agent_pre() {
   # cleanup (hb_pinger_stop, spawn_watchdog_stop). On the next phase, those
   # stale files would cause a false abort. Remove them first so only files
   # created AFTER this point (genuine fleet kills) trigger the guard.
-  local _pinger_stop="/tmp/ticket-auto-${TICKET_ID}-pinger-stop"
-  local _watchdog_stop="/tmp/ticket-auto-${TICKET_ID}-watchdog-stop"
+  local _pinger_stop _watchdog_stop
+  _pinger_stop=$(_worker_stop_file "pinger")
+  _watchdog_stop=$(_worker_stop_file "watchdog")
   rm -f "$_pinger_stop" "$_watchdog_stop"
   # Yield to widen the race-window guard enough for fleet controller signals
   # to land. The fleet controller polls every 30s — 1ms is invisible to
@@ -235,8 +260,9 @@ spawn_agent_pre() {
   local PINGER_PID=""
   local WATCHDOG_PID=""
   if [ -n "${HB_LOG_FILE:-}" ]; then
-    local pinger_stop="/tmp/ticket-auto-${TICKET_ID}-pinger-stop"
-    local watchdog_stop="/tmp/ticket-auto-${TICKET_ID}-watchdog-stop"
+    local pinger_stop watchdog_stop
+    pinger_stop=$(_worker_stop_file "pinger")
+    watchdog_stop=$(_worker_stop_file "watchdog")
     export HB_LOG_FILE="$HB_LOG_FILE"
     hb_heartbeat "orchestrator-waiting" "agent ${phase_lower} launched"
     hb_pinger_start "$pinger_stop"
@@ -251,7 +277,7 @@ spawn_agent_pre() {
 
     # 3b. Create empty agent progress file — agents write single-line status
     # updates here. The watchdog reads it each cycle for agent-progress heartbeats.
-    : >"/tmp/ticket-auto-${TICKET_ID}-progress.txt"
+    : >"$(_worker_progress_file)"
   fi
 
   # 4. Write cl_write handoff
@@ -393,13 +419,14 @@ spawn_agent_post() {
 
   # Stop watchdog and heartbeat pinger
   if [ -n "${HB_LOG_FILE:-}" ]; then
-    local watchdog_stop="/tmp/ticket-auto-${TICKET_ID}-watchdog-stop"
-    local pinger_stop="/tmp/ticket-auto-${TICKET_ID}-pinger-stop"
+    local watchdog_stop pinger_stop
+    watchdog_stop=$(_worker_stop_file "watchdog")
+    pinger_stop=$(_worker_stop_file "pinger")
     spawn_watchdog_stop "$watchdog_stop"
     hb_pinger_stop "$pinger_stop"
 
     # Truncate agent progress file — agent has returned
-    : >"/tmp/ticket-auto-${TICKET_ID}-progress.txt"
+    : >"$(_worker_progress_file)"
 
     # Reap background processes — wait for captured PIDs to prevent zombie accumulation.
     # Handles stale PIDs (process already exited): wait on dead PID returns immediately
@@ -562,7 +589,8 @@ spawn_watchdog_start() {
       hb_heartbeat "watchdog" "alive" "waiting for ${phase_label} agent" || true
       # Read agent progress file — if non-empty, emit as agent-progress heartbeat
       if [ -n "$ticket_id" ]; then
-        local prog_file="/tmp/ticket-auto-${ticket_id}-progress.txt"
+        local prog_file
+        prog_file=$(_worker_progress_file "$ticket_id")
         if [ -f "$prog_file" ] && [ -s "$prog_file" ]; then
           local prog_content
           prog_content=$(head -1 "$prog_file" 2>/dev/null || true)

@@ -22,6 +22,11 @@ _fleet_linear_query() {
 
 _DISPATCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Source config for state-directory resolver (used for queue path construction)
+if [ -f "$_DISPATCH_DIR/config.sh" ]; then
+  source "$_DISPATCH_DIR/config.sh"
+fi
+
 # Source linear-api.sh from canonical path (synced by ticket-auto-pipeline SessionStart hook)
 if ! declare -f get_issue >/dev/null 2>&1; then
   for _lp in "$HOME/.claude/skills/lib/linear-api.sh" "$_DISPATCH_DIR/../ticket-auto-pipeline/lib/linear-api.sh"; do
@@ -61,9 +66,8 @@ _active_pipeline_count() {
 fleet_dispatch_initiative() {
   local initiative_id="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
-  local instance_id="${FLEET_INSTANCE_ID:-default}"
-  local state_dir="${FLEET_STATE_DIR:-$workspace}"
-  local queue_file="${state_dir}/fleet-${instance_id}-spawn-queue.jsonl"
+  local queue_file
+  queue_file=$(_fleet_queue_file "$workspace")
   local max_concurrent="${FLEET_MAX_CONCURRENT:-3}"
   local dry_run="${FLEET_DRY_RUN:-false}"
 
@@ -206,18 +210,45 @@ fleet_dispatch_initiative() {
     if [ "$dry_run" = "true" ]; then
       echo "[DRY-RUN] would enqueue: ${entry}"
     else
-      # Serialize append under flock with same lock file as _spawn_queue_consume
-      # to prevent the mv-clobbers-append race.
+      # Bounded retry with backoff for queue append. A single flock timeout
+      # does not mean the queue is permanently unavailable — the monitor may
+      # be mid-rewrite. Retry with backoff; dead-letter entries that exhaust
+      # all attempts so nothing is silently lost.
       local lock_file="${queue_file}.lock"
       local lock_timeout="${FLEET_QUEUE_LOCK_TIMEOUT:-5}"
-      (
-        flock -w "$lock_timeout" 9 2>/dev/null || {
-          echo "  WARN: flock timeout enqueuing ${child_id}" >&2
-          exit 1
-        }
-        echo "$entry" >>"$queue_file"
-      ) 9>"$lock_file"
-      echo "  enqueued ${child_id} (priority=${priority})"
+      local max_retries="${FLEET_QUEUE_MAX_RETRIES:-3}"
+      local backoff_secs="${FLEET_QUEUE_RETRY_BACKOFF_SECS:-2}"
+      local attempt=0
+      local enqueued_ok=false
+
+      while [ "$attempt" -lt "$max_retries" ]; do
+        attempt=$((attempt + 1))
+        if (
+          flock -w "$lock_timeout" 9 2>/dev/null || exit 1
+          echo "$entry" >>"$queue_file"
+        ) 9>"$lock_file"; then
+          enqueued_ok=true
+          break
+        fi
+        if [ "$attempt" -lt "$max_retries" ]; then
+          sleep "$backoff_secs"
+          backoff_secs=$((backoff_secs * 2))
+        fi
+      done
+
+      if $enqueued_ok; then
+        echo "  enqueued ${child_id} (priority=${priority})"
+      else
+        # Dead-letter: write to a separate file so the entry is not lost.
+        # The dead-letter file is human-readable and replayable.
+        local dead_letter_file="${queue_file%.jsonl}-dead-letter.jsonl"
+        echo "  ERROR: failed to enqueue ${child_id} after ${max_retries} attempts — dead-lettering" >&2
+        echo "$entry" >>"$dead_letter_file"
+        echo "  dead-lettered ${child_id} → ${dead_letter_file}" >&2
+        # Do not count as enqueued; the dead-letter file must be manually
+        # replayed or the dispatch re-run.
+        continue
+      fi
     fi
     enqueued=$((enqueued + 1))
   done <<<"$sorted"

@@ -279,6 +279,50 @@ test_cycle_fallback_json_includes_fleet_wide_key() {
   [ "$has_fleet_wide" = "true" ]
 }
 
+# ── State-directory unification: path-consistency tests ────────────────────────
+# Verifies that the fleet controller writes stop-files, queue, registry, and
+# fence markers where consumers (worker, monitor, flow.sh) expect to find them.
+
+test_path_consistency_default_resolves_to_workspace() {
+  source "$LIB_DIR/config.sh"
+  local ws="/tmp/test-su-$$"
+  local stop_file
+  stop_file=$(_fleet_stop_file "WIL-66" "pinger" "$ws")
+  [[ "$stop_file" == "$ws/ticket-auto-WIL-66-pinger-stop" ]]
+}
+
+test_path_consistency_custom_state_dir() {
+  local custom="/tmp/test-custom-$$"
+  source "$LIB_DIR/config.sh"
+  local stop_file
+  FLEET_STATE_DIR="$custom" stop_file=$(_fleet_stop_file "WIL-66" "pinger" "./logs")
+  [[ "$stop_file" == "$custom/ticket-auto-WIL-66-pinger-stop" ]]
+}
+
+test_path_consistency_queue_file_uses_state_dir() {
+  local custom="/tmp/test-custom-$$"
+  source "$LIB_DIR/config.sh"
+  local queue_file
+  FLEET_STATE_DIR="$custom" queue_file=$(_fleet_queue_file "./logs")
+  [[ "$queue_file" == "$custom/fleet-default-spawn-queue.jsonl" ]]
+}
+
+test_path_consistency_fence_file_uses_state_dir() {
+  local custom="/tmp/test-custom-$$"
+  source "$LIB_DIR/config.sh"
+  local fence_file
+  FLEET_STATE_DIR="$custom" fence_file=$(_fleet_fence_file "WIL-66" "./logs")
+  [[ "$fence_file" == "$custom/WIL-66-fence" ]]
+}
+
+test_path_consistency_run_file_uses_state_dir() {
+  local custom="/tmp/test-custom-$$"
+  source "$LIB_DIR/config.sh"
+  local run_file
+  FLEET_STATE_DIR="$custom" run_file=$(_fleet_run_file "WIL-66" "./logs")
+  [[ "$run_file" == "$custom/WIL-66-run.json" ]]
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -300,7 +344,12 @@ for fn in \
   test_summary_emitted_when_changed \
   test_summary_forced_after_interval \
   test_summary_not_forced_before_interval \
-  test_cycle_fallback_json_includes_fleet_wide_key; do
+  test_cycle_fallback_json_includes_fleet_wide_key \
+  test_path_consistency_default_resolves_to_workspace \
+  test_path_consistency_custom_state_dir \
+  test_path_consistency_queue_file_uses_state_dir \
+  test_path_consistency_fence_file_uses_state_dir \
+  test_path_consistency_run_file_uses_state_dir; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done
