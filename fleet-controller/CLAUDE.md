@@ -25,13 +25,14 @@ fleet-controller/
 
 | File | Exports |
 |------|---------|
+| `config.sh` | Configuration defaults: `FLEET_STATE_DIR`, `FLEET_KILL_GRACE_SECS`, `FLEET_KILL_VERIFY`, `FLEET_FENCE_ENFORCE`, `FLEET_QUEUE_LOCK_TIMEOUT`. State-directory resolver: `_fleet_state_dir <workspace>`. |
 | `fleet-detect.sh` | 11 detection engines: `detect_phase_failures`, `detect_stalls`, `detect_zombies`, `detect_loops`, `detect_abandoned`, `detect_flow_failures`, `detect_auto_mode_blocks`, `detect_tool_errors`, `detect_planner_feedback`, `detect_blocked_by`, `detect_initiative_dispatch`. Aggregator: `fleet_detect_all` outputs JSON. Sourceable library — no `set -euo pipefail`. |
-| `fleet-intervene.sh` | Intervention executor: `fleet_kill_pipeline`, `fleet_can_restart`, `fleet_restart_pipeline`, `fleet_stop_background`. flow.sh mutex-aware, `FLEET_DRY_RUN` guard. |
-| `fleet-monitor.sh` | Monitor loop: `fleet_monitor_cycle` (one detection + intervention pass), `fleet_monitor_loop` (continuous polling with stop-file gating). Spawn queue consumption integrated. Dual-mode: interactive (ACTION:spawn-restart) or cron (JSONL queue). |
+| `fleet-intervene.sh` | Intervention executor: `fleet_kill_pipeline` (verified escalation with PID-reuse guard), `fleet_can_restart`, `fleet_restart_pipeline`, `fleet_stop_background`. flow.sh mutex-aware, `FLEET_DRY_RUN` guard. |
+| `fleet-monitor.sh` | Monitor loop: `fleet_monitor_cycle` (one detection + intervention pass), `fleet_monitor_loop` (continuous polling with stop-file gating). Spawn queue consumption integrated with `flock` serialization. Dual-mode: interactive (ACTION:spawn-restart) or cron (JSONL queue). |
+| `fleet-registry.sh` | Run registry + generation fence helpers: `registry_write`, `registry_read`, `registry_pid`, `registry_generation`, `registry_exists`, `registry_clear`, `fence_write`, `fence_read`, `fence_is_superseded`, `fence_clear`. Per-ticket JSON files; no shared-file races. |
 | `fleet-dashboard.sh` | Dashboard renderer: `fleet_render_dashboard` / `fleet_render_dashboard_from_data` (terminal health table) and `fleet_write_report` / `fleet_write_report_from_data` (markdown report). |
-| `fleet-dispatch.sh` | Planned-ticket dispatch. Reads initiative epics from Linear via `lib/linear-api.sh`, validates `state:execution`, resolves `blocked-by` dependencies, writes spawn queue JSONL. Respects `FLEET_MAX_CONCURRENT` and `FLEET_DRY_RUN`. |
-| `fleet-feedback.sh` | Feedback aggregation. Scans pipeline logs for `META|planner-feedback`, groups by `{initiative-id}`, computes confidence drift, writes `$REPOS_ROOT/.ticket-auto/initiatives/{ID}/feedback/{rundate}.json`. |
-
+| `fleet-dispatch.sh` | Planned-ticket dispatch. Reads initiative epics from Linear via `lib/linear-api.sh`, validates `state:execution`, resolves `blocked-by` dependencies, writes spawn queue JSONL with `generation` field. Serialized under `flock`. Respects `FLEET_MAX_CONCURRENT` and `FLEET_DRY_RUN`. |
+| `fleet-feedback.sh` | Feedback aggregation. Scans pipeline logs for `META\|planner-feedback`, groups by `{initiative-id}`, computes confidence drift, writes `$REPOS_ROOT/.ticket-auto/initiatives/{ID}/feedback/{rundate}.json`. |
 ### Canonical library sources (dependency bridge)
 
 Fleet controller depends on two libraries defined in `ticket-auto-pipeline/`:
@@ -72,7 +73,8 @@ These are sourced via `_source_if_missing` from `~/.claude/skills/lib/` (synced 
 - **Detection engines are sourceable library**: `fleet-detect.sh` exports functions as a sourceable bash library — no `-euo pipefail`. Callers source it and call individual detectors or the aggregator `fleet_detect_all`.
 - **Dispatch uses spawn queue file**: `fleet-dispatch.sh` writes to `/tmp/fleet-{instance}-spawn-queue.jsonl`. The monitor loop consumes the queue. Separation of concerns — dispatch identifies work, monitor executes it.
 - **Feedback writes to REPOS_ROOT, not Linear**: `fleet-feedback.sh` collects and structures data; agents act on it. The determinism boundary — fleet controller scripts are bash, Linear comment posting is an agent responsibility.
-- **Intervention respects flow.sh mutex**: Kill/restart operations check for flow.sh locks (`/tmp/ticket-flow-{ID}.lock`) before acting. `FLEET_DRY_RUN=true` makes all interventions no-op.
+- **Intervention respects flow.sh mutex**: Kill/restart operations check for flow.sh locks (`/tmp/ticket-flow-{ID}.lock`) before acting. `FLEET_DRY_RUN=true` makes all interventions no-op. Kill escalation is verified: stop-files → grace → SIGTERM → grace → SIGKILL → re-verify, with PID-reuse guard. Fence markers prevent superseded zombie mutations at flow.sh.
+- **Owned worker lifecycle**: Run registry (`{tid}-run.json`) records PID + generation at spawn. Generation fencing (`{tid}-fence`) blocks superseded workers at flow.sh (fleet-registry.sh). Per-ticket JSON files avoid shared-file write races. Durable state under workspace, not /tmp.
 - **Plugin manifest mimics ticket-auto-pipeline structure**: Same `.claude-plugin/plugin.json` conventions. No custom agent types — fleet controller doesn't spawn Claude agents.
 - **Dependency bridge**: Fleet controller sources `linear-api.sh` and `heartbeat.sh` from `~/.claude/skills/lib/` (synced by ticket-auto-pipeline's SessionStart hook). Does not maintain its own copies — uses the canonical sources.
 - **Detector output format preserved**: Existing 8 detectors produce byte-identical output after migration. New detectors follow same severity convention and pipe-delimited output format.
@@ -80,10 +82,10 @@ These are sourced via `_source_if_missing` from `~/.claude/skills/lib/` (synced 
 ## Determinism boundary
 
 All fleet controller operations are deterministic bash — no Claude agent involvement, no LLM reasoning. The determinism boundary is:
-- **Fleet controller side (bash)**: Detection, dispatch planning, feedback aggregation, stop-file touches, pipeline log finalization
+- **Fleet controller side (bash)**: Detection, dispatch planning, feedback aggregation, verified kill escalation (stop-files → SIGTERM → SIGKILL → fence), pipeline log finalization, run registry and fence marker writes
 - **Agent side (Claude)**: Actual ticket-auto pipeline execution, Linear comment posting (feedback acting), ticket appraisal/implementation/verification
 
-Fleet controller reads from pipeline logs and heartbeat logs; it never writes to them except for intervention markers (`META|fleet-intervention`, `META|outcome`) and stop-file touches. Dispatch writes to a separate spawn queue; feedback writes to a separate feedback directory.
+Fleet controller reads from pipeline logs and heartbeat logs; it never writes to them except for intervention markers, fence markers, and run registry entries (`META|fleet-intervention`, `META|outcome`) and stop-file touches. Dispatch writes to a separate spawn queue; feedback writes to a separate feedback directory.
 
 ## Configuration
 
@@ -91,6 +93,11 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `FLEET_STATE_DIR` | (workspace) | Directory for spawn queue, stop files, run registry, fence markers — survives reboot |
+| `FLEET_KILL_GRACE_SECS` | 10 | Wait for cooperative shutdown before SIGTERM |
+| `FLEET_KILL_VERIFY` | true | Fall back to stop-file-only kill when false |
+| `FLEET_FENCE_ENFORCE` | true | Enable generation fencing in flow.sh |
+| `FLEET_QUEUE_LOCK_TIMEOUT` | 5 | Spawn queue flock timeout in seconds |
 | `FLEET_POLL_INTERVAL` | 30 | Seconds between monitor cycles |
 | `FLEET_STALL_WARN_SECS` | 300 | Stale heartbeat threshold for WARN |
 | `FLEET_STALL_KILL_SECS` | 900 | Stale heartbeat threshold for KILL |

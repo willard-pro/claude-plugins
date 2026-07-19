@@ -29,7 +29,7 @@ Runs detection in a continuous loop via `fleet_monitor_loop`, rendering the dash
 ```
 
 - Polls every `FLEET_POLL_INTERVAL` seconds (default 30)
-- Checks for stop file `/tmp/fleet-{instance}-controller-stop` at the start of each cycle
+- Checks for stop file `${state_dir}/fleet-{instance}-controller-stop` at the start of each cycle
 - Respects `FLEET_DRY_RUN=true` — detection runs but interventions are logged, not executed
 - Consumes spawn queue entries when active pipeline count < `FLEET_MAX_CONCURRENT`
 - Exits cleanly when stop file is detected
@@ -64,7 +64,7 @@ Enqueue planned child tickets from an initiative epic for execution by the monit
 - Validates the epic has `state:execution` label
 - Finds child tickets with `planned` label + `Backlog` state
 - Resolves `blocked-by:{ID}` dependencies (skips blocked tickets)
-- Writes to spawn queue at `/tmp/fleet-{instance}-spawn-queue.jsonl`
+- Writes to spawn queue at `${state_dir}/fleet-{instance}-spawn-queue.jsonl` (workspace-relative, not `/tmp`)
 - Respects `FLEET_MAX_CONCURRENT` cap
 - Idempotent — re-running won't duplicate already-queued tickets
 
@@ -108,8 +108,8 @@ OBSERVE (sev=0) → WARN (sev=1) → KILL (sev=2) → KILL+RESTART (sev=3)
 
 - **OBSERVE**: Log detection results, no action
 - **WARN**: Write alert to dashboard, no destructive action
-- **KILL**: Touch stop files (`/tmp/ticket-auto-{ID}-pinger-stop`, `/tmp/ticket-auto-{ID}-watchdog-stop`), finalize pipeline log, write heartbeat audit
-- **KILL+RESTART**: Kill + spawn new `/ticket-auto {ID} --auto` agent (if `FLEET_AUTO_RESTART=true` and restart count < `FLEET_MAX_RESTARTS`)
+- **KILL**: Verified escalation — stop-files → grace period → `kill -0` → SIGTERM → grace → `kill -0` → SIGKILL → re-verify. Finalizes pipeline log ONLY after PID confirmed gone. Writes generation fence marker (`{tid}-fence`) to prevent superseded zombie mutations. When no registry PID exists, falls back to stop-file-only.
+- **KILL+RESTART**: Kill + spawn new `/ticket-auto {ID} --auto` agent (if `FLEET_AUTO_RESTART=true` and restart count < `FLEET_MAX_RESTARTS`). New spawn increments the run registry generation.
 
 ## Configuration
 
@@ -130,6 +130,11 @@ All settings in `lib/config.sh` with `${VAR:-default}` pattern:
 | `FLEET_MAX_CONCURRENT` | 3 | Max concurrent pipelines for dispatch |
 | `FLEET_INSTANCE_ID` | default | Namespace for stop files and spawn queues |
 | `FLEET_SUMMARY_INTERVAL_CYCLES` | 10 | Cycles between forced fleet-summary heartbeat emissions |
+| `FLEET_STATE_DIR` | (workspace) | Directory for spawn queue, stop files, run registry, fence markers |
+| `FLEET_KILL_GRACE_SECS` | 10 | Seconds to wait for cooperative shutdown before SIGTERM |
+| `FLEET_KILL_VERIFY` | true | When false, fall back to stop-file-only kill (pre-escalation compat) |
+| `FLEET_FENCE_ENFORCE` | true | When false, disable generation fencing in flow.sh |
+| `FLEET_QUEUE_LOCK_TIMEOUT` | 5 | Seconds to wait for spawn queue flock before skipping cycle |
 
 ## Implementation
 
@@ -177,8 +182,22 @@ For autonomous operation, schedule the fleet controller via cron:
 - **Terminal**: Health table with ticket ID, phase, stall time, severity, and anomalies
 - **File**: `logs/reports/fleet-dashboard.md` — markdown report with health table + alert details + diagnostic context
 - **Interventions**: Pipeline log entries (`META|fleet-intervention`, `META|outcome`) and heartbeat audit entries (`decision|fleet-kill|fired`, `decision|fleet-restart|fired`)
-- **Dispatch**: `/tmp/fleet-{instance}-spawn-queue.jsonl` — JSONL entries consumed by monitor loop
+- **Dispatch**: `{state_dir}/fleet-{instance}-spawn-queue.jsonl` — JSONL entries consumed by monitor loop (workspace-relative, survives reboot)
+- **Run registry**: `{state_dir}/{tid}-run.json` — per-ticket PID + generation ownership record
+- **Fence markers**: `{state_dir}/{tid}-fence` — generation fence preventing superseded zombie mutations
 - **Feedback**: `$REPOS_ROOT/.ticket-auto/initiatives/{ID}/feedback/{rundate}.json`
+
+## Owned Worker Lifecycle
+
+Fleet controller owns each spawned worker — the same invariant OTP/systemd/Kubernetes converged on: whoever starts a worker holds its handle and is the sole authority that can declare it dead.
+
+**Run registry** (`{tid}-run.json`): Written at spawn containing `tid`, `pid`, `generation` (monotonic, starts at 1, incremented per restart), `started_at`, `reason`. The single source of truth for "which process owns this ticket."
+
+**Verified kill escalation**: Stop-files → `FLEET_KILL_GRACE_SECS` (default 10) → `kill -0` → SIGTERM → grace → `kill -0` → SIGKILL → re-verify. `META|outcome` is written ONLY after PID confirmed gone. PID-reuse guard: process start-time corroboration before signalling prevents signalling a wrong process.
+
+**Generation fencing** (`{tid}-fence`): Kill writes a fence marker for the killed generation. `flow.sh` refuses Linear mutations from a superseded generation (`caller_gen <= fenced_gen`) — so even an un-killable zombie worker can only waste its own tokens, never corrupt Linear state. Gate behind `FLEET_FENCE_ENFORCE=true`.
+
+**Rollback**: Set `FLEET_KILL_VERIFY=false` for stop-file-only kill (pre-escalation behavior). Set `FLEET_FENCE_ENFORCE=false` to disable fencing.
 
 ## Related Skills
 

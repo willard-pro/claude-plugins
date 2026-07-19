@@ -178,7 +178,7 @@ test_fleet_kill_pipeline_normal() {
       exit 1
     }
     # Verify outcome entry written
-    grep -q "META|outcome|info|stopped: fleet-kill; test-kill" "./logs/CRE-47-pipeline.log" || {
+    grep -q "META|outcome|info|stopped: fleet-kill" "./logs/CRE-47-pipeline.log" || {
       echo "missing outcome entry" >&2
       exit 1
     }
@@ -203,6 +203,56 @@ test_fleet_kill_pipeline_dry_run_does_not_mutate() {
     local after_count
     after_count=$(wc -l <"./logs/CRE-47-pipeline.log")
     [ "$before_count" -eq "$after_count" ]
+  )
+  local rc=$?
+  rm -rf "$ws"
+  [ "$rc" -eq 0 ]
+}
+
+# ── _count_restarts regression tests ─────────────────────────────────────────────
+
+test_count_restarts_single_restart_counts_one() {
+  local ws
+  ws=$(_setup_workspace)
+  (
+    cd "$ws"
+    mkdir -p logs
+    _make_pipeline_log "./logs" "CRE-47"
+    # Add one fleet-restart + one fleet-restart-marker (the exact bug trigger)
+    echo "2026-06-02T10:05:00Z|META|fleet-restart|info|restart test-reason" >>"./logs/CRE-47-pipeline.log"
+    echo "2026-06-02T10:05:01Z|META|fleet-restart-marker|info|restart-intent test-reason" >>"./logs/CRE-47-pipeline.log"
+    source "$LIB_DIR/fleet-intervene.sh"
+    local count
+    count=$(_count_restarts "./logs/CRE-47-pipeline.log")
+    [ "$count" -eq 1 ] || {
+      echo "expected 1 restart, got $count" >&2
+      exit 1
+    }
+  )
+  local rc=$?
+  rm -rf "$ws"
+  [ "$rc" -eq 0 ]
+}
+
+test_fleet_can_restart_not_exhausted_after_single_restart() {
+  local ws
+  ws=$(_setup_workspace)
+  (
+    cd "$ws"
+    mkdir -p logs
+    _make_pipeline_log "./logs" "CRE-47"
+    # One fleet-restart + companion marker (should count as 1, not 2)
+    echo "2026-06-02T10:05:00Z|META|fleet-restart|info|restart test-reason" >>"./logs/CRE-47-pipeline.log"
+    echo "2026-06-02T10:05:01Z|META|fleet-restart-marker|info|restart-intent test-reason" >>"./logs/CRE-47-pipeline.log"
+    source "$LIB_DIR/fleet-intervene.sh"
+    export FLEET_AUTO_RESTART=true
+    export FLEET_MAX_RESTARTS=2
+    if fleet_can_restart "CRE-47" "./logs" 2>/dev/null; then
+      true # should be eligible
+    else
+      echo "cap should NOT be reached after 1 restart with MAX=2" >&2
+      exit 1
+    fi
   )
   local rc=$?
   rm -rf "$ws"
@@ -286,6 +336,8 @@ for fn in \
   test_fleet_kill_pipeline_nonexistent_ticket \
   test_fleet_kill_pipeline_normal \
   test_fleet_kill_pipeline_dry_run_does_not_mutate \
+  test_count_restarts_single_restart_counts_one \
+  test_fleet_can_restart_not_exhausted_after_single_restart \
   test_fleet_restart_pipeline_no_restart_eligible_stdout \
   test_fleet_restart_pipeline_writes_restart_marker \
   test_fleet_restart_pipeline_auto_restart_off_returns_1; do

@@ -62,7 +62,8 @@ fleet_dispatch_initiative() {
   local initiative_id="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local instance_id="${FLEET_INSTANCE_ID:-default}"
-  local queue_file="/tmp/fleet-${instance_id}-spawn-queue.jsonl"
+  local state_dir="${FLEET_STATE_DIR:-$workspace}"
+  local queue_file="${state_dir}/fleet-${instance_id}-spawn-queue.jsonl"
   local max_concurrent="${FLEET_MAX_CONCURRENT:-3}"
   local dry_run="${FLEET_DRY_RUN:-false}"
 
@@ -198,13 +199,24 @@ fleet_dispatch_initiative() {
       --arg reason "planned-dispatch from ${initiative_id}" \
       --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
       --argjson restarts 0 \
+      --argjson generation 1 \
       --arg dispatch_type "initial" \
-      '{tid: $tid, reason: $reason, timestamp: $timestamp, restarts: $restarts, dispatch_type: $dispatch_type}')
+      '{tid: $tid, reason: $reason, timestamp: $timestamp, restarts: $restarts, dispatch_type: $dispatch_type, generation: $generation}')
 
     if [ "$dry_run" = "true" ]; then
       echo "[DRY-RUN] would enqueue: ${entry}"
     else
-      echo "$entry" >>"$queue_file"
+      # Serialize append under flock with same lock file as _spawn_queue_consume
+      # to prevent the mv-clobbers-append race.
+      local lock_file="${queue_file}.lock"
+      local lock_timeout="${FLEET_QUEUE_LOCK_TIMEOUT:-5}"
+      (
+        flock -w "$lock_timeout" 9 2>/dev/null || {
+          echo "  WARN: flock timeout enqueuing ${child_id}" >&2
+          exit 1
+        }
+        echo "$entry" >>"$queue_file"
+      ) 9>"$lock_file"
       echo "  enqueued ${child_id} (priority=${priority})"
     fi
     enqueued=$((enqueued + 1))

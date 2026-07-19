@@ -1,6 +1,6 @@
 {
   "name": "fleet-controller",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Parent orchestrator above ticket-planner and ticket-auto — dispatches planned tickets, monitors pipeline health, aggregates execution feedback. Bash-only detection + intervention; no Claude agents.",
   "author": {
     "name": "John Willard"
