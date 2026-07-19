@@ -30,6 +30,23 @@ Parent orchestrator above ticket-planner and ticket-auto. Dispatches planned tic
 2. **Owned worker lifecycle**: Whoever starts a worker holds its handle and is the sole authority that can declare it dead (OTP/systemd/Kubernetes pattern).
 3. **Single chokepoint**: All Linear mutations flow through `flow.sh`. The generation fence guard lives there, so one check covers every mutation.
 4. **Durable state**: Spawn queue, stop files, run registry, and fence markers live under the workspace — a host reboot does not silently drop queued dispatches or in-flight decisions.
+5. **Supervisor ownership**: The `fleetd` daemon is the single parent of every worker it spawns. Real PIDs replace sentinel zeros. Kill escalation signals process groups, not individual processes. Crash recovery verifies PID ownership via `/proc/<pid>/stat` start time before adoption.
+
+### fleetd supervisor daemon
+
+`fleetd` (`fleet-controller/fleetd/`) is the long-lived actuator that replaces cron-based fleet invocation. Bash detection engines are unchanged — fleetd invokes them as subprocesses.
+
+**Process model**: `fork()` + `exec()` with `os.setpgid(0, 0)` for process-group isolation. The self-pipe trick handles `SIGCHLD` → `waitpid` reaping without async-signal-unsafe operations in the signal handler.
+
+**Kill escalation**: Cooperative stop (stop files) → grace → `SIGTERM` to process group → grace → `SIGKILL` to process group, with zombie-aware liveness checks (`waitpid` before `kill -0`).
+
+**Crash recovery**: On restart, reads registry entries, verifies PID ownership via `starttime` from `/proc/<pid>/stat` compared against registry `started_at`, and adopts verified survivors into degraded supervision (polling-based exit detection instead of reaping).
+
+**Health API**: `GET http://127.0.0.1:21001/health` — returns live workers with PIDs and phases, queue depth, last cycle timestamp and success/failure, cycle count, and detection summary.
+
+**Generation fencing**: The supervisor assigns generations at spawn (`max(prior_gen, fenced_gen) + 1`), writes fence markers on kill, and `flow.sh` enforces the fence — a worker with `generation <= fenced_generation` cannot mutate Linear state.
+
+**CLI bridge**: The `/fleet-controller` skill writes to `{state_dir}/kill-requests/{tid}.json`; fleetd processes requests and writes result files. No dual authority for process signalling.
 
 ## Detection Engines (11 total)
 

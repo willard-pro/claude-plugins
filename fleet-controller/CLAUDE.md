@@ -14,8 +14,25 @@ fleet-controller/
   skills/fleet-controller/        # Single skill: /fleet-controller
   lib/                            # Shared bash libraries
   lib/tests/                      # Test suites
+  fleetd/                         # Python 3 supervisor daemon (stdlib-only)
   docs/                           # Architecture and reference docs
 ```
+
+## fleetd supervisor daemon
+
+`fleetd` is a long-lived Python 3 daemon that owns worker process lifecycle. It replaces cron-based fleet invocation for spawn and kill operations. Detection engines remain in bash; fleetd invokes them as subprocesses.
+
+**Key properties:**
+- **Real PIDs**: Every worker's registry PID is the PID of a process fleetd forked. No sentinel zeros.
+- **Single-instance**: `fcntl.flock` on a pidfile; kernel releases on death.
+- **Kill escalation**: Cooperative stop → SIGTERM → SIGKILL, signalling the process group.
+- **Crash recovery**: On restart, verifies surviving PIDs via `/proc/<pid>/stat` start time before adoption.
+- **Generation fencing**: Supervisor assigns generations above any fenced predecessor.
+- **CLI alignment**: The `/fleet-controller` skill writes kill requests to `{state_dir}/kill-requests/`; fleetd processes them.
+
+**Invocation:** `python -m fleet-controller.fleetd [--port PORT] [--state-dir DIR]`
+
+**Gating:** Set `FLEETD_SPAWN_ENABLED=1` to enable worker spawning. Default is observe-only (detection + health API, no spawns).
 
 ## Skill
 

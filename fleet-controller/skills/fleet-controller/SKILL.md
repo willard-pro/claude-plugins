@@ -167,15 +167,30 @@ fleet_aggregate_feedback
 
 ## Scheduling (Recommended)
 
-For autonomous operation, schedule the fleet controller via cron:
+For autonomous operation, run fleetd as a persistent daemon:
 
 ```
-# Status check every 10 minutes
-*/10 * * * * cd /path/to/workspace && /fleet-controller status
-
-# Or continuous monitor via a cron-triggered agent loop
-# (monitor mode exits on stop file, so cron restarts it if it dies)
+FLEETD_SPAWN_ENABLED=1 python -m fleet-controller.fleetd --state-dir /path/to/workspace
 ```
+
+fleetd replaces cron-based fleet invocation. It runs detection cycles on a configurable interval (default 30s), consumes the spawn queue, spawns workers with real PIDs, reaps exits, and serves a health API on `http://127.0.0.1:21001/health`.
+
+### Migration from cron
+
+| Cron-based | fleetd-based |
+|-----------|-------------|
+| `cron` invokes `fleet_monitor_loop` | fleetd runs continuously |
+| `ACTION:spawn-auto` stdout lines (unconsumed) | fleetd forks `claude` directly |
+| PID=0 sentinel in registry | Real PIDs |
+| Kill escalation unreachable (no PID to signal) | Full escalation with process-group signalling |
+| No health endpoint | `GET /health` returns live workers, queue depth, cycle status |
+
+### CLI with fleetd running
+
+When fleetd is running, the `/fleet-controller` skill operates through shared state:
+- **dispatch**: Writes to spawn queue JSONL → fleetd consumes on next cycle
+- **intervene/kill**: Writes to `{state_dir}/kill-requests/{tid}.json` → fleetd processes and writes result
+- **status**: Queries fleetd health API (`GET /health`) for live worker set instead of running `fleet_detect_all` directly
 
 ## Output
 
