@@ -190,10 +190,30 @@ TEAM_JSON=$(get_team "$TEAM_ID")
 # generations. Missing generation token on a fenced ticket → fail-closed.
 FENCE_ENFORCE="${FLEET_FENCE_ENFORCE:-true}"
 if [ "$FENCE_ENFORCE" = "true" ]; then
-  # Resolve state directory consistently with fleet-controller/lib/config.sh:
-  # FLEET_STATE_DIR if set (fleet controller writes fences there), else /tmp.
-  _state_dir="${FLEET_STATE_DIR:-/tmp}"
-  _fence_file="${_state_dir}/${TICKET_ID}-fence"
+  # Discover and source config.sh for _fleet_fence_file constructor.
+  # Look relative to this script (monorepo), then installed plugin paths.
+  _flow_config_sh=""
+  for _cand in \
+    "$SCRIPT_DIR/../../../fleet-controller/lib/config.sh" \
+    "$HOME/.claude/skills/fleet-controller/lib/config.sh" \
+    "$HOME/.claude/plugins/fleet-controller/lib/config.sh"; do
+    [ -f "$_cand" ] && {
+      _flow_config_sh="$_cand"
+      break
+    }
+  done
+  if [ -n "$_flow_config_sh" ]; then
+    source "$_flow_config_sh"
+    _fence_file=$(_fleet_fence_file "$TICKET_ID" "${FLEET_STATE_DIR:-./logs}")
+  else
+    # Fallback: match config.sh resolution logic — FLEET_STATE_DIR takes
+    # precedence, workspace-derived path second, /tmp last (backward compat).
+    if [ -n "${FLEET_STATE_DIR:-}" ]; then
+      _fence_file="${FLEET_STATE_DIR}/${TICKET_ID}-fence"
+    else
+      _fence_file="/tmp/${TICKET_ID}-fence"
+    fi
+  fi
 
   if [ -f "$_fence_file" ]; then
     _fenced_gen=$(jq -r '.fenced_generation // 0' "$_fence_file" 2>/dev/null || echo "0")

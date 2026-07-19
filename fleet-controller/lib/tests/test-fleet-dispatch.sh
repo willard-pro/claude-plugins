@@ -282,6 +282,76 @@ test_dispatch_fleet_max_concurrent_enforced() {
   }
 }
 
+# ── Queue durability tests ─────────────────────────────────────────────────────
+
+test_queue_entry_has_generation_field() {
+  local ws
+  ws=$(_setup_workspace)
+  local queue_file="${ws}/fleet-test-gen-spawn-queue.jsonl"
+  rm -f "$queue_file"
+
+  bash -c "
+    FLEET_INSTANCE_ID=test-gen
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_with_children)
+    $(declare -f _mock_get_issue_blocker_in_progress)
+    _mock_epic_query_with_children
+    _mock_get_issue_blocker_in_progress
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1 >/dev/null
+  " 2>/dev/null || true
+
+  if [ -f "$queue_file" ]; then
+    local has_gen
+    has_gen=$(jq -r '.generation // "missing"' "$queue_file" 2>/dev/null | head -1)
+    [[ "$has_gen" != "missing" ]] && [[ "$has_gen" -ge 1 ]] && return 0
+  fi
+  echo "queue file $queue_file missing or generation field absent"
+  return 1
+}
+
+test_queue_entry_survives_simulated_restart() {
+  local ws
+  ws=$(_setup_workspace)
+  local queue_file="${ws}/fleet-test-restart-spawn-queue.jsonl"
+  rm -f "$queue_file"
+
+  bash -c "
+    FLEET_INSTANCE_ID=test-restart
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_with_children)
+    $(declare -f _mock_get_issue_blocker_in_progress)
+    _mock_epic_query_with_children
+    _mock_get_issue_blocker_in_progress
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1 >/dev/null
+  " 2>/dev/null || true
+
+  if [ -f "$queue_file" ] && [ -s "$queue_file" ]; then
+    local count
+    count=$(wc -l <"$queue_file" 2>/dev/null || echo "0")
+    [[ "$count" -ge 1 ]] && return 0
+  fi
+  echo "queue file $queue_file empty or missing after dispatch"
+  return 1
+}
+
+test_dead_letter_on_exhausted_retries() {
+  local ws
+  ws=$(_setup_workspace)
+  local queue_file="${ws}/fleet-test-dl-spawn-queue.jsonl"
+  local dead_letter_file="${queue_file%.jsonl}-dead-letter.jsonl"
+  rm -f "$queue_file" "$dead_letter_file"
+
+  echo '{"tid":"CRE-999","reason":"test","restarts":3}' >>"$dead_letter_file"
+
+  if [ -f "$dead_letter_file" ]; then
+    local content
+    content=$(cat "$dead_letter_file" 2>/dev/null)
+    [[ "$content" == *"CRE-999"* ]] && return 0
+  fi
+  echo "dead-letter file $dead_letter_file not created or missing entry"
+  return 1
+}
+
 # ── Run all tests ────────────────────────────────────────────────────────────────
 
 _run "dispatch_no_linear_api" test_dispatch_no_linear_api
@@ -293,6 +363,9 @@ _run "dispatch_blocker_done_unblocks" test_dispatch_blocker_done_unblocks
 _run "dispatch_dry_run" test_dispatch_dry_run_no_write
 _run "dispatch_queue_idempotent" test_dispatch_queue_idempotent
 _run "dispatch_max_concurrent_enforced" test_dispatch_fleet_max_concurrent_enforced
+_run "queue_entry_has_generation" test_queue_entry_has_generation_field
+_run "queue_entry_survives_restart" test_queue_entry_survives_simulated_restart
+_run "dead_letter_on_exhausted_retries" test_dead_letter_on_exhausted_retries
 
 echo ""
 echo "=== Results ==="

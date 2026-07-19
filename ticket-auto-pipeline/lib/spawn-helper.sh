@@ -15,13 +15,34 @@ if ! declare -f _plog >/dev/null 2>&1; then
 fi
 
 # ── State-directory resolution ──────────────────────────────────────────────────
-# Resolve stop-file and progress-file paths from FLEET_STATE_DIR so the worker
-# watches the same directory the fleet controller writes to. Without this, the
-# worker watches /tmp while fleet-intervene.sh writes to the workspace — cooperative
-# kill never reaches the worker. Fall back to /tmp when FLEET_STATE_DIR is unset
-# (backward compatible with non-fleet-controller environments).
+# Resolve stop-file and progress-file paths consistently with
+# fleet-controller/lib/config.sh so the worker watches the same directory the
+# fleet controller writes to. Without this, the worker watches /tmp while
+# fleet-intervene.sh writes to the workspace — cooperative kill never reaches
+# the worker.
+#
+# Discovery order:
+#   1. FLEET_STATE_DIR env var — explicit override, always wins
+#   2. config.sh constructors — when fleet-controller is co-installed
+#   3. /tmp — backward compatible with non-fleet-controller environments
+#
 # Usage: _worker_stop_file <type>
 #   type: pinger | watchdog
+
+# Discover and source config.sh for _fleet_stop_file constructor.
+# Look relative to this script (monorepo), then installed plugin paths.
+_worker_config_sh=""
+for _w_cand in \
+  "$(dirname "${BASH_SOURCE[0]}")/../../fleet-controller/lib/config.sh" \
+  "$HOME/.claude/skills/fleet-controller/lib/config.sh" \
+  "$HOME/.claude/plugins/fleet-controller/lib/config.sh"; do
+  [ -f "$_w_cand" ] && {
+    source "$_w_cand"
+    _worker_config_sh="$_w_cand"
+    break
+  }
+done
+
 _worker_state_dir() {
   if [ -n "${FLEET_STATE_DIR:-}" ]; then
     echo "$FLEET_STATE_DIR"
@@ -31,7 +52,14 @@ _worker_state_dir() {
 }
 _worker_stop_file() {
   local type="$1"
-  echo "$(_worker_state_dir)/ticket-auto-${TICKET_ID}-${type}-stop"
+  # When FLEET_STATE_DIR is explicitly set AND config.sh is available,
+  # use the canonical _fleet_stop_file constructor so the worker watches
+  # the exact same path the fleet controller writes to.
+  if [ -n "${FLEET_STATE_DIR:-}" ] && [ -n "$_worker_config_sh" ] && declare -f _fleet_stop_file >/dev/null 2>&1; then
+    _fleet_stop_file "$TICKET_ID" "$type" "${FLEET_PIPELINE_LOG_DIR:-./logs}"
+  else
+    echo "$(_worker_state_dir)/ticket-auto-${TICKET_ID}-${type}-stop"
+  fi
 }
 _worker_progress_file() {
   local tid="${1:-${TICKET_ID:-}}"
