@@ -232,7 +232,14 @@ fleet_dispatch_initiative() {
         fi
         if [ "$attempt" -lt "$max_retries" ]; then
           sleep "$backoff_secs"
-          backoff_secs=$((backoff_secs * 2))
+          # Use bc for multiplication to support fractional backoff values
+          # (bash $(( )) is integer-only). Fall back to integer arithmetic if
+          # bc is unavailable in a stripped environment.
+          if command -v bc >/dev/null 2>&1; then
+            backoff_secs=$(echo "$backoff_secs * 2" | bc)
+          else
+            backoff_secs=$((backoff_secs * 2))
+          fi
         fi
       done
 

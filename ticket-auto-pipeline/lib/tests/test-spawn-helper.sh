@@ -924,34 +924,49 @@ METAEOF
 test_f10_guard_clears_stale_stop_files_from_prior_phase() {
   local tmpdir
   tmpdir=$(mktemp -d)
-  # Simulate a prior phase: create both pinger and watchdog stop files
-  touch "/tmp/ticket-auto-TEST-F10A-pinger-stop"
-  touch "/tmp/ticket-auto-TEST-F10A-watchdog-stop"
   (
+    export FLEET_STATE_DIR="$tmpdir"
     source "$LIB_DIR/spawn-helper.sh"
+    TICKET_ID=TEST-F10A
+    # Use the resolver to get the correct paths — _worker_stop_file now
+    # delegates to config.sh constructors, so paths may not be /tmp.
+    local pinger_stop watchdog_stop
+    pinger_stop=$(_worker_stop_file "pinger")
+    watchdog_stop=$(_worker_stop_file "watchdog")
+    mkdir -p "$(dirname "$pinger_stop")"
+    # Simulate prior phase: create both stop files at the resolved paths
+    touch "$pinger_stop" "$watchdog_stop"
     # The guard should rm -f both stale files and succeed
     spawn_agent_pre PHASE=TEST STEP=f10-clear TICKET_ID=TEST-F10A \
       SKILL=/ticket-test HB_LOG_FILE="$tmpdir/hb.log" >/dev/null 2>&1
+    # Verify stale files were removed
+    [ ! -f "$pinger_stop" ] || exit 1
+    [ ! -f "$watchdog_stop" ] || exit 1
   )
   local rc=$?
-  # Verify stale files were removed
-  [ ! -f "/tmp/ticket-auto-TEST-F10A-pinger-stop" ] && local cleared_pinger=1 || local cleared_pinger=0
-  [ ! -f "/tmp/ticket-auto-TEST-F10A-watchdog-stop" ] && local cleared_watchdog=1 || local cleared_watchdog=0
-  rm -rf "$tmpdir" "/tmp/ticket-auto-TEST-F10A-pinger-stop" "/tmp/ticket-auto-TEST-F10A-watchdog-stop" 2>/dev/null || true
-  [ "$rc" -eq 0 ] && [ "$cleared_pinger" -eq 1 ] && [ "$cleared_watchdog" -eq 1 ]
+  rm -rf "$tmpdir"
+  [ "$rc" -eq 0 ]
 }
 
 test_f10_guard_still_blocks_external_kill() {
   local tmpdir
   tmpdir=$(mktemp -d)
   (
+    # Pin FLEET_STATE_DIR to the temp dir so path resolution is deterministic
+    # regardless of CWD. Without this, _worker_stop_file resolves to ./logs/
+    # which may not exist, and touch with 2>/dev/null silently fails.
+    export FLEET_STATE_DIR="$tmpdir"
     source "$LIB_DIR/spawn-helper.sh"
+    TICKET_ID=TEST-F10B
+    local pinger_stop
+    pinger_stop=$(_worker_stop_file "pinger")
+    mkdir -p "$(dirname "$pinger_stop")"
     # First call: clean state, should succeed (and clear any stale files)
     spawn_agent_pre PHASE=TEST STEP=f10-kill-1 TICKET_ID=TEST-F10B \
       SKILL=/ticket-test HB_LOG_FILE="$tmpdir/hb.log" >/dev/null 2>&1 || exit 1
     # Race: background loop touches the stop file to simulate fleet
     # controller creating it between rm -f and [ -f ] inside the guard.
-    (while true; do touch "/tmp/ticket-auto-TEST-F10B-pinger-stop" 2>/dev/null; done) &
+    (while true; do touch "$pinger_stop" 2>/dev/null; done) &
     local racer_pid=$!
     sleep 0.1
     # Second call: racer should recreate the file in the guard window
@@ -965,17 +980,21 @@ test_f10_guard_still_blocks_external_kill() {
     wait "$racer_pid" 2>/dev/null || true
   )
   local rc=$?
-  rm -rf "$tmpdir" "/tmp/ticket-auto-TEST-F10B-pinger-stop" "/tmp/ticket-auto-TEST-F10B-watchdog-stop" 2>/dev/null || true
+  rm -rf "$tmpdir"
   [ "$rc" -eq 0 ]
 }
 
 test_f10_guard_succeeds_when_no_stop_files_exist() {
   local tmpdir
   tmpdir=$(mktemp -d)
-  # Ensure clean state
-  rm -f "/tmp/ticket-auto-TEST-F10C-pinger-stop" "/tmp/ticket-auto-TEST-F10C-watchdog-stop"
   (
     source "$LIB_DIR/spawn-helper.sh"
+    TICKET_ID=TEST-F10C
+    # Ensure clean state at the resolved paths
+    local pinger_stop watchdog_stop
+    pinger_stop=$(_worker_stop_file "pinger")
+    watchdog_stop=$(_worker_stop_file "watchdog")
+    rm -f "$pinger_stop" "$watchdog_stop"
     spawn_agent_pre PHASE=TEST STEP=f10-clean TICKET_ID=TEST-F10C \
       SKILL=/ticket-test HB_LOG_FILE="$tmpdir/hb.log" >/dev/null 2>&1
   )
