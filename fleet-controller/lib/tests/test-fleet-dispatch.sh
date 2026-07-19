@@ -352,6 +352,105 @@ test_dead_letter_on_exhausted_retries() {
   return 1
 }
 
+# Exercise the retry→dead-letter path by mocking flock to always fail.
+# This avoids timing-sensitive lock contention between processes and
+# deterministically tests the retry loop, backoff, and dead-letter logic.
+test_contended_append_retried_then_dead_lettered() {
+  local ws
+  ws=$(_setup_workspace)
+  # Derive paths via the constructor so they match what the dispatch uses
+  source "$LIB_DIR/config.sh"
+  local instance_id="test-contend"
+  local queue_file dead_letter_file
+  queue_file=$(FLEET_INSTANCE_ID="$instance_id" _fleet_queue_file "$ws")
+  dead_letter_file="${queue_file%.jsonl}-dead-letter.jsonl"
+  rm -f "$queue_file" "$dead_letter_file"
+
+  local output
+  output=$(bash -c "
+    # Mock flock to always fail (simulate permanent lock contention)
+    flock() { return 1; }
+    export -f flock
+
+    FLEET_INSTANCE_ID='$instance_id'
+    FLEET_QUEUE_LOCK_TIMEOUT=1
+    FLEET_QUEUE_MAX_RETRIES=2
+    FLEET_QUEUE_RETRY_BACKOFF_SECS=1
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_with_children)
+    $(declare -f _mock_get_issue_blocker_in_progress)
+    _mock_epic_query_with_children
+    _mock_get_issue_blocker_in_progress
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  # The dispatch should have written a dead-letter error to stderr and dead-letter
+  # the entry to the dead-letter file
+  echo "$output" | grep -qi "dead-letter" || {
+    echo "expected dead-letter message in output: $output" >&2
+    rm -rf "$ws"
+    return 1
+  }
+
+  if [ -f "$dead_letter_file" ] && grep -q "CRE-101" "$dead_letter_file" 2>/dev/null; then
+    rm -rf "$ws"
+    return 0
+  fi
+  echo "dead-letter file $dead_letter_file missing or missing CRE-101 entry" >&2
+  rm -rf "$ws"
+  return 1
+}
+
+# Verify that when flock succeeds after a failure, the retry loop recovers
+# and the entry lands in the queue.
+test_contended_append_retried_and_lands() {
+  local ws
+  ws=$(_setup_workspace)
+  source "$LIB_DIR/config.sh"
+  local instance_id="test-retry-land"
+  local queue_file
+  queue_file=$(FLEET_INSTANCE_ID="$instance_id" _fleet_queue_file "$ws")
+  rm -f "$queue_file"
+
+  local output
+  output=$(bash -c "
+    # Mock flock: fail on first call, succeed on subsequent calls
+    _mock_flock() {
+      local _attempt_file='${ws}/.flock-attempts'
+      local _count=0
+      [ -f \"\$_attempt_file\" ] && _count=\$(cat \"\$_attempt_file\" 2>/dev/null || echo 0)
+      _count=\$((_count + 1))
+      echo \"\$_count\" > \"\$_attempt_file\"
+      [ \"\$_count\" -le 1 ] && return 1
+      return 0
+    }
+    flock() { _mock_flock \"\$@\"; }
+    export -f flock _mock_flock
+
+    rm -f '${ws}/.flock-attempts'
+
+    FLEET_INSTANCE_ID='$instance_id'
+    FLEET_QUEUE_LOCK_TIMEOUT=1
+    FLEET_QUEUE_MAX_RETRIES=3
+    FLEET_QUEUE_RETRY_BACKOFF_SECS=1
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_with_children)
+    $(declare -f _mock_get_issue_blocker_in_progress)
+    _mock_epic_query_with_children
+    _mock_get_issue_blocker_in_progress
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  # After first flock failure, second attempt should succeed
+  if [ -f "$queue_file" ] && grep -q "CRE-101" "$queue_file" 2>/dev/null; then
+    rm -rf "$ws"
+    return 0
+  fi
+  echo "queue file $queue_file missing expected CRE-101; output: $output" >&2
+  rm -rf "$ws"
+  return 1
+}
+
 # ── Run all tests ────────────────────────────────────────────────────────────────
 
 _run "dispatch_no_linear_api" test_dispatch_no_linear_api
@@ -366,6 +465,8 @@ _run "dispatch_max_concurrent_enforced" test_dispatch_fleet_max_concurrent_enfor
 _run "queue_entry_has_generation" test_queue_entry_has_generation_field
 _run "queue_entry_survives_restart" test_queue_entry_survives_simulated_restart
 _run "dead_letter_on_exhausted_retries" test_dead_letter_on_exhausted_retries
+_run "contended_append_retried_then_dead_lettered" test_contended_append_retried_then_dead_lettered
+_run "contended_append_retried_and_lands" test_contended_append_retried_and_lands
 
 echo ""
 echo "=== Results ==="

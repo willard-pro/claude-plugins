@@ -44,7 +44,14 @@ for _w_cand in \
 done
 
 _worker_state_dir() {
-  if [ -n "${FLEET_STATE_DIR:-}" ]; then
+  # Delegate to config.sh resolver when available — ensures the worker and
+  # fleet controller agree on the state directory regardless of whether
+  # FLEET_STATE_DIR is set. The resolver handles both explicit and default
+  # cases, so FLEET_STATE_DIR unset resolves to the workspace, matching
+  # what fleet-intervene.sh writes to.
+  if [ -n "$_worker_config_sh" ] && declare -f _fleet_state_dir >/dev/null 2>&1; then
+    _fleet_state_dir "${FLEET_PIPELINE_LOG_DIR:-./logs}"
+  elif [ -n "${FLEET_STATE_DIR:-}" ]; then
     echo "$FLEET_STATE_DIR"
   else
     echo "/tmp"
@@ -52,10 +59,13 @@ _worker_state_dir() {
 }
 _worker_stop_file() {
   local type="$1"
-  # When FLEET_STATE_DIR is explicitly set AND config.sh is available,
-  # use the canonical _fleet_stop_file constructor so the worker watches
-  # the exact same path the fleet controller writes to.
-  if [ -n "${FLEET_STATE_DIR:-}" ] && [ -n "$_worker_config_sh" ] && declare -f _fleet_stop_file >/dev/null 2>&1; then
+  # Always use the canonical constructor when config.sh is available — the
+  # constructor handles FLEET_STATE_DIR set and unset cases identically to
+  # fleet-intervene.sh. The prior guard required FLEET_STATE_DIR to be set,
+  # which meant the worker watched /tmp while the fleet controller wrote to
+  # the workspace under the default config — cooperative kill never reached
+  # the worker.
+  if [ -n "$_worker_config_sh" ] && declare -f _fleet_stop_file >/dev/null 2>&1; then
     _fleet_stop_file "$TICKET_ID" "$type" "${FLEET_PIPELINE_LOG_DIR:-./logs}"
   else
     echo "$(_worker_state_dir)/ticket-auto-${TICKET_ID}-${type}-stop"

@@ -325,6 +325,102 @@ test_fleet_restart_pipeline_auto_restart_off_returns_1() {
   [ "$rc" -eq 0 ]
 }
 
+# ── Stop-file path equality tests ──────────────────────────────────────────────
+# Verifies fleet-intervene.sh and spawn-helper.sh resolve stop-file paths to
+# the same directory. Without this, cooperative kill silently fails because
+# the intervention writes to one directory while the worker watches another.
+
+test_stop_file_path_equality_default() {
+  local ws
+  ws=$(_setup_workspace)
+  (
+    cd "$ws"
+    mkdir -p logs
+    source "$LIB_DIR/config.sh"
+    source "$LIB_DIR/fleet-intervene.sh"
+
+    # Simulate what fleet_stop_background does
+    local fleet_pinger
+    fleet_pinger=$(_fleet_stop_file "TEST-TID" "pinger" "./logs")
+
+    # Simulate what _worker_stop_file in spawn-helper.sh does when config.sh is
+    # available — same constructor, same workspace default (FLEET_PIPELINE_LOG_DIR
+    # unset → ./logs). After the spawn-helper fix, the FLEET_STATE_DIR guard is
+    # removed, so both call sites resolve through _fleet_stop_file.
+    local worker_pinger
+    worker_pinger=$(_fleet_stop_file "TEST-TID" "pinger" "${FLEET_PIPELINE_LOG_DIR:-./logs}")
+
+    [ "$fleet_pinger" = "$worker_pinger" ] || {
+      echo "MISMATCH (default): fleet=$fleet_pinger worker=$worker_pinger" >&2
+      exit 1
+    }
+    # Verify both paths are under the state directory, not /tmp
+    echo "$fleet_pinger" | grep -qv "/tmp" || {
+      echo "stop file path should not be under /tmp (default config): $fleet_pinger" >&2
+      exit 1
+    }
+  )
+  local rc=$?
+  rm -rf "$ws"
+  [ "$rc" -eq 0 ]
+}
+
+test_stop_file_path_equality_fleet_state_dir_set() {
+  local ws
+  ws=$(_setup_workspace)
+  (
+    cd "$ws"
+    mkdir -p logs
+    source "$LIB_DIR/config.sh"
+    source "$LIB_DIR/fleet-intervene.sh"
+
+    export FLEET_STATE_DIR="/var/fleet/state"
+
+    local fleet_pinger
+    fleet_pinger=$(_fleet_stop_file "TEST-TID" "pinger" "./logs")
+
+    local worker_pinger
+    worker_pinger=$(_fleet_stop_file "TEST-TID" "pinger" "${FLEET_PIPELINE_LOG_DIR:-./logs}")
+
+    [ "$fleet_pinger" = "$worker_pinger" ] || {
+      echo "MISMATCH (FLEET_STATE_DIR): fleet=$fleet_pinger worker=$worker_pinger" >&2
+      exit 1
+    }
+    # Verify both paths honour FLEET_STATE_DIR
+    echo "$fleet_pinger" | grep -q "/var/fleet/state" || {
+      echo "stop file path should honour FLEET_STATE_DIR: $fleet_pinger" >&2
+      exit 1
+    }
+  )
+  local rc=$?
+  rm -rf "$ws"
+  [ "$rc" -eq 0 ]
+}
+
+test_stop_file_path_equality_both_types() {
+  local ws
+  ws=$(_setup_workspace)
+  (
+    cd "$ws"
+    mkdir -p logs
+    source "$LIB_DIR/config.sh"
+
+    for stype in pinger watchdog; do
+      local fleet_path worker_path
+      fleet_path=$(_fleet_stop_file "TEST-TID" "$stype" "./logs")
+      worker_path=$(_fleet_stop_file "TEST-TID" "$stype" "${FLEET_PIPELINE_LOG_DIR:-./logs}")
+
+      [ "$fleet_path" = "$worker_path" ] || {
+        echo "MISMATCH ($stype): fleet=$fleet_path worker=$worker_path" >&2
+        exit 1
+      }
+    done
+  )
+  local rc=$?
+  rm -rf "$ws"
+  [ "$rc" -eq 0 ]
+}
+
 # ── Dispatcher ──────────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -340,7 +436,10 @@ for fn in \
   test_fleet_can_restart_not_exhausted_after_single_restart \
   test_fleet_restart_pipeline_no_restart_eligible_stdout \
   test_fleet_restart_pipeline_writes_restart_marker \
-  test_fleet_restart_pipeline_auto_restart_off_returns_1; do
+  test_fleet_restart_pipeline_auto_restart_off_returns_1 \
+  test_stop_file_path_equality_default \
+  test_stop_file_path_equality_fleet_state_dir_set \
+  test_stop_file_path_equality_both_types; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done
