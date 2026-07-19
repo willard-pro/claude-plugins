@@ -14,16 +14,6 @@ if [ -f "$_REGISTRY_DIR/config.sh" ]; then
   source "$_REGISTRY_DIR/config.sh"
 fi
 
-# Resolve state_dir consistently: use _fleet_state_dir from config.sh if available,
-# otherwise fall back to /tmp (backward compatible with pre-config.sh environments).
-_resolve_state_dir() {
-  if declare -f _fleet_state_dir >/dev/null 2>&1; then
-    _fleet_state_dir "${1:-./logs}"
-  else
-    echo "${1:-/tmp}"
-  fi
-}
-
 # ── Run registry ────────────────────────────────────────────────────────────────
 
 # Write a run registry entry for a spawned worker.
@@ -33,8 +23,9 @@ registry_write() {
   local pid="$2"
   local generation="$3"
   local reason="$4"
-  local state_dir="${5:-$(_resolve_state_dir)}"
-  local registry_file="${state_dir}/${tid}-run.json"
+  local state_dir="${5:-$(_fleet_state_dir ./logs)}"
+  local registry_file
+  registry_file=$(_fleet_run_file "$tid" "$state_dir")
 
   jq -nc \
     --arg tid "$tid" \
@@ -51,8 +42,9 @@ registry_write() {
 # Returns JSON on stdout, empty string if no registry exists.
 registry_read() {
   local tid="$1"
-  local state_dir="${2:-$(_resolve_state_dir)}"
-  local registry_file="${state_dir}/${tid}-run.json"
+  local state_dir="${2:-$(_fleet_state_dir ./logs)}"
+  local registry_file
+  registry_file=$(_fleet_run_file "$tid" "$state_dir")
 
   if [ -f "$registry_file" ]; then
     cat "$registry_file"
@@ -64,8 +56,9 @@ registry_read() {
 # Returns PID string, empty if no registry.
 registry_pid() {
   local tid="$1"
-  local state_dir="${2:-$(_resolve_state_dir)}"
-  local registry_file="${state_dir}/${tid}-run.json"
+  local state_dir="${2:-$(_fleet_state_dir ./logs)}"
+  local registry_file
+  registry_file=$(_fleet_run_file "$tid" "$state_dir")
 
   if [ -f "$registry_file" ]; then
     jq -r '.pid // empty' "$registry_file" 2>/dev/null
@@ -77,8 +70,9 @@ registry_pid() {
 # Returns generation integer, 0 if no registry.
 registry_generation() {
   local tid="$1"
-  local state_dir="${2:-$(_resolve_state_dir)}"
-  local registry_file="${state_dir}/${tid}-run.json"
+  local state_dir="${2:-$(_fleet_state_dir ./logs)}"
+  local registry_file
+  registry_file=$(_fleet_run_file "$tid" "$state_dir")
 
   if [ -f "$registry_file" ]; then
     jq -r '.generation // 0' "$registry_file" 2>/dev/null
@@ -92,8 +86,9 @@ registry_generation() {
 # Returns 0 if exists, 1 otherwise.
 registry_exists() {
   local tid="$1"
-  local state_dir="${2:-$(_resolve_state_dir)}"
-  local registry_file="${state_dir}/${tid}-run.json"
+  local state_dir="${2:-$(_fleet_state_dir ./logs)}"
+  local registry_file
+  registry_file=$(_fleet_run_file "$tid" "$state_dir")
 
   [ -f "$registry_file" ]
 }
@@ -102,8 +97,9 @@ registry_exists() {
 # Usage: registry_clear <tid> <state_dir>
 registry_clear() {
   local tid="$1"
-  local state_dir="${2:-$(_resolve_state_dir)}"
-  local registry_file="${state_dir}/${tid}-run.json"
+  local state_dir="${2:-$(_fleet_state_dir ./logs)}"
+  local registry_file
+  registry_file=$(_fleet_run_file "$tid" "$state_dir")
 
   rm -f "$registry_file"
 }
@@ -115,8 +111,9 @@ registry_clear() {
 fence_write() {
   local tid="$1"
   local fenced_generation="$2"
-  local state_dir="${3:-$(_resolve_state_dir)}"
-  local fence_file="${state_dir}/${tid}-fence"
+  local state_dir="${3:-$(_fleet_state_dir ./logs)}"
+  local fence_file
+  fence_file=$(_fleet_fence_file "$tid" "$state_dir")
 
   jq -nc \
     --arg tid "$tid" \
@@ -131,8 +128,9 @@ fence_write() {
 # Returns JSON on stdout, empty if no fence.
 fence_read() {
   local tid="$1"
-  local state_dir="${2:-$(_resolve_state_dir)}"
-  local fence_file="${state_dir}/${tid}-fence"
+  local state_dir="${2:-$(_fleet_state_dir ./logs)}"
+  local fence_file
+  fence_file=$(_fleet_fence_file "$tid" "$state_dir")
 
   if [ -f "$fence_file" ]; then
     cat "$fence_file"
@@ -145,8 +143,9 @@ fence_read() {
 fence_is_superseded() {
   local tid="$1"
   local caller_generation="$2"
-  local state_dir="${3:-$(_resolve_state_dir)}"
-  local fence_file="${state_dir}/${tid}-fence"
+  local state_dir="${3:-$(_fleet_state_dir ./logs)}"
+  local fence_file
+  fence_file=$(_fleet_fence_file "$tid" "$state_dir")
 
   # No fence marker → unrestricted (backward compatible)
   if [ ! -f "$fence_file" ]; then
@@ -168,8 +167,9 @@ fence_is_superseded() {
 # Usage: fence_clear <tid> <state_dir>
 fence_clear() {
   local tid="$1"
-  local state_dir="${2:-$(_resolve_state_dir)}"
-  local fence_file="${state_dir}/${tid}-fence"
+  local state_dir="${2:-$(_fleet_state_dir ./logs)}"
+  local fence_file
+  fence_file=$(_fleet_fence_file "$tid" "$state_dir")
 
   rm -f "$fence_file"
 }

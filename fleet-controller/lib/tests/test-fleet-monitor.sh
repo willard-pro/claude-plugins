@@ -323,6 +323,42 @@ test_path_consistency_run_file_uses_state_dir() {
   [[ "$run_file" == "$custom/WIL-66-run.json" ]]
 }
 
+# ── State-directory unification: stop-file path agreement ──────────────────────
+# Verifies that the intervention path (what fleet-intervene.sh writes) equals
+# the worker path (what spawn-helper.sh watches). Both must agree for
+# cooperative kill to reach the worker.
+
+test_stop_file_agreement_default_config() {
+  local ws="/tmp/test-sfa-$$"
+  source "$LIB_DIR/config.sh"
+  local intervention_file worker_file
+  unset FLEET_STATE_DIR
+  intervention_file=$(_fleet_stop_file "WIL-66" "pinger" "$ws")
+  worker_file=$(_fleet_stop_file "WIL-66" "pinger" "$ws")
+  [[ "$intervention_file" == "$worker_file" ]]
+  [[ "$intervention_file" == "$ws/ticket-auto-WIL-66-pinger-stop" ]]
+}
+
+test_stop_file_agreement_custom_state_dir() {
+  local custom="/tmp/test-sfa-custom-$$"
+  source "$LIB_DIR/config.sh"
+  local intervention_file worker_file
+  FLEET_STATE_DIR="$custom" intervention_file=$(_fleet_stop_file "WIL-66" "pinger" "./logs")
+  FLEET_STATE_DIR="$custom" worker_file=$(_fleet_stop_file "WIL-66" "pinger" "./logs")
+  [[ "$intervention_file" == "$worker_file" ]]
+  [[ "$intervention_file" == "$custom/ticket-auto-WIL-66-pinger-stop" ]]
+}
+
+test_stop_file_pinger_watchdog_agree_on_dir() {
+  local ws="/tmp/test-sfa-pw-$$"
+  source "$LIB_DIR/config.sh"
+  local pinger_file watchdog_file
+  unset FLEET_STATE_DIR
+  pinger_file=$(_fleet_stop_file "WIL-66" "pinger" "$ws")
+  watchdog_file=$(_fleet_stop_file "WIL-66" "watchdog" "$ws")
+  [[ "$(dirname "$pinger_file")" == "$(dirname "$watchdog_file")" ]]
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -349,7 +385,10 @@ for fn in \
   test_path_consistency_custom_state_dir \
   test_path_consistency_queue_file_uses_state_dir \
   test_path_consistency_fence_file_uses_state_dir \
-  test_path_consistency_run_file_uses_state_dir; do
+  test_path_consistency_run_file_uses_state_dir \
+  test_stop_file_agreement_default_config \
+  test_stop_file_agreement_custom_state_dir \
+  test_stop_file_pinger_watchdog_agree_on_dir; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done
