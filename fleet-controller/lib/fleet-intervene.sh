@@ -63,12 +63,13 @@ _count_restarts() {
 # ── fleet_stop_background ────────────────────────────────────────────────────────
 # Touch both stop files to signal background pinger/watchdog to shut down.
 # Idempotent — touching files that already exist succeeds.
-# Usage: fleet_stop_background <tid> [state_dir]
+# Usage: fleet_stop_background <tid> [workspace]
 fleet_stop_background() {
   local tid="$1"
-  local state_dir="${2:-/tmp}"
-  local pinger_stop="${state_dir}/ticket-auto-${tid}-pinger-stop"
-  local watchdog_stop="${state_dir}/ticket-auto-${tid}-watchdog-stop"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local pinger_stop watchdog_stop
+  pinger_stop=$(_fleet_stop_file "$tid" "pinger" "$workspace")
+  watchdog_stop=$(_fleet_stop_file "$tid" "watchdog" "$workspace")
 
   touch "$pinger_stop" 2>/dev/null || true
   touch "$watchdog_stop" 2>/dev/null || true
@@ -84,7 +85,8 @@ fleet_kill_pipeline() {
   local tid="$1"
   local reason="${2:-fleet-kill}"
   local workspace="${3:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
-  local state_dir="${FLEET_STATE_DIR:-$workspace}"
+  local state_dir
+  state_dir=$(_fleet_state_dir "$workspace")
   local log_file="${workspace}/${tid}-pipeline.log"
   local hb_file="${workspace}/${tid}-heartbeat.log"
   local kill_grace="${FLEET_KILL_GRACE_SECS:-10}"

@@ -55,14 +55,14 @@ fl_write() {
 
 # Write a restart entry to the cron spawn queue JSONL file.
 # No-op in interactive mode (CLAUDE_CODE_SESSION_ID is set).
-# Args: tid reason restarts [state_dir]
+# Args: tid reason restarts [workspace]
 _spawn_queue_write() {
   local tid="$1"
   local reason="$2"
   local restarts="${3:-0}"
-  local state_dir="${4:-/tmp}"
-  local instance_id="${FLEET_INSTANCE_ID:-default}"
-  local queue_file="${state_dir}/fleet-${instance_id}-spawn-queue.jsonl"
+  local workspace="${4:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local queue_file
+  queue_file=$(_fleet_queue_file "$workspace")
   local entry
   entry=$(jq -nc \
     --arg tid "$tid" \
@@ -77,19 +77,19 @@ _spawn_queue_write() {
 
 # Emit a restart spawn action. In interactive mode (CLAUDE_CODE_SESSION_ID is set),
 # emits ACTION:spawn-restart to stdout. In cron mode, writes to spawn queue JSONL.
-# Args: tid reason [restarts] [state_dir]
+# Args: tid reason [restarts] [workspace]
 _spawn_restart() {
   local tid="$1"
   local reason="$2"
   local restarts="${3:-0}"
-  local state_dir="${4:-/tmp}"
+  local workspace="${4:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
 
   if [ -n "${CLAUDE_CODE_SESSION_ID:-}" ]; then
     # Interactive mode — Claude Code parses these ACTION: lines
     echo "ACTION:spawn-restart tid=${tid}"
   else
     # Cron mode — write to spawn queue for external consumer
-    _spawn_queue_write "$tid" "$reason" "$restarts" "$state_dir"
+    _spawn_queue_write "$tid" "$reason" "$restarts" "$workspace"
   fi
 }
 
@@ -232,7 +232,7 @@ fleet_monitor_cycle() {
           # Scan for fresh restart-intent markers
           if command grep -q "META|fleet-restart-marker|info|restart-intent" "${workspace}/${tid}-pipeline.log" 2>/dev/null; then
             fl_write "INFO" "monitor" "Spawning restart for ${tid}"
-            _spawn_restart "$tid" "auto-restart" 0 "$(_fleet_state_dir "$workspace")"
+            _spawn_restart "$tid" "auto-restart" 0 "$workspace"
           fi
         fi
       else
