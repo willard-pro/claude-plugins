@@ -15,14 +15,14 @@
 
 ## 3. Close the integration gaps (small, independently valuable — do before the state machine)
 
-- [ ] 3.1 Implement the feedback writer per the existing `planner-feedback-write` spec in `ticket-planner-feedback-loop`: a post-implement hook emitting `META|planner-feedback` lines to the pipeline log
-- [ ] 3.2 Verify `fleet-feedback.sh:99-271` aggregates the emitted lines into per-initiative feedback JSON — this is the feedback loop's first real input
-- [ ] 3.3 Add the `--from-planned` flag to ticket-auto per the `fleet-controller-dispatch` proposal, and have dispatch pass it in spawn-queue entries
-- [ ] 3.4 Wire `_fleet_scan_initiative_dispatch` at `fleet-detect.sh:620-624` to invoke `fleet_dispatch_initiative` instead of warning only
-- [ ] 3.5 Ensure auto-dispatch respects `FLEET_MAX_CONCURRENT` and `FLEET_DRY_RUN`, and does not duplicate already-queued entries across cycles
-- [ ] 3.6 Verify the human approval gate still stops every auto-dispatched ticket — automating dispatch must not automate approval
-- [ ] 3.7 Confirm `planned-entry-gate` remains dormant and unimplemented by decision; record that as an explicit choice, not an oversight
-- [ ] 3.8 Add tests: dispatch failure for one initiative does not abort the detection cycle; repeated cycles do not double-enqueue
+- [x] 3.1 Implement the feedback writer per the existing `planner-feedback-write` spec in `ticket-planner-feedback-loop`: a post-implement hook emitting `META|planner-feedback` lines to the pipeline log
+- [x] 3.2 Verify `fleet-feedback.sh:99-271` aggregates the emitted lines into per-initiative feedback JSON — this is the feedback loop's first real input
+- [x] 3.3 Add the `--from-planned` flag to ticket-auto per the `fleet-controller-dispatch` proposal, and have dispatch pass it in spawn-queue entries
+- [x] 3.4 Wire `_fleet_scan_initiative_dispatch` at `fleet-detect.sh:620-624` to invoke `fleet_dispatch_initiative` instead of warning only
+- [x] 3.5 Ensure auto-dispatch respects `FLEET_MAX_CONCURRENT` and `FLEET_DRY_RUN`, and does not duplicate already-queued entries across cycles
+- [x] 3.6 Verify the human approval gate still stops every auto-dispatched ticket — automating dispatch must not automate approval
+- [x] 3.7 Confirm `planned-entry-gate` remains dormant and unimplemented by decision; record that as an explicit choice, not an oversight
+- [x] 3.8 Add tests: dispatch failure for one initiative does not abort the detection cycle; repeated cycles do not double-enqueue
 
 ## 4. Generation phases (build the output end first, so it can be proven against the real pipeline)
 

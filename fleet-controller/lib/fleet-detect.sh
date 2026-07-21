@@ -619,6 +619,34 @@ _fleet_scan_initiative_dispatch() {
 
   if [ "$undispatched" -gt 0 ]; then
     echo "{\"severity\":1,\"findings\":\"${undispatched} undispatched: ${findings}\"}"
+
+    # Auto-dispatch: when FLEET_AUTO_DISPATCH=true, call fleet_dispatch_initiative
+    # for each initiative with undispatched planned children.
+    # The human approval gate still stops every ticket — this automates dispatch,
+    # not approval.
+    if [ "${FLEET_AUTO_DISPATCH:-false}" = "true" ]; then
+      # Source fleet-dispatch.sh if not already available
+      if ! declare -f fleet_dispatch_initiative >/dev/null 2>&1; then
+        local _dispatch_lib="${_CONFIG_DIR}/fleet-dispatch.sh"
+        [ -f "$_dispatch_lib" ] && source "$_dispatch_lib"
+      fi
+
+      if declare -f fleet_dispatch_initiative >/dev/null 2>&1; then
+        for epic_id in $initiative_ids; do
+          # Strip the count suffix: "INIT-42(3)" → "INIT-42"
+          local clean_id="${epic_id%(*}"
+          if [ "${FLEET_DRY_RUN:-false}" = "true" ]; then
+            echo "[FLEET_AUTO_DISPATCH] would dispatch initiative: ${clean_id}" >&2
+          else
+            fleet_dispatch_initiative "$clean_id" "${workspace:-}" 2>&1 | while IFS= read -r dispatch_msg; do
+              echo "[FLEET_AUTO_DISPATCH] ${clean_id}: ${dispatch_msg}" >&2
+            done
+          fi
+        done
+      else
+        echo "[FLEET_AUTO_DISPATCH] WARNING: fleet_dispatch_initiative not available — cannot auto-dispatch" >&2
+      fi
+    fi
   else
     echo '{"severity":0,"findings":""}'
   fi
