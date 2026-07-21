@@ -26,16 +26,16 @@
 
 ## 4. Generation phases (build the output end first, so it can be proven against the real pipeline)
 
-- [ ] 4.1 Implement Epic Generation: create the initiative epic with its execution-state label, recording intent before creation
-- [ ] 4.2 Implement Story Generation as a distinct phase (collapse into Ticket Generation later if the distinction proves empty — see design open question)
-- [ ] 4.3 Implement Ticket Generation producing child tickets in backlog with the planned label, initiative label, and type label where determined
-- [ ] 4.4 Derive per-ticket confidence from concrete generation signals — services identified, symbols resolved, prior art found — never a uniform constant
-- [ ] 4.5 Emit dependencies as blocked-by labels and validate the dependency set is acyclic before creating any ticket
-- [ ] 4.6 Write per-ticket artifacts where the existing artifact resolver locates them
-- [ ] 4.7 Validate every generated ticket with `planned-ticket-check.sh` before creation; do not create a ticket that fails
-- [ ] 4.8 Implement idempotent creation: record intent before side effects, check existence by deterministic identifier before creating
-- [ ] 4.9 Add interruption tests at every entity-creating phase: interrupt between intent and creation, and between creation and completion — exactly one entity must exist after resume
-- [ ] 4.10 Add tests: cyclic dependency set creates nothing and reports the cycle; confidence varies across tickets with differing evidence
+- [x] 4.1 Implement Epic Generation: create the initiative epic with its execution-state label, recording intent before creation
+- [x] 4.2 Implement Story Generation as a distinct phase (collapse into Ticket Generation later if the distinction proves empty — see design open question)
+- [x] 4.3 Implement Ticket Generation producing child tickets in backlog with the planned label, initiative label, and type label where determined
+- [x] 4.4 Derive per-ticket confidence from concrete generation signals — services identified, symbols resolved, prior art found — never a uniform constant
+- [x] 4.5 Emit dependencies as blocked-by labels and validate the dependency set is acyclic before creating any ticket
+- [x] 4.6 Write per-ticket artifacts where the existing artifact resolver locates them
+- [x] 4.7 Validate every generated ticket with `planned-ticket-check.sh` before creation; do not create a ticket that fails
+- [x] 4.8 Implement idempotent creation: record intent before side effects, check existence by deterministic identifier before creating
+- [x] 4.9 Add interruption tests at every entity-creating phase: interrupt between intent and creation, and between creation and completion — exactly one entity must exist after resume
+- [x] 4.10 Add tests: cyclic dependency set creates nothing and reports the cycle; confidence varies across tickets with differing evidence
 
 ## 5. First real end-to-end proof (before building upstream phases)
 
