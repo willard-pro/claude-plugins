@@ -677,6 +677,16 @@ _outcome_sh="${HOME}/.claude/skills/lib/outcome-label-check.sh"
 bash "$_outcome_sh" "{TICKET_ID}" "{LOG_FILE}"
 ```
 
+Then emit planner feedback for planned tickets (no-op for unplanned):
+```bash
+_feedback_sh="${HOME}/.claude/skills/lib/planned-feedback-write.sh"
+[ -f "$_feedback_sh" ] || _feedback_sh=$(find "${HOME}/.claude/plugins/cache" -name "planned-feedback-write.sh" -path "*/ticket-auto-pipeline/*/lib/planned-feedback-write.sh" 2>/dev/null | sort | tail -1)
+if [ -f "$_feedback_sh" ]; then
+  source "$_feedback_sh"
+  planned_feedback_write "{TICKET_ID}" "{LOG_FILE}" || true
+fi
+```
+
 Then transition from Ready → Review via implement-complete:
 ```bash
 flow_sh="${HOME}/.claude/skills/ticket-flow/flow.sh"
