@@ -74,29 +74,29 @@ planner_context_generate() {
 
   # Validate Strategy enum
   case "$strategy" in
-    Conservative|Balanced|Innovative) ;;
-    *)
-      echo "planner-context-gen: invalid Strategy '$strategy' (must be Conservative|Balanced|Innovative)" >&2
-      return 1
-      ;;
+  Conservative | Balanced | Innovative) ;;
+  *)
+    echo "planner-context-gen: invalid Strategy '$strategy' (must be Conservative|Balanced|Innovative)" >&2
+    return 1
+    ;;
   esac
 
   # Validate Pre-approved is boolean
   case "$pre_approved" in
-    true|false) ;;
-    *)
-      echo "planner-context-gen: invalid Pre-approved '$pre_approved' (must be true|false)" >&2
-      return 1
-      ;;
+  true | false) ;;
+  *)
+    echo "planner-context-gen: invalid Pre-approved '$pre_approved' (must be true|false)" >&2
+    return 1
+    ;;
   esac
 
   # Validate Regenerate is boolean
   case "$regenerate" in
-    true|false) ;;
-    *)
-      echo "planner-context-gen: invalid Regenerate '$regenerate' (must be true|false)" >&2
-      return 1
-      ;;
+  true | false) ;;
+  *)
+    echo "planner-context-gen: invalid Regenerate '$regenerate' (must be true|false)" >&2
+    return 1
+    ;;
   esac
 
   # Generate timestamp if not provided
@@ -168,16 +168,16 @@ planner_confidence_derive() {
 
   # Exploration depth bonus
   case "$exploration_depth" in
-    deep) score=$((score + 10)) ;;
-    standard) score=$((score + 5)) ;;
-    *) ;; # quick-scan: no bonus
+  deep) score=$((score + 10)) ;;
+  standard) score=$((score + 5)) ;;
+  *) ;; # quick-scan: no bonus
   esac
 
   # Complexity penalty
   case "$complexity" in
-    complex) score=$((score - 15)) ;;
-    moderate) ;; # no penalty
-    simple) score=$((score + 5)) ;;
+  complex) score=$((score - 15)) ;;
+  moderate) ;; # no penalty
+  simple) score=$((score + 5)) ;;
   esac
 
   # Clamp to 0-100

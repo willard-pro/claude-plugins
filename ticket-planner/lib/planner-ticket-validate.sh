@@ -69,7 +69,7 @@ planner_validate_ticket() {
 
   if [ ! -f "$checker" ]; then
     echo "planner-validate: planned-ticket-check.sh not found — skipping validation" >&2
-    return 0  # Degrade gracefully: allow creation without validation
+    return 0 # Degrade gracefully: allow creation without validation
   fi
 
   # Source and check. Pass the description inline to avoid API dependency.
@@ -79,21 +79,21 @@ planner_validate_ticket() {
   check_planned_ticket "PLANNER-PREVIEW" "$description" "$has_planned_label" 2>/dev/null || exit_code=$?
 
   case "$exit_code" in
-    0) return 0 ;;
-    1)
-      echo "planner-validate: ticket failed validation (malformed/missing fields)" >&2
-      echo "  CHECK_RESULT=${CHECK_RESULT:-unknown}" >&2
-      return 1
-      ;;
-    2)
-      echo "planner-validate: ticket has low confidence + not pre-approved" >&2
-      echo "  CHECK_RESULT=${CHECK_RESULT:-unknown}" >&2
-      return 2
-      ;;
-    *)
-      echo "planner-validate: unexpected exit code ${exit_code}" >&2
-      return 1
-      ;;
+  0) return 0 ;;
+  1)
+    echo "planner-validate: ticket failed validation (malformed/missing fields)" >&2
+    echo "  CHECK_RESULT=${CHECK_RESULT:-unknown}" >&2
+    return 1
+    ;;
+  2)
+    echo "planner-validate: ticket has low confidence + not pre-approved" >&2
+    echo "  CHECK_RESULT=${CHECK_RESULT:-unknown}" >&2
+    return 2
+    ;;
+  *)
+    echo "planner-validate: unexpected exit code ${exit_code}" >&2
+    return 1
+    ;;
   esac
 }
 
@@ -137,7 +137,7 @@ planner_record_intent() {
       entity_key: $entity_key,
       intent_created: $iso,
       status: "intent"
-    }' > "$intent_file"
+    }' >"$intent_file"
 }
 
 # Check if an entity was already created (Linear ID recorded).
@@ -190,5 +190,5 @@ planner_entity_mark_created() {
     --arg linear_id "$linear_id" \
     --arg iso "$iso" \
     '. + {linear_id: $linear_id, created_at: $iso, status: "created"}' \
-    > "$intent_file"
+    >"$intent_file"
 }

@@ -24,7 +24,7 @@ planner_deps_check_acyclic() {
   local deps_json="$1"
 
   if [ -z "$deps_json" ] || [ "$deps_json" = "{}" ]; then
-    return 0  # Empty graph is trivially acyclic
+    return 0 # Empty graph is trivially acyclic
   fi
 
   # Use tsort (standard Unix utility) for topological sort.
@@ -39,7 +39,7 @@ planner_deps_check_acyclic() {
   ' 2>/dev/null)
 
   if [ -z "$pairs" ]; then
-    return 0  # No edges — trivially acyclic
+    return 0 # No edges — trivially acyclic
   fi
 
   # Run tsort. If it detects a cycle, it prints to stderr and exits non-zero.

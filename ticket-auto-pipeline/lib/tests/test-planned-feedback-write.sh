@@ -13,8 +13,14 @@ trap 'rm -rf "$TMPDIR"' EXIT
 PASS=0
 FAIL=0
 
-pass() { echo "  PASS $1"; PASS=$((PASS + 1)); }
-fail() { echo "  FAIL $1: $2"; FAIL=$((FAIL + 1)); }
+pass() {
+  echo "  PASS $1"
+  PASS=$((PASS + 1))
+}
+fail() {
+  echo "  FAIL $1: $2"
+  FAIL=$((FAIL + 1))
+}
 
 echo "=== planned-feedback-write.sh tests ==="
 
@@ -34,7 +40,7 @@ fi
 echo "--- Test 2: emits feedback for planned tickets ---"
 FROM_PLANNED=true
 log="${TMPDIR}/test2-pipeline.log"
-echo "2026-07-21T00:00:00Z|META|outcome-label|info|Smooth" > "$log"
+echo "2026-07-21T00:00:00Z|META|outcome-label|info|Smooth" >"$log"
 planned_feedback_write "TEST-2" "$log" || true
 if grep -q '|META|planner-feedback|info|' "$log" 2>/dev/null; then
   pass "feedback entry emitted for planned ticket"

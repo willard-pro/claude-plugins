@@ -21,8 +21,14 @@ REPOS_ROOT="$TMPDIR"
 PASS=0
 FAIL=0
 
-pass() { echo "  PASS $1"; PASS=$((PASS + 1)); }
-fail() { echo "  FAIL $1: $2"; FAIL=$((FAIL + 1)); }
+pass() {
+  echo "  PASS $1"
+  PASS=$((PASS + 1))
+}
+fail() {
+  echo "  FAIL $1: $2"
+  FAIL=$((FAIL + 1))
+}
 
 echo "=== planner-state.sh tests ==="
 
@@ -85,7 +91,7 @@ echo "--- Test 5: terminal phase returns empty ---"
 
 planner_state_init "INIT-DONE" "completed idea"
 for phase in "Appraisal" "Discovery" "Architecture" "Proposal" "Review" "Consensus" \
-             "OpenSpec" "EpicGen" "StoryGen" "TicketGen" "Execution" "Completed"; do
+  "OpenSpec" "EpicGen" "StoryGen" "TicketGen" "Execution" "Completed"; do
   planner_state_write "INIT-DONE" "$phase" "$(echo "$phase" | tr '[:upper:]' '[:lower:]')" "done" "$phase complete"
 done
 
@@ -141,7 +147,7 @@ echo "--- Test 8: partial trailing write ignored ---"
 planner_state_init "INIT-PARTIAL" "partial test"
 planner_state_write "INIT-PARTIAL" "Appraisal" "appraise" "done" "done"
 # Simulate a partial write by appending truncated data
-echo "2026-07-21T00:00:00Z|Discovery|disc" >> "$REPOS_ROOT/.ticket-auto/initiatives/INIT-PARTIAL/state.log"
+echo "2026-07-21T00:00:00Z|Discovery|disc" >>"$REPOS_ROOT/.ticket-auto/initiatives/INIT-PARTIAL/state.log"
 
 pos=$(planner_position_derive "INIT-PARTIAL")
 if [ "$pos" = "Discovery" ]; then

@@ -65,7 +65,7 @@ planner_state_write() {
   # Ensure directory exists
   mkdir -p "$(dirname "$log_file")"
 
-  printf '%s|%s|%s|%s|%s\n' "$iso" "$phase" "$step" "$status" "$message" >> "$log_file"
+  printf '%s|%s|%s|%s|%s\n' "$iso" "$phase" "$step" "$status" "$message" >>"$log_file"
 }
 
 # Initialize a new state log with the schema line and META entries.

@@ -19,8 +19,14 @@ export REPOS_ROOT="$TMPDIR"
 
 PASS=0
 FAIL=0
-pass() { echo "  PASS $1"; PASS=$((PASS + 1)); }
-fail() { echo "  FAIL $1: $2"; FAIL=$((FAIL + 1)); }
+pass() {
+  echo "  PASS $1"
+  PASS=$((PASS + 1))
+}
+fail() {
+  echo "  FAIL $1: $2"
+  FAIL=$((FAIL + 1))
+}
 
 echo "=== planner generation primitives tests ==="
 
@@ -101,7 +107,8 @@ fi
 # ═══════════════════════════════════════════════════════════════════════════════
 
 echo "--- context-gen: valid block ---"
-ctx=$(cat <<'JSON'
+ctx=$(
+  cat <<'JSON'
 {
   "Schema-Version": 1,
   "Initiative": "INIT-42",
@@ -130,10 +137,10 @@ else
 fi
 # Verify it passes the validator by checking required fields are present
 for field in "Schema-Version" "Initiative" "Epic" "Confidence" "Strategy" \
-             "Decision" "Affected Services" "Target Symbols" "Pre-approved" \
-             "Generated" "Regenerate"; do
+  "Decision" "Affected Services" "Target Symbols" "Pre-approved" \
+  "Generated" "Regenerate"; do
   if echo "$block" | grep -q "\*\*${field}:\*\*"; then
-    :  # present
+    : # present
   else
     fail "  required field '$field' present" "missing in generated block"
   fi
@@ -157,7 +164,8 @@ else
 fi
 
 echo "--- context-gen: auto-generates timestamp ---"
-ctx=$(cat <<'JSON'
+ctx=$(
+  cat <<'JSON'
 {
   "Schema-Version": 1,
   "Initiative": "INIT-1",

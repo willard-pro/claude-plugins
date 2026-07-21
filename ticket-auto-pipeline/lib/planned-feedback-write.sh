@@ -27,7 +27,7 @@ planned_feedback_write() {
       fi
     fi
     if [ "$has_planned" != "true" ]; then
-      return 0  # Not a planned ticket — silent no-op
+      return 0 # Not a planned ticket — silent no-op
     fi
   fi
 
@@ -130,7 +130,7 @@ planned_feedback_write() {
   fi
 
   iso=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-  echo "${iso}|META|planner-feedback|info|${payload}" >> "$log_file"
+  echo "${iso}|META|planner-feedback|info|${payload}" >>"$log_file"
 
   return 0
 }
