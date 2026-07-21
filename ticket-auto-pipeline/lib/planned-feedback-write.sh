@@ -54,9 +54,14 @@ planned_feedback_write() {
   local branch
   branch=$(grep '^[^|]*|META|branch|info|' "$log_file" 2>/dev/null | tail -1 | awk -F'|' '{for(i=5;i<=NF;i++) printf "%s%s", $i, (i<NF?"|":"")}')
   if [ -n "$branch" ] && [ -d "$PWD/.git" ]; then
+    # Sanitize branch name: strip shell metacharacters ($, backticks, semicolons,
+    # pipes, newlines). Branch comes from our own pipeline log and should only
+    # contain git-ref-safe characters, but defense in depth.
+    local safe_branch="${branch//[;\`\$|]/\ }"
+    safe_branch="${safe_branch//$'\n'/ }"
     # Try to get files changed on the branch vs main
-    if git rev-parse "$branch" >/dev/null 2>&1; then
-      files_changed=$(git diff --name-only "origin/main...${branch}" 2>/dev/null | jq -R -s 'split("\n") | map(select(length > 0))' 2>/dev/null || echo "[]")
+    if git rev-parse "$safe_branch" >/dev/null 2>&1; then
+      files_changed=$(git diff --name-only "origin/main...${safe_branch}" 2>/dev/null | jq -R -s 'split("\n") | map(select(length > 0))' 2>/dev/null || echo "[]")
     fi
   fi
   # Fallback: log any files referenced in implement step
