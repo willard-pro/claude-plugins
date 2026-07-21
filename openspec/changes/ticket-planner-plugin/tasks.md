@@ -82,6 +82,6 @@
 
 ## 10. Documentation
 
-- [ ] 10.1 Write plugin documentation covering the twelve phases, state representation, resume semantics, and the contracts the planner produces against
-- [ ] 10.2 Document the operator-facing idea-to-tickets flow, including what auto-dispatch does and what the approval gate still holds
-- [ ] 10.3 Record the decision that `planned-entry-gate` stays dormant, and what would have to be true to revisit it
+- [x] 10.1 Write plugin documentation covering the twelve phases, state representation, resume semantics, and the contracts the planner produces against
+- [x] 10.2 Document the operator-facing idea-to-tickets flow, including what auto-dispatch does and what the approval gate still holds
+- [x] 10.3 Record the decision that `planned-entry-gate` stays dormant, and what would have to be true to revisit it

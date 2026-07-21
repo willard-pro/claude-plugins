@@ -36,6 +36,7 @@ Each phase runs as an isolated agent. State lives in a durable append-only log u
 - **Dependencies as `blocked-by` labels, validated acyclic.** Cycle detection before any ticket is created.
 - **Auto-dispatch wired at the detector, approval gate untouched.** Dispatches without human command; still stops every ticket at the human approval gate.
 - **Regenerate is an explicit flag.** Feedback ingested only when `Regenerate` label is present. Undispatched Backlog tickets only — in-flight work untouched.
+- **`planned-entry-gate` stays dormant by decision.** Specified but deliberately unimplemented. Confidence ≥ 0.85 + `pre-approved` would bypass human approval gate. Revisit only after: ≥ 10 completed initiatives with real feedback data, drift consistently ≤ 0.10 at confidence ≥ 0.85, zero incidents from auto-approved tickets, and explicit operator opt-in. See `docs/ticket-planner.md#planned-entry-gate-dormancy`.
 
 ## Determinism boundary
 
