@@ -8,8 +8,14 @@
   },
   "plugins": [
     {
+      "name": "ticket-planner",
+      "version": "0.1.0",
+      "source": "./ticket-planner",
+      "description": "12-phase autonomous planner — turns business ideas into dependency-ordered planned tickets. Appraisal → Discovery → Architecture → Proposal → Review → Consensus → OpenSpec → Epic Gen → Story Gen → Ticket Gen → Execution → Completed. Produces against frozen Planner Context and labels contracts."
+    },
+    {
       "name": "ticket-auto-pipeline",
-      "version": "0.15.0",
+      "version": "0.16.0",
       "source": "./ticket-auto-pipeline",
       "description": "Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. Bundles 20+ skills, state machine config, pipeline safety gates, and retrospective analysis."
     },
