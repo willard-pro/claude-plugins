@@ -1,6 +1,6 @@
 # Linear Ticket Templates
 
-Four templates for creating well-structured Linear tickets that work cleanly with the ticket-auto pipeline.
+Five templates for creating well-structured Linear tickets that work cleanly with the ticket-auto pipeline.
 
 | Template | Label to set | Use when |
 | -------- | ------------ | -------- |

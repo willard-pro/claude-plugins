@@ -123,6 +123,7 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 | `FLEET_ABANDON_KILL_HOURS` | 4 | Abandonment threshold for KILL+RESTART |
 | `FLEET_ZOMBIE_SECS` | 900 | Unresolved waiting entry threshold |
 | `FLEET_MAX_RESTARTS` | 2 | Max automatic restarts before giving up |
+| `FLEET_AUTO_DISPATCH` | false | Must be `true` to enable automatic dispatch of planned tickets from initiative epics. Detection still runs and reports; dispatch is the actuation step. Human approval gate still stops every auto-dispatched ticket. |
 | `FLEET_AUTO_RESTART` | false | Must be `true` to enable automatic restarts |
 | `FLEET_DRY_RUN` | false | When `true`, interventions are logged not executed |
 | `FLEET_MAX_CONCURRENT` | 3 | Max concurrent pipelines for dispatch |

@@ -125,8 +125,18 @@ elif [ -n "$TICKET_AUTONOMY" ]; then
 else
   AUTONOMY="manual"
 fi
-# Strip flag from arg to get the bare ticket ID
-TICKET_ID=$(echo "{TICKET_ARG}" | sed 's/--semi-auto//;s/--auto//;s/--manual//' | tr -s ' ' | xargs)
+
+# Resolve --from-planned flag: set when fleetd/fleet-controller dispatches
+# a planner-generated ticket. Used by the feedback writer to emit
+# META|planner-feedback entries to the pipeline log.
+if echo "{TICKET_ARG}" | grep -qw '\-\-from-planned'; then
+  FROM_PLANNED="true"
+else
+  FROM_PLANNED="false"
+fi
+
+# Strip flags from arg to get the bare ticket ID
+TICKET_ID=$(echo "{TICKET_ARG}" | sed 's/--semi-auto//;s/--auto//;s/--manual//;s/--from-planned//' | tr -s ' ' | xargs)
 ```
 
 Set `{AUTONOMY}` and `{TICKET_ID}` — used throughout the pipeline.
@@ -144,7 +154,7 @@ export HB_LOG_FILE="$HB_LOG_FILE"
 hb_init
 # Idempotency guards: skip if already written (prevents duplication on resume)
 if ! grep -q '|heartbeat|pipeline-start|' "$HB_LOG_FILE" 2>/dev/null; then
-  hb-wrap.sh heartbeat "pipeline-start" "pipeline starting — autonomy={AUTONOMY}, ticket={TICKET-ID}"
+  hb-wrap.sh heartbeat "pipeline-start" "pipeline starting — autonomy={AUTONOMY}, from-planned={FROM_PLANNED}, ticket={TICKET-ID}"
 fi
 if ! grep -q '|decision|autonomy-resolution|' "$HB_LOG_FILE" 2>/dev/null; then
   hb-wrap.sh decision "autonomy-resolution" "fired" "autonomy set to {AUTONOMY}" '{"mode":"{AUTONOMY}"}'
@@ -228,7 +238,8 @@ spawn_write_env \
   FE_TEST_CMD="{FE_TEST_CMD}" \
   LOCAL_URL="{LOCAL_URL}" \
   UAT_URL="{UAT_URL}" \
-  SLACK_CHANNEL="{SLACK_CHANNEL}"
+  SLACK_CHANNEL="{SLACK_CHANNEL}" \
+  FROM_PLANNED="{FROM_PLANNED}"
 ```
 
 This MUST run before Step 0.6 (pipeline log init) and before Step 1 (first agent spawn). The env file is needed by every `spawn_agent_pre` call — sub-agents source it via `source /tmp/ticket-auto-{TICKET_ID}-env.sh`.
@@ -271,6 +282,11 @@ if [ -z "$_recorded_autonomy" ]; then
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|autonomy|info|{AUTONOMY}" >> {LOG_FILE}
 elif [ "$_recorded_autonomy" != "{AUTONOMY}" ]; then
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|mode-change|warn|{AUTONOMY} (was $_recorded_autonomy)" >> {LOG_FILE}
+fi
+# Log from-planned provenance — idempotent (written once, never changed).
+# fleet-feedback.sh reads this to determine whether to expect META|planner-feedback entries.
+if ! grep -q '^[^|]*|META|from-planned|' {LOG_FILE} 2>/dev/null; then
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|from-planned|info|{FROM_PLANNED}" >> {LOG_FILE}
 fi
 hb-wrap.sh gate "phase-transition" "ok" "START → APPRAISE"
 ```
@@ -659,6 +675,16 @@ After implement completes, always run outcome-label-check:
 ```bash
 _outcome_sh="${HOME}/.claude/skills/lib/outcome-label-check.sh"
 bash "$_outcome_sh" "{TICKET_ID}" "{LOG_FILE}"
+```
+
+Then emit planner feedback for planned tickets (no-op for unplanned):
+```bash
+_feedback_sh="${HOME}/.claude/skills/lib/planned-feedback-write.sh"
+[ -f "$_feedback_sh" ] || _feedback_sh=$(find "${HOME}/.claude/plugins/cache" -name "planned-feedback-write.sh" -path "*/ticket-auto-pipeline/*/lib/planned-feedback-write.sh" 2>/dev/null | sort | tail -1)
+if [ -f "$_feedback_sh" ]; then
+  source "$_feedback_sh"
+  planned_feedback_write "{TICKET_ID}" "{LOG_FILE}" || true
+fi
 ```
 
 Then transition from Ready → Review via implement-complete:
