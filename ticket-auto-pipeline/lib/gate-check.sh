@@ -109,8 +109,8 @@ _gate_entry() {
   autonomy=$(_get_autonomy)
   artifact_type=$(_get_artifact_type)
 
-  # Check 1: Artifact file existence
-  if [ -n "$artifact_path" ] && [ ! -f "$artifact_path" ]; then
+  # Check 1: Artifact file existence (accepts files and openspec directories)
+  if [ -n "$artifact_path" ] && [ ! -f "$artifact_path" ] && [ ! -d "$artifact_path" ]; then
     _plog "$LOG_FILE" "META" "gate-stop" "fail" "EXEC_NO_ARTIFACT"
     hb_gate "entry-gate" "fail" "artifact missing" "{\"path\":\"$artifact_path\"}"
     return 2
@@ -240,8 +240,9 @@ _gate_entry() {
   local gate_td="${td:-.}"
 
   # Check 2.6: Verification readiness — check plan artifact for all 4 prerequisites
-  # Backward compat: skip if no critique score exists (old ticket without new critique sections)
-  if [ -n "$artifact_path" ] && [ -f "$artifact_path" ] && [ -n "$critique_score" ]; then
+  # Verification prerequisites are independent of critique readiness. Check them
+  # whenever we have an artifact, regardless of whether a critique has run yet.
+  if [ -n "$artifact_path" ] && { [ -f "$artifact_path" ] || [ -d "$artifact_path" ]; }; then
     local has_test_user has_nav_path has_expected_behavior has_env_prereqs role_pattern missing_count
     # Build role pattern from test-users.json catalog if available, fall back to known roles
     role_pattern=$(jq -r '[.[].roles[]] | unique | join("|")' "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/skills}/config/test-users.json" 2>/dev/null | sed 's/_/[-_]/g' || echo 'attorney|admin|debtor|collection[-_]?agency|correspondent')
@@ -254,11 +255,11 @@ _gate_entry() {
       # Extract the per-criterion table between "### Per-Criterion Verification" and the next ## heading
       vplan_section=$(awk '/^### Per-Criterion Verification$/,/^## /' "$notes_path" 2>/dev/null || true)
       if [ -n "$vplan_section" ]; then
-        # Check the Verifiable column for any ✓ entries. If at least one criterion
-        # is marked verifiable, the plan has enough info. If none are ✓, all 4
+        # Check the Verifiable column for ✓ or Y entries. If at least one criterion
+        # is marked verifiable, the plan has enough info. If none are marked, all 4
         # prereqs are effectively missing (fallback triggers).
         local verifiable_count
-        verifiable_count=$(echo "$vplan_section" | grep -ciP '✓' 2>/dev/null || true)
+        verifiable_count=$(echo "$vplan_section" | grep -ciP '[✓Y]' 2>/dev/null || true)
         if [ "${verifiable_count:-0}" -gt 0 ] 2>/dev/null; then
           # At least one criterion is fully verifiable — all 4 prereqs are present
           # for that criterion. Mark all as found.
@@ -338,15 +339,21 @@ _gate_entry() {
     fi
 
     # Hold if 2+ missing for browser tickets, or any missing for API-only
-    # (INCOMPLETE threshold from appraise-exec Step 3.8)
-    if { $_is_api_only && [ "$missing_count" -ge 1 ] 2>/dev/null; } ||
-      { ! $_is_api_only && [ "$missing_count" -ge 2 ] 2>/dev/null; }; then
-      local _ticket_mode="browser"
-      $_is_api_only && _ticket_mode="api-only"
-      _plog "$LOG_FILE" "GATE" "gate" "fail" "held: plan missing $missing_count/${_required_count} verification prerequisites (mode=$_ticket_mode test_user=$has_test_user nav=$has_nav_path expected=$has_expected_behavior env=$has_env_prereqs)"
-      hb_gate "entry-gate" "fail" "held: plan missing verification prerequisites" "{\"artifact\":\"$artifact_path\",\"missing\":\"$missing_count\",\"required\":\"$_required_count\",\"mode\":\"$_ticket_mode\",\"test_user\":\"$has_test_user\",\"nav\":\"$has_nav_path\",\"expected\":\"$has_expected_behavior\",\"env\":\"$has_env_prereqs\"}"
-      return 1
-    fi
+    # (INCOMPLETE threshold from appraise-exec Step 3.8).
+    # Only enforce when a verification plan was attempted (plan section exists)
+    # or a critique has been run (indicating the plan SHOULD exist). Tickets
+    # without either are pre-verification-plan and the hold would be a false
+    # positive — skip enforcement for them.
+    if [ -n "$vplan_section" ] || [ -n "$critique_score" ]; then
+      if { $_is_api_only && [ "$missing_count" -ge 1 ] 2>/dev/null; } ||
+        { ! $_is_api_only && [ "$missing_count" -ge 2 ] 2>/dev/null; }; then
+        local _ticket_mode="browser"
+        $_is_api_only && _ticket_mode="api-only"
+        _plog "$LOG_FILE" "GATE" "gate" "fail" "held: plan missing $missing_count/${_required_count} verification prerequisites (mode=$_ticket_mode test_user=$has_test_user nav=$has_nav_path expected=$has_expected_behavior env=$has_env_prereqs)"
+        hb_gate "entry-gate" "fail" "held: plan missing verification prerequisites" "{\"artifact\":\"$artifact_path\",\"missing\":\"$missing_count\",\"required\":\"$_required_count\",\"mode\":\"$_ticket_mode\",\"test_user\":\"$has_test_user\",\"nav\":\"$has_nav_path\",\"expected\":\"$has_expected_behavior\",\"env\":\"$has_env_prereqs\"}"
+        return 1
+      fi
+    fi # vplan_section || critique_score guard
 
     # Cross-validation: if critique flagged specific gaps, verify the PLAN resolved them.
     # Uses pre-fallback plan_has_* values — the verification plan must resolve critique
@@ -436,7 +443,23 @@ _gate_entry() {
     _plog "$LOG_FILE" "GATE" "planned-check" "done" "body complete for type $ticket_type"
   fi
 
-  # Check 3: Complex tickets are always held
+  # Check 2.8b: Complex + auto/semi-auto + approved → auto-approve.
+  # In auto and semi-auto modes, an approved label means the human has explicitly
+  # signaled approval — don't hold complex tickets that have it. Only applies to
+  # non-manual modes (manual has its own check at Check 4).
+  if [ "$complexity" = "complex" ] && { [ "$autonomy" = "auto" ] || [ "$autonomy" = "semi-auto" ]; }; then
+    local issue_json approved
+    issue_json=$(get_issue "$TICKET_ID" 2>/dev/null || echo 'null')
+    approved=$(echo "$issue_json" | jq -r '[.labels.nodes[]?.name? // empty | ascii_downcase] | index("approved") != null' 2>/dev/null || echo 'false')
+    if [ "$approved" = "true" ]; then
+      _plog "$LOG_FILE" "GATE" "gate" "done" "auto-approved (complex + $autonomy + approved)"
+      hb_gate "entry-gate" "done" "complex auto-approved" "{\"complexity\":\"$complexity\",\"autonomy\":\"$autonomy\",\"approved\":true}"
+      # Pass through to verify flow.sh's post-trigger assertion still holds
+      return 0
+    fi
+  fi
+
+  # Check 3: Complex tickets are always held (unless bypassed above)
   if [ "$complexity" = "complex" ]; then
     _plog "$LOG_FILE" "GATE" "gate" "fail" "held: complex ticket"
     hb_gate "entry-gate" "fail" "held: complex ticket" "{\"complexity\":\"$complexity\"}"

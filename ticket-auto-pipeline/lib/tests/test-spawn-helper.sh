@@ -316,7 +316,7 @@ test_token_tracker_resolves_phase_from_spawn_meta() {
   local log_file="$tmpdir/test-tk.log"
   local transcript="$tmpdir/transcript.jsonl"
   local meta_file="/tmp/ticket-auto-TEST-TK01-spawn-meta.txt"
-  local start_file="/tmp/ticket-auto-TEST-TK01-start-APPRAISE.ts"
+  local start_file="/tmp/ticket-auto-TEST-TK01-start-APPRAISE-$(date +%s%N).ts"
 
   # Clean any prior run
   rm -f "$meta_file" "$start_file" "$log_file"
@@ -370,7 +370,7 @@ test_token_tracker_fallback_to_ctx_file() {
   local log_file="$tmpdir/test-tk2.log"
   local transcript="$tmpdir/transcript2.jsonl"
   local ctx_file="/tmp/ticket-auto-TEST-TK02-ctx.txt"
-  local start_file="/tmp/ticket-auto-TEST-TK02-start-IMPLEMENT.ts"
+  local start_file="/tmp/ticket-auto-TEST-TK02-start-IMPLEMENT-$(date +%s%N).ts"
 
   # Move aside all existing spawn-meta files
   local saved_meta_dir="$tmpdir/saved-metas"
@@ -427,10 +427,10 @@ test_token_tracker_defaults_to_unknown_when_no_files() {
   local log_file="$tmpdir/test-tk3.log"
   local transcript="$tmpdir/transcript3.jsonl"
   local meta_file="/tmp/ticket-auto-TEST-TK03-spawn-meta.txt"
-  local start_file="/tmp/ticket-auto-TEST-TK03-start-UNKNOWN.ts"
+  local start_file="/tmp/ticket-auto-TEST-TK03-start-UNKNOWN-$(date +%s%N).ts"
 
   # Clean all tracking files for this ticket
-  rm -f "$meta_file" "/tmp/ticket-auto-TEST-TK03-ctx.txt" "$start_file" "$log_file"
+  rm -f "$meta_file" "/tmp/ticket-auto-TEST-TK03-ctx.txt" "/tmp/ticket-auto-TEST-TK03-start-UNKNOWN-"*".ts" "$log_file"
 
   # Move aside all existing ctx files (they interfere with fallback)
   local saved_ctx_dir="$tmpdir/saved-ctx"

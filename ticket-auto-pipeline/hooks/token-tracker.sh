@@ -54,7 +54,9 @@ if [ -z "$LOG_FILE" ]; then
 fi
 
 [ -z "$TICKET_ID" ] && TICKET_ID="unknown"
-START_FILE="/tmp/ticket-auto-${TICKET_ID}-start-${PHASE}.ts"
+# Pick the most recent start file for this phase. Unique suffixes per spawn
+# prevent sub-sub-agent overwrite races; ls -t ensures correct pairing.
+START_FILE=$(ls -t /tmp/ticket-auto-${TICKET_ID}-start-${PHASE}-*.ts 2>/dev/null | head -1)
 
 # Fallback: named agent types (subagent_type) don't include agent_transcript_path in
 # SubagentStop payload. Derive project sessions dir from LOG_FILE path — it reliably
@@ -94,6 +96,9 @@ print(f'{input_t}/{output_t}/{cache_read + cache_create}')
       NOW_NS=$(date +%s%N)
       ELAPSED="|elapsed_ms=$(((NOW_NS - START_NS) / 1000000))"
       rm -f "$START_FILE"
+      # Clean up stale start files (>5 min old) from crashed/missing SubagentStop
+      # hooks. Prevents unbounded accumulation under /tmp.
+      find /tmp -name "ticket-auto-${TICKET_ID}-start-${PHASE}-*.ts" -mmin +5 -delete 2>/dev/null || true
     fi
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|tokens|info|${PHASE}:${TOKENS}${ELAPSED}" >>"$LOG_FILE"
     echo "tokens logged: ${PHASE} ${TOKENS}" >&2

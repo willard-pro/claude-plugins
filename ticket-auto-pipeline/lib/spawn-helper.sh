@@ -574,6 +574,13 @@ spawn_agent_post() {
 # Wrapper around capture_agent_result that reads metadata if available.
 # Usage: spawn_capture TICKET_ID=<id> PHASE=<phase> RESULT="<agent output>"
 spawn_capture() {
+  # Source capture-transcript.sh if capture_agent_result is not already loaded.
+  # spawn-helper.sh is sourced from multiple contexts; capture-transcript.sh may
+  # not be in the calling chain. The guard prevents 22 exit-127 errors per run.
+  if ! command -v capture_agent_result >/dev/null 2>&1; then
+    source "${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}/capture-transcript.sh" 2>/dev/null || true
+  fi
+
   local TICKET_ID=""
   local PHASE=""
   local RESULT=""
