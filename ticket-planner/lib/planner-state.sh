@@ -11,14 +11,72 @@
 #
 # Sourceable library — no set -euo pipefail.
 
+# ── Initiative ID validation ────────────────────────────────────────────────────
+
+# Validate initiative_id against the expected pattern.
+# Rejects path traversal sequences and non-conforming IDs before any path construction.
+# Usage: planner_validate_initiative_id <initiative_id>
+# Returns: 0 if valid, 1 if invalid (writes reason to stderr).
+PLANNER_ID_PATTERN='^INIT-[A-Za-z0-9_-]+$'
+planner_validate_initiative_id() {
+  local id="$1"
+
+  if [ -z "$id" ]; then
+    echo "ERROR: initiative ID is empty" >&2
+    return 1
+  fi
+
+  # Reject path traversal sequences
+  case "$id" in
+  *..* | */* | *\\*)
+    echo "ERROR: initiative ID contains path traversal characters: '$id'" >&2
+    return 1
+    ;;
+  esac
+
+  # Reject if it doesn't match the expected pattern
+  if ! echo "$id" | grep -qE "$PLANNER_ID_PATTERN"; then
+    echo "ERROR: initiative ID '$id' does not match expected pattern ${PLANNER_ID_PATTERN}" >&2
+    return 1
+  fi
+
+  return 0
+}
+
 # ── State directory ────────────────────────────────────────────────────────────
 
 # Resolve the initiative state directory.
+# Validates the initiative_id before constructing the path.
 # Usage: planner_initiative_dir <initiative_id>
 planner_initiative_dir() {
   local initiative_id="$1"
   local repos_root="${REPOS_ROOT:-${HOME}/repos}"
-  echo "${repos_root}/.ticket-auto/initiatives/${initiative_id}"
+
+  # Path traversal guard: validate the ID
+  if ! planner_validate_initiative_id "$initiative_id"; then
+    echo "ERROR: invalid initiative ID '${initiative_id}'" >&2
+    return 1
+  fi
+
+  local dir="${repos_root}/.ticket-auto/initiatives/${initiative_id}"
+
+  # Defense-in-depth: verify the resolved path is still under the expected root
+  local resolved
+  if command -v realpath >/dev/null 2>&1; then
+    resolved=$(realpath "$dir" 2>/dev/null || echo "$dir")
+  else
+    resolved=$(readlink -f "$dir" 2>/dev/null || echo "$dir")
+  fi
+  local expected_prefix="${repos_root}/.ticket-auto/initiatives"
+  case "$resolved" in
+  "${expected_prefix}"/*) ;;
+  *)
+    echo "ERROR: resolved path '${resolved}' is outside expected root '${expected_prefix}'" >&2
+    return 1
+    ;;
+  esac
+
+  echo "$dir"
 }
 
 # Ensure the initiative state directory and its subdirectories exist.

@@ -51,6 +51,11 @@ The router is bash; phases are Claude agents. The router never reasons about con
 |------|---------|
 | `planner-state.sh` | State log format, state directory layout, `planner_state_read`, `planner_state_write`, `planner_position_derive`, `planner_initiative_dir` |
 | `planner-router.sh` | Phase router: `planner_phase_next`, `planner_phase_dispatch`, `planner_phase_validate_transition`. Reads state log, spawns phase agents. |
+| `planner-phase-prompts.sh` | Per-phase agent prompt templates: `planner_prompt_appraisal`, `planner_prompt_discovery`, `planner_prompt_architecture`, `planner_prompt_proposal`, `planner_prompt_review`, `planner_prompt_consensus`, `planner_prompt_openspec`, `planner_prompt_epicgen`, `planner_prompt_storygen`, `planner_prompt_ticketgen`, `planner_prompt_execution`, `planner_prompt_completed`. Dispatch via `planner_prompt_for_phase`. |
+| `planner-context-gen.sh` | Deterministic Planner Context block generator, confidence derivation from concrete signals. |
+| `planner-deps-check.sh` | Dependency acyclicity validation (`tsort`-based), topological sort, missing-target detection. |
+| `planner-ticket-validate.sh` | Pre-creation validation against `planned-ticket-check.sh`, idempotency helpers (`record_intent`, `entity_exists`, `entity_mark_created`). |
+| `planner-replan.sh` | Re-planning support: regenerate-flag detection, feedback ingestion, drift computation, scope restriction, post-replan dependency validation. |
 
 ## State log format
 

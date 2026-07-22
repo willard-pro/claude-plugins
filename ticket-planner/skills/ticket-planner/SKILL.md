@@ -17,6 +17,7 @@ Sits upstream of `ticket-auto` and `fleet-controller`. Produces against frozen c
 | `/ticket-planner plan "idea"` | Start a new initiative from an idea |
 | `/ticket-planner resume <INIT_ID>` | Resume a crashed or paused initiative |
 | `/ticket-planner status <INIT_ID>` | Show current phase and recent log entries |
+| `/ticket-planner replan <INIT_ID>` | Re-plan an initiative from feedback (requires Regenerate flag) |
 
 ## Modes
 
@@ -40,10 +41,18 @@ Continue an interrupted or paused run. The router reads the state log, finds the
 
 ### Status (`status`)
 
-Show the current phase, initiative metadata, and the last few state log entries. Useful for checking whether a run is in progress, paused, or complete.
+Show the current phase, initiative metadata, and the last few state log entries.
 
 ```
 /ticket-planner status INIT-42
+```
+
+### Replan (`replan`)
+
+Re-plan an initiative that carries the `Regenerate` flag. Ingests aggregated feedback, applies confidence drift, and regenerates undispatched Backlog tickets. Dispatched, in-progress, and completed tickets are left unchanged.
+
+```
+/ticket-planner replan INIT-42
 ```
 
 ## The 12 Phases
@@ -92,3 +101,125 @@ The router never reasons about content; phases never mutate state directly (they
 | `PLANNER_REVIEW_HOLD` | false | When `true`, Review phase pauses for human input |
 | `PLANNER_CONSENSUS_HOLD` | false | When `true`, Consensus phase pauses for human input |
 | `PLANNER_MAX_PHASE_RETRIES` | 2 | Max retries per phase before failing the run |
+
+---
+
+## Implementation
+
+When invoked, follow this procedure:
+
+### 1. Source libraries
+
+```bash
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$0")/../..}"
+source "${PLUGIN_ROOT}/lib/planner-state.sh"
+source "${PLUGIN_ROOT}/lib/planner-router.sh"
+source "${PLUGIN_ROOT}/lib/planner-phase-prompts.sh"
+```
+
+### 2. Parse mode
+
+First argument is the mode: `plan`, `resume`, `status`, or `replan`.
+
+### 3. Plan mode
+
+When mode is `plan`:
+
+1. Extract the idea from the second argument.
+2. Generate an initiative ID: `INIT-$(date +%s)` or use a provided ID.
+3. Initialize state: `planner_state_init "$INITIATIVE_ID" "$IDEA"`
+4. Run the dispatch loop (see below).
+
+### 4. Resume mode
+
+When mode is `resume`:
+
+1. Extract the initiative ID from the second argument.
+2. Call `planner_resume "$INITIATIVE_ID"` — it outputs `PLANNER_NEXT_PHASE`, `PLANNER_INITIATIVE`, `PLANNER_LAST_LOG`.
+3. If `PLANNER_COMPLETE=true` is output, report completion and stop.
+4. Run the dispatch loop starting from the returned phase.
+
+### 5. Status mode
+
+When mode is `status`:
+
+1. Extract the initiative ID from the second argument.
+2. Read the state log: `planner_state_read "$INITIATIVE_ID"`
+3. Run `planner_position_derive "$INITIATIVE_ID"` to get the current phase.
+4. Report: current phase, initiative metadata, last 10 log entries, artifact listing.
+
+### 6. Replan mode
+
+When mode is `replan`:
+
+1. Extract the initiative ID from the second argument.
+2. Verify the `Regenerate` flag is present in the state log or initiative artifacts.
+3. If no Regenerate flag, report that re-planning requires the flag and stop.
+4. Ingest feedback from `${state_dir}/feedback/` — read all JSON files, compute drift.
+5. Identify undispatched Backlog tickets (read intent files, cross-reference with spawn queue).
+6. For each eligible ticket, regenerate the Planner Context block with adjusted confidence.
+7. Validate the regenerated dependency set is still acyclic.
+8. Write `META|replan|done` to the state log with counts: tickets regenerated, unchanged, skipped.
+9. Do NOT modify dispatched, in-progress, or completed tickets.
+
+### 7. Dispatch loop
+
+For each phase to run:
+
+1. **Get the prompt** for the current phase:
+   ```bash
+   prompt=$(planner_prompt_for_phase "$PHASE" "$INITIATIVE_ID" "$IDEA" "$STATE_DIR")
+   ```
+
+2. **Check for hold phases.** If `PLANNER_REVIEW_HOLD=true` and phase is Review, pause and ask
+   the user for input before proceeding. If `PLANNER_CONSENSUS_HOLD=true` and phase is Consensus,
+   pause and ask before proceeding.
+
+3. **Spawn the agent** using the Agent tool with:
+   - `description`: "Run planner phase: $PHASE for $INITIATIVE_ID"
+   - `prompt`: the phase prompt from `planner_prompt_for_phase`
+   - `subagent_type`: "general-purpose" (the agent needs Read, Bash, and Linear API access)
+
+4. **Wait for the agent** to complete. The agent writes state log entries itself.
+
+5. **Check the result:**
+   - If the agent succeeded (state log shows `done` for this phase), advance to the next phase.
+   - If the agent failed (state log shows `fail`), check retry count. If under
+     `PLANNER_MAX_PHASE_RETRIES`, retry the same phase. Otherwise, report failure and stop.
+   - If the state log has no terminal entry for the phase (agent crashed), retry
+     (phases are idempotent, so re-running is safe).
+
+6. **Advance** by re-reading `planner_position_derive`. If it returns empty, we're done —
+   Completed phase reached. Report the completion summary.
+
+### 8. After completion
+
+When the dispatch loop finishes (Completed phase done):
+
+1. Read the completion summary from `${STATE_DIR}/artifacts/COMPLETED.md`.
+2. Report to the user:
+   - Initiative ID
+   - Epic ID
+   - Number of tickets created
+   - Whether auto-dispatch will pick them up (FLEET_AUTO_DISPATCH status)
+   - Path to the state log for inspection
+
+## Re-planning details
+
+Re-planning is gated on the `Regenerate` flag. Without it, feedback is not read — the planner's output does not depend on execution history by default. This keeps planner runs reproducible.
+
+When `Regenerate` is true:
+
+1. **Ingest feedback:** Read all JSON files in `${state_dir}/feedback/`. Each file is an aggregate from `fleet-feedback.sh` containing per-ticket confidence drift data.
+2. **Compute drift:** For each ticket, compare `confidence_predicted` (from the Planner Context block) against `confidence_actual` (from feedback). Drift = predicted - actual.
+3. **Adjust confidence:** Apply drift to the original confidence signal. If systematic overconfidence is detected (avg drift > 0.15), apply a uniform penalty to all regenerated tickets.
+4. **Scope restriction:** Only regenerate tickets that are:
+   - In `Backlog` state (not dispatched, not in progress)
+   - Not present in the spawn queue (not already enqueued)
+   - Not completed or merged
+5. **Re-validate:** The regenerated dependency set must be acyclic. If regeneration removes a ticket that others depend on, the dependent tickets must be updated or the regeneration aborted.
+6. **Record:** Write a `META|replan` entry to the state log with:
+   - Triggering flag
+   - Feedback runs considered (file paths)
+   - Drift summary per ticket
+   - Tickets regenerated / unchanged / skipped counts
