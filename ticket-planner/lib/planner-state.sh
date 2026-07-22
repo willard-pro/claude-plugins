@@ -185,13 +185,20 @@ planner_position_derive() {
     # Skip META lines
     [ "$phase" = "META" ] && continue
 
+    # A failed phase has not completed — treat it like an incomplete start
+    # so that the router re-runs it rather than advancing past it.
+    if [ "$status" = "fail" ] && [ -z "$last_started" ]; then
+      last_started="$phase"
+    fi
+
     # Track the last phase that has a start entry (may be incomplete)
     if [ "$status" = "start" ] && [ -z "$last_started" ]; then
       last_started="$phase"
     fi
 
-    # Track the last phase that has a terminal entry (done, fail, skip)
-    if [ "$status" = "done" ] || [ "$status" = "fail" ] || [ "$status" = "skip" ]; then
+    # Track the last phase that has a terminal entry (done, skip)
+    # Note: fail is explicitly excluded — a failed phase is not complete.
+    if [ "$status" = "done" ] || [ "$status" = "skip" ]; then
       last_completed="$phase"
       break
     fi

@@ -46,30 +46,30 @@
 
 ## 6. Upstream reasoning phases
 
-- [ ] 6.1 Implement Appraisal: interpret the idea and establish initiative scope
-- [ ] 6.2 Implement Discovery: explore the affected repositories and gather context
-- [ ] 6.3 Implement Architecture: determine the technical approach
-- [ ] 6.4 Implement Proposal: produce the initiative proposal artifact
-- [ ] 6.5 Implement Review: critique the proposal (internal by default, configurable hold — see design open question)
-- [ ] 6.6 Implement Consensus: resolve review findings into a settled plan
-- [ ] 6.7 Implement OpenSpec: emit the specification artifacts the generation phases consume
-- [ ] 6.8 Add tests: out-of-order transitions refused; phase failure halts the run recoverably and resumes at the failed phase
+- [x] 6.1 Implement Appraisal: interpret the idea and establish initiative scope
+- [x] 6.2 Implement Discovery: explore the affected repositories and gather context
+- [x] 6.3 Implement Architecture: determine the technical approach
+- [x] 6.4 Implement Proposal: produce the initiative proposal artifact
+- [x] 6.5 Implement Review: critique the proposal (internal by default, configurable hold — see design open question)
+- [x] 6.6 Implement Consensus: resolve review findings into a settled plan
+- [x] 6.7 Implement OpenSpec: emit the specification artifacts the generation phases consume
+- [x] 6.8 Add tests: out-of-order transitions refused; phase failure halts the run recoverably and resumes at the failed phase
 
 ## 7. Execution and completion
 
-- [ ] 7.1 Implement Execution: label the epic for execution and hand off to auto-dispatch from group 3
-- [ ] 7.2 Monitor progress through the feedback the writer now produces
-- [ ] 7.3 Implement Completed as a terminal phase permitting no further transition
+- [x] 7.1 Implement Execution: label the epic for execution and hand off to auto-dispatch from group 3
+- [x] 7.2 Monitor progress through the feedback the writer now produces
+- [x] 7.3 Implement Completed as a terminal phase permitting no further transition
 
 ## 8. Re-planning
 
-- [ ] 8.1 Implement Regenerate-flag detection; read feedback only when the flag is present
-- [ ] 8.2 Ingest aggregated feedback runs and apply drift to regenerated confidence
-- [ ] 8.3 Distinguish absent feedback from unreadable feedback rather than treating both as none
-- [ ] 8.4 Restrict regeneration to undispatched backlog tickets; leave dispatched, in-progress, and completed tickets unchanged and report them as such
-- [ ] 8.5 Verify the dependency set remains acyclic and resolvable when regeneration touches only part of an initiative
-- [ ] 8.6 Record the triggering flag and the feedback runs considered in the state log
-- [ ] 8.7 Add tests: unflagged run reads no feedback; regeneration does not modify an in-flight ticket; systematic overconfidence lowers regenerated confidence
+- [x] 8.1 Implement Regenerate-flag detection; read feedback only when the flag is present
+- [x] 8.2 Ingest aggregated feedback runs and apply drift to regenerated confidence
+- [x] 8.3 Distinguish absent feedback from unreadable feedback rather than treating both as none
+- [x] 8.4 Restrict regeneration to undispatched backlog tickets; leave dispatched, in-progress, and completed tickets unchanged and report them as such
+- [x] 8.5 Verify the dependency set remains acyclic and resolvable when regeneration touches only part of an initiative
+- [x] 8.6 Record the triggering flag and the feedback runs considered in the state log
+- [x] 8.7 Add tests: unflagged run reads no feedback; regeneration does not modify an in-flight ticket; systematic overconfidence lowers regenerated confidence
 
 ## 9. Full end-to-end verification (requires fleetd)
 
