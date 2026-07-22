@@ -242,7 +242,7 @@ _gate_entry() {
   # Check 2.6: Verification readiness — check plan artifact for all 4 prerequisites
   # Verification prerequisites are independent of critique readiness. Check them
   # whenever we have an artifact, regardless of whether a critique has run yet.
-  if [ -n "$artifact_path" ] && { [ -f "$artifact_path" ] || [ -d "$artifact_path" ]; } then
+  if [ -n "$artifact_path" ] && { [ -f "$artifact_path" ] || [ -d "$artifact_path" ]; }; then
     local has_test_user has_nav_path has_expected_behavior has_env_prereqs role_pattern missing_count
     # Build role pattern from test-users.json catalog if available, fall back to known roles
     role_pattern=$(jq -r '[.[].roles[]] | unique | join("|")' "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/skills}/config/test-users.json" 2>/dev/null | sed 's/_/[-_]/g' || echo 'attorney|admin|debtor|collection[-_]?agency|correspondent')
@@ -347,13 +347,13 @@ _gate_entry() {
     if [ -n "$vplan_section" ] || [ -n "$critique_score" ]; then
       if { $_is_api_only && [ "$missing_count" -ge 1 ] 2>/dev/null; } ||
         { ! $_is_api_only && [ "$missing_count" -ge 2 ] 2>/dev/null; }; then
-      local _ticket_mode="browser"
-      $_is_api_only && _ticket_mode="api-only"
-      _plog "$LOG_FILE" "GATE" "gate" "fail" "held: plan missing $missing_count/${_required_count} verification prerequisites (mode=$_ticket_mode test_user=$has_test_user nav=$has_nav_path expected=$has_expected_behavior env=$has_env_prereqs)"
-      hb_gate "entry-gate" "fail" "held: plan missing verification prerequisites" "{\"artifact\":\"$artifact_path\",\"missing\":\"$missing_count\",\"required\":\"$_required_count\",\"mode\":\"$_ticket_mode\",\"test_user\":\"$has_test_user\",\"nav\":\"$has_nav_path\",\"expected\":\"$has_expected_behavior\",\"env\":\"$has_env_prereqs\"}"
-      return 1
-    fi
-    fi  # vplan_section || critique_score guard
+        local _ticket_mode="browser"
+        $_is_api_only && _ticket_mode="api-only"
+        _plog "$LOG_FILE" "GATE" "gate" "fail" "held: plan missing $missing_count/${_required_count} verification prerequisites (mode=$_ticket_mode test_user=$has_test_user nav=$has_nav_path expected=$has_expected_behavior env=$has_env_prereqs)"
+        hb_gate "entry-gate" "fail" "held: plan missing verification prerequisites" "{\"artifact\":\"$artifact_path\",\"missing\":\"$missing_count\",\"required\":\"$_required_count\",\"mode\":\"$_ticket_mode\",\"test_user\":\"$has_test_user\",\"nav\":\"$has_nav_path\",\"expected\":\"$has_expected_behavior\",\"env\":\"$has_env_prereqs\"}"
+        return 1
+      fi
+    fi # vplan_section || critique_score guard
 
     # Cross-validation: if critique flagged specific gaps, verify the PLAN resolved them.
     # Uses pre-fallback plan_has_* values — the verification plan must resolve critique
