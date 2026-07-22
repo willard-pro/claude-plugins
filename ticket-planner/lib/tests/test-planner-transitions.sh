@@ -101,9 +101,9 @@ phase_sequence=(
   "OpenSpec" "EpicGen" "StoryGen" "TicketGen" "Execution" "Completed"
 )
 all_legal_ok=true
-for ((i=0; i < ${#phase_sequence[@]}-1; i++)); do
+for ((i = 0; i < ${#phase_sequence[@]} - 1; i++)); do
   from="${phase_sequence[$i]}"
-  to="${phase_sequence[$((i+1))]}"
+  to="${phase_sequence[$((i + 1))]}"
   if ! planner_phase_validate_transition "INIT-LEGAL" "$from" "$to" 2>/dev/null; then
     echo "    UNEXPECTED: $from → $to was rejected"
     all_legal_ok=false
