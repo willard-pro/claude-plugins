@@ -123,11 +123,17 @@ planner_feedback_read_all() {
     return 0
   fi
 
-  # Merge all feedback files into a single JSON array
+  # Merge all valid feedback files into a single JSON array
+  # Invalid/unparseable files are skipped with a warning to stderr.
   local first=true
   echo "["
   while IFS= read -r f; do
     if [ -s "$f" ]; then
+      # Skip files that aren't valid JSON
+      if ! jq -e . "$f" >/dev/null 2>&1; then
+        echo "WARNING: skipping unparseable feedback file: $f" >&2
+        continue
+      fi
       if $first; then
         first=false
       else
@@ -227,7 +233,7 @@ planner_drift_compute() {
       aggregate: {
         avg_drift: ($drifts | if length > 0 then (add / length) else 0 end),
         drift_count: ($drifts | length),
-        systematic_overconfidence: ($drifts | if length > 0 then ((add / length) > 0.15) else false end),
+        systematic_overconfidence: ($drifts | if length > 0 then ((add / length) < -0.15) else false end),
         max_drift: ($drifts | if length > 0 then max else 0 end),
         min_drift: ($drifts | if length > 0 then min else 0 end)
       }
