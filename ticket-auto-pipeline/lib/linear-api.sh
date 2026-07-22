@@ -94,7 +94,10 @@ _retry_classify() {
   # HTTP-level transient messages in the body (non-GraphQL-error responses).
   # Rate-limit info embedded in a 200 response body, timeout/temporary keywords.
   # Use rate[.]limit to avoid the unescaped dot matching any character.
-  if echo "$body" | grep -qiE '429|rate[.]limit|timeout|temporar'; then
+  # NOTE: '429' deliberately excluded — UUID substrings trigger false positives on
+  # successful responses (e.g. dd816776-4ce4-429c-ad38). HTTP 429 is caught by the
+  # status-code check above; GraphQL rate-limit errors are caught by the .errors block.
+  if echo "$body" | grep -qiE 'rate[.]limit|timeout|temporar'; then
     echo "transient"
     return
   fi

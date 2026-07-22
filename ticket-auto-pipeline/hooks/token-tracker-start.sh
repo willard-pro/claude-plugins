@@ -20,4 +20,7 @@ if [ -z "$PHASE" ]; then
 fi
 
 TICKET_ID=$(basename "$CTX_FILE" | sed 's/ticket-auto-\(.*\)-ctx\.txt/\1/')
-date +%s%N >"/tmp/ticket-auto-${TICKET_ID}-start-${PHASE}.ts"
+# Unique suffix prevents sub-sub-agent spawns from overwriting the parent agent's
+# start timestamp. A second SubagentStart within the same phase writes a distinct
+# file so both elapsed_ms values survive to SubagentStop.
+date +%s%N >"/tmp/ticket-auto-${TICKET_ID}-start-${PHASE}-$(date +%s%N).ts"
