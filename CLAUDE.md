@@ -4,7 +4,30 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository purpose
 
-Claude Code plugin marketplace (`willard-pro-claude-plugins`). Currently ships one plugin: `ticket-auto-pipeline` — a fully autonomous Linear ticket pipeline that appraises, implements, verifies, and merges tickets with zero user input.
+Claude Code plugin marketplace (`willard-pro-claude-plugins`). Ships four plugins:
+
+- **`ticket-planner`** — 12-phase autonomous planner turning business ideas into dependency-ordered planned tickets. Sits upstream of ticket-auto. Appraisal → Discovery → Architecture → Proposal → Review → Consensus → OpenSpec → Epic Gen → Story Gen → Ticket Gen → Execution → Completed.
+- **`ticket-auto-pipeline`** — fully autonomous Linear ticket pipeline that appraises, implements, verifies, and merges tickets with zero user input. Consumes planner output via the `planned` label + Planner Context block.
+- **`fleet-controller`** — parent orchestrator above ticket-planner and ticket-auto. Dispatches planned tickets from initiative epics, monitors pipeline health via 11 detection engines, aggregates execution feedback back to the planner. Bash-only, zero Claude agents.
+- **`knowledge-curator`** — durable cross-project knowledge tracking. Captures ideas, decisions, lessons, and discoveries with automatic resurfacing.
+
+## Ecosystem architecture
+
+```
+Business idea → [ticket-planner] → initiative epic + planned tickets (Planner Context + labels)
+                                       ↓
+                                 [fleet-controller] → detect initiatives → dispatch tickets → spawn queue
+                                       ↓
+                                 [ticket-auto-pipeline] → appraise (fast-path for planned) → implement → verify → merge
+                                       ↓
+                                 [fleet-controller feedback] → aggregate execution results → per-initiative feedback JSON
+                                       ↓
+                                 [ticket-planner re-plan] → (on Regenerate flag) → read feedback → regenerate tickets
+```
+
+**Plan → Build → Operate ring**: ticket-planner (Plan) → ticket-auto (Build) → Operate (incident→ticket, post-merge safety) → back to Plan. See `ticket-planner-implementation.md` for the system map.
+
+**Determinism boundary**: bash orchestrates (state parsing, phase routing, validation, dispatch, feedback aggregation). Claude agents reason (appraisal, discovery, architecture, proposal, review, spec writing, ticket generation).
 
 ## Plugin anatomy
 

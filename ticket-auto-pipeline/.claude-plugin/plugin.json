@@ -1,7 +1,7 @@
 {
   "name": "ticket-auto-pipeline",
-  "version": "0.17.0",
-  "description": "Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. Includes 20+ slash commands, state-machine-driven flow control, safety gates, and retrospective analysis.",
+  "version": "0.18.0",
+  "description": "Fully autonomous Linear ticket pipeline \u2014 appraise, implement, verify, and merge with zero user input. Includes 20+ slash commands, state-machine-driven flow control, safety gates, and retrospective analysis.",
   "author": {
     "name": "John Willard"
   },
@@ -26,7 +26,7 @@
         "mcp__gitnexus__impact"
       ],
       "destructive": false,
-      "systemPrompt": "You are a ticket appraisal agent in the ticket-auto-pipeline. Your scope is investigation and artifact creation only. You may read any file and search the codebase, but you MUST NOT modify source code, create branches, or commit. Write only to the ticket workspace directory (notes.md, simple-fix.md, OpenSpec artifacts). Failures go to the pipeline log — never attempt Linear API mutations directly."
+      "systemPrompt": "You are a ticket appraisal agent in the ticket-auto-pipeline. Your scope is investigation and artifact creation only. You may read any file and search the codebase, but you MUST NOT modify source code, create branches, or commit. Write only to the ticket workspace directory (notes.md, simple-fix.md, OpenSpec artifacts). Failures go to the pipeline log \u2014 never attempt Linear API mutations directly."
     },
     "ticket-implement-agent": {
       "description": "Code implementation agent for the IMPLEMENT pipeline phase. Makes code changes, writes tests, commits, and pushes branches.",
@@ -87,7 +87,7 @@
         "Glob"
       ],
       "destructive": true,
-      "systemPrompt": "You are a maintenance agent in the ticket-auto-pipeline. Your scope is documentation generation and wiki errata processing. You may read and write files, but MUST NOT modify source code, create branches, or make commits. Documentation changes are scoped to the wiki root directory and the ticket workspace. Failures are non-blocking — log warnings to the pipeline log and continue."
+      "systemPrompt": "You are a maintenance agent in the ticket-auto-pipeline. Your scope is documentation generation and wiki errata processing. You may read and write files, but MUST NOT modify source code, create branches, or make commits. Documentation changes are scoped to the wiki root directory and the ticket workspace. Failures are non-blocking \u2014 log warnings to the pipeline log and continue."
     },
     "ticket-gate-reconcile-agent": {
       "description": "Post-gate-hold comment reconciliation agent. Spawned when a held ticket is re-approved. Fetches Linear comments, evaluates open questions, incorporates user feedback into the plan artifact, and either passes clean or re-holds with an amendment cycle.",
@@ -121,7 +121,7 @@
         "mcp__gitnexus__smart_unfold"
       ],
       "destructive": false,
-      "systemPrompt": "You are a prescan agent in the ticket-auto-pipeline. Your scope is repository analysis and documentation generation. You write ONLY to your assigned output file under REPOS_ROOT/.ticket-auto/<repo-slug>/docs/. You MUST NOT modify source code, create branches, or make commits. Your output is a single markdown file providing agent-knowledge context for future pipeline runs. Failures are non-blocking — report issues and exit gracefully."
+      "systemPrompt": "You are a prescan agent in the ticket-auto-pipeline. Your scope is repository analysis and documentation generation. You write ONLY to your assigned output file under REPOS_ROOT/.ticket-auto/<repo-slug>/docs/. You MUST NOT modify source code, create branches, or make commits. Your output is a single markdown file providing agent-knowledge context for future pipeline runs. Failures are non-blocking \u2014 report issues and exit gracefully."
     }
   },
   "hooks": {
