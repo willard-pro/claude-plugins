@@ -42,14 +42,21 @@ planner_deps_check_acyclic() {
     return 0 # No edges — trivially acyclic
   fi
 
-  # Run tsort. If it detects a cycle, it prints to stderr and exits non-zero.
-  if echo "$pairs" | tsort >/dev/null 2>&1; then
+  # Run tsort with timeout to prevent unbounded hang on malformed graphs.
+  # POSIX specifies no upper bound on tsort runtime.
+  local tsort_timeout="${PLANNER_TSORT_TIMEOUT:-30}"
+  if echo "$pairs" | timeout "$tsort_timeout" tsort >/dev/null 2>&1; then
     return 0
   else
-    echo "planner-deps-check: cycle detected in dependency graph" >&2
+    local tsort_rc=$?
+    if [ "$tsort_rc" -eq 124 ]; then
+      echo "planner-deps-check: tsort timed out after ${tsort_timeout}s — dependency graph may be malformed" >&2
+    else
+      echo "planner-deps-check: cycle detected in dependency graph" >&2
+    fi
     # Try to identify the cycle for diagnostics
     local cycle_info
-    cycle_info=$(echo "$pairs" | tsort 2>&1 || true)
+    cycle_info=$(echo "$pairs" | timeout "$tsort_timeout" tsort 2>&1 || true)
     echo "planner-deps-check: tsort output: $cycle_info" >&2
     return 1
   fi

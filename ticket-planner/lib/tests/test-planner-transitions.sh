@@ -54,7 +54,7 @@ fi
 
 echo "--- 1b: skip-ahead (gap of 3) ---"
 if ! planner_phase_validate_transition "INIT-BIG" "Discovery" "Review" 2>/dev/null; then
-  pass "Discovery → Review (skipping Architecture+Proposal) is refused"
+  pass "Discovery → Review (skipping Architecture+Specify) is refused"
 else
   fail "Discovery → Review refused" "validator accepted multi-skip"
 fi
@@ -97,8 +97,8 @@ fi
 echo "--- 1h: legal transitions honored ---"
 # Verify every legal adjacent transition works
 phase_sequence=(
-  "Appraisal" "Discovery" "Architecture" "Proposal" "Review" "Consensus"
-  "OpenSpec" "EpicGen" "StoryGen" "TicketGen" "Execution" "Completed"
+  "Appraisal" "Discovery" "Architecture" "Specify" "Review" "Consensus"
+  "EpicGen" "TicketGen" "Completed"
 )
 all_legal_ok=true
 for ((i = 0; i < ${#phase_sequence[@]} - 1; i++)); do
@@ -116,10 +116,10 @@ else
 fi
 
 echo "--- 1i: same-phase transition (resume) ---"
-if planner_phase_validate_transition "INIT-SAME" "Proposal" "Proposal" 2>/dev/null; then
-  pass "Proposal → Proposal (same-phase resume) is legal"
+if planner_phase_validate_transition "INIT-SAME" "Specify" "Specify" 2>/dev/null; then
+  pass "Specify → Specify (same-phase resume) is legal"
 else
-  fail "Proposal → Proposal legal" "validator rejected same-phase resume"
+  fail "Specify → Specify legal" "validator rejected same-phase resume"
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -158,7 +158,7 @@ echo "--- 2d: after re-running failed phase successfully, advances normally ---"
 # Simulate re-running Architecture successfully
 planner_state_write "INIT-FAIL" "Architecture" "architect" "done" "approach chosen after retry"
 pos=$(planner_position_derive "INIT-FAIL")
-if [ "$pos" = "Proposal" ]; then
+if [ "$pos" = "Specify" ]; then
   pass "after re-running failed phase to done, advances to next phase"
 else
   fail "after re-running failed phase to done" "got '$pos'"

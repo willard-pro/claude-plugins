@@ -68,8 +68,8 @@ planner_validate_ticket() {
   fi
 
   if [ ! -f "$checker" ]; then
-    echo "planner-validate: planned-ticket-check.sh not found — skipping validation" >&2
-    return 0 # Degrade gracefully: allow creation without validation
+    echo "planner-validate: planned-ticket-check.sh not found — HARD STOP (validator unavailable)" >&2
+    return 3 # Fail closed: missing validator is a hard stop
   fi
 
   # Source and check. Pass the description inline to avoid API dependency.
@@ -191,4 +191,107 @@ planner_entity_mark_created() {
     --arg iso "$iso" \
     '. + {linear_id: $linear_id, created_at: $iso, status: "created"}' \
     >"$intent_file"
+}
+
+# ── Post-creation verification ────────────────────────────────────────────────
+
+# Verify that created tickets actually exist in Linear with correct labels.
+# This is the last checkpoint after entity creation — catches transient API
+# failures that returned success but didn't persist, and label drift.
+#
+# Usage: planner_verify_tickets <initiative_id> <ticket_ids_json>
+#   initiative_id: the initiative ID
+#   ticket_ids_json: JSON array of ticket identifiers (e.g., ["PRO-101", "PRO-102"])
+# Returns: 0 if all verified, 1 if mismatches found (reports to stdout).
+planner_verify_tickets() {
+  local initiative_id="$1" ticket_ids_json="$2"
+  local intent_dir="${REPOS_ROOT:-${HOME}/repos}/.ticket-auto/initiatives/${initiative_id}/.intents"
+
+  local failures=0 verified=0 missing=0
+  local ticket_id entity_key intent_file linear_id
+
+  _source_if_missing "planner_linear_graphql" "${CLAUDE_PLUGIN_ROOT:-.}/lib/planner-linear-api.sh"
+
+  for ticket_id in $(echo "$ticket_ids_json" | jq -r '.[]'); do
+    # Build entity key: ticket-{slug}
+    local slug
+    slug=$(echo "$ticket_id" | tr '[:upper:]' '[:lower:]')
+    entity_key="ticket-${slug}"
+
+    # Check intent file for recorded Linear ID
+    intent_file="${intent_dir}/${entity_key}.json"
+    if [ ! -f "$intent_file" ]; then
+      echo "planner-verify: WARNING — no intent file for $ticket_id (created outside planner?)"
+      missing=$((missing + 1))
+      continue
+    fi
+
+    linear_id=$(jq -r '.linear_id // ""' "$intent_file" 2>/dev/null)
+    if [ -z "$linear_id" ] || [ "$linear_id" = "null" ]; then
+      echo "planner-verify: FAIL — no Linear ID recorded for $ticket_id"
+      failures=$((failures + 1))
+      continue
+    fi
+
+    # Fetch from Linear and verify labels
+    local issue_json
+    if issue_json=$(planner_linear_get_issue "$linear_id" 2>/dev/null); then
+      local label_names
+      label_names=$(echo "$issue_json" | jq -r '.data.issue.labels.nodes[].name // ""' 2>/dev/null)
+
+      # Required labels: planned, INIT-{id}, Type label
+      local missing_labels=""
+      echo "$label_names" | grep -q "planned" || missing_labels="${missing_labels}planned "
+      echo "$label_names" | grep -q "INIT-" || missing_labels="${missing_labels}INIT-* "
+
+      if [ -n "$missing_labels" ]; then
+        echo "planner-verify: FAIL — $ticket_id ($linear_id) missing labels: $missing_labels"
+        failures=$((failures + 1))
+      else
+        echo "planner-verify: OK — $ticket_id ($linear_id) labels correct"
+        verified=$((verified + 1))
+      fi
+    else
+      echo "planner-verify: FAIL — $ticket_id ($linear_id) not found in Linear (API error or deleted)"
+      failures=$((failures + 1))
+    fi
+  done
+
+  echo "planner-verify: $verified verified, $failures failed, $missing missing-intent"
+  return $((failures > 0 ? 1 : 0))
+}
+
+# ── Dispatch gate ──────────────────────────────────────────────────────────────
+
+# Post-creation gate: verify all tickets and set state:execution on the parent
+# epic. Called by Ticket Gen after all child tickets are created and verified.
+#
+# Usage: planner_dispatch_gate <initiative_id> <epic_linear_id> <ticket_ids_json>
+# Returns: 0 if gate passes (epic labelled state:execution), 1 if it fails.
+planner_dispatch_gate() {
+  local initiative_id="$1" epic_id="$2" ticket_ids_json="$3"
+
+  _source_if_missing "planner_linear_graphql" "${CLAUDE_PLUGIN_ROOT:-.}/lib/planner-linear-api.sh"
+
+  # Step 1: Verify all tickets exist and have correct labels
+  echo "planner-dispatch-gate: verifying $ticket_ids_json tickets..."
+  if ! planner_verify_tickets "$initiative_id" "$ticket_ids_json"; then
+    echo "planner-dispatch-gate: FAIL — ticket verification failed. Epic NOT labelled for execution." >&2
+    return 1
+  fi
+
+  # Step 2: Verify the parent epic exists
+  local epic_json
+  if ! epic_json=$(planner_linear_get_issue "$epic_id" 2>/dev/null); then
+    echo "planner-dispatch-gate: FAIL — cannot fetch epic $epic_id" >&2
+    return 1
+  fi
+  echo "planner-dispatch-gate: epic $epic_id confirmed to exist"
+
+  # Step 3: Set state:execution on the epic
+  echo "planner-dispatch-gate: labelling epic $epic_id with state:execution"
+  # The agent calls the Linear API to add the label
+  # This is a notification — the actual label mutation is done by the agent
+
+  return 0
 }

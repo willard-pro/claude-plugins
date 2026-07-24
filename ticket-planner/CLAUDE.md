@@ -4,7 +4,7 @@ Plugin-level guidance for Claude Code when working inside this plugin directory.
 
 ## Plugin purpose
 
-Autonomous 12-phase planner that turns business ideas into dependency-ordered planned tickets the existing `ticket-auto` pipeline consumes without special-casing. Sits upstream of `ticket-auto` and `fleet-controller` — plans, then hands off.
+Autonomous 9-phase planner that turns business ideas into dependency-ordered planned tickets the existing `ticket-auto` pipeline consumes without special-casing. Sits upstream of `ticket-auto` and `fleet-controller` — plans, then hands off.
 
 Produces against frozen consumption-side contracts: Planner Context block schema, `planned`/`pre-approved`/`Type` labels, artifact plane, and feedback aggregation. Does not re-specify them.
 
@@ -18,7 +18,7 @@ ticket-planner/
   docs/                           # Architecture and reference docs
 ```
 
-## 12-phase state machine
+## 9-phase state machine
 
 ```
 Appraisal → Discovery → Architecture → Proposal → Review → Consensus →
@@ -51,11 +51,13 @@ The router is bash; phases are Claude agents. The router never reasons about con
 |------|---------|
 | `planner-state.sh` | State log format, state directory layout, `planner_state_read`, `planner_state_write`, `planner_position_derive`, `planner_initiative_dir` |
 | `planner-router.sh` | Phase router: `planner_phase_next`, `planner_phase_dispatch`, `planner_phase_validate_transition`. Reads state log, spawns phase agents. |
-| `planner-phase-prompts.sh` | Per-phase agent prompt templates: `planner_prompt_appraisal`, `planner_prompt_discovery`, `planner_prompt_architecture`, `planner_prompt_proposal`, `planner_prompt_review`, `planner_prompt_consensus`, `planner_prompt_openspec`, `planner_prompt_epicgen`, `planner_prompt_storygen`, `planner_prompt_ticketgen`, `planner_prompt_execution`, `planner_prompt_completed`. Dispatch via `planner_prompt_for_phase`. |
+| `planner-phase-prompts.sh` | Per-phase agent prompt templates: `planner_prompt_appraisal`, `planner_prompt_discovery`, `planner_prompt_architecture`, `planner_prompt_specify`, `planner_prompt_review`, `planner_prompt_consensus`, `planner_prompt_epicgen`, `planner_prompt_ticketgen`, `planner_prompt_completed`. Dispatch via `planner_prompt_for_phase`. |
 | `planner-context-gen.sh` | Deterministic Planner Context block generator, confidence derivation from concrete signals. |
 | `planner-deps-check.sh` | Dependency acyclicity validation (`tsort`-based), topological sort, missing-target detection. |
 | `planner-ticket-validate.sh` | Pre-creation validation against `planned-ticket-check.sh`, idempotency helpers (`record_intent`, `entity_exists`, `entity_mark_created`). |
 | `planner-replan.sh` | Re-planning support: regenerate-flag detection, feedback ingestion, drift computation, scope restriction, post-replan dependency validation. |
+| `planner-linear-api.sh` | Linear GraphQL API client with retry (3 attempts, exponential backoff). Wraps curl. `planner_linear_graphql`, `planner_linear_create_issue`, `planner_linear_get_issue`. |
+| `planner-spec-validate.sh` | Deterministic spec file validation gate. `planner_spec_validate_all`, `planner_spec_validate_one`. Checks required sections + parseable Signals JSON. |
 
 ## State log format
 
