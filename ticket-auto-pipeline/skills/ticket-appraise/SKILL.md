@@ -119,6 +119,16 @@ If `FAST_PATH_ELIGIBLE=true`:
    - Step 4 (Update ticket in Linear) — claim + label
    - Step 5 (Hand off) — report to user
 
+5. **Exploration depth consumption** — adjust investigation scope based on `Exploration Depth` field (Schema-Version 2). Read from the Planner Context block:
+
+   | Depth | Behavior |
+   |---|---|
+   | `deep` | Trust the planner's investigation. Skip full codebase grep. Use `Code Paths Traced` and `Target Symbols` as the complete investigation surface. Verify that listed API contracts still match current code (contracts may have drifted). |
+   | `standard` (or absent) | Use `Target Symbols` as primary investigation path. Supplement with targeted grep on affected files. Do NOT do a full codebase sweep — the planner already traced key call chains. |
+   | `quick-scan` | Treat `Target Symbols` as hints only. Do a full codebase investigation — the planner only did a surface scan. The `quick-scan` depth means the planner may have missed relevant code paths. |
+
+   If `Open Questions` is non-empty, treat each question as an investigation prompt during blast radius analysis (Step 2.8). Surface answers (or lack thereof) in notes.md.
+
 ### 1.3d — Fast-path skipped: proceed normally
 
 If `FAST_PATH_ELIGIBLE=false`:

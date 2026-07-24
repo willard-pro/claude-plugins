@@ -103,6 +103,80 @@ planned_feedback_write() {
   local decision_drift
   decision_drift=$(_compute_decision_drift "$confidence_predicted" "$confidence_actual")
 
+  # ── Exploration accuracy ─────────────────────────────────────────────────────
+
+  local exploration_depth_declared="" exploration_depth_actual="" missed_symbols="[]" false_traces="[]" code_paths_traced=""
+
+  # Extract exploration fields from Planner Context block
+  if [ -n "$description" ]; then
+    exploration_depth_declared=$(echo "$description" | sed -n '/## Planner Context/,/^## /p' | grep -i '^\s*\*\*Exploration Depth:\*\*' | head -1 | sed 's/.*\*\*Exploration Depth:\*\*\s*//' || true)
+    code_paths_traced=$(echo "$description" | sed -n '/## Planner Context/,/^## /p' | grep -i '^\s*\*\*Code Paths Traced:\*\*' | head -1 | sed 's/.*\*\*Code Paths Traced:\*\*\s*//' || true)
+  fi
+
+  # Compute exploration accuracy when the ticket was planned with exploration data
+  if [ -n "$exploration_depth_declared" ]; then
+    # Parse declared code paths into a clean list for comparison
+    local traced_list="[]"
+    if [ -n "$code_paths_traced" ]; then
+      traced_list=$(echo "$code_paths_traced" | tr ';' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | jq -R -s 'split("\n") | map(select(length > 0))' 2>/dev/null || echo "[]")
+    fi
+
+    # Compare actual files changed vs. traced code paths
+    # missed_symbols: files in the diff whose symbols were NOT in Code Paths Traced
+    # false_traces: symbols in Code Paths Traced whose files were NOT in the diff
+    if [ "$files_changed" != "[]" ] && [ -n "$files_changed" ]; then
+      local changed_files_list
+      changed_files_list=$(echo "$files_changed" | jq -r '.[]' 2>/dev/null || true)
+
+      if [ "$traced_list" != "[]" ] && [ -n "$changed_files_list" ]; then
+        # Extract file paths from traced symbols (symbol:file → file)
+        local traced_files
+        traced_files=$(echo "$code_paths_traced" | tr ';' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$' | sed 's/^[^:]*://' | sort -u)
+
+        # missed_symbols: changed files not in traced files
+        local missed_list=""
+        while IFS= read -r f; do
+          [ -z "$f" ] && continue
+          if ! echo "$traced_files" | grep -qF "$f"; then
+            missed_list="${missed_list}${missed_list:+,}\"${f}\""
+          fi
+        done <<<"$changed_files_list"
+        missed_symbols="[${missed_list}]"
+
+        # false_traces: traced symbols whose file wasn't changed
+        local false_list=""
+        while IFS= read -r entry; do
+          [ -z "$entry" ] && continue
+          local sym_file
+          sym_file=$(echo "$entry" | sed 's/^[^:]*://') # extract file from symbol:file
+          if ! echo "$changed_files_list" | grep -qF "$sym_file"; then
+            false_list="${false_list}${false_list:+,}\"${entry}\""
+          fi
+        done <<<"$(echo "$code_paths_traced" | tr ';' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -v '^$')"
+        false_traces="[${false_list}]"
+      elif [ -z "$changed_files_list" ] || [ "$changed_files_list" = "[]" ]; then
+        # No files changed — all traced paths are false traces
+        false_traces="$traced_list"
+      fi
+    fi
+
+    # Determine exploration_depth_actual
+    # sufficient: no missed symbols, no false traces
+    # insufficient: missed symbols found
+    # over: false traces found but no missed symbols
+    local missed_count false_count
+    missed_count=$(echo "$missed_symbols" | jq 'length' 2>/dev/null || echo 0)
+    false_count=$(echo "$false_traces" | jq 'length' 2>/dev/null || echo 0)
+
+    if [ "$missed_count" -gt 0 ] 2>/dev/null; then
+      exploration_depth_actual="insufficient"
+    elif [ "$false_count" -gt 0 ] 2>/dev/null; then
+      exploration_depth_actual="$exploration_depth_declared" # over-traced but depth was sufficient
+    else
+      exploration_depth_actual="$exploration_depth_declared"
+    fi
+  fi
+
   # ── Emit feedback entry ──────────────────────────────────────────────────────
 
   local payload iso
@@ -114,6 +188,10 @@ planned_feedback_write() {
     --argjson files_changed "$files_changed" \
     --argjson services_touched "$services_touched" \
     --arg decision_drift "$decision_drift" \
+    --arg exploration_depth_declared "$exploration_depth_declared" \
+    --arg exploration_depth_actual "$exploration_depth_actual" \
+    --argjson missed_symbols "$missed_symbols" \
+    --argjson false_traces "$false_traces" \
     '{
       confidence_predicted: $confidence_predicted,
       confidence_actual: $confidence_actual,
@@ -122,7 +200,13 @@ planned_feedback_write() {
       files_changed: $files_changed,
       services_touched: $services_touched,
       decision_drift: $decision_drift
-    }' 2>/dev/null)
+    }
+    + if $exploration_depth_declared != "" then {
+      exploration_depth_declared: $exploration_depth_declared,
+      exploration_depth_actual: $exploration_depth_actual,
+      missed_symbols: $missed_symbols,
+      false_traces: $false_traces
+    } else {} end' 2>/dev/null)
 
   if [ -z "$payload" ]; then
     echo "planned-feedback-write: jq payload construction failed" >&2

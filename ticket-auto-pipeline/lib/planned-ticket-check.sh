@@ -19,11 +19,12 @@
 # ── Configuration ───────────────────────────────────────────────────────────
 
 PLANNER_CONFIDENCE_THRESHOLD="${PLANNER_CONFIDENCE_THRESHOLD:-0.5}"
-SCHEMA_KNOWN_MAX="${PLANNER_SCHEMA_KNOWN_MAX:-1}"
+SCHEMA_KNOWN_MAX="${PLANNER_SCHEMA_KNOWN_MAX:-2}"
 
 # ── Required fields (Schema-Version 1) ──────────────────────────────────────
 
 # Ordered list of required field display names (the part between ** **)
+# These 11 fields are mandatory for ALL schema versions.
 PLANNER_REQUIRED_FIELDS=(
   "Schema-Version"
   "Initiative"
@@ -38,8 +39,20 @@ PLANNER_REQUIRED_FIELDS=(
   "Regenerate"
 )
 
+# Schema-Version 2 optional exploration fields (validated when present, absent is OK)
+PLANNER_V2_OPTIONAL_FIELDS=(
+  "Exploration Depth"
+  "Code Paths Traced"
+  "API Contracts Analyzed"
+  "Alternative Approaches"
+  "Open Questions"
+)
+
 # Valid Strategy enum values
 VALID_STRATEGIES=("Conservative" "Balanced" "Innovative")
+
+# Valid Exploration Depth enum values
+VALID_EXPLORATION_DEPTHS=("quick-scan" "standard" "deep")
 
 # ── Public API ──────────────────────────────────────────────────────────────
 
@@ -160,6 +173,42 @@ check_planned_ticket_description() {
     esac
   done
 
+  # ── Schema-Version 2 optional field validation ────────────────────────────
+  # Only run when schema_version is 2+. Validate fields if present; absent is OK.
+  if [ -n "$schema_version" ] && [ "$schema_version" -ge 2 ] 2>/dev/null; then
+    for field in "${PLANNER_V2_OPTIONAL_FIELDS[@]}"; do
+      local value
+      value=$(echo "$block" | _extract_field "$field")
+
+      # Skip if absent — all V2 fields are optional
+      [ -z "$value" ] && continue
+
+      # Type-specific validation for V2 fields
+      case "$field" in
+      "Exploration Depth")
+        if ! _validate_enum "$value" "${VALID_EXPLORATION_DEPTHS[@]}"; then
+          invalid_fields+=("$field: expected quick-scan|standard|deep, got '$value'")
+        fi
+        ;;
+      "Code Paths Traced")
+        # Same format as Target Symbols: semicolon-separated symbol:file references
+        if ! _validate_target_symbols "$value"; then
+          invalid_fields+=("$field: expected semicolon-separated 'symbol:file' references, got '$value'")
+        fi
+        ;;
+      "API Contracts Analyzed")
+        # Free-form comma-separated list — no structural validation beyond presence
+        ;;
+      "Alternative Approaches")
+        # Free-form semicolon-separated summaries — no structural validation
+        ;;
+      "Open Questions")
+        # Free-form semicolon-separated items — no structural validation
+        ;;
+      esac
+    done
+  fi
+
   # ── Report missing/invalid fields ─────────────────────────────────────────
   if [ ${#missing_fields[@]} -gt 0 ] || [ ${#invalid_fields[@]} -gt 0 ]; then
     local msg=""
@@ -276,6 +325,39 @@ _confidence_below_threshold() {
   [ "$cmp" = "below" ]
 }
 
+# check_exploration_depth_mismatch <depth> <complexity> <affected_services_count>
+# Detects inconsistency between declared exploration depth and ticket characteristics.
+# Returns: 0 (consistent), 1 (mismatch — warn but don't block), 2 (severe mismatch)
+# Complexity and service count are optional — mismatch degrades gracefully.
+check_exploration_depth_mismatch() {
+  local depth="$1"
+  local complexity="${2:-simple}"
+  local service_count="${3:-1}"
+
+  # Default depth if absent
+  [ -z "$depth" ] && depth="standard"
+
+  # quick-scan on a complex ticket → mismatch (severity 1)
+  if [ "$depth" = "quick-scan" ] && [ "$complexity" = "complex" ]; then
+    echo "exploration-depth-mismatch: quick-scan depth on complex ticket — investigation may be insufficient" >&2
+    return 1
+  fi
+
+  # quick-scan touching 5+ services → mismatch (severity 1)
+  if [ "$depth" = "quick-scan" ] && [ "$service_count" -ge 5 ] 2>/dev/null; then
+    echo "exploration-depth-mismatch: quick-scan depth with $service_count affected services — investigation may be insufficient" >&2
+    return 1
+  fi
+
+  # deep on a simple single-service ticket → note but not a problem (over-exploration)
+  if [ "$depth" = "deep" ] && [ "$complexity" = "simple" ] && [ "$service_count" -le 1 ] 2>/dev/null; then
+    echo "exploration-depth-mismatch: deep depth on simple single-service ticket — over-exploration noted" >&2
+    return 0
+  fi
+
+  return 0
+}
+
 # ── Self-test mode ──────────────────────────────────────────────────────────
 # Run with --self-test to validate internal helpers. Not a substitute for
 # test-planned-ticket-check.sh — just smoke-checks the helper functions.
@@ -300,6 +382,22 @@ if [ "${1:-}" = "--self-test" ]; then
   # Target symbols validation
   _validate_target_symbols "DebtCollector.collect:src/collector.ts:42" && echo "✓ target symbols valid" || echo "✗ should be valid"
   ! _validate_target_symbols "BadFormat" && echo "✓ BadFormat invalid" || echo "✗ should be invalid"
+
+  # Exploration depth validation
+  _validate_enum "quick-scan" "${VALID_EXPLORATION_DEPTHS[@]}" && echo "✓ quick-scan valid" || echo "✗ quick-scan should be valid"
+  _validate_enum "deep" "${VALID_EXPLORATION_DEPTHS[@]}" && echo "✓ deep valid" || echo "✗ deep should be valid"
+  ! _validate_enum "thorough" "${VALID_EXPLORATION_DEPTHS[@]}" && echo "✓ thorough invalid" || echo "✗ thorough should be invalid"
+  ! _validate_enum "none" "${VALID_EXPLORATION_DEPTHS[@]}" && echo "✓ none invalid" || echo "✗ none should be invalid"
+
+  # Exploration depth mismatch detection
+  check_exploration_depth_mismatch "quick-scan" "complex" 1
+  [ $? -eq 1 ] && echo "✓ quick-scan+complex mismatch detected" || echo "✗ should detect mismatch"
+  check_exploration_depth_mismatch "deep" "complex" 3
+  [ $? -eq 0 ] && echo "✓ deep+complex consistent" || echo "✗ should be consistent"
+  check_exploration_depth_mismatch "standard" "simple" 1
+  [ $? -eq 0 ] && echo "✓ standard+simple consistent" || echo "✗ should be consistent"
+  check_exploration_depth_mismatch "quick-scan" "simple" 1
+  [ $? -eq 0 ] && echo "✓ quick-scan+simple consistent" || echo "✗ should be consistent"
 
   echo "Self-tests complete."
   exit 0

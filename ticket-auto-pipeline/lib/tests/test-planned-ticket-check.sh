@@ -265,6 +265,106 @@ test_planned_ticket_valid() {
   check_planned_ticket "CRE-100" "$desc" "true"
 }
 
+# ── Schema-Version 2 tests ──────────────────────────────────────────────────
+
+# Helper: build a Schema-Version 2 block with exploration fields
+_build_block_v2() {
+  local exploration_depth="${1:-standard}"
+  local code_paths="${2:-DebtCollector.collect:src/collector.ts; PaymentGateway.charge:src/gateway.ts}"
+  local api_contracts="${3:-debt-collection:POST /collect}"
+  local alt_approaches="${4:-Extend collector (rejected: too coupled); Inline fix (selected)}"
+  local open_questions="${5:-Should collector retry on 429?}"
+
+  cat <<EOF
+Some ticket description text.
+
+## Planner Context
+**Schema-Version:** 2
+**Initiative:** INIT-42
+**Epic:** CRE-100
+**Confidence:** 0.92
+**Strategy:** Balanced
+**Decision:** Extend DebtCollector with new payment method enum
+**Affected Services:** debt-collection
+**Target Symbols:** DebtCollector.collect:src/collector.ts:42
+**Pre-approved:** true
+**Generated:** 2026-07-24T18:00:00Z
+**Regenerate:** false
+**Exploration Depth:** ${exploration_depth}
+**Code Paths Traced:** ${code_paths}
+**API Contracts Analyzed:** ${api_contracts}
+**Alternative Approaches:** ${alt_approaches}
+**Open Questions:** ${open_questions}
+
+## Acceptance Criteria
+- [ ] Something works
+EOF
+}
+
+# ── Test: Schema-Version 2, fully valid with exploration fields → exit 0 ─────
+
+test_v2_valid_full() {
+  local desc
+  desc=$(_build_block_v2)
+  check_planned_ticket_description "$desc"
+}
+
+# ── Test: Schema-Version 2 with missing optional exploration fields → exit 0 ──
+
+test_v2_missing_optional() {
+  local desc
+  desc=$(_build_block "2")
+  check_planned_ticket_description "$desc"
+}
+
+# ── Test: Schema-Version 2, invalid Exploration Depth (thorough) → exit 1 ─────
+
+test_v2_invalid_depth() {
+  local desc
+  desc=$(_build_block_v2 "thorough")
+  check_planned_ticket_description "$desc"
+}
+
+# ── Test: Schema-Version 2, invalid Exploration Depth (none) → exit 1 ─────────
+
+test_v2_invalid_depth_none() {
+  local desc
+  desc=$(_build_block_v2 "none")
+  check_planned_ticket_description "$desc"
+}
+
+# ── Test: Schema-Version 2, malformed Code Paths Traced → exit 1 ─────────────
+
+test_v2_malformed_code_paths() {
+  local desc
+  desc=$(_build_block_v2 "standard" "NoColonHere")
+  check_planned_ticket_description "$desc"
+}
+
+# ── Test: Exploration depth mismatch — quick-scan + complex → exit 1 ──────────
+
+test_depth_mismatch_quick_complex() {
+  check_exploration_depth_mismatch "quick-scan" "complex" 1
+}
+
+# ── Test: Exploration depth mismatch — deep + complex → exit 0 ────────────────
+
+test_depth_mismatch_deep_complex() {
+  check_exploration_depth_mismatch "deep" "complex" 3
+}
+
+# ── Test: Exploration depth mismatch — standard + simple → exit 0 ─────────────
+
+test_depth_mismatch_standard_simple() {
+  check_exploration_depth_mismatch "standard" "simple" 1
+}
+
+# ── Test: Exploration depth mismatch — quick-scan + 5 services → exit 1 ───────
+
+test_depth_mismatch_quick_many_services() {
+  check_exploration_depth_mismatch "quick-scan" "simple" 5
+}
+
 # ── Run tests ──────────────────────────────────────────────────────────────
 
 echo "=== planned-ticket-check.sh unit tests ==="
@@ -290,6 +390,21 @@ _run_exit_code "Strategy case sensitivity (conservative) → exit 1" 1 test_stra
 _run "API fetch path with mocked get_issue → exit 0" test_api_fetch_path
 _run "not-planned ticket → exit 0" test_not_planned_ticket
 _run "planned ticket + valid block → exit 0" test_planned_ticket_valid
+
+echo ""
+echo "--- Schema-Version 2 ---"
+_run "V2 fully valid with exploration fields → exit 0" test_v2_valid_full
+_run "V2 missing optional exploration fields → exit 0" test_v2_missing_optional
+_run_exit_code "V2 invalid Exploration Depth (thorough) → exit 1" 1 test_v2_invalid_depth
+_run_exit_code "V2 invalid Exploration Depth (none) → exit 1" 1 test_v2_invalid_depth_none
+_run_exit_code "V2 malformed Code Paths Traced → exit 1" 1 test_v2_malformed_code_paths
+
+echo ""
+echo "--- Exploration depth mismatch ---"
+_run_exit_code "quick-scan + complex → exit 1" 1 test_depth_mismatch_quick_complex
+_run "deep + complex → exit 0" test_depth_mismatch_deep_complex
+_run "standard + simple → exit 0" test_depth_mismatch_standard_simple
+_run_exit_code "quick-scan + 5 services → exit 1" 1 test_depth_mismatch_quick_many_services
 
 echo ""
 echo "=== $((PASS + FAIL)) tests: $PASS pass, $FAIL fail ==="

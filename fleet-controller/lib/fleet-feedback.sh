@@ -230,6 +230,26 @@ fleet_aggregate_feedback() {
     local services_json
     services_json=$(echo "$tickets_json" | jq -r '[.[].services_touched // []] | flatten | unique' 2>/dev/null)
 
+    # ── Exploration accuracy aggregation ──────────────────────────────────────
+    local exploration_insufficient_count=0 missed_symbols_total=0 false_traces_total=0
+    while IFS= read -r entry; do
+      [ -z "$entry" ] && continue
+      local depth_actual
+      depth_actual=$(echo "$entry" | jq -r '.exploration_depth_actual // ""' 2>/dev/null)
+      [ "$depth_actual" = "insufficient" ] && exploration_insufficient_count=$((exploration_insufficient_count + 1))
+
+      local missed
+      missed=$(echo "$entry" | jq -r '.missed_symbols | length' 2>/dev/null || echo 0)
+      [ -n "$missed" ] && [ "$missed" != "null" ] && missed_symbols_total=$((missed_symbols_total + missed))
+
+      local false_t
+      false_t=$(echo "$entry" | jq -r '.false_traces | length' 2>/dev/null || echo 0)
+      [ -n "$false_t" ] && [ "$false_t" != "null" ] && false_traces_total=$((false_traces_total + false_t))
+    done <<<"$entries"
+
+    local exploration_insufficient_ratio=0
+    [ "$ticket_count" -gt 0 ] 2>/dev/null && exploration_insufficient_ratio=$(echo "scale=2; $exploration_insufficient_count / $ticket_count" | bc 2>/dev/null || echo "0")
+
     local output_dir="${repos_root}/.ticket-auto/initiatives/${init_id}/feedback"
     local output_file="${output_dir}/${rundate}.json"
 
@@ -249,6 +269,10 @@ fleet_aggregate_feedback() {
       --argjson avg_confidence_actual "$avg_confidence" \
       --argjson drift_count "$drift_count" \
       --argjson services_touched "$services_json" \
+      --argjson exploration_insufficient_count "$exploration_insufficient_count" \
+      --argjson exploration_insufficient_ratio "$exploration_insufficient_ratio" \
+      --argjson missed_symbols_total "$missed_symbols_total" \
+      --argjson false_traces_total "$false_traces_total" \
       '{
         initiative_id: $initiative_id,
         rundate: $rundate,
@@ -257,7 +281,13 @@ fleet_aggregate_feedback() {
           total_tickets: $total_tickets,
           avg_confidence_actual: $avg_confidence_actual,
           drift_count: $drift_count,
-          services_touched: $services_touched
+          services_touched: $services_touched,
+          exploration_accuracy: {
+            insufficient_count: $exploration_insufficient_count,
+            insufficient_ratio: $exploration_insufficient_ratio,
+            missed_symbols_total: $missed_symbols_total,
+            false_traces_total: $false_traces_total
+          }
         }
       }')
 

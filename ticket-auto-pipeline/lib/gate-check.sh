@@ -441,6 +441,21 @@ _gate_entry() {
       return 2
     fi
     _plog "$LOG_FILE" "GATE" "planned-check" "done" "body complete for type $ticket_type"
+
+    # 2.7d: Exploration depth mismatch detection (soft signal, never blocks)
+    local exploration_depth
+    exploration_depth=$(echo "$planned_desc" | sed -n '/## Planner Context/,/^## /p' | grep -i '^\*\*Exploration Depth:\*\*' | head -1 | sed 's/.*\*\*Exploration Depth:\*\*\s*//' || true)
+    if [ -n "$exploration_depth" ]; then
+      local affected_services_str svc_count
+      affected_services_str=$(echo "$planned_desc" | sed -n '/## Planner Context/,/^## /p' | grep -i '^\*\*Affected Services:\*\*' | head -1 | sed 's/.*\*\*Affected Services:\*\*\s*//' || true)
+      svc_count=$(echo "$affected_services_str" | tr ',' '\n' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | grep -cv '^$' || echo 1)
+      local mismatch_rc=0
+      check_exploration_depth_mismatch "$exploration_depth" "$complexity" "$svc_count" 2>/dev/null || mismatch_rc=$?
+      if [ "$mismatch_rc" = "1" ]; then
+        _plog "$LOG_FILE" "GATE" "planned-check" "warn" "exploration depth mismatch: depth=$exploration_depth complexity=$complexity services=$svc_count"
+        hb_gate "planned-check" "warn" "exploration depth mismatch" "{\"depth\":\"$exploration_depth\",\"complexity\":\"$complexity\",\"services\":\"$svc_count\"}"
+      fi
+    fi
   fi
 
   # Check 2.8b: Complex + auto/semi-auto + approved → auto-approve.
