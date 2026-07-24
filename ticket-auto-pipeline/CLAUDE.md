@@ -167,6 +167,10 @@ Defined in `planner_labels` section of `state-machine.json`. Set by ticket-plann
 
 When ticket-planner creates a ticket, it appends a `## Planner Context` markdown block to the Linear description. Schema defined in `docs/planner-context-schema.md`. Validated by `lib/planned-ticket-check.sh` (exit 0 = valid, 1 = malformed, 2 = low confidence + not pre-approved).
 
+**Schema-Version 2** (current) adds 5 optional exploration fields: `Exploration Depth` (enum: quick-scan/standard/deep), `Code Paths Traced` (symbol:file list), `API Contracts Analyzed` (CSV), `Alternative Approaches` (semicolon-list), `Open Questions` (semicolon-list). Version 1 blocks remain valid — all Version 2 fields are optional with sensible defaults. See `docs/exploration-depth-levels.md` for depth semantics and `docs/discovery-phase-spec.md` for how openspec-explore integrates into the planner's Discovery phase.
+
+**Exploration depth consumption** (appraise fast-path): The depth declared by the planner controls how much the appraise agent trusts the planner's investigation. `deep` → skip full grep, trust traced paths. `standard` → use targets as primary path, supplement with targeted grep. `quick-scan` → treat targets as hints, do full investigation. Depth mismatch (`quick-scan` on complex ticket) is a soft signal in gate-check.sh — warns, never blocks.
+
 ## Pipeline log format
 
 `ISO|PHASE|STEP|STATUS|MSG` — schema version 1. Phases: `APPRAISE`, `EXEC`, `GATE`, `IMPLEMENT`, `VERIFY`, `PR-REVIEW`, `MAINTENANCE`. `META` pseudo-phase for schema, gate results, outcomes, artifacts.
