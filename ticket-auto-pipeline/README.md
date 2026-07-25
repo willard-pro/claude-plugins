@@ -56,8 +56,11 @@ UAT_URL: https://staging.example.com
 Then confirm your Linear team's states and labels match the state machine:
 
 ```bash
-bash ticket-auto-pipeline/validate-linear-config.sh
+bash "$(find ~/.claude/plugins/cache/willard-pro-claude-plugins/ticket-auto-pipeline \
+  -name validate-linear-config.sh -type f | sort -V | tail -1)"
 ```
+
+(Working from a clone of this repo instead? The script is at `ticket-auto-pipeline/skills/ticket-flow/validate-linear-config.sh`.)
 
 **5. Run your first pipeline:**
 
@@ -191,9 +194,8 @@ Restart Claude Code after adding MCP servers.
 | Command | What it does |
 |---------|-------------|
 | `/ticket-overseer` | Pipeline queue dashboard report (human-facing) |
-| `/ticket-fleet-controller monitor` | Continuous detection loop with automated kill/restart |
-| `/ticket-fleet-controller status` | One-shot health dashboard + markdown report |
-| `/ticket-fleet-controller intervene <id>` | Manual kill or restart of a specific pipeline |
+
+Fleet monitoring now lives in the separate [`fleet-controller`](../fleet-controller/README.md) plugin — `/fleet-controller status`, `monitor`, `intervene`, `dispatch`, `feedback`. The old `/ticket-fleet-controller` command is a deprecated forwarder kept for one release cycle; update any cron jobs still calling it.
 
 ### Supporting
 
@@ -341,7 +343,8 @@ If `validate-linear-config.sh` reports states or labels missing from your Linear
 Use `--dry-run` to preview without failing:
 
 ```bash
-bash ticket-auto-pipeline/validate-linear-config.sh --dry-run
+bash "$(find ~/.claude/plugins/cache/willard-pro-claude-plugins/ticket-auto-pipeline \
+  -name validate-linear-config.sh -type f | sort -V | tail -1)" --dry-run
 ```
 
 ### MCP auth errors
@@ -365,13 +368,30 @@ When the pipeline halts with a gate-stop, check the pipeline log for the specifi
 
 For detailed failure analysis, run `/ticket-retro <id>` — it reads the pipeline log and heartbeat log to classify the failure and suggest fixes.
 
-### Crash recovery
+### Resuming an interrupted run
 
 If a pipeline run is interrupted (session close, crash, timeout):
 
 1. Run `/ticket-detect-resume <id>` — it reads the pipeline log to find the last completed step
 2. Run `/ticket-auto <id>` again — it will detect the in-progress log and offer to resume
 3. If the log is corrupted, delete `tickets/{ID}--*/pipeline.log` and start fresh
+
+## Documentation
+
+| Document | Audience | Contents |
+|----------|----------|----------|
+| [plugin-overview.md](plugin-overview.md) | Maintainers | Full architecture and design rationale |
+| [docs/README.md](docs/README.md) | Everyone | Index of all deep-dive reference docs |
+| [templates/](templates/) | Users | Ticket templates — copy into Linear descriptions |
+| [pipeline-log-format.md](pipeline-log-format.md) | Developers | Pipeline log schema (the crash-recovery checkpoint) |
+| [pipeline-heartbeat-format.md](pipeline-heartbeat-format.md) | Developers | Heartbeat log schema |
+| [docs/planner-context-schema.md](docs/planner-context-schema.md) | Developers | The planner → pipeline handoff contract |
+| [docs/branch-directive-schema.md](docs/branch-directive-schema.md) | Developers | Shared epic-branch directive format |
+| [skills/ticket-flow/state-machine.json](skills/ticket-flow/state-machine.json) | Developers | Canonical state/label transition definitions |
+| [CLAUDE.md](CLAUDE.md) | Claude Code | Plugin architecture, library reference, sharp edges |
+| [Root README](../README.md) | Everyone | Marketplace overview, ecosystem flow, first-run walkthrough |
+
+Related plugins: [ticket-planner](../ticket-planner/README.md) (upstream planning) · [fleet-controller](../fleet-controller/README.md) (fleet supervision).
 
 ## Upgrading
 
