@@ -84,6 +84,14 @@ planner_initiative_dir() {
 planner_initiative_dir_init() {
   local initiative_id="$1"
   local dir
+
+  # Validate REPOS_ROOT (P2-26)
+  local repos_root="${REPOS_ROOT:-${HOME}/repos}"
+  if [ ! -d "$repos_root" ]; then
+    echo "ERROR: REPOS_ROOT '$repos_root' does not exist or is not a directory" >&2
+    return 1
+  fi
+
   dir=$(planner_initiative_dir "$initiative_id")
   mkdir -p "${dir}/artifacts" "${dir}/feedback"
   echo "$dir"
@@ -112,7 +120,8 @@ planner_state_read() {
   fi
 }
 
-# Append a line to the state log. Atomic via mv (write to .tmp, then mv).
+# Append a line to the state log. Atomic via flock (exclusive lock) with
+# tmp+mv fallback if flock is unavailable.
 # Usage: planner_state_write <initiative_id> <phase> <step> <status> <message>
 planner_state_write() {
   local initiative_id="$1" phase="$2" step="$3" status="$4" message="$5"
@@ -123,7 +132,22 @@ planner_state_write() {
   # Ensure directory exists
   mkdir -p "$(dirname "$log_file")"
 
-  printf '%s|%s|%s|%s|%s\n' "$iso" "$phase" "$step" "$status" "$message" >>"$log_file"
+  # Duplicate entry detection — reject done→done, allow fail→done
+  if ! _planner_check_duplicate "$log_file" "$phase" "$step" "$status"; then
+    return 0
+  fi
+
+  if command -v flock >/dev/null 2>&1; then
+    # Atomic append via flock
+    {
+      flock -x 200
+      printf '%s|%s|%s|%s|%s\n' "$iso" "$phase" "$step" "$status" "$message" >>"$log_file"
+    } 200>"${log_file}.lock"
+  else
+    # Fallback: direct append (not safe under concurrent writers, but best-effort)
+    echo "planner-state: flock not available — using non-atomic fallback" >&2
+    printf '%s|%s|%s|%s|%s\n' "$iso" "$phase" "$step" "$status" "$message" >>"$log_file"
+  fi
 }
 
 # Initialize a new state log with the schema line and META entries.
@@ -134,8 +158,28 @@ planner_state_init() {
   local log_file
   log_file=$(planner_state_log "$initiative_id")
 
-  if [ -f "$log_file" ]; then
+  # Phase concurrency lock — prevent resume during active phase
+  local lock_file="${log_file}.phase-lock"
+  if [ -f "$lock_file" ]; then
+    local lock_pid
+    lock_pid=$(cat "$lock_file" 2>/dev/null)
+    if kill -0 "$lock_pid" 2>/dev/null; then
+      echo "planner-state: phase is already running (PID $lock_pid). Refusing concurrent execution." >&2
+      return 2
+    fi
+    # Stale lock — remove it
+    rm -f "$lock_file"
+  fi
+
+  # Check for schema declaration line, not just file existence (P2-44)
+  if [ -f "$log_file" ] && grep -q '^[^|]*|META|schema|start|1$' "$log_file" 2>/dev/null; then
     return 0
+  fi
+
+  # If file exists but has no valid schema line, it's corrupted — remove and re-init
+  if [ -f "$log_file" ]; then
+    echo "planner-state: state log exists but has no schema line — re-initializing" >&2
+    rm -f "$log_file"
   fi
 
   planner_initiative_dir_init "$initiative_id"
@@ -146,8 +190,60 @@ planner_state_init() {
   # Initiative identity
   planner_state_write "$initiative_id" "META" "initiative-id" "start" "$initiative_id"
 
-  # The idea that spawned this initiative
-  planner_state_write "$initiative_id" "META" "idea" "start" "$idea"
+  # The idea that spawned this initiative — sanitize pipe/newline to avoid
+  # corrupting the pipe-delimited log format. Original preserved in artifacts/idea.txt.
+  local safe_idea
+  safe_idea=$(echo "$idea" | tr '|' ' ' | tr '\n' ' ' | tr '\r' ' ')
+  mkdir -p "$(planner_initiative_dir "$initiative_id")/artifacts"
+  echo "$idea" >"$(planner_initiative_dir "$initiative_id")/artifacts/idea.txt"
+  planner_state_write "$initiative_id" "META" "idea" "start" "$safe_idea"
+}
+
+# ── Phase sequence ─────────────────────────────────────────────────────────────
+
+# Return the ordered phase sequence. Single source of truth — both position
+# derivation and transition validation call this function.
+# Usage: planner_phase_sequence <array_var>
+planner_phase_sequence() {
+  local -n _seq="$1"
+  _seq=(
+    "Appraisal" "Discovery" "Architecture" "Specify" "Review" "Consensus"
+    "EpicGen" "TicketGen" "Completed"
+  )
+}
+
+# ── Phase concurrency lock ────────────────────────────────────────────────────
+
+# Acquire a phase-level lock to prevent concurrent resume while an agent runs.
+# Usage: planner_phase_lock <initiative_id> <phase>
+# Returns: 0 if lock acquired, 1 if another phase is running.
+planner_phase_lock() {
+  local initiative_id="$1" phase="$2"
+  local lock_file
+  lock_file="$(planner_state_log "$initiative_id").phase-lock"
+
+  if [ -f "$lock_file" ]; then
+    local lock_phase lock_pid
+    lock_phase=$(head -1 "$lock_file" 2>/dev/null | cut -d' ' -f1)
+    lock_pid=$(head -1 "$lock_file" 2>/dev/null | cut -d' ' -f2)
+    if [ -n "$lock_pid" ] && kill -0 "$lock_pid" 2>/dev/null; then
+      echo "planner-state: phase '$lock_phase' is running (PID $lock_pid). Refusing concurrent '$phase'." >&2
+      return 1
+    fi
+    rm -f "$lock_file"
+  fi
+
+  echo "$phase $$" >"$lock_file"
+  return 0
+}
+
+# Release the phase concurrency lock.
+# Usage: planner_phase_unlock <initiative_id>
+planner_phase_unlock() {
+  local initiative_id="$1"
+  local lock_file
+  lock_file="$(planner_state_log "$initiative_id").phase-lock"
+  rm -f "$lock_file"
 }
 
 # ── Position derivation ────────────────────────────────────────────────────────
@@ -164,11 +260,9 @@ planner_position_derive() {
   local log_file phase_sequence current_phase
   log_file=$(planner_state_log "$initiative_id")
 
-  # Define the phase sequence (12 phases)
-  phase_sequence=(
-    "Appraisal" "Discovery" "Architecture" "Proposal" "Review" "Consensus"
-    "OpenSpec" "EpicGen" "StoryGen" "TicketGen" "Execution" "Completed"
-  )
+  # Define the phase sequence
+  local phase_sequence
+  planner_phase_sequence phase_sequence
 
   if [ ! -f "$log_file" ]; then
     echo "${phase_sequence[0]}"
@@ -252,10 +346,8 @@ planner_position_derive() {
 planner_phase_validate_transition() {
   local initiative_id="$1" from="$2" to="$3"
 
-  local phase_sequence=(
-    "Appraisal" "Discovery" "Architecture" "Proposal" "Review" "Consensus"
-    "OpenSpec" "EpicGen" "StoryGen" "TicketGen" "Execution" "Completed"
-  )
+  local phase_sequence
+  planner_phase_sequence phase_sequence
 
   # Transition to same phase is legal (resume after crash)
   if [ "$from" = "$to" ]; then
@@ -305,4 +397,122 @@ planner_phase_is_done() {
   fi
 
   grep -q "^[^|]*|${phase}|[^|]*|done|" "$log_file" 2>/dev/null
+}
+
+# ── State log repair ────────────────────────────────────────────────────────────
+
+# Validate each line of the state log, drop invalid lines, and strip trailing
+# partial lines (crash mid-write). Called by resume before position derivation.
+#
+# Usage: planner_state_repair <initiative_id>
+# Returns: 0 if log is valid (or repaired successfully), 1 if log is unrecoverable.
+planner_state_repair() {
+  local initiative_id="$1"
+  local log_file
+  log_file=$(planner_state_log "$initiative_id")
+
+  if [ ! -f "$log_file" ]; then
+    return 0
+  fi
+
+  # Get valid phase names
+  local valid_phases
+  planner_phase_sequence valid_phases
+  valid_phases+=("META")
+
+  local valid_statuses="start done fail skip"
+  local line_count=0 kept=0 dropped=0 trailing=0
+  local tmp="${log_file}.repair.tmp.$$"
+  local phase status
+
+  # Schema version pattern (YYYY-MM-DDTHH:MM:SSZ)
+  local iso_pattern='^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'
+
+  >"$tmp"
+
+  while IFS='|' read -r iso phase _step status _msg rest; do
+    line_count=$((line_count + 1))
+
+    # Check for trailing partial line (no newline = mid-write crash)
+    # If the line has a partial/incomplete structure, drop it
+    if [ -z "$iso" ] || [ -z "$phase" ] || [ -z "$status" ]; then
+      # Empty or too-short line — could be trailing partial
+      continue
+    fi
+
+    # Validate ISO timestamp
+    if ! echo "$iso" | grep -qE "$iso_pattern" 2>/dev/null; then
+      dropped=$((dropped + 1))
+      echo "planner-state-repair: dropping line $line_count — invalid ISO: $iso" >&2
+      continue
+    fi
+
+    # Validate phase
+    local valid_phase=0
+    for p in "${valid_phases[@]}"; do
+      [ "$phase" = "$p" ] && valid_phase=1 && break
+    done
+    if [ "$valid_phase" -eq 0 ]; then
+      dropped=$((dropped + 1))
+      echo "planner-state-repair: dropping line $line_count — unknown phase: $phase" >&2
+      continue
+    fi
+
+    # Validate status
+    if ! echo " $valid_statuses " | grep -q " $status " 2>/dev/null; then
+      dropped=$((dropped + 1))
+      echo "planner-state-repair: dropping line $line_count — invalid status: $status" >&2
+      continue
+    fi
+
+    # Line is valid — write to repaired log
+    printf '%s|%s|%s|%s|%s\n' "$iso" "$phase" "$_step" "$status" "$_msg${rest:+|$rest}" >>"$tmp"
+    kept=$((kept + 1))
+  done <"$log_file"
+
+  # If we kept zero lines, the log is unrecoverable
+  if [ "$kept" -eq 0 ]; then
+    echo "planner-state-repair: UNRECOVERABLE — all $line_count lines dropped from state log" >&2
+    rm -f "$tmp"
+    return 1
+  fi
+
+  # Replace original with repaired version
+  if [ "$dropped" -gt 0 ] || [ "$trailing" -gt 0 ]; then
+    echo "planner-state-repair: repaired state log — $kept kept, $dropped dropped" >&2
+  fi
+  mv "$tmp" "$log_file"
+  return 0
+}
+
+# ── Duplicate entry detection ───────────────────────────────────────────────────
+
+# Check whether a duplicate terminal entry exists before writing.
+# Rejects: done→done for same phase+step. Allows: fail→done (retry).
+# Usage: _planner_check_duplicate <log_file> <phase> <step> <status>
+# Returns: 0 if write is allowed, 1 if duplicate should be suppressed.
+_planner_check_duplicate() {
+  local log_file="$1" phase="$2" step="$3" status="$4"
+
+  if [ ! -f "$log_file" ]; then
+    return 0
+  fi
+
+  case "$status" in
+  done)
+    # Check if a 'done' entry already exists for this phase+step
+    if grep -q "^[^|]*|${phase}|${step}|done|" "$log_file" 2>/dev/null; then
+      # Check if the last entry was 'fail' (retry pattern is allowed)
+      local last_status
+      last_status=$(grep "^[^|]*|${phase}|${step}|" "$log_file" 2>/dev/null | tail -1 | cut -d'|' -f4)
+      if [ "$last_status" = "fail" ]; then
+        return 0 # fail→done retry is allowed
+      fi
+      echo "planner-state: WARNING — duplicate done entry for ${phase}/${step} suppressed" >&2
+      return 1
+    fi
+    ;;
+  esac
+
+  return 0
 }

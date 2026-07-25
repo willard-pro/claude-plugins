@@ -1,12 +1,12 @@
 ---
 name: ticket-planner
-description: 12-phase autonomous planner — turns a business idea into dependency-ordered planned tickets. Phases: Appraisal → Discovery → Architecture → Proposal → Review → Consensus → OpenSpec → Epic Gen → Story Gen → Ticket Gen → Execution → Completed. Produces against frozen Planner Context and labels contracts.
+description: 9-phase autonomous planner — turns a business idea into dependency-ordered planned tickets. Phases: Appraisal → Discovery → Architecture → Specify → Review → Consensus → Epic Gen → Ticket Gen → Completed. Produces against frozen Planner Context and labels contracts.
 allowed-tools: Bash, Read, Agent
 ---
 
 # Ticket Planner — Idea-to-Tickets Pipeline
 
-Autonomous 12-phase planner that turns business ideas into Linear initiatives, epics, and dependency-ordered planned tickets the existing `ticket-auto` pipeline consumes without special-casing.
+Autonomous 9-phase planner that turns business ideas into Linear initiatives, epics, and dependency-ordered planned tickets the existing `ticket-auto` pipeline consumes without special-casing.
 
 Sits upstream of `ticket-auto` and `fleet-controller`. Produces against frozen consumption-side contracts — does not re-specify them.
 
@@ -23,7 +23,7 @@ Sits upstream of `ticket-auto` and `fleet-controller`. Produces against frozen c
 
 ### Plan (`plan`)
 
-Start a new planning run from a business idea. The planner initializes the state directory, creates the state log, and begins at the Appraisal phase. Each phase runs as an isolated agent; the router advances sequentially through the 12-phase state machine.
+Start a new planning run from a business idea. The planner initializes the state directory, creates the state log, and begins at the Appraisal phase. Each phase runs as an isolated agent; the router advances sequentially through the 9-phase state machine.
 
 ```
 /ticket-planner plan "Add real-time collaboration to the document editor"
@@ -55,22 +55,19 @@ Re-plan an initiative that carries the `Regenerate` flag. Ingests aggregated fee
 /ticket-planner replan INIT-42
 ```
 
-## The 12 Phases
+## The 9 Phases
 
 | # | Phase | What it does | Output |
 |---|-------|-------------|--------|
 | 1 | Appraisal | Interprets the idea, establishes initiative scope | Scope summary |
 | 2 | Discovery | Explores affected repos, gathers context | Code paths, symbols, APIs |
 | 3 | Architecture | Determines the technical approach | Architecture decision record |
-| 4 | Proposal | Produces the initiative proposal artifact | `proposal.md` |
-| 5 | Review | Critiques the proposal (internal by default) | Review findings |
+| 4 | Specify | Synthesizes proposal + writes per-ticket specs with signals | `proposal.md`, spec files |
+| 5 | Review | Critiques the proposal and specs (internal by default) | Review findings |
 | 6 | Consensus | Resolves review findings into a settled plan | Finalized proposal |
-| 7 | OpenSpec | Emits specification artifacts | Spec documents |
-| 8 | Epic Gen | Creates the initiative epic in Linear | Linear epic with `state:execution` |
-| 9 | Story Gen | Generates stories from the spec | Story descriptions |
-| 10 | Ticket Gen | Creates planned child tickets in Backlog | Linear tickets with `planned` label |
-| 11 | Execution | Labels the epic for execution, hands off to dispatch | Auto-dispatch to `fleet-controller` |
-| 12 | Completed | Terminal phase — no further transitions | Completed state |
+| 7 | Epic Gen | Creates the initiative epic in Linear | Linear epic with `epic` label |
+| 8 | Ticket Gen | Creates planned child tickets, computes confidence, gate-dispatches | Linear tickets, `state:execution` on epic |
+| 9 | Completed | Terminal phase — no further transitions | Completed state |
 
 ## Contracts (frozen — the planner produces against these)
 
@@ -101,6 +98,11 @@ The router never reasons about content; phases never mutate state directly (they
 | `PLANNER_REVIEW_HOLD` | false | When `true`, Review phase pauses for human input |
 | `PLANNER_CONSENSUS_HOLD` | false | When `true`, Consensus phase pauses for human input |
 | `PLANNER_MAX_PHASE_RETRIES` | 2 | Max retries per phase before failing the run |
+| `PLANNER_PHASE_TIMEOUT` | 600 | Seconds before timing out a hung phase agent |
+| `PLANNER_TSORT_TIMEOUT` | 30 | Seconds before timing out dependency graph sort |
+| `PLANNER_CONFIDENCE_THRESHOLD` | 0.85 | Minimum confidence for `pre-approved` label |
+| `PLANNER_IDEA_MAX_LENGTH` | 2000 | Maximum idea length in chars (truncated with warning) |
+| `FLEET_AUTO_DISPATCH` | false | Must be true for automatic fleet-controller dispatch |
 
 ---
 
@@ -126,7 +128,7 @@ First argument is the mode: `plan`, `resume`, `status`, or `replan`.
 When mode is `plan`:
 
 1. Extract the idea from the second argument.
-2. Generate an initiative ID: `INIT-$(date +%s)` or use a provided ID.
+2. Generate an initiative ID: `INIT-$(date +%s)-$(shuf -i 1000-9999 -n 1)` to avoid collision.
 3. Initialize state: `planner_state_init "$INITIATIVE_ID" "$IDEA"`
 4. Run the dispatch loop (see below).
 
@@ -164,6 +166,12 @@ When mode is `replan`:
 
 ### 7. Dispatch loop
 
+Before the loop, export CLAUDE_PLUGIN_ROOT so phase agents can source libraries:
+
+```bash
+export CLAUDE_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${HOME}/.claude/plugins/cache/ticket-planner/current}"
+```
+
 For each phase to run:
 
 1. **Get the prompt** for the current phase:
@@ -179,6 +187,7 @@ For each phase to run:
    - `description`: "Run planner phase: $PHASE for $INITIATIVE_ID"
    - `prompt`: the phase prompt from `planner_prompt_for_phase`
    - `subagent_type`: "general-purpose" (the agent needs Read, Bash, and Linear API access)
+   - `timeout_ms`: \$((PLANNER_PHASE_TIMEOUT * 1000)) (default 600000ms = 10min)
 
 4. **Wait for the agent** to complete. The agent writes state log entries itself.
 

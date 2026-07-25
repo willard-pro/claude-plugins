@@ -65,24 +65,24 @@ planner_state_write "INIT-1" "Discovery" "discover" "done" "context gathered"
 planner_state_write "INIT-1" "Architecture" "architect" "done" "approach chosen"
 
 pos=$(planner_position_derive "INIT-1")
-if [ "$pos" = "Proposal" ]; then
-  pass "after Architecture done, next is Proposal"
+if [ "$pos" = "Specify" ]; then
+  pass "after Architecture done, next is Specify"
 else
-  fail "after Architecture done, next is Proposal" "got '$pos'"
+  fail "after Architecture done, next is Specify" "got '$pos'"
 fi
 
 # ── Test 4: resume at crashed phase (start but no done/fail) ────────────────────
 
 echo "--- Test 4: resume at crashed phase ---"
 
-planner_state_write "INIT-1" "Proposal" "propose" "start" "spawning Proposal agent"
-# No done/fail for Proposal — simulates crash
+planner_state_write "INIT-1" "Specify" "synthesize" "start" "spawning Specify agent"
+# No done/fail for Specify — simulates crash
 
 pos=$(planner_position_derive "INIT-1")
-if [ "$pos" = "Proposal" ]; then
-  pass "crashed Proposal phase resumes at Proposal"
+if [ "$pos" = "Specify" ]; then
+  pass "crashed Specify phase resumes at Specify"
 else
-  fail "crashed Proposal phase resumes at Proposal" "got '$pos'"
+  fail "crashed Specify phase resumes at Specify" "got '$pos'"
 fi
 
 # ── Test 5: terminal phase returns empty ────────────────────────────────────────
@@ -90,8 +90,8 @@ fi
 echo "--- Test 5: terminal phase returns empty ---"
 
 planner_state_init "INIT-DONE" "completed idea"
-for phase in "Appraisal" "Discovery" "Architecture" "Proposal" "Review" "Consensus" \
-  "OpenSpec" "EpicGen" "StoryGen" "TicketGen" "Execution" "Completed"; do
+for phase in "Appraisal" "Discovery" "Architecture" "Specify" "Review" "Consensus" \
+  "EpicGen" "TicketGen" "Completed"; do
   planner_state_write "INIT-DONE" "$phase" "$(echo "$phase" | tr '[:upper:]' '[:lower:]')" "done" "$phase complete"
 done
 
