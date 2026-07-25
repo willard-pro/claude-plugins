@@ -29,6 +29,8 @@ Business idea → [ticket-planner] → initiative epic + planned tickets (Planne
 
 **Determinism boundary**: bash orchestrates (state parsing, phase routing, validation, dispatch, feedback aggregation). Claude agents reason (appraisal, discovery, architecture, proposal, review, spec writing, ticket generation).
 
+**Shared epic branches**: An epic may declare a `## Branch Directive` block in its description (see [Branch Directive schema](ticket-auto-pipeline/docs/branch-directive-schema.md)). ticket-auto resolves branch targets via a deterministic precedence chain: `--branch` CLI flag → parent epic directive → `BASE_BRANCH` default (`develop`). A malformed directive gate-stops the pipeline — no fallback. The directive lives only on the epic; it is never copied into child tickets.
+
 ## Plugin anatomy
 
 ```

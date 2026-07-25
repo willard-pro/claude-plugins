@@ -243,18 +243,30 @@ check_planned_ticket_description() {
 
 # ── Internal helpers ────────────────────────────────────────────────────────
 
-# _extract_planner_context_block <description>
-# Extracts the ## Planner Context block from a markdown description.
-# Canonical implementation — ALL consumers (appraise-fast-path.sh,
-# planner-artifacts.sh, planned-ticket-body-check.sh) MUST call this
-# single function. Changes to block-delimiter rules update ONE site.
-_extract_planner_context_block() {
+# _extract_md_section <description> <heading>
+# Extracts a named markdown section block (e.g., "Planner Context",
+# "Branch Directive") from a description. Heading-parameterised —
+# callers specify the heading text without the leading "## ".
+# Prints the block body (everything between the heading and the next
+# ##-level heading), or nothing if the heading is absent.
+_extract_md_section() {
   local description="$1"
-  echo "$description" | awk '
-    /^## Planner Context[[:space:]]*$/ { found=1; next }
+  local heading="$2"
+  echo "$description" | awk -v heading="$heading" '
+    $0 ~ ("^## " heading "[[:space:]]*$") { found=1; next }
     found && /^## / { exit }
     found { print }
   '
+}
+
+# _extract_planner_context_block <description>
+# Extracts the ## Planner Context block from a markdown description.
+# Thin wrapper around _extract_md_section — canonical implementation.
+# ALL consumers (appraise-fast-path.sh, planner-artifacts.sh,
+# planned-ticket-body-check.sh) MUST call this single function.
+# Changes to block-delimiter rules update ONE site.
+_extract_planner_context_block() {
+  _extract_md_section "$1" "Planner Context"
 }
 
 # _extract_field <field-name> — reads from stdin (the block), outputs value

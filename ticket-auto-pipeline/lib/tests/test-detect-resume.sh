@@ -276,6 +276,49 @@ test_schema_v2_accepted() {
 
 FILTER="${1:-}"
 
+# ── Branch context recovery (Phase 1 shared-branch-resolution) ─────────────
+
+test_branch_context_survives_resume() {
+  local out
+  out=$(_detect_resume_with_log "TEST-BC" \
+    "2026-07-25T10:00:00Z|META|schema|info|1" \
+    "2026-07-25T10:00:01Z|META|title|info|TEST-BC: Fix auth" \
+    "2026-07-25T10:00:02Z|META|branch-context|info|base=epic/test-x;integration=epic/test-x;source=directive;ticket=feat/TEST-BC-fix-auth" \
+    "2026-07-25T10:00:03Z|APPRAISE|setup-workspace|start|")
+  [ "$(_field "$out" BASE_BRANCH)" = "epic/test-x" ] || {
+    echo "BASE_BRANCH mismatch: $(_field "$out" BASE_BRANCH)" >&2
+    return 1
+  }
+  [ "$(_field "$out" INTEGRATION_BRANCH)" = "epic/test-x" ] || {
+    echo "INTEGRATION_BRANCH mismatch: $(_field "$out" INTEGRATION_BRANCH)" >&2
+    return 1
+  }
+  [ "$(_field "$out" BRANCH_SOURCE)" = "directive" ] || {
+    echo "BRANCH_SOURCE mismatch: $(_field "$out" BRANCH_SOURCE)" >&2
+    return 1
+  }
+}
+
+test_branch_context_empty_on_legacy_log() {
+  local out
+  out=$(_detect_resume_with_log "TEST-LEGACY" \
+    "2026-07-01T10:00:00Z|META|schema|info|1" \
+    "2026-07-01T10:00:01Z|META|title|info|TEST-LEGACY: Old ticket" \
+    "2026-07-01T10:00:02Z|APPRAISE|setup-workspace|start|")
+  [ -z "$(_field "$out" BASE_BRANCH)" ] || {
+    echo "BASE_BRANCH should be empty on legacy log: $(_field "$out" BASE_BRANCH)" >&2
+    return 1
+  }
+  [ -z "$(_field "$out" INTEGRATION_BRANCH)" ] || {
+    echo "INTEGRATION_BRANCH should be empty on legacy log: $(_field "$out" INTEGRATION_BRANCH)" >&2
+    return 1
+  }
+  [ -z "$(_field "$out" BRANCH_SOURCE)" ] || {
+    echo "BRANCH_SOURCE should be empty on legacy log: $(_field "$out" BRANCH_SOURCE)" >&2
+    return 1
+  }
+}
+
 for fn in \
   test_verify_attempts_preflight_fail_does_not_overcount \
   test_verify_attempts_two_terminal_failures_count_two \
@@ -296,7 +339,9 @@ for fn in \
   test_zombie_detection_skips_non_phase_waiting \
   test_msg_field_preserves_embedded_pipes \
   test_schema_v1_accepted_with_warning \
-  test_schema_v2_accepted; do
+  test_schema_v2_accepted \
+  test_branch_context_survives_resume \
+  test_branch_context_empty_on_legacy_log; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

@@ -27,6 +27,9 @@ ticket-auto-pipeline/
 ```
 REPOS_ROOT/.ticket-auto/
   system.md                       # Cross-repo FE→BE contract map
+  worktrees/                      # Per-ticket git worktree isolation (Phase 2)
+    {TICKET_ID}/
+      {repo-slug}/                # Isolated working copy — no shared-clone collisions
   <repo-slug>/
     meta.json                     # SHA, timestamps, schema version, stats
     .lock                         # Flock concurrency guard
@@ -109,6 +112,9 @@ REPOS_ROOT/.ticket-auto/
 | `return-completeness-check.sh` | Deterministic bash gate for implement-phase completion. Counts unchecked `- [ ]` boxes in tasks.md (openspec) or `## Completion Checklist` in simple-fix.md. Exit 0 complete, 1 incomplete, 2 error. Zero LLM tokens. |
 | `corrections-parse.sh` | `append_correction`, `get_corrections`, `get_corrections_by_source`. Atomic `.tmp`→`mv` append of CORRECTIONS blocks to notes.md. Parse with last-match-wins dedup. Torn-block tolerant. |
 | `planned-ticket-check.sh` | `check_planned_ticket`, `check_planned_ticket_description`. Deterministic bash validator for `## Planner Context` blocks in planned tickets. Exit 0 (valid), 1 (missing/malformed), 2 (low confidence + not pre-approved). Schema-Version tolerance for forward compatibility. Also exports `_extract_planner_context_block` — canonical shared block parser. |
+| `branch-directive-check.sh` | `check_branch_directive <EPIC_ID>`, `check_branch_directive_description <description>`. Deterministic bash validator for `## Branch Directive` blocks on epic parents. Exit 0 (valid + emits parsed values), 1 (absent), 2 (malformed). Validates branch names, closed enums, Schema-Version tolerance. Shares `_extract_md_section` and `_extract_field` from planned-ticket-check.sh. |
+| `branch-resolve.sh` | `resolve_branch_context <TICKET_ID> [--branch <override>] [--title <title>] [--parent-json <json>]`. Deterministic branch decision point. Precedence: `--branch` flag → parent epic directive → config default. Emits `BRANCH_CONTEXT_RESULT` block. Depends on config.sh, linear-api.sh, branch-directive-check.sh. |
+| `worktree.sh` | `worktree_path <TICKET_ID> <repo_slug>`, `ensure_worktree <TICKET_ID> <repo_path> <branch> <base>`, `release_worktree <TICKET_ID>`, `worktree_gc`. Per-ticket git worktree isolation. `ensure_worktree` is idempotent with identity guard (refuses re-checkout on branch mismatch). `release_worktree` is safe to repeat. `worktree_gc` removes terminal-state trees. |
 | `template-select.sh` | `resolve_template <type>`. Deterministic type-to-template resolver. Maps `bug`/`feature`/`improvement`/`security`/`chore`/`refactor` (alias → improvement). Exit 3 on unknown/empty type — no silent fallback. Pure bash, zero LLM. |
 | `planner-artifacts.sh` | `resolve_planner_dir <TID>`, `has_planner_body <TID>`, `has_planner_proposal <TID>`. Resolves `$REPOS_ROOT/.ticket-auto/initiatives/{INIT}/tickets/{TID}/planner/` from the Planner Context block's Initiative field. Exit 0 present, 1 dir missing, 2 no Initiative. |
 | `planned-ticket-body-check.sh` | `check_planned_body <TID> <type>`. Validates ticket body has all required sections per type (universal: AC, Test User, Scope; bug: +Repro Steps, Test Data; feature/improvement: +Nav Path). Sets `BODY_CHECK_MISSING` and `BODY_CHECK_EXIT_CODE`. Plane body.md preferred over Linear description. |
@@ -193,7 +199,7 @@ Consumers: `skills/ticket-auto/dashboard.py` (dual-panel), `skills/ticket-overse
 - **Stateless routing**: Router reads all state from pipeline log via `detect-resume.sh` (direct bash invocation, not a Claude skill spawn). After every phase dispatch, router re-reads state. Zero in-memory state between dispatches.
 - **Complexity gating**: Simple tickets auto-approve in `auto`/`semi-auto` mode. Complex tickets always gate (require human `approved` label). `manual` mode gates everything.
 - **Phase context**: Before each agent spawn, orchestrator writes both a ctx file (`/tmp/ticket-auto-{ID}-ctx.txt`) and a spawn-meta file (`/tmp/ticket-auto-{ID}-spawn-meta.txt`). The token-tracker hook reads PHASE from the spawn-meta file (stable per-spawn snapshot) with fallback to the ctx file (legacy). The spawn-meta file persists until the next `spawn_agent_pre` call overwrites it — this avoids a race where the ctx file shows the next phase before the async SubagentStop hook fires.
-- **Safety gates**: 13 structural gate-stop codes (EXEC_NO_ARTIFACT, COMPLEXITY_ARTIFACT_MISMATCH, CRITIQUE_SCORE_MISSING, CRITIQUE_BLOCKED, CRITIQUE_SCORE_IMPLAUSIBLE, ZERO_AC, BUG_NO_REPRO, NO_TEMPLATE_FOR_TYPE, PLANNED_BODY_INCOMPLETE, APPROVAL_REVOKED, VERIFY_EXHAUSTED, PR_REVIEW_VERDICT_UNPARSEABLE, PR_FEEDBACK_EXHAUSTED). Violations emit `|META|gate-stop|fail|<CODE>`.
+- **Safety gates**: 14 structural gate-stop codes (EXEC_NO_ARTIFACT, COMPLEXITY_ARTIFACT_MISMATCH, CRITIQUE_SCORE_MISSING, CRITIQUE_BLOCKED, CRITIQUE_SCORE_IMPLAUSIBLE, ZERO_AC, BUG_NO_REPRO, NO_TEMPLATE_FOR_TYPE, PLANNED_BODY_INCOMPLETE, APPROVAL_REVOKED, VERIFY_EXHAUSTED, PR_REVIEW_VERDICT_UNPARSEABLE, PR_FEEDBACK_EXHAUSTED, BRANCH_DIRECTIVE_INVALID). Violations emit `|META|gate-stop|fail|<CODE>`.
 - **Idempotency**: flow.sh computes desired end state from current + adds - removes. No change → exit 0 without mutation.
 
 ## Known sharp edges
@@ -202,6 +208,9 @@ Consumers: `skills/ticket-auto/dashboard.py` (dual-panel), `skills/ticket-overse
 - Dashboard dead zone: Pipeline log shows `|waiting|` while agent runs but heartbeat log may be silent during long operations. Gap between pipeline log and heartbeat log during sub-agent execution.
 - Zombie steps: If agent crashes without writing a terminal status (`done`/`fail`), the step remains `|waiting|` forever. `ticket-detect-resume` treats these as not-started and re-runs the phase. Bracket idempotency guards (tail-check before write) prevent duplicate brackets but do not eliminate the zombie root cause.
 - Version synchronization: `plugin.json`, root `README.md`, and `marketplace.json` each carry a version number. Must be updated in all three places on version bump.
+- **Worktree isolation is files-only**: Per-ticket git worktrees isolate the working tree (branches, files, index). They do NOT isolate ports, databases, caches, or seeded test state. Concurrent `ticket-verify` runs against a single `LOCAL_URL` still collide on the shared backend. Worktrees fix the git race; the broader resource-isolation problem remains.
+- **Minimum git version**: `git worktree` requires git ≥ 2.5 (released 2015). The `git worktree remove` command used by `release_worktree` requires git ≥ 2.17 (released 2018). All supported environments meet this.
+- **No migration needed**: Pre-existing branches adopt worktrees by ordinary git operation. `ensure_worktree` calls `git worktree add -b <branch>` which works whether the branch is new or already exists. Existing ticket workspaces continue to function — only new pipeline runs use worktrees.
 
 ### Resolved (0.7.11)
 
@@ -215,5 +224,7 @@ Consumers: `skills/ticket-auto/dashboard.py` (dual-panel), `skills/ticket-overse
 - [Pipeline log format](pipeline-log-format.md)
 - [Heartbeat log format](pipeline-heartbeat-format.md)
 - [State machine](skills/ticket-flow/state-machine.json)
+- [Planner Context schema](docs/planner-context-schema.md)
+- [Branch Directive schema](docs/branch-directive-schema.md)
 - [Interactive diagram](../docs/ticket-auto-pipeline-diagram.html)
 - [Root CLAUDE.md](../CLAUDE.md)

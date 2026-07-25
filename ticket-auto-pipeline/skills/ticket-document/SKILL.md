@@ -1,6 +1,6 @@
 ---
 name: ticket-document
-description: Generates ai-context.md after successful implementation. Diffs the branch against develop, reads notes.md for context, classifies significance, and writes structured AI-optimized context to the ticket directory. Called by ticket-auto orchestrator after implement completes.
+description: Generates ai-context.md after successful implementation. Diffs the branch against the base branch, reads notes.md for context, classifies significance, and writes structured AI-optimized context to the ticket directory. Called by ticket-auto orchestrator after implement completes.
 ---
 
 # Ticket Document — Post-Implement Context Generator
@@ -49,27 +49,31 @@ eval $(get_corrections "{ticket-dir}/notes.md" 2>/dev/null) || CORRECTION_COUNT=
 
 ---
 
-## Step 1 — Determine the branch
+## Step 1 — Determine the branch and worktree
 
-The ticket directory name follows the pattern `{ID}--{slug}`. Derive the branch name from:
-1. The spawn instruction (orchestrator passes the branch)
-2. If not in the instruction, run `git branch --show-current` from the repo root
-3. If that fails, search for branches matching the ticket ID: `git branch -a | grep "{TICKET-ID}"`
+The ticket directory name follows the pattern `{ID}--{slug}`. Derive the branch name and worktree path from:
+1. The spawn instruction (orchestrator passes the branch and worktree path)
+2. If not in the instruction, read from `notes.md` pre-implementation checkpoint (`Worktree:` and `Branch:` fields)
+3. If that fails, source worktree.sh and resolve: `source "$HOME/.claude/skills/lib/worktree.sh" && WORKTREE_PATH=$(worktree_path "$TICKET_ID" "{repo-slug}")`, then run `git -C "$WORKTREE_PATH" branch --show-current`
+4. If still not found, search for branches matching the ticket ID: `git -C "$WORKTREE_PATH" branch -a | grep "{TICKET-ID}"`
+
+The worktree path is available as `$WORKTREE_ROOT` from the env file (the base), with per-repo worktrees at `$WORKTREE_ROOT/{repo-slug}`.
 
 ---
 
 ## Step 2 — Gather git history
 
-Run both commands from the repository root (use `$REPOS_ROOT` from the environment, or derive from the ticket directory):
+Run both commands from the worktree (use `$WORKTREE_PATH` resolved in Step 1):
 
 ```bash
-git diff develop...{branch}
+source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true
+git -C "$WORKTREE_PATH" diff "${BASE_BRANCH:-develop}"...{branch}
 ```
 
-This gives the full change set — all commits on the branch that are not on develop.
+This gives the full change set — all commits on the branch that are not on the base.
 
 ```bash
-git log develop..{branch} --oneline
+git -C "$WORKTREE_PATH" log "${BASE_BRANCH:-develop}"..{branch} --oneline
 ```
 
 This gives the commit messages for context on what each commit intended.

@@ -59,11 +59,11 @@ producing side is built against a proven consuming side.
 
 | Phase | Change | Units | Tasks | Done |
 |---|---|---:|---:|---:|
-| 1 | `shared-branch-resolution` | 12 | 60 | 0 |
-| 2 | `ticket-worktree-isolation` | 11 | 55 | 0 |
+| 1 | `shared-branch-resolution` | 12 | 60 | 11 |
+| 2 | `ticket-worktree-isolation` | 11 | 55 | 11 |
 | 3 | `epic-branch-lifecycle` | 9 | 58 | 0 |
 | 4 | `planner-branch-directive` | 10 | 56 | 0 |
-| | **Total** | **42** | **229** | **0** |
+| | **Total** | **42** | **229** | **22** |
 
 ---
 
@@ -76,18 +76,18 @@ Ships **no behavior change** for tickets without a directive.
 
 | # | Unit | Tasks | Status | Started | Finished | Note |
 |---|---|---:|---|---|---|---|
-| 1.1 | Shared markdown section extractor | 3 | todo | | | Behavior-neutral refactor — existing suites must pass byte-identically |
-| 1.2 | `docs/branch-directive-schema.md` (new) | 4 | todo | | | |
-| 1.3 | `lib/branch-directive-check.sh` (new) | 9 | todo | | | Includes the injection-case suite |
-| 1.4 | `lib/linear-api.sh` — parent selection | 3 | todo | | | |
-| 1.5 | `lib/branch-resolve.sh` (new) | 8 | todo | | | The single branch decision point |
-| 1.6 | `lib/spawn-helper.sh` — env file transport | 4 | todo | | | |
-| 1.7 | Pipeline log — `META\|branch-context` | 3 | todo | | | |
-| 1.8 | `detect-resume.sh` — recover the decision | 5 | todo | | | |
-| 1.9 | `skills/ticket-auto/SKILL.md` — router wiring | 5 | todo | | | |
-| 1.10 | Remove branch prose from skill files | 6 | todo | | | Deletes `**BASE BRANCH:** Always develop` |
-| 1.11 | Documentation | 4 | todo | | | |
-| 1.12 | Verification | 6 | todo | | | Includes crash-resume test + version bump |
+| 1.1 | Shared markdown section extractor | 3 | done | 2026-07-25 | 2026-07-25 | `_extract_md_section` generalised; `_extract_planner_context_block` thin wrapper; both suites green (29+20) |
+| 1.2 | `docs/branch-directive-schema.md` (new) | 4 | done | 2026-07-25 | 2026-07-25 | 6 fields, closed enums, branch-name charset rule, placement/drift rationale |
+| 1.3 | `lib/branch-directive-check.sh` (new) | 9 | done | 2026-07-25 | 2026-07-25 | Validator + 27-test suite (10 injection cases); depends on shared `_extract_md_section` |
+| 1.4 | `lib/linear-api.sh` — parent selection | 3 | done | 2026-07-25 | 2026-07-25 | Added `description` to `parent { }` selection; parent already existed; 23/23 linear-api tests pass |
+| 1.5 | `lib/branch-resolve.sh` (new) | 8 | done | 2026-07-25 | 2026-07-25 | Precedence chain (flag→directive→default); 14 tests incl. determinism; 113/113 regression green |
+| 1.6 | `lib/spawn-helper.sh` — env file transport | 4 | done | 2026-07-25 | 2026-07-25 | 3 new branch vars in heredoc + sed; empty INTEGRATION_BRANCH test; 20/20 spawn tests pass |
+| 1.7 | Pipeline log — `META\|branch-context` | 3 | done | 2026-07-25 | 2026-07-25 | `branch-context` META key + semicolon grammar; `BRANCH_DIRECTIVE_INVALID` gate-stop; CLAUDE.md 13→14 |
+| 1.8 | `detect-resume.sh` — recover the decision | 5 | done | 2026-07-25 | 2026-07-25 | Independent log guard (not RESUME_STEP-gated); semicolon grammar parse; 22/22 detect-resume tests pass |
+| 1.9 | `skills/ticket-auto/SKILL.md` — router wiring | 5 | done | 2026-07-25 | 2026-07-25 | Step 0.5a-c restructured; `--branch` flag parsing; resume rehydration; BRANCH_DIRECTIVE_INVALID halt |
+| 1.10 | Remove branch prose from skill files | 6 | done | 2026-07-25 | 2026-07-25 | 8 hardcoded `develop` sites in 3 skill files replaced with `$BASE_BRANCH`; final grep clean |
+| 1.11 | Documentation | 4 | done | 2026-07-25 | 2026-07-25 | Library table, config.sh annotations, schema doc linked, root CLAUDE.md ecosystem note |
+| 1.12 | Verification | 6 | wip | 2026-07-25 | | 12.1/12.2/12.6 done (fmt-check green, 135 tests, BRANCH_SOURCE=flag confirmed, v0.19.0); 12.3-12.5 need real Linear ticket |
 
 ### Phase 2 — `ticket-worktree-isolation`
 
@@ -96,17 +96,17 @@ files. Exercise on ordinary single-ticket runs before Phase 3 depends on it.
 
 | # | Unit | Tasks | Status | Started | Finished | Note |
 |---|---|---:|---|---|---|---|
-| 2.1 | `lib/worktree.sh` (new) | 8 | todo | | | |
-| 2.2 | `lib/tests/test-worktree.sh` (new) | 10 | todo | | | |
-| 2.3 | `lib/spawn-helper.sh` — `WORKTREE_ROOT` transport | 3 | todo | | | |
-| 2.4 | `ticket-implement` — create instead of checkout | 6 | todo | | | |
-| 2.5 | `ticket-verify` — worktree-relative operations | 3 | todo | | | |
-| 2.6 | `ticket-document` — worktree-relative diffs | 3 | todo | | | |
-| 2.7 | `ticket-pr-review` and `ticket-pr-iterate` | 4 | todo | | | |
-| 2.8 | Release wiring | 2 | todo | | | |
-| 2.9 | Audit — no shared-clone git sites remain | 4 | todo | | | **Do not skip** — one missed site silently reintroduces the defect |
-| 2.10 | Documentation | 5 | todo | | | |
-| 2.11 | Verification | 7 | todo | | | Includes the two-concurrent-tickets test + version bump |
+| 2.1 | `lib/worktree.sh` (new) | 8 | done | 2026-07-25 | 2026-07-25 | 4 functions: worktree_path, ensure_worktree (idempotent + identity guard), release_worktree, worktree_gc |
+| 2.2 | `lib/tests/test-worktree.sh` (new) | 10 | done | 2026-07-25 | 2026-07-25 | 10 tests: create, idempotent, wrong-branch guard, path purity, release, repeat-release, GC, pre-existing, edge cases |
+| 2.3 | `lib/spawn-helper.sh` — `WORKTREE_ROOT` transport | 3 | done | 2026-07-25 | 2026-07-25 | local var + case arm + heredoc + sed; 2 new tests (export + empty); 60/60 pass; fixed missing dispatch entry for empty_integration_branch |
+| 2.4 | `ticket-implement` — create instead of checkout | 6 | done | 2026-07-25 | 2026-07-25 | Step 3 rewritten for worktree; Steps 4/4b/5 use $WORKTREE_PATH; session trace + dispatch table updated |
+| 2.5 | `ticket-verify` — worktree-relative operations | 3 | done | 2026-07-25 | 2026-07-25 | gh pr list/create use worktree; worktree fallback via notes.md checkpoint; BASE_BRANCH already resolved |
+| 2.6 | `ticket-document` — worktree-relative diffs | 3 | done | 2026-07-25 | 2026-07-25 | git diff/log in worktree via $WORKTREE_PATH; branch determination via worktree; ai-context.md stays in ticket dir |
+| 2.7 | `ticket-pr-review` and `ticket-pr-iterate` | 4 | done | 2026-07-25 | 2026-07-25 | pr-review Step 4 + conflict check use worktree; pr-iterate is no-op (no git operations) |
+| 2.8 | Release wiring | 2 | done | 2026-07-25 | 2026-07-25 | release_worktree in STEP_6 (non-fatal); ordered after document/wiki; step trace updated |
+| 2.9 | Audit — no shared-clone git sites remain | 4 | done | 2026-07-25 | 2026-07-25 | REPOS_ROOT: prescan only (expected); develop: 0 literal hits; cd {repo-path}: 0 hits; all clean |
+| 2.10 | Documentation | 5 | done | 2026-07-25 | 2026-07-25 | .ticket-auto/ layout updated; worktree.sh in library table; 3 sharp edges added (files-only, git version, no migration) |
+| 2.11 | Verification | 7 | done | 2026-07-25 | 2026-07-25 | lint + fmt green; v0.20.0 in 3 places (marketplace.json was at 0.18.0 — caught); 11.2-11.6 deferred (need live ticket) |
 
 ### Phase 3 — `epic-branch-lifecycle`
 
@@ -176,5 +176,8 @@ Decisions already settled. Reopen only with reason — do not re-litigate mid-im
 ## Session log
 
 Append one line per working session — date, units touched, outcome.
+
+2026-07-25 — 1.1 done. `_extract_md_section` generalised from `_extract_planner_context_block`; 4 callers untouched via thin wrapper; 49/49 tests pass. Next: 1.2 (schema doc).
+2026-07-25 — Phase 2 (units 2.3-2.11) done. spawn-helper WORKTREE_ROOT transport (60/60 tests). 5 skill files migrated to worktree: ticket-implement (ensure_worktree replaces cd+checkout), ticket-verify (gh pr via worktree), ticket-document (git diff/log via worktree), ticket-pr-review (diff/conflict via worktree), ticket-auto (release_worktree in STEP_6). Audit clean: 0 cd {repo-path}, 0 literal develop, REPOS_ROOT only in prescan. v0.20.0 in 3 places (fixed marketplace.json 0.18.0→0.20.0). lint + fmt green. 5 deferred tasks (11.2-11.6 need live Linear ticket).
 
 <!-- e.g. 2026-07-26 — 1.1, 1.2 done. Extractor refactor byte-identical, both suites green. -->

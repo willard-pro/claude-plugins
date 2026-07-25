@@ -7,7 +7,7 @@ description: Full implementation workflow for a Linear ticket that has been appr
 
 You have been given a ticket ID as the argument (e.g. `WIL-42`). Execute the full implementation sequence below in order.
 
-**BASE BRANCH:** Always `develop`. Branch from `develop`, PR into `develop`. Never use `main` or any other base. If `develop` doesn't exist locally, `git fetch origin && git checkout -b develop origin/develop`.
+**BASE BRANCH:** Resolved by the router at Step 0.5 and injected via `$BASE_BRANCH` in the env file. Default is `develop`. Branch from `$BASE_BRANCH`, PR into `$BASE_BRANCH`.
 
 ## Pipeline Preamble
 
@@ -20,7 +20,8 @@ If `--from-auto` is present in the arguments, follow the auto-pipeline preamble 
 
 ### Step dispatch
 **Context restoration when skipping early steps:**
-- Branch name: read from notes.md `### ... — pre-implementation checkpoint` entry or from `IMPLEMENT|checkout-branch|done|` in `$LOG_FILE`.
+- Worktree path: read from notes.md `### ... — pre-implementation checkpoint` entry (`Worktree:` field) or re-derive via `source "$HOME/.claude/skills/lib/worktree.sh" && worktree_path "$TICKET_ID" "{repo-slug}"`.
+- Branch name: read from notes.md checkpoint or from `IMPLEMENT|checkout-branch|done|` in `$LOG_FILE`.
 - Implementation mode: read from `IMPLEMENT|detect-path|done|` in `$LOG_FILE` (value: `simple-fix` or `openspec`).
 - Affected repos: re-derive from notes.md `Initial Investigation` section and CLAUDE.md table.
 
@@ -28,8 +29,8 @@ If `--from-auto` is present in the arguments, follow the auto-pipeline preamble 
 |---------------------|---------|---------|
 | `check-approval` | Step 2 (detect path) | ticket dir from find; notes.md and context.md |
 | `detect-path` | Step 3 (checkout branch) | mode from log `detect-path\|done` entry |
-| `checkout-branch` | Step 4 (implement) | branch from notes.md checkpoint; mode from log |
-| `implement` | Step 4b (write tests) | changed files from `git diff --name-only develop` |
+| `checkout-branch` | Step 4 (implement) | branch + worktree from notes.md checkpoint; mode from log |
+| `implement` | Step 4b (write tests) | changed files from `git -C "$WORKTREE_PATH" diff --name-only "$BASE_BRANCH"` |
 | `run-tests` | Step 4b code-review | — |
 | `code-review` | Step 5 (commit/push) | — |
 | `commit-push` | End — skill already complete | — |
@@ -45,13 +46,14 @@ cat > {ticket-dir}/implement-session.md << 'TRACE'
 # implement session — {ISSUE-ID}
 **Date:** {today}
 **Branch:** {branch-name}
+**Worktree:** {WORKTREE_PATH}
 **Mode:** {simple-fix | openspec: <name>}
 **Outcome:** {Smooth|Rough|Hard}
 
 ## Step trace
 - [x] Step 1: Approval guard + load workspace — approved
 - [x] Step 2: Set Ready + identify path — {mode}
-- [x] Step 3: Checkout and branch — {branch}
+- [x] Step 3: Worktree and branch — {branch} at {worktree}
 - [x] Step 4: Implement — {N} files changed
 - [x] Step 4b: Tests + code review — {pass/failures}
 - [x] Step 4c: Rate complexity — {Smooth|Rough|Hard}
@@ -234,32 +236,35 @@ The SUGGESTED_FIX provides the implementer with the verifier's hypothesis about 
 
 ---
 
-## Step 3 — Checkout and branch
+## Step 3 — Checkout and branch (worktree)
 
-[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|checkout-branch|start|Creating branch" >> "$LOG_FILE"
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|checkout-branch|start|Creating worktree" >> "$LOG_FILE"
 
-For each affected repo:
+Branch variables are injected by the router via the env file (`$TICKET_BRANCH`, `$BASE_BRANCH`,
+`$INTEGRATION_BRANCH`, `$WORKTREE_ROOT`). Source it and the worktree library before checkout:
+
 ```bash
-cd {repo-path} && git checkout develop && git pull
+source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true
+source "$HOME/.claude/skills/lib/worktree.sh"
 ```
 
-Stop and ask the user if any repo has uncommitted changes or conflicts.
+For each affected repo, create an isolated git worktree instead of checking out in the shared clone:
 
-**Branch name:** `{prefix}{TICKET-ID}-{title-slug}` (max 60 chars)
-- Label `bug` → `bugfix/`; label `feature` or `enhancement` → `feature/`; default → `feature/`
-
-Create on every affected repo:
 ```bash
-cd {repo-path} && git checkout -b {branch-name} 2>/dev/null || git checkout {branch-name}
+WORKTREE_PATH=$(ensure_worktree "$TICKET_ID" "{repo-path}" "$TICKET_BRANCH" "$BASE_BRANCH")
 ```
+
+This creates the worktree at `$WORKTREE_ROOT/{repo-slug}`. It is idempotent — on resume, it returns the existing path without touching files. If the worktree exists on a different branch, it fails loudly (identity guard — no silent re-checkout).
+
+Do NOT `cd` into the shared clone. All subsequent git operations (`git diff`, `git add`, `git commit`, `git push`) run inside the worktree at `$WORKTREE_PATH`.
 
 Append to `notes.md`:
 ```markdown
 ### {today's date} — pre-implementation checkpoint
-- Repos: {list} | Branch: {branch-name} | Mode: {simple-fix | openspec: <name>}
+- Repos: {list} | Branch: {TICKET_BRANCH} | Worktree: {WORKTREE_PATH} | Mode: {simple-fix | openspec: <name>}
 ```
 
-[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|checkout-branch|done|{branch-name}" >> "$LOG_FILE"
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|checkout-branch|done|{TICKET_BRANCH}" >> "$LOG_FILE"
 
 ---
 
@@ -277,11 +282,11 @@ Work through each change in `simple-fix.md` in order.
 
 ### Openspec mode
 
-Spawn a `general-purpose` agent to apply the change and return a difficulty summary. The branch is already checked out — no isolation needed.
+Spawn a `general-purpose` agent to apply the change and return a difficulty summary. The worktree is already created at `$WORKTREE_PATH` — all edits happen there.
 
 **Prompt the agent with:**
 ```
-Apply the openspec change `{change-name}` by running `/opsx:apply` in the repo at `{repo-path}`. Follow its instructions fully.
+Apply the openspec change `{change-name}` by running `/opsx:apply` in the worktree at `{WORKTREE_PATH}`. Follow its instructions fully.
 
 Use smart_search for code navigation during editing: `smart_search` to locate symbols, `smart_outline` for structural views, then `smart_unfold` or `Read` for confirmed targets only. Fall back to Serena if smart_search returns nothing: symbol search or go_to_definition to locate, find_references to trace usages. Read only what these tools pinpoint — never scan whole files. Before starting edits, run GitNexus `impact()` on target symbols to map blast radius.
 
@@ -327,10 +332,10 @@ When complete, return ONLY this JSON (no other text):
 # BE_TEST_RUNNER takes precedence over BE_TEST_CMD for pyenv/pipenv environments
 # where the bare command (e.g. "pytest") is not on PATH.
 _test_cmd="{BE_TEST_RUNNER:-{BE_TEST_CMD}}"
-cd {repo-path} && $_test_cmd
+cd {WORKTREE_PATH} && $_test_cmd
 
 # FE repos (only if FE_TEST_CMD is defined)
-cd {repo-path} && {FE_TEST_CMD}
+cd {WORKTREE_PATH} && {FE_TEST_CMD}
 ```
 
 If tests fail → fix the code or the tests, re-run. Do not proceed until all tests pass. Skip a test command only if its corresponding variable is not defined in CLAUDE.md.
@@ -342,8 +347,8 @@ If tests fail → fix the code or the tests, re-run. Do not proceed until all te
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|code-review|start|Reviewing changes" >> "$LOG_FILE"
 
 Spawn a `general-purpose` agent for each repo with changes. Pass it:
-- The repo path and branch name
-- The list of changed files (`git diff --name-only develop`)
+- The worktree path and branch name
+- The list of changed files (`git -C "$WORKTREE_PATH" diff --name-only "$BASE_BRANCH"`)
 - The ticket ID and a one-sentence description of what was implemented
 - This exact instruction: **Invoke `Skill("superpowers:requesting-code-review")` — use the Skill tool with this exact name. Do NOT use any other review tool, plugin, or slash command.**
 
@@ -471,11 +476,11 @@ append_correction "{ticket-dir}/notes.md" \
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|commit-push|start|Committing and pushing" >> "$LOG_FILE"
 
 For each affected repo:
-1. Run `/commit-commands:commit` to create the commit.
-2. **Pre-push safety check — GitNexus `detect_changes`:** Call `mcp__gitnexus__detect_changes` with `scope: "compare"` and `base_ref: "develop"`. This maps the full branch diff against the knowledge graph.
+1. Run `/commit-commands:commit` from the worktree (`cd "$WORKTREE_PATH"` first).
+2. **Pre-push safety check — GitNexus `detect_changes`:** Call `mcp__gitnexus__detect_changes` with `scope: "compare"` and `base_ref: "$BASE_BRANCH"`. The worktree is a full git checkout — `detect_changes` operates on the branch, not the filesystem path.
    - If the result shows `risk_level: "high"` or `"critical"`, OR affected execution flows outside the ticket's stated scope: append a warning to the handoff output.
    - If GitNexus is unavailable: log a warning and proceed — never block on it.
-3. Push: `git push origin {branch-name}`
+3. Push from the worktree: `git -C "$WORKTREE_PATH" push origin {branch-name}`
 
 ### Commit title template
 
