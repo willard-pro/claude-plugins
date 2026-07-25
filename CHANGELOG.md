@@ -1,5 +1,175 @@
 # Changelog
 
+Version numbers track **`ticket-auto-pipeline`**, the original plugin in this
+marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
+`knowledge-curator`, those versions are called out in the entry.
+
+> **Backfill note (2026-07-25):** entries for 0.14.0 through 0.21.1 were
+> reconstructed from git history — the changelog had lapsed after 0.13.0 while
+> `plugin.json` advanced to 0.21.1. They are accurate as to what shipped, but are
+> summaries written after the fact rather than release-time notes.
+>
+> Two numbering artifacts surfaced during the reconstruction, recorded rather
+> than silently corrected:
+> - **0.13.0 was never a `plugin.json` version.** The commit that added the
+>   0.12.13 and 0.13.0 entries below bumped `plugin.json` straight from 0.12.12
+>   to 0.14.0. Those two entries describe work that shipped as 0.14.0.
+> - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
+>   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
+
+## 0.21.2 (2026-07-25)
+
+Documentation restructure — the root README covered install and configure but
+never said what to type, and `fleet-controller` was listed in the marketplace
+table with a link to a README that did not exist.
+
+- Docs: root README rewritten as a high-level entry point — goal-indexed "which plugin do I need", ecosystem flow diagram, two-path first-run walkthrough, seven-phase run description, symptom-to-link troubleshooting table, and a documentation map indexing every doc by audience (previously only two of four plugin READMEs were linked at all).
+- Docs: new `fleet-controller/README.md` — when the plugin is needed, dry-run-first quickstart, all five modes, the 12 detection engines, escalation path, `fleetd`, configuration reference, and migration off the deprecated `/ticket-fleet-controller`.
+- Docs: `ticket-auto-pipeline/README.md` gains a Documentation map; it never linked its own `plugin-overview.md` or `docs/` index.
+- Fix: `validate-linear-config.sh` path was wrong in three places — the script lives under `skills/ticket-flow/`, so the documented Configure step failed with "No such file". Replaced with the plugin-cache `find` idiom used elsewhere, since marketplace users have no clone.
+- Fix: planner described as 12-phase in the root README and `marketplace.json` (listing merged-away phases such as Story Gen); actual is 9-phase per `plugin.json`, `SKILL.md`, and `CLAUDE.md`.
+- Fix: "six phases" claim followed by a five-item diagram; actual is seven.
+- Fix: `ticket-auto-pipeline` README taught the deprecated `/ticket-fleet-controller` commands; now points at the extracted plugin.
+- Fix: duplicate `Crash recovery` heading silently broke anchor links — the troubleshooting one renamed to "Resuming an interrupted run".
+- Chore: fleet-controller 0.3.1 → 0.3.2. `ticket-planner` intentionally unbumped — only its marketplace description changed, which is marketplace-level metadata, not plugin content.
+
+## 0.21.1 (2026-07-25)
+
+Release packaging for the shared epic-branch programme — 4 phases, 229 tasks,
+4831 LOC across 46 files.
+
+- Chore: patch bumps across three plugins for marketplace update detection — ticket-planner 0.3.0 → 0.3.1, fleet-controller 0.3.0 → 0.3.1.
+- Docs: root README lists all 4 plugins (previously only `ticket-auto-pipeline`).
+- Docs: root CLAUDE.md corrected — 12-phase → 9-phase planner, 11 → 12 detection engines; the engine count propagated across all CLAUDE.md and SKILL.md files.
+- Docs: plugin descriptions gain epic branch, worktree, and Branch Directive mentions.
+
+## 0.21.0 (2026-07-25)
+
+Shared epic-branch programme, Phase 3 — epic branch lifecycle management.
+fleet-controller 0.2.1 → 0.3.0.
+
+- Feature: new `lib/epic-branch.sh` — `ensure_epic_branch` (create/push the directive-declared branch, idempotent), `epic_branch_sync` (merge base into epic; never rebases, never force-pushes), `epic_branch_children_done` (pure bash readiness check), `epic_branch_open_pr` (opens an integration PR, never auto-merges). All mutating paths gate behind `FLEET_DRY_RUN`.
+- Feature: `fleet-dispatch.sh` fetches epic description in GraphQL, enforces an epic-branch precondition before enqueue, and syncs per cycle behind the `FLEET_EPIC_BRANCH_SYNC` gate.
+- Feature: 12th detection engine `_fleet_scan_epic_branch_ready` registered in `fleet_detect_all` (D-12, severity 0–1).
+- Feature: `fleet-monitor.sh` runs `worktree_gc` each cycle (non-fatal), closing a Phase 2 gap.
+- Feature: `INTEGRATION_PR_GUARD` added before auto-merge squash; new config `FLEET_EPIC_BRANCH_SYNC` (default true) and `FLEET_EPIC_AUTO_PR` (default false).
+- Test: 20 tests using an origin fixture and `gh` function mocks; all 4 shared-branch programme suites wired into the Makefile.
+
+## 0.20.0 (2026-07-25)
+
+Shared epic-branch programme, Phase 2 — per-ticket git worktree isolation.
+Replaces shared-clone checkout, fixing the concurrent-pipeline race where two
+tickets on the same repo observed each other's branches and uncommitted changes.
+
+- Feature: `lib/spawn-helper.sh` gains `WORKTREE_ROOT` transport (param parser, heredoc placeholder, sed replacement). 60/60 tests pass.
+- Feature: 5 skills migrated to worktrees — `ticket-implement` (`ensure_worktree` replaces cd+checkout+pull+checkout-b), `ticket-verify` (`gh pr list/create` use the worktree path), `ticket-document` (git diff/log and branch detection via worktree), `ticket-pr-review` (diff and conflict check in worktree), `ticket-auto` (`release_worktree` in STEP_6, non-fatal, after document).
+- Chore: audit clean — 0 `cd {repo-path}`, 0 literal `develop`, `REPOS_ROOT` confined to prescan loops.
+- Docs: 3 sharp edges recorded — worktree isolation is files-only (ports, databases, and seeded test state still collide), minimum git 2.17 for `git worktree remove`, and no migration needed for pre-existing branches.
+- Known gap: 5 verification tasks deferred (end-to-end, concurrency, crash-resume, wrong-branch guard, `release_worktree` confirmation) — all require live Linear ticket runs.
+
+## 0.18.0 (2026-07-24)
+
+Planner integration, Part 7 — rollout, alignment, and a full determinism audit.
+ticket-planner 0.2.0, fleet-controller 0.2.1.
+
+- Docs: new `docs/rollout-plan.md` — 8-phase sequence with gating criteria and rollback procedures.
+- Docs: new `docs/planner-state-alignment.md` — planner-to-ticket-auto state mapping, label bridge, confidence flow.
+- Docs: new `docs/determinism-audit-2026-07-24.md` — full-system audit across all 7 parts; **0 candidates found for further bash migration**.
+- Docs: root CLAUDE.md updated to the 4-plugin ecosystem architecture with a determinism boundary diagram.
+- Test: new `test-handoff-e2e.sh` — 16 end-to-end integration tests with a mocked Linear API (planned ticket validation, depth mismatch, blocked-by resolution, concurrency, unplanned isolation).
+
+## 0.17.0 (2026-07-24)
+
+Exploration depth levels — Planner Context Schema-Version 2.
+
+- Feature: `planned-ticket-check.sh` supports Schema-Version 2 with 5 optional exploration fields (Exploration Depth, Code Paths Traced, API Contracts Analyzed, Alternative Approaches, Open Questions). `SCHEMA_KNOWN_MAX` bumped to 2, forward-compatible with future versions.
+- Feature: Exploration Depth enum validation (`quick-scan`/`standard`/`deep`) and Code Paths Traced format validation (`symbol:file`).
+- Feature: `check_exploration_depth_mismatch()` detects quick-scan-on-complex tickets; surfaced in `gate-check.sh` as a **soft signal that warns but never blocks**.
+- Feature: `planned-feedback-write.sh` computes `exploration_depth_actual`, `missed_symbols`, and `false_traces` from the diff versus traced paths; `fleet-feedback.sh` aggregates `exploration_accuracy` per initiative.
+- Docs: appraise depth-consumption guidance (deep → trust traced paths, standard → supplement with targeted grep, quick-scan → full investigation). New `exploration-depth-levels.md` and `discovery-phase-spec.md`.
+- Test: 9 new cases (5 V2 validation, 4 depth mismatch); all 29 pass, shfmt clean.
+
+## 0.16.1 (2026-07-22)
+
+Resolves 7 GitHub issues (#97–#103), including a P0 that broke `flow.sh` entirely.
+
+- Fix (P0, #97): `linear-api.sh` removed `429` from the transient-keyword regex. UUID substrings (e.g. `dd816776-4ce4-429c-ad38`) triggered false-positive transient classification on every labels/states query, breaking `flow.sh`. HTTP 429 is already caught by the status-code check and GraphQL rate-limit errors by the `.errors` block.
+- Fix (P1, #98): `gate-check.sh` allows complex + auto/semi-auto + approved to bypass the unconditional complex hold — a human approval label now auto-approves complex tickets in non-manual modes.
+- Fix (P2, #99): `gate-check.sh` accepts both `✓` and `Y` in the verification plan Verifiable column; agents write ASCII `Y` but the grep required the Unicode mark.
+- Fix (P2, #100): `gate-check.sh` accepts openspec directories as artifacts — `[ -f ]` returned false for directories, causing `EXEC_NO_ARTIFACT` false positives on every openspec ticket.
+- Fix (P2, #102): `gate-check.sh` decouples the verification check from `critique_score`, preventing false holds on tickets with neither a verification plan section nor a critique.
+- Fix (P2, #101): `spawn-helper.sh` sources `capture-transcript.sh` in `spawn_capture` when `capture_agent_result` is not loaded.
+
+## 0.16.0 (2026-07-21)
+
+- Docs: reconciled the ticket-planner tracker against shipped code. Parts 4 and 5 were marked TODO with 0 tasks while the fleet-side code had shipped on 2026-07-15.
+- Docs: recorded 3 remaining gaps at the time — `--from-planned` flag, feedback writer, detection-to-dispatch actuation.
+- Docs: noted fleetd-supervisor-daemon complete (PR #104, 58/58 tasks).
+
+## 0.15.1 (2026-07-14)
+
+- Feature: `ticket-retro` gains `--post-to-github` — a deterministic GitHub issue pipeline. New `lib/github-issues.sh` (4 functions wrapping the `gh` CLI with heartbeat instrumentation) and `lib/github-issue-retro.sh` (state file I/O, severity mapping, threshold check, create-vs-comment decisions — all mechanics in bash, content from AI).
+- Feature: single `lib/github-issue-body.template.md` with `{PLACEHOLDER}` variables for consistent issue formatting; the SessionStart hook copies `*.template.md` to `lib/`.
+- Feature: 3 new config constants — `GITHUB_ISSUE_REPO`, `GITHUB_ISSUE_STALE_DAYS`, `GITHUB_ISSUE_MAX_COMMENT_SIZE`.
+- Design: deduplication via a local JSON state file, not GitHub labels. Graceful degradation — `gh` unavailable warns and skips, and the proposal is still written. Fleet-controller deliberately excluded as an architectural boundary.
+- Test: 21 unit tests with a mocked `gh` CLI.
+
+## 0.15.0 (2026-07-14)
+
+Template selection, body validation, and the artifact plane for planned tickets.
+
+- Feature: `lib/template-select.sh` — deterministic type-to-template resolution (`bug`/`feature`/`improvement`/`security`/`chore`, with `refactor` aliased to improvement).
+- Feature: `lib/planner-artifacts.sh` — resolves the shared plane path `REPOS_ROOT/.ticket-auto/initiatives/{INIT}/tickets/{TID}/planner/`.
+- Feature: `lib/planned-ticket-body-check.sh` — validates required body sections per type (universal: AC / Test User / Scope; bug adds Repro + Test Data; feature and improvement add Nav Path).
+- Feature: two new gate-stops in `gate-check.sh` Check 2.7 — `NO_TEMPLATE_FOR_TYPE` and `PLANNED_BODY_INCOMPLETE`.
+- Refactor: `planned-ticket-check.sh` exports the canonical `_extract_planner_context_block` as a single source of truth, deduped from `appraise-fast-path.sh`.
+- Feature: `state-machine.json` registers Type labels (bug/feature/improvement/security/chore) and corrects the `pre-approved` description. New `templates/chore.md`.
+- Feature: `setup.sh` seeds `context.md` from the plane's `body.md` on planned tickets; `ticket-appraise-exec` reuses `planner/proposal.md` when present; `ticket-verify` prefers the plane-seeded `context.md` over the Linear description.
+- Test: 4 new suites (40 tests); all 120 existing plus new tests pass, lint and fmt-check clean.
+
+## 0.14.3 (2026-07-08)
+
+Appraise fast-path for planned tickets — Phase 2 of ticket-planner enrichment.
+When a ticket carries the `planned` label and a valid `## Planner Context`
+block, appraise skips the complexity sweep, prior art search, and codebase
+investigation, using the planner's pre-computed metadata instead.
+
+- Feature: `lib/appraise-fast-path.sh` — deterministic eligibility check, field extraction, strategy-to-complexity mapping (Conservative → simple; Balanced/Innovative → complex), and printf-based `notes.md` generation.
+- Feature: SKILL.md Step 1.3 dispatches at bash level via `fast_path_action()`, replacing an LLM-interpreted decision table.
+- Fix (post-review hardening): heredoc replaced with printf as defense-in-depth against shell injection; delegation to `planned-ticket-check.sh` helpers eliminates duplicated sed/awk; `unset_fast_path_vars()` prevents stale variable leaks across invocations; case catch-all added for unexpected validator exit codes.
+- Test: 20 unit tests, wired into Makefile discovery.
+
+## 0.14.2 (2026-07-08)
+
+- Chore: version bump only, no functional change.
+
+## 0.14.1 (2026-07-07)
+
+Fleet controller extracted from `ticket-auto-pipeline/lib/` into a standalone
+top-level `fleet-controller/` plugin (v0.1.0). Fleet sits architecturally above
+both ticket-planner and ticket-auto as the parent orchestrator — the extraction
+makes that explicit.
+
+- **BREAKING (internal):** fleet lib scripts and the skill move to a new plugin namespace. The runtime skill path changes from `/ticket-auto-pipeline:ticket-fleet-controller` to `/fleet-controller:fleet-controller`. A deprecated forwarder remains for one release cycle.
+- Feature: new plugin ships 6 lib scripts, 8 test files, 122 tests.
+- Feature: 3 new detection engines — `detect_planner_feedback`, `detect_blocked_by`, `detect_initiative_dispatch` (11 total, up from 8).
+- Feature: `fleet-dispatch.sh` — initiative epic to spawn queue dispatch with blocked-by resolution and `FLEET_MAX_CONCURRENT` enforcement.
+- Feature: `fleet-feedback.sh` — `META|planner-feedback` aggregation grouped by initiative, structured JSON with confidence drift tracking.
+- Feature: `fleet-monitor.sh` integrates spawn queue consumption into the monitor loop; `fleet-dashboard.sh` adds fleet-wide detector rows to terminal and markdown output.
+- Chore: removed 4 fleet scripts and 4 tests from `ticket-auto-pipeline/lib/`.
+
+## 0.14.0 (2026-07-06)
+
+Closes 32+ integrity defects across prescan, router, pipeline phases, and
+observability. **This is the release that shipped the work described in the
+0.12.13 and 0.13.0 entries below** — `plugin.json` went from 0.12.12 straight to
+0.14.0 in this commit.
+
+- Fix: prescan — gitnexus indexing gaps, corpus-build failures, fan-out issues.
+- Fix: router hardening, 14 fixes — 4 P0 (auto-merge dead code, retro firing every run, silent `flow.sh` skip, loop dedup suppression) and 5 P1 routing/counting integrity bugs.
+- Feature: pipeline integrity Phase 1 — `return-completeness-check.sh` (warn-only, openspec-scoped); Section 2 — `simple-fix.md` Completion Checklist gate; Phase 3 — CORRECTIONS back-feed library with 3 consumers and round-trip tests; Phase 4 — prescan title fix via `meta.json` `doc_titles`.
+- Fix: ticket-auto integrity hardening, 18 defects across 9 increments (A–I) — EXEC artifact-type token closeout (`exec|done|` → `create-artifact|done|`); router grep fixes and `VERIFY_ATTEMPTS` semantics; `gate-check.sh` `set -e` fix; `state-machine.json` unified to a single source with the root copy deleted; `flow.sh` from-precondition guard (warn-only `ILLEGAL_TRANSITION`); `linear-api.sh`/`flow.sh` robustness (429 retry, empty-200, lock path); outcome-label grep fix and `corrections-parse.sh` flock concurrency; loop-counter freeze fix hard-requiring `VERDICT=`/`cycle#N`; test and doc hygiene.
+
 ## 0.13.0 (2026-07-05)
 
 Pipeline integrity, Phase 1 — closes the "agent self-reports done with zero
