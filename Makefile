@@ -2,7 +2,7 @@ SCRIPTS := $(shell find . -name "*.sh" -not -path "./.git/*")
 
 .PHONY: test test-lib test-flow test-kc lint fmt-check fmt
 
-test: test-lib test-flow test-kc
+test: test-lib test-planner test-flow test-kc
 
 test-lib:
 	@echo "=== lib unit tests ==="
@@ -69,6 +69,17 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-branch-resolve.sh
 	bash ticket-auto-pipeline/lib/tests/test-worktree.sh
 	bash ticket-auto-pipeline/lib/tests/test-epic-branch.sh
+
+test-planner:
+	@echo "=== ticket-planner unit tests ==="
+	bash ticket-planner/lib/tests/test-planner-sanitize.sh
+	bash ticket-planner/lib/tests/test-planner-state.sh
+	bash ticket-planner/lib/tests/test-planner-transitions.sh
+	bash ticket-planner/lib/tests/test-planner-generation.sh
+	bash ticket-planner/lib/tests/test-planner-replan.sh
+	bash ticket-planner/lib/tests/test-planner-integration.sh
+	bash ticket-planner/lib/tests/test-branch-decision.sh
+	bash ticket-planner/lib/tests/test-branch-directive-gen.sh
 
 test-flow:
 	@echo "=== ticket-flow tests ==="

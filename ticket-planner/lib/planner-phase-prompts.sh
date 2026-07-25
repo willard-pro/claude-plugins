@@ -595,13 +595,129 @@ echo "EPIC_ID=\$CREATED_EPIC_ID"
 Do NOT set \`state:execution\` — that label is set deterministically by the Ticket Gen
 post-creation gate after all child tickets are created and verified.
 
+## Branch Directive (step 5 — after epic creation)
+
+After the epic is created (step 3+4 above), decide whether to attach a shared-branch
+directive. This decision is **deterministic bash** — performed by helpers you source,
+not by your judgement. Follow this procedure exactly:
+
+### 5a. Run the recommender
+
+\`\`\`bash
+source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-deps-check.sh"
+source "\${CLAUDE_PLUGIN_ROOT}/lib/branch-directive-gen.sh"
+
+# The recommender reads spec files and the dependency graph. It emits JSON
+# with .recommend (bool), .reason (string), .ticket_count, .chain_depth.
+RECOMMENDATION=\$(planner_branch_directive_recommend "${initiative_id}")
+RECOMMEND=\$(echo "\$RECOMMENDATION" | jq -r '.recommend')
+REASON=\$(echo "\$RECOMMENDATION" | jq -r '.reason')
+\`\`\`
+
+### 5b. Apply operator overrides
+
+The recommender's output may be overridden by operator flags passed to the planner:
+
+- If **\`PLANNER_SHARED_BRANCH=true\`** is in the environment, the outcome is \`true\`
+  regardless of the recommender.
+- If **\`PLANNER_NO_SHARED_BRANCH=true\`** is in the environment, the outcome is \`false\`
+  regardless of the recommender.
+- Supplying both together is rejected before you are spawned — you will never see both
+  set.
+
+\`\`\`bash
+# Determine final outcome
+if [ "\${PLANNER_SHARED_BRANCH:-}" = "true" ]; then
+  EMIT_DIRECTIVE=true
+  OVERRIDE_REASON="operator override: --shared-branch"
+elif [ "\${PLANNER_NO_SHARED_BRANCH:-}" = "true" ]; then
+  EMIT_DIRECTIVE=false
+  OVERRIDE_REASON="operator override: --no-shared-branch"
+else
+  EMIT_DIRECTIVE="\$RECOMMEND"
+  OVERRIDE_REASON=""
+fi
+\`\`\`
+
+### 5c. Generate and append (or skip)
+
+\`\`\`bash
+if [ "\$EMIT_DIRECTIVE" = "true" ]; then
+  # Check idempotency: does the epic already have a directive block?
+  EXISTING_BLOCK=\$(echo "\$EPIC_DESCRIPTION" | _extract_md_section "Branch Directive" 2>/dev/null || true)
+
+  if [ -n "\$EXISTING_BLOCK" ]; then
+    planner_state_write "${initiative_id}" "EpicGen" "branch-directive" "done" \
+      "Directive already present (idempotent): \$(echo \"\$EXISTING_BLOCK\" | _extract_field \"Branch\")"
+  else
+    # Read the proposal title for the slug
+    PROPOSAL_TITLE=\$(grep -m1 '^# ' "\${state_dir}/artifacts/proposal.md" 2>/dev/null | sed 's/^# //' || echo "initiative")
+    TITLE_SLUG=\$(echo "\$PROPOSAL_TITLE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
+
+    DIRECTIVE_JSON=\$(jq -n \
+      --arg iid "${initiative_id}" \
+      --arg slug "\$TITLE_SLUG" \
+      --arg base "\${PLANNER_BASE_BRANCH:-develop}" \
+      --arg merge "\${PLANNER_MERGE_POLICY:-manual}" \
+      --arg sync "\${PLANNER_SYNC_POLICY:-rebase-on-base-change}" \
+      '{initiative_id: \$iid, title_slug: \$slug, base_branch: \$base, merge_policy: \$merge, sync_policy: \$sync}')
+
+    DIRECTIVE_BLOCK=\$(branch_directive_generate "\$DIRECTIVE_JSON")
+
+    if [ -z "\$DIRECTIVE_BLOCK" ]; then
+      echo "ERROR: branch-directive-gen returned empty — directive not appended" >&2
+      planner_state_write "${initiative_id}" "EpicGen" "branch-directive" "fail" "Generator returned empty output"
+    else
+      # Append directive to epic description via Linear API
+      # (append to existing description, preserving what's already there)
+      NEW_DESCRIPTION="\${EPIC_DESCRIPTION}\n\n\${DIRECTIVE_BLOCK}"
+      # Use the Linear API to update the description
+      # ... Linear API update call ...
+
+      BRANCH_NAME=\$(echo "\$DIRECTIVE_BLOCK" | grep '^\*\*Branch:\*\*' | sed 's/\*\*Branch:\*\* //')
+      if [ -n "\$OVERRIDE_REASON" ]; then
+        planner_state_write "${initiative_id}" "EpicGen" "branch-directive" "done" \
+          "BRANCH=\${BRANCH_NAME} REASON=\${OVERRIDE_REASON}"
+      else
+        planner_state_write "${initiative_id}" "EpicGen" "branch-directive" "done" \
+          "BRANCH=\${BRANCH_NAME} REASON=heuristic:\${REASON}"
+      fi
+    fi
+  fi
+else
+  # No directive emitted — log the reason
+  if [ -n "\$OVERRIDE_REASON" ]; then
+    planner_state_write "${initiative_id}" "EpicGen" "branch-directive" "done" \
+      "SKIP REASON=\${OVERRIDE_REASON}"
+  else
+    planner_state_write "${initiative_id}" "EpicGen" "branch-directive" "done" \
+      "SKIP REASON=heuristic:\${REASON}"
+  fi
+fi
+\`\`\`
+
 ## State log
 Write \`done\` on success, \`fail\` on error (include the GraphQL error in the message).
+The \`branch-directive\` step is a separate entry — it records the branch decision
+independently of the \`create\` step so status and replan can read it.
+
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| \`PLANNER_BASE_BRANCH\` | \`develop\` | Base branch for the directive |
+| \`PLANNER_MERGE_POLICY\` | \`manual\` | Merge policy enum |
+| \`PLANNER_SYNC_POLICY\` | \`rebase-on-base-change\` | Sync policy enum |
 
 ## Constraints
 - The idempotency check is mandatory — do not skip it.
 - If the Linear API call fails, record \`fail\` with the error details.
 - The epic ID (e.g., \`CRE-123\`) must be recorded in both the intent file and the state log.
+- The branch-directive step is **independent of epic creation** — re-entering the
+  phase after a partial run (epic created, directive not appended) must append
+  the directive without recreating the epic.
+- The directive block uses the existing \`_extract_md_section\` and \`_extract_field\`
+  helpers from \`planned-ticket-check.sh\` (via \`branch-directive-check.sh\`).
 AGENT_PROMPT
 }
 

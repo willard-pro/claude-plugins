@@ -14,11 +14,11 @@ Claude Code plugin marketplace (`willard-pro-claude-plugins`). Ships four plugin
 ## Ecosystem architecture
 
 ```
-Business idea → [ticket-planner] → initiative epic + planned tickets (Planner Context + labels)
+Business idea → [ticket-planner] → initiative epic + planned tickets (Planner Context + labels + Branch Directive)
                                        ↓
-                                 [fleet-controller] → detect initiatives → dispatch tickets → spawn queue
+                                 [fleet-controller] → detect initiatives → ensure epic branch → dispatch tickets → spawn queue
                                        ↓
-                                 [ticket-auto-pipeline] → appraise (fast-path for planned) → implement → verify → merge
+                                 [ticket-auto-pipeline] → resolve branch → appraise (fast-path for planned) → implement → verify → merge
                                        ↓
                                  [fleet-controller feedback] → aggregate execution results → per-initiative feedback JSON
                                        ↓
@@ -29,7 +29,7 @@ Business idea → [ticket-planner] → initiative epic + planned tickets (Planne
 
 **Determinism boundary**: bash orchestrates (state parsing, phase routing, validation, dispatch, feedback aggregation). Claude agents reason (appraisal, discovery, architecture, proposal, review, spec writing, ticket generation).
 
-**Shared epic branches**: An epic may declare a `## Branch Directive` block in its description (see [Branch Directive schema](ticket-auto-pipeline/docs/branch-directive-schema.md)). ticket-auto resolves branch targets via a deterministic precedence chain: `--branch` CLI flag → parent epic directive → `BASE_BRANCH` default (`develop`). A malformed directive gate-stops the pipeline — no fallback. The directive lives only on the epic; it is never copied into child tickets.
+**Shared epic branches**: The ticket-planner may attach a `## Branch Directive` block to epic descriptions (via deterministic heuristic or operator override). ticket-auto resolves branch targets via a deterministic precedence chain: `--branch` CLI flag → parent epic directive → `BASE_BRANCH` default (`develop`). fleet-controller manages epic branch lifecycle (create, sync, GC). A malformed directive gate-stops the pipeline — no fallback. The directive lives only on the epic; it is never copied into child tickets. See [Branch Directive schema](ticket-auto-pipeline/docs/branch-directive-schema.md).
 
 ## Plugin anatomy
 

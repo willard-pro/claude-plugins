@@ -239,6 +239,48 @@ When TicketGen completes successfully, the initiative epic gets `state:execution
 
 **Concurrency:** `FLEET_MAX_CONCURRENT` caps active pipelines. `FLEET_DRY_RUN` makes dispatch no-op for preview.
 
+## Shared-Branch Directive
+
+When Epic Gen creates an initiative epic, a deterministic bash heuristic decides whether the epic should carry a `## Branch Directive` block. The directive declares a shared integration branch that child tickets target — downstream, `ticket-auto-pipeline` resolves it via `branch-resolve.sh` and `fleet-controller` manages its lifecycle via `epic-branch.sh`.
+
+### Decision Rule
+
+The recommender (`planner_branch_directive_recommend`) applies a two-condition rule, both required:
+
+- **≥ 3 planned tickets** — fewer tickets don't warrant shared-branch overhead
+- **Dependency chain depth ≥ 2** — chained tickets genuinely build on each other
+
+Ticket count alone is insufficient — independent tickets serialised behind a single integration PR gain nothing. Chain depth (computed via DP on the topological ordering) is the signal that tickets form an integrated unit.
+
+### Thresholds
+
+The thresholds are **provisional and unvalidated** against real usage data. The asymmetry is deliberate:
+
+- **Under-recommending** costs the operator one flag (`--shared-branch`)
+- **Over-recommending** silently changes the merge topology of ordinary work
+
+When uncertain, don't recommend. Both override flags exist so the heuristic is never the final word.
+
+### Operator Overrides
+
+| Flag | Behavior |
+|------|----------|
+| `--shared-branch` | Force directive emission regardless of heuristic |
+| `--no-shared-branch` | Suppress directive regardless of heuristic |
+
+Supplying both is an error. Neither flag defers to the heuristic.
+
+### Design Decisions
+
+- **The decision is bash, not agent judgement.** "Do these tickets belong on one branch?" is a question about dependency graph shape, not content. Reproducibility matters — merge topology must not depend on sampling variance.
+- **The branch name is derived, not authored.** `epic/{INITIATIVE_ID}-{title-slug}`, deterministic, satisfying the downstream validator's charset rules by construction. No agent-supplied content.
+- **Generate against the validator.** `branch-directive-gen.sh` round-trips through `branch-directive-check.sh` (downstream plugin). No bundled copy — a drifting duplicate would silently produce blocks that fail validation.
+- **Nothing is added to the Planner Context block.** Children inherit the branch by parent lookup. Adding a branch field to each child would mean an epic edit silently desynchronises every child, with no arbiter.
+
+### Ticket Gen Unchanged
+
+The Ticket Generation phase is deliberately unaffected. Child tickets inherit the shared branch by parent lookup at execution time. No branch information is written into child ticket bodies or Planner Context blocks. The Planner Context block schema version is unchanged.
+
 ## Re-Planning
 
 When an initiative carries the `Regenerate` flag (set to `true` in the Planner Context block), the planner:
@@ -259,7 +301,9 @@ When an initiative carries the `Regenerate` flag (set to `true` in the Planner C
 | Phase transition validation | Appraisal scope decisions |
 | Entity idempotency (intent→check→create) | Discovery code path selection |
 | Dependency acyclicity (`tsort`) | Architecture approach evaluation |
+| Shared-branch recommendation (heuristic) | — |
 | Planner Context block generation | Proposal and spec authoring |
+| Directive block generation (branch naming) | — |
 | Confidence signal derivation | Review critique generation |
 | Pre-creation validation (`planned-ticket-check.sh`) | Ticket body content |
 | Auto-dispatch detection and enqueuing | Re-planning decisions |

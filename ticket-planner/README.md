@@ -62,6 +62,20 @@ From within Claude Code:
 | `/ticket-planner status <INIT_ID>` | Show current phase and recent log entries |
 | `/ticket-planner replan <INIT_ID>` | Re-plan from feedback (requires `Regenerate` flag) |
 
+### Plan flags
+
+Both `plan` and `resume` accept optional branch-directive override flags:
+
+| Flag | Effect |
+|------|--------|
+| `--shared-branch` | Force a shared-branch directive on the epic regardless of the heuristic |
+| `--no-shared-branch` | Suppress the shared-branch directive regardless of the heuristic |
+
+Supplying both together is an error. When neither is supplied, a deterministic bash heuristic
+decides: ≥ 3 planned tickets **and** dependency chain depth ≥ 2. The thresholds are provisional
+and conservative by design — under-recommending costs one flag, over-recommending silently
+changes merge topology.
+
 ### What happens
 
 1. The planner initializes a state directory under `$REPOS_ROOT/.ticket-auto/initiatives/{ID}/`

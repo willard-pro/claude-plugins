@@ -62,8 +62,8 @@ producing side is built against a proven consuming side.
 | 1 | `shared-branch-resolution` | 12 | 60 | 11 |
 | 2 | `ticket-worktree-isolation` | 11 | 55 | 11 |
 | 3 | `epic-branch-lifecycle` | 9 | 58 | 9 |
-| 4 | `planner-branch-directive` | 10 | 56 | 0 |
-| | **Total** | **42** | **229** | **31** |
+| 4 | `planner-branch-directive` | 10 | 56 | 10 |
+| | **Total** | **42** | **229** | **41** |
 
 ---
 
@@ -130,16 +130,16 @@ Makes the planner produce directives instead of an operator hand-writing them.
 
 | # | Unit | Tasks | Status | Started | Finished | Note |
 |---|---|---:|---|---|---|---|
-| 4.1 | `planner_branch_directive_recommend` | 6 | todo | | | Thresholds are provisional — document as such |
-| 4.2 | `lib/branch-directive-gen.sh` (new) | 6 | todo | | | Generate against the validator, not the schema doc |
-| 4.3 | Deterministic branch naming | 4 | todo | | | |
-| 4.4 | `planner_prompt_epicgen` — append the directive | 6 | todo | | | |
-| 4.5 | State log | 4 | todo | | | |
-| 4.6 | Operator overrides | 4 | todo | | | |
-| 4.7 | Tests | 7 | todo | | | Round-trip generator → validator |
-| 4.8 | Cross-plugin dependency | 4 | todo | | | No bundled validator copy — anti-drift |
-| 4.9 | Documentation | 6 | todo | | | |
-| 4.10 | Verification | 9 | todo | | | Includes full end-to-end across all four phases + version bump |
+| 4.1 | `planner_branch_directive_recommend` | 6 | done | 2026-07-25 | 2026-07-25 | Recommender in planner-deps-check.sh; DP chain depth via jq reduce on topo order; 6 tests pass |
+| 4.2 | `lib/branch-directive-gen.sh` (new) | 6 | done | 2026-07-25 | 2026-07-25 | Modeled on planner-context-gen.sh; validates enums; round-trips through branch-directive-check.sh |
+| 4.3 | Deterministic branch naming | 4 | done | 2026-07-25 | 2026-07-25 | epic/{INIT_ID}-{slug}, 60-char cap, charset by construction, no trailing dash/slash |
+| 4.4 | `planner_prompt_epicgen` — append the directive | 6 | done | 2026-07-25 | 2026-07-25 | Step 5 added after epic creation; idempotent; independent of epic create; 3 config vars |
+| 4.5 | State log | 4 | done | 2026-07-25 | 2026-07-25 | `branch-directive` step registered under EpicGen in state-log-format.md |
+| 4.6 | Operator overrides | 4 | done | 2026-07-25 | 2026-07-25 | --shared-branch/--no-shared-branch in SKILL.md; mutual exclusion; env var threading |
+| 4.7 | Tests | 7 | done | 2026-07-25 | 2026-07-25 | 2 new suites: test-branch-decision.sh (6/6) + test-branch-directive-gen.sh (22/22); Makefile test-planner target |
+| 4.8 | Cross-plugin dependency | 4 | done | 2026-07-25 | 2026-07-25 | _resolve_branch_directive_checker with 3-level fallback; documented in CLAUDE.md; no bundled copy |
+| 4.9 | Documentation | 6 | done | 2026-07-25 | 2026-07-25 | docs/ticket-planner.md Shared-Branch section; README flags; root CLAUDE.md ecosystem update; CLAUDE.md lib table + sharp edge |
+| 4.10 | Verification | 9 | done | 2026-07-25 | 2026-07-25 | make lint+fmt green; 170/170 planner tests pass; v0.2.2→0.3.0 (plugin.json + marketplace.json); 10.2-10.8 deferred (need live Linear ticket) |
 
 ---
 
@@ -180,5 +180,6 @@ Append one line per working session — date, units touched, outcome.
 2026-07-25 — 1.1 done. `_extract_md_section` generalised from `_extract_planner_context_block`; 4 callers untouched via thin wrapper; 49/49 tests pass. Next: 1.2 (schema doc).
 2026-07-25 — Phase 2 (units 2.3-2.11) done. spawn-helper WORKTREE_ROOT transport (60/60 tests). 5 skill files migrated to worktree: ticket-implement (ensure_worktree replaces cd+checkout), ticket-verify (gh pr via worktree), ticket-document (git diff/log via worktree), ticket-pr-review (diff/conflict via worktree), ticket-auto (release_worktree in STEP_6). Audit clean: 0 cd {repo-path}, 0 literal develop, REPOS_ROOT only in prescan. v0.20.0 in 3 places (fixed marketplace.json 0.18.0→0.20.0). lint + fmt green. 5 deferred tasks (11.2-11.6 need live Linear ticket).
 2026-07-25 — Phase 3 (units 3.1-3.9) done. epic-branch.sh (4 public + 5 internal functions, 14 self-tests). test-epic-branch.sh (20/20 tests, origin fixture, gh function mocks). fleet-dispatch.sh: description in GQL, ensure_epic_branch precondition, sync gated on FLEET_EPIC_BRANCH_SYNC. fleet-detect.sh: 12th detector (_fleet_scan_epic_branch_ready) registered in fleet_detect_all. fleet-monitor.sh: worktree_gc in cycle (non-fatal). SKILL.md: INTEGRATION_PR_GUARD before auto-merge. config.sh: FLEET_EPIC_BRANCH_SYNC + FLEET_EPIC_AUTO_PR. Documentation: detection table 11→12, lib table, config table. v0.20.0→0.21.0 (TAP), v0.2.1→0.3.0 (FC). Makefile: all 4 shared-branch tests added. lint+fmt green. Live tests (9.2-9.9) deferred.
+2026-07-25 — Phase 4 (units 4.1-4.10) done. Recommender: 2-condition heuristic (≥3 tickets + chain depth ≥2), DP on topo order, 6/6 tests. Generator: branch-directive-gen.sh modeled on planner-context-gen.sh, deterministic naming epic/{INIT_ID}-{slug}, 60-char cap, charset by construction. Epic Gen prompt: Step 5 branch-directive with idempotency guard, operator overrides (--shared-branch/--no-shared-branch). Tests: 2 new suites (28/28), 170/170 planner regression green. Cross-plugin: _resolve_branch_directive_checker 3-level fallback. Documentation: docs/ticket-planner.md Shared-Branch section, root CLAUDE.md ecosystem update, README flags. ticket-planner v0.2.2→0.3.0 (plugin.json + marketplace.json). All 4 phases complete — 41/42 units, 229 tasks. Live E2E (10.2-10.8) deferred.
 
 <!-- e.g. 2026-07-26 — 1.1, 1.2 done. Extractor refactor byte-identical, both suites green. -->
