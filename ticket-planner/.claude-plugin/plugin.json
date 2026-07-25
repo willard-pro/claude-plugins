@@ -1,6 +1,6 @@
 {
   "name": "ticket-planner",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "9-phase autonomous planner — turns business ideas into dependency-ordered planned tickets. Appraisal → Discovery → Architecture → Specify → Review → Consensus → Epic Gen → Ticket Gen → Completed. Produces against frozen Planner Context, labels, and artifact contracts.",
   "author": {
     "name": "John Willard"

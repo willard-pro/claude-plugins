@@ -18,7 +18,7 @@ Maintainer-facing overview of the ticket-auto-pipeline plugin. Read this before 
 | State machine definition | `skills/ticket-flow/state-machine.json` | Declares triggers, states, labels, transitions |
 | State machine executor | `skills/ticket-flow/flow.sh` | Reads JSON, executes transitions with idempotency |
 | State diagram generator | `skills/ticket-flow/gen-mermaid.sh` | Generates mermaid from state machine JSON |
-| Interactive diagram | `docs/pipeline-diagram.html` | Visual state diagram with drill-down (GitHub Pages) |
+| Interactive diagram | `docs/ticket-auto-pipeline-diagram.html` | Visual state diagram with drill-down (GitHub Pages) |
 | Linear config validator | `validate-linear-config.sh` | Asserts team states/labels match state machine |
 
 ### Core pipeline (thin router dispatch)

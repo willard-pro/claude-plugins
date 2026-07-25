@@ -108,7 +108,7 @@ planner_prompt_appraisal() {
 
   cat <<AGENT_PROMPT
 You are the **Appraisal** phase agent for the ticket-planner. Your job is to
-interpret a business idea and establish initiative scope. You are phase 1 of 12
+interpret a business idea and establish initiative scope. You are phase 1 of 9
 in an autonomous planning pipeline.
 
 ## Initiative
@@ -181,7 +181,7 @@ planner_prompt_discovery() {
   cat <<AGENT_PROMPT
 You are the **Discovery** phase agent for the ticket-planner. Your job is to
 explore affected repositories and gather concrete context: code paths, symbols,
-API contracts, and existing patterns. You are phase 2 of 12.
+API contracts, and existing patterns. You are phase 2 of 9.
 
 ## Initiative
 - **ID:** ${initiative_id}
@@ -241,7 +241,7 @@ planner_prompt_architecture() {
   cat <<AGENT_PROMPT
 You are the **Architecture** phase agent for the ticket-planner. Your job is to
 determine the technical approach: evaluate alternatives, choose the path, and
-document the decision. You are phase 3 of 12.
+document the decision. You are phase 3 of 9.
 
 ## Initiative
 - **ID:** ${initiative_id}
@@ -404,7 +404,7 @@ planner_prompt_review() {
   cat <<AGENT_PROMPT
 You are the **Review** phase agent for the ticket-planner. Your job is to
 critique the proposal — find gaps, risks, and infeasibilities before we commit
-to building. You are phase 5 of 12. You are a skeptic; your job is to find
+to building. You are phase 5 of 9. You are a skeptic; your job is to find
 what's wrong.
 
 ## Initiative
@@ -474,7 +474,7 @@ planner_prompt_consensus() {
 You are the **Consensus** phase agent for the ticket-planner. Your job is to
 resolve review findings into a settled, actionable plan. You don't re-litigate
 the proposal — you address the specific findings from Review and produce the
-final version. You are phase 6 of 12.
+final version. You are phase 6 of 9.
 
 ## Initiative
 - **ID:** ${initiative_id}
@@ -533,7 +533,7 @@ planner_prompt_epicgen() {
 
   cat <<AGENT_PROMPT
 You are the **Epic Generation** phase agent for the ticket-planner. Your job is
-to create the Linear epic that represents this initiative. You are phase 8 of 12.
+to create the Linear epic that represents this initiative. You are phase 7 of 9.
 
 ## Initiative
 - **ID:** ${initiative_id}
@@ -618,7 +618,7 @@ planner_prompt_ticketgen() {
 
   cat <<AGENT_PROMPT
 You are the **Ticket Generation** phase agent for the ticket-planner. Your job is
-to create planned child tickets in Linear. You are phase 10 of 12 — the main
+to create planned child tickets in Linear. You are phase 8 of 9 — the main
 entity-creation phase that produces what the pipeline consumes.
 
 ## Initiative
