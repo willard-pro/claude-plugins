@@ -133,3 +133,106 @@ planner_deps_validate_targets() {
   fi
   return 0
 }
+
+# ── Shared-branch recommendation ──────────────────────────────────────────────
+
+# Decide whether an initiative warrants a shared (epic) integration branch.
+#
+# The recommendation is pure bash over the dependency graph. Two conditions must
+# both be met: ≥ 3 planned tickets, AND a dependency chain of depth ≥ 2.
+#
+# Thresholds are PROVISIONAL and unvalidated against real usage data. The
+# asymmetry is deliberate: under-recommending costs one operator flag;
+# over-recommending silently changes the merge topology of ordinary work.
+#
+# Usage: planner_branch_directive_recommend <initiative_id>
+# Output: JSON object with recommend, reason, ticket_count, chain_depth.
+# Returns: 0 if decision computed, 1 if error (initiative dir missing, etc.).
+planner_branch_directive_recommend() {
+  local initiative_id="$1"
+  local repos_root="${REPOS_ROOT:-${HOME}/repos}"
+  local specs_dir="${repos_root}/.ticket-auto/initiatives/${initiative_id}/artifacts/specs"
+
+  if [ ! -d "$specs_dir" ]; then
+    echo "planner-deps-check: specs directory not found: $specs_dir" >&2
+    echo '{"recommend":false,"reason":"specs directory not found","ticket_count":0,"chain_depth":0}'
+    return 1
+  fi
+
+  # ── Build ticket JSON array from spec files ─────────────────────────────────
+  local tickets_json="["
+  local count=0
+  local spec_file slug signals blocked_by
+
+  for spec_file in "$specs_dir"/*.md; do
+    [ -f "$spec_file" ] || continue
+    [ "$(basename "$spec_file")" = "INDEX.md" ] && continue
+
+    # Derive ticket slug from filename (strip .md)
+    slug=$(basename "$spec_file" .md)
+    count=$((count + 1))
+
+    # Extract Signals JSON block (```json ... ```)
+    signals=$(sed -n '/```json/,/```/p' "$spec_file" 2>/dev/null | sed '1d;$d' | jq -e . 2>/dev/null || echo "{}")
+
+    # Extract blocked_by, defaulting to empty array
+    blocked_by=$(echo "$signals" | jq -r '.blocked_by // []' 2>/dev/null)
+
+    # Build JSON entry: {"id": "slug", "blocked_by": [...]}
+    if [ "$count" -gt 1 ]; then
+      tickets_json+=","
+    fi
+    tickets_json+=$(jq -n --arg id "$slug" --argjson deps "$blocked_by" '{id: $id, blocked_by: $deps}')
+  done
+  tickets_json+="]"
+
+  # ── Condition 1: ticket count ─────────────────────────────────────────────
+  if [ "$count" -lt 3 ]; then
+    echo "{\"recommend\":false,\"reason\":\"insufficient ticket count: ${count} < 3\",\"ticket_count\":${count},\"chain_depth\":0}"
+    return 0
+  fi
+
+  # ── Build dependency graph and compute chain depth ─────────────────────────
+  local deps_json
+  deps_json=$(planner_deps_from_tickets "$tickets_json")
+
+  # If no dependencies, chain depth is trivially 0
+  if [ "$deps_json" = "{}" ] || [ -z "$deps_json" ]; then
+    echo "{\"recommend\":false,\"reason\":\"no dependencies among ${count} tickets\",\"ticket_count\":${count},\"chain_depth\":0}"
+    return 0
+  fi
+
+  # Compute chain depth from topological ordering (DP on sorted nodes)
+  local sorted depth_json chain_depth
+  sorted=$(planner_deps_topological_sort "$deps_json" 2>/dev/null || echo "[]")
+
+  if [ "$sorted" = "[]" ]; then
+    echo "{\"recommend\":false,\"reason\":\"dependency graph is cyclic — cannot compute chain depth\",\"ticket_count\":${count},\"chain_depth\":0}"
+    return 0
+  fi
+
+  # DP: longest path (in edges) ending at each node
+  # For each node u in topological order:
+  #   longest[u] = max(0, 1 + max_{v where u blocked_by v} longest[v])
+  # The `reduce` uses `. as $acc` to capture the accumulator before pipe iteration
+  # rebinds `.` to the string value from [$deps[$u][]]. $acc[.] then reads the
+  # predecessor's stored depth.
+  depth_json=$(echo "$sorted" | jq --argjson deps "$deps_json" '
+    reduce .[] as $u ({};
+      . as $acc | .[$u] = (
+        [ ($deps[$u] // [])[] | 1 + ($acc[.] // 0) ] | max // 0
+      )
+    )
+  ' 2>/dev/null || echo "{}")
+
+  # Chain depth = max edge count across all nodes
+  chain_depth=$(echo "$depth_json" | jq '[.[]] | max // 0' 2>/dev/null || echo "0")
+
+  # ── Condition 2: chain depth ≥ 2 ──────────────────────────────────────────
+  if [ "$chain_depth" -ge 2 ] 2>/dev/null; then
+    echo "{\"recommend\":true,\"reason\":\"${count} tickets with dependency chain depth ${chain_depth}\",\"ticket_count\":${count},\"chain_depth\":${chain_depth}}"
+  else
+    echo "{\"recommend\":false,\"reason\":\"chain depth ${chain_depth} below threshold 2 (${count} tickets)\",\"ticket_count\":${count},\"chain_depth\":${chain_depth}}"
+  fi
+  return 0
+}

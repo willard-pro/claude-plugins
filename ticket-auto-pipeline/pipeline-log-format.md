@@ -119,6 +119,22 @@ implement) mirrors the Smooth/Rough/Hard Linear label confirmed for this ticket.
 auto-merge check in `ticket-auto/SKILL.md` reads `outcome-label`, not `outcome` — it needs
 the ticket-quality verdict, not the pipeline-run verdict.
 
+### Branch context entry
+
+Written once by `resolve_branch_context` at pipeline start (Step 0.5), before the first agent
+spawn. Records the branch decisions for this run so crash-resume can recover them without
+re-resolving.
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|branch-context|info|base=develop;integration=;source=default;ticket=feat/CRE-123-fix-auth" >> "$LOG_FILE"
+```
+
+`MSG` grammar: semicolon-delimited key=value pairs. Keys: `base` (always present),
+`integration` (empty when base=integration), `source` (flag|directive|default),
+`ticket` (always present). Values MUST NOT contain `|` per the pipe-delimited format
+constraint. Branch names are already validated to exclude `;` and `|` by
+`_validate_branch_name`, so the semicolon grammar is safe.
+
 `mode-change` is written to Step 0.6's `META|autonomy` guard instead of a silent re-append
 when a resume's `--mode` flag differs from the autonomy already recorded for this run —
 gate decisions upstream were made under the old mode, so the switch must be visible, not
@@ -213,6 +229,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|<CODE>" >> "$LOG_FILE"
 | `REPRO_NOT_CONFIRMED` | Reproduce skill determined bug does not manifest on UAT (Step 1.5) |
 | `REPRO_BLOCKED` | Reproduce skill blocked — insufficient detail in ticket (Step 1.5) |
 | `PR_FEEDBACK_EXHAUSTED` | `PR_FEEDBACK_CYCLE` reached 3 — reconciliation cycle capped, needs human review (Step 5.5) |
+| `BRANCH_DIRECTIVE_INVALID` | Parent epic has a malformed `## Branch Directive` block — gate-stop, no fallback (Step 0.5) |
 
 ## Ordering guarantees
 

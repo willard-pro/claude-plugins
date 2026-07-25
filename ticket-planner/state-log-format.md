@@ -58,6 +58,7 @@ Each phase has one primary step. Agents may write additional `start`/`done` pair
 
 ### EpicGen
 `create` — create Linear epic with idempotency guard
+`branch-directive` — decide and optionally append shared-branch directive to epic description
 
 ### TicketGen
 `validate` — pre-creation dependency and spec validation

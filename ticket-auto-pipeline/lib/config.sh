@@ -31,6 +31,8 @@ SENTINEL_DIR="${SENTINEL_DIR:-./logs}"
 FLEET_PIPELINE_LOG_DIR="${FLEET_PIPELINE_LOG_DIR:-${PIPELINE_LOGS_DIR:-./logs}}"
 
 # ── Git defaults ──────────────────────────────────────────────────────────────
+# Consumed by: branch-resolve.sh, ticket-implement, ticket-verify, ticket-document.
+# Override via env: BASE_BRANCH=main BRANCH_PREFIX=fix/ /ticket-auto CRE-123.
 
 BASE_BRANCH="${BASE_BRANCH:-develop}"
 BRANCH_PREFIX="${BRANCH_PREFIX:-feat/}"

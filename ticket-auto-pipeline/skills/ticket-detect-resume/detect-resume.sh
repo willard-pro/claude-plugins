@@ -289,11 +289,27 @@ TICKET_DIR=""
 COMPLEXITY=""
 ARTIFACT_TYPE=""
 BRANCH=""
+BASE_BRANCH=""
+INTEGRATION_BRANCH=""
+BRANCH_SOURCE=""
 TICKET_TITLE=""
 VERIFY_ATTEMPTS=0
 VERIFY_LAST=""
 ITERATION=0
 PR_FEEDBACK_CYCLE=0
+
+# Branch-context recovery is independent of RESUME_STEP — it's written at
+# Step 0.5 before the first agent spawn and must be recoverable from any
+# resume state, including STEP_1 and GATE_STILL_HELD.
+if [ -s "$LOG_FILE" ]; then
+  _branch_ctx=$(grep '^[^|]*|META|branch-context|info|' "$LOG_FILE" 2>/dev/null |
+    tail -1 | awk -F'|' '{for(i=5;i<=NF;i++) printf "%s%s", (i>5?"|":""), $i; print ""}' || true)
+  if [ -n "$_branch_ctx" ]; then
+    BASE_BRANCH=$(echo "$_branch_ctx" | sed -n 's/.*base=\([^;]*\).*/\1/p')
+    INTEGRATION_BRANCH=$(echo "$_branch_ctx" | sed -n 's/.*integration=\([^;]*\).*/\1/p')
+    BRANCH_SOURCE=$(echo "$_branch_ctx" | sed -n 's/.*source=\([^;]*\).*/\1/p')
+  fi
+fi
 
 if [ "$RESUME_STEP" != "STEP_1" ] && [ "$RESUME_STEP" != "GATE_STILL_HELD" ]; then
   TICKET_DIR=$(resolve_ticket_dir "$TICKET_ID" "." 2>/dev/null || true)
@@ -368,6 +384,9 @@ fi
 #   AUTONOMY          — auto|semi-auto|manual (from pipeline log META|autonomy, defaults to manual)
 #   ARTIFACT_TYPE     — simple-fix|openspec (from EXEC phase completion line)
 #   BRANCH            — git branch name (from IMPLEMENT checkout)
+#   BASE_BRANCH       — base branch resolved at Step 0.5 (from META|branch-context)
+#   INTEGRATION_BRANCH — integration branch if epic-scoped (from META|branch-context; empty if none)
+#   BRANCH_SOURCE     — flag|directive|default (from META|branch-context; empty on legacy logs)
 #   TICKET_TITLE      — human-readable ticket title
 #   VERIFY_ATTEMPTS   — count of terminal verify fail entries in pipeline log (PASS excluded)
 #   VERIFY_LAST       — "fail" if the last terminal VERIFY event is a fail with no
@@ -394,6 +413,9 @@ DETECT_RESUME_RESULT
   AUTONOMY:           ${AUTONOMY:-manual}
   ARTIFACT_TYPE:      ${ARTIFACT_TYPE:-}
   BRANCH:             ${BRANCH:-}
+  BASE_BRANCH:        ${BASE_BRANCH:-}
+  INTEGRATION_BRANCH: ${INTEGRATION_BRANCH:-}
+  BRANCH_SOURCE:      ${BRANCH_SOURCE:-}
   TICKET_TITLE:       ${TICKET_TITLE:-}
   VERIFY_ATTEMPTS:    ${VERIFY_ATTEMPTS}
   VERIFY_LAST:        ${VERIFY_LAST:-}

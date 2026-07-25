@@ -9,13 +9,13 @@
   "plugins": [
     {
       "name": "ticket-planner",
-      "version": "0.2.1",
+      "version": "0.3.1",
       "source": "./ticket-planner",
       "description": "12-phase autonomous planner — turns business ideas into dependency-ordered planned tickets. Appraisal → Discovery → Architecture → Proposal → Review → Consensus → OpenSpec → Epic Gen → Story Gen → Ticket Gen → Execution → Completed. Produces against frozen Planner Context and labels contracts."
     },
     {
       "name": "ticket-auto-pipeline",
-      "version": "0.18.0",
+      "version": "0.21.1",
       "source": "./ticket-auto-pipeline",
       "description": "Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. Bundles 20+ skills, state machine config, pipeline safety gates, and retrospective analysis."
     },
@@ -27,9 +27,9 @@
     },
     {
       "name": "fleet-controller",
-      "version": "0.2.1",
+      "version": "0.3.1",
       "source": "./fleet-controller",
-      "description": "Parent orchestrator above ticket-planner and ticket-auto — dispatches planned tickets from initiative epics, monitors all active pipeline health via 11 detection engines, and aggregates execution feedback back to the planner. Bash-only, zero Claude agents."
+      "description": "Parent orchestrator above ticket-planner and ticket-auto — dispatches planned tickets from initiative epics, monitors all active pipeline health via 12 detection engines, and aggregates execution feedback back to the planner. Bash-only, zero Claude agents."
     }
   ]
 }

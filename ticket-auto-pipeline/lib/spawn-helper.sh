@@ -102,6 +102,8 @@ fi
 #          REPOS_ROOT=<path> ISSUE_PREFIX=<prefix> BE_SERVICES=<services> \
 #          [WIKI_ROOT=<path>] [BE_TEST_CMD=<cmd>] [BE_TEST_RUNNER=<cmd>] [FE_TEST_CMD=<cmd>] \
 #          [LOCAL_URL=<url>] [UAT_URL=<url>] [SLACK_CHANNEL=<channel>]
+#          [BASE_BRANCH=<branch>] [INTEGRATION_BRANCH=<branch>] [TICKET_BRANCH=<branch>]
+#          [WORKTREE_ROOT=<path>]
 #
 # Uses single-quote heredoc — no shell expansion, no injection risk.
 spawn_write_env() {
@@ -116,6 +118,10 @@ spawn_write_env() {
   local LOCAL_URL=""
   local UAT_URL=""
   local SLACK_CHANNEL=""
+  local BASE_BRANCH=""
+  local INTEGRATION_BRANCH=""
+  local TICKET_BRANCH=""
+  local WORKTREE_ROOT=""
 
   # Parse named parameters
   for arg in "$@"; do
@@ -131,6 +137,10 @@ spawn_write_env() {
     LOCAL_URL=*) LOCAL_URL="${arg#LOCAL_URL=}" ;;
     UAT_URL=*) UAT_URL="${arg#UAT_URL=}" ;;
     SLACK_CHANNEL=*) SLACK_CHANNEL="${arg#SLACK_CHANNEL=}" ;;
+    BASE_BRANCH=*) BASE_BRANCH="${arg#BASE_BRANCH=}" ;;
+    INTEGRATION_BRANCH=*) INTEGRATION_BRANCH="${arg#INTEGRATION_BRANCH=}" ;;
+    TICKET_BRANCH=*) TICKET_BRANCH="${arg#TICKET_BRANCH=}" ;;
+    WORKTREE_ROOT=*) WORKTREE_ROOT="${arg#WORKTREE_ROOT=}" ;;
     *)
       echo "spawn_write_env: unknown parameter '$arg'" >&2
       return 1
@@ -163,6 +173,10 @@ export FE_TEST_CMD="FE_TEST_CMD_PLACEHOLDER"
 export LOCAL_URL="LOCAL_URL_PLACEHOLDER"
 export UAT_URL="UAT_URL_PLACEHOLDER"
 export SLACK_CHANNEL="SLACK_CHANNEL_PLACEHOLDER"
+export BASE_BRANCH="BASE_BRANCH_PLACEHOLDER"
+export INTEGRATION_BRANCH="INTEGRATION_BRANCH_PLACEHOLDER"
+export TICKET_BRANCH="TICKET_BRANCH_PLACEHOLDER"
+export WORKTREE_ROOT="WORKTREE_ROOT_PLACEHOLDER"
 ENVEOF
 
   # Sed-replace placeholders with actual values (escaped for sed)
@@ -181,6 +195,10 @@ ENVEOF
     -e "s|LOCAL_URL_PLACEHOLDER|$(_sed_escape "$LOCAL_URL")|" \
     -e "s|UAT_URL_PLACEHOLDER|$(_sed_escape "$UAT_URL")|" \
     -e "s|SLACK_CHANNEL_PLACEHOLDER|$(_sed_escape "$SLACK_CHANNEL")|" \
+    -e "s|BASE_BRANCH_PLACEHOLDER|$(_sed_escape "$BASE_BRANCH")|" \
+    -e "s|INTEGRATION_BRANCH_PLACEHOLDER|$(_sed_escape "$INTEGRATION_BRANCH")|" \
+    -e "s|TICKET_BRANCH_PLACEHOLDER|$(_sed_escape "$TICKET_BRANCH")|" \
+    -e "s|WORKTREE_ROOT_PLACEHOLDER|$(_sed_escape "$WORKTREE_ROOT")|" \
     "$env_file"
 
   # Auto-append LINEAR_API_KEY to env file when available

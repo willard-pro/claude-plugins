@@ -31,6 +31,16 @@ Start a new planning run from a business idea. The planner initializes the state
 
 If the run is interrupted (crash, timeout, manual stop), resume with `resume` — the router re-derives position from the state log and continues from where it left off.
 
+### Plan flags
+
+| Flag | Effect |
+|------|--------|
+| `--shared-branch` | Force a shared-branch directive on the epic regardless of the heuristic |
+| `--no-shared-branch` | Suppress the shared-branch directive regardless of the heuristic |
+
+Both flags are optional. Supplying both together is an error. When neither is supplied,
+the binary heuristic decides (≥ 3 tickets **and** dependency chain depth ≥ 2).
+
 ### Resume (`resume`)
 
 Continue an interrupted or paused run. The router reads the state log, finds the last incomplete phase, and resumes from there. Completed phases are skipped.
@@ -122,6 +132,39 @@ source "${PLUGIN_ROOT}/lib/planner-phase-prompts.sh"
 ### 2. Parse mode
 
 First argument is the mode: `plan`, `resume`, `status`, or `replan`.
+
+### 2a. Parse override flags (plan mode only)
+
+After extracting the idea, scan remaining arguments for override flags:
+
+```bash
+SHARED_BRANCH_FLAG=""
+NO_SHARED_BRANCH_FLAG=""
+
+for arg in "$@"; do
+  case "$arg" in
+    --shared-branch) SHARED_BRANCH_FLAG=true ;;
+    --no-shared-branch) NO_SHARED_BRANCH_FLAG=true ;;
+  esac
+done
+
+# Reject both flags together
+if [ "$SHARED_BRANCH_FLAG" = "true" ] && [ "$NO_SHARED_BRANCH_FLAG" = "true" ]; then
+  echo "ERROR: --shared-branch and --no-shared-branch are mutually exclusive" >&2
+  exit 1
+fi
+
+# Export for phase agents to consume
+if [ "$SHARED_BRANCH_FLAG" = "true" ]; then
+  export PLANNER_SHARED_BRANCH=true
+elif [ "$NO_SHARED_BRANCH_FLAG" = "true" ]; then
+  export PLANNER_NO_SHARED_BRANCH=true
+fi
+```
+
+These env vars are read by the Epic Gen phase agent during the branch-directive step.
+They take precedence over the heuristic: either flag beats the recommender; neither flag
+defers to it.
 
 ### 3. Plan mode
 

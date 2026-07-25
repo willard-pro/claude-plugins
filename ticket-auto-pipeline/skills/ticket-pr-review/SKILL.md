@@ -109,9 +109,14 @@ Resolve the repo path from the CLAUDE.md codebase map based on the affected serv
 
 ## Step 4 — Get changed code
 
+Resolve the worktree path from `notes.md` pre-implementation checkpoint or the env file, then:
+
 ```bash
-git -C {repo-path} fetch origin
-git -C {repo-path} diff origin/{baseRefName}...origin/{headRefName}
+source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true
+source "$HOME/.claude/skills/lib/worktree.sh"
+WORKTREE_PATH=$(worktree_path "$TICKET_ID" "{repo-slug}")
+git -C "$WORKTREE_PATH" fetch origin
+git -C "$WORKTREE_PATH" diff origin/{baseRefName}...origin/{headRefName}
 ```
 
 This produces the full set of changes introduced by the branch relative to its base.
@@ -283,7 +288,7 @@ Post the same message as a PR comment.
 Scan the diff captured in Step 4 for conflict markers before merging:
 
 ```bash
-git -C {repo-path} diff origin/{baseRefName}...origin/{headRefName} | grep -n "^[+].*\(<<<<<<<\|=======\|>>>>>>>\)"
+git -C "$WORKTREE_PATH" diff origin/{baseRefName}...origin/{headRefName} | grep -n "^[+].*\(<<<<<<<\|=======\|>>>>>>>\)"
 ```
 
 If any conflict markers are found, do NOT merge. Report to the user:

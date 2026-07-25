@@ -497,14 +497,21 @@ Append to `{ticket-dir}/notes.md`:
 
 Verification passed on localhost — the implementation is confirmed working. Now open the PR:
 
-1. Read `notes.md` for the branch name and repo from the `committed` entry.
-2. For each affected repo, check if a PR already exists for this branch, then open one against `develop` if needed:
+1. Read `notes.md` for the branch name, repo, and worktree path from the `pre-implementation checkpoint` entry.
+2. For each affected repo, check if a PR already exists for this branch, then open one against `$BASE_BRANCH`:
    ```bash
-   existing_pr=$(cd {repo-path} && gh pr list --head {branch-name} --json url --jq '.[0].url' 2>/dev/null)
+   source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true
+   # Resolve worktree path — prefer notes.md checkpoint, fall back to path computation
+   WORKTREE_PATH=$(grep "Worktree:" {ticket-dir}/notes.md 2>/dev/null | head -1 | sed 's/.*Worktree: //')
+   if [ -z "$WORKTREE_PATH" ]; then
+     source "$HOME/.claude/skills/lib/worktree.sh"
+     WORKTREE_PATH=$(worktree_path "$TICKET_ID" "{repo-slug}")
+   fi
+   existing_pr=$(cd "$WORKTREE_PATH" && gh pr list --head {branch-name} --json url --jq '.[0].url' 2>/dev/null)
    if [ -n "$existing_pr" ]; then
      echo "PR already exists: $existing_pr"
    else
-     cd {repo-path} && gh pr create --base develop --head {branch-name} \
+     cd "$WORKTREE_PATH" && gh pr create --base "${BASE_BRANCH:-develop}" --head {branch-name} \
        --title "{type}({TICKET-ID}): {description}" \
        --body "$(cat <<'EOF'
    ## Summary
@@ -549,7 +556,7 @@ Post via the Linear access strategy (bash `save_comment` when `LINEAR_API_KEY` i
 |---|---|
 | {criterion} | ✅ Pass |
 
-All acceptance criteria confirmed. {For local: PR {URL} opened against develop. | For uat: Ticket moved to Done.}
+All acceptance criteria confirmed. {For local: PR {URL} opened against $BASE_BRANCH. | For uat: Ticket moved to Done.}
 ```
 
 ### If `--env uat`: Move to Done

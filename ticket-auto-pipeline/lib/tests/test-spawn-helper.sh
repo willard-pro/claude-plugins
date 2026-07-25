@@ -84,13 +84,21 @@ test_write_env_exports_all_fields() {
     FE_TEST_CMD="npm test" \
     LOCAL_URL=http://localhost:3000 \
     UAT_URL=http://localhost:8080 \
-    SLACK_CHANNEL="#alerts" >/dev/null 2>&1
+    SLACK_CHANNEL="#alerts" \
+    BASE_BRANCH=develop \
+    INTEGRATION_BRANCH=epic/test-x \
+    TICKET_BRANCH=feat/TEST-42-fix-auth \
+    WORKTREE_ROOT=/home/user/worktrees/TEST-42 >/dev/null 2>&1
   local f=/tmp/ticket-auto-TEST-42-env.sh
   grep -q 'export TICKET_ID="TEST-42"' "$f" &&
     grep -q 'export REPOS_ROOT="/repos"' "$f" &&
     grep -q 'export BE_SERVICES="svc1 svc2"' "$f" &&
     grep -q 'export WIKI_ROOT="/wiki"' "$f" &&
-    grep -q 'export SLACK_CHANNEL="#alerts"' "$f"
+    grep -q 'export SLACK_CHANNEL="#alerts"' "$f" &&
+    grep -q 'export BASE_BRANCH="develop"' "$f" &&
+    grep -q 'export INTEGRATION_BRANCH="epic/test-x"' "$f" &&
+    grep -q 'export TICKET_BRANCH="feat/TEST-42-fix-auth"' "$f" &&
+    grep -q 'export WORKTREE_ROOT="/home/user/worktrees/TEST-42"' "$f"
 }
 
 test_write_env_appends_linear_key_when_set() {
@@ -100,6 +108,29 @@ test_write_env_appends_linear_key_when_set() {
     REPOS_ROOT=/repos ISSUE_PREFIX=TEST BE_SERVICES=svc1 >/dev/null 2>&1
   tmpfile=/tmp/ticket-auto-TEST-LL-env.sh
   grep -q 'export LINEAR_API_KEY="test-spawn-key"' "$tmpfile"
+}
+
+test_write_env_empty_integration_branch() {
+  source "$LIB_DIR/spawn-helper.sh"
+  spawn_write_env TICKET_ID=TEST-42 \
+    REPOS_ROOT=/repos ISSUE_PREFIX=TEST BE_SERVICES=svc1 \
+    BASE_BRANCH=develop \
+    INTEGRATION_BRANCH= \
+    TICKET_BRANCH=feat/TEST-42-fix-bug >/dev/null 2>&1
+  local f=/tmp/ticket-auto-TEST-42-env.sh
+  # Empty INTEGRATION_BRANCH should produce empty placeholder (not error)
+  grep -q 'export INTEGRATION_BRANCH=""' "$f"
+}
+
+test_write_env_empty_worktree_root() {
+  source "$LIB_DIR/spawn-helper.sh"
+  spawn_write_env TICKET_ID=TEST-42 \
+    REPOS_ROOT=/repos ISSUE_PREFIX=TEST BE_SERVICES=svc1 \
+    BASE_BRANCH=develop \
+    WORKTREE_ROOT= >/dev/null 2>&1
+  local f=/tmp/ticket-auto-TEST-42-env.sh
+  # Empty WORKTREE_ROOT should produce empty placeholder (not error)
+  grep -q 'export WORKTREE_ROOT=""' "$f"
 }
 
 test_write_env_does_not_append_linear_key_when_unset() {
@@ -1046,6 +1077,8 @@ for fn in \
   test_write_env_exports_ticket_id \
   test_write_env_exports_repos_root \
   test_write_env_exports_all_fields \
+  test_write_env_empty_integration_branch \
+  test_write_env_empty_worktree_root \
   test_write_env_appends_linear_key_when_set \
   test_write_env_does_not_append_linear_key_when_unset \
   test_write_env_rejects_empty_ticket_id \

@@ -34,6 +34,15 @@ if ! declare -f get_issue >/dev/null 2>&1; then
   done
 fi
 
+# Source epic-branch.sh and its transitive deps for epic branch lifecycle ops.
+# planned-ticket-check.sh → branch-directive-check.sh → epic-branch.sh
+_TAP_LIB="$_DISPATCH_DIR/../../ticket-auto-pipeline/lib"
+if ! declare -f ensure_epic_branch >/dev/null 2>&1; then
+  [ -f "$_TAP_LIB/planned-ticket-check.sh" ] && source "$_TAP_LIB/planned-ticket-check.sh"
+  [ -f "$_TAP_LIB/branch-directive-check.sh" ] && source "$_TAP_LIB/branch-directive-check.sh"
+  [ -f "$_TAP_LIB/epic-branch.sh" ] && source "$_TAP_LIB/epic-branch.sh"
+fi
+
 # ── Helpers ──────────────────────────────────────────────────────────────────────
 
 # Check if a ticket is already in the spawn queue.
@@ -89,7 +98,7 @@ fleet_dispatch_initiative() {
   echo "fleet_dispatch: validating initiative ${initiative_id}..."
   local epic_query epic_resp epic_json
   epic_query=$(jq -n --arg id "$initiative_id" '{
-    query: "query($id: String!) { issue(id: $id) { id identifier title state { name } labels { nodes { name } } children { nodes { id identifier title state { name } labels { nodes { name } } priority } } } }",
+    query: "query($id: String!) { issue(id: $id) { id identifier title description state { name } labels { nodes { name } } children { nodes { id identifier title state { name } labels { nodes { name } } priority } } } }",
     variables: {id: $id}
   }')
   epic_resp=$(_fleet_linear_query "$epic_query") || {
@@ -110,6 +119,37 @@ fleet_dispatch_initiative() {
   fi
 
   echo "fleet_dispatch: initiative ${initiative_id} validated (state:execution)"
+
+  # Step 1.5: Epic branch precondition — ensure the declared branch exists
+  # and sync it with its base before any child ticket needs it.
+  # Only meaningful when the epic carries a Branch Directive; no-op otherwise.
+  if declare -f ensure_epic_branch >/dev/null 2>&1; then
+    # Resolve repo path for epic branch operations
+    local epic_repo="${EPIC_REPO_PATH:-${REPOS_ROOT:-.}}"
+    # If REPOS_ROOT has multiple repos, use the first one
+    if [ ! -d "$epic_repo/.git" ] && [ -d "$epic_repo" ]; then
+      for _erd in "$epic_repo"/*/; do
+        if [ -d "$_erd/.git" ] || git -C "$_erd" rev-parse --git-dir >/dev/null 2>&1; then
+          epic_repo="$_erd"
+          break
+        fi
+      done
+    fi
+
+    if ! ensure_epic_branch "$initiative_id" "$epic_repo"; then
+      echo "EPIC_BRANCH_UNAVAILABLE: initiative ${initiative_id} — cannot ensure epic branch, skipping dispatch" >&2
+      return 0
+    fi
+
+    # Sync: integrate base changes into the epic branch per the directive's policy.
+    # Sync failure warns but does not block dispatch — children still enqueue.
+    local epic_sync_enabled="${FLEET_EPIC_BRANCH_SYNC:-true}"
+    if [ "$epic_sync_enabled" = "true" ]; then
+      epic_branch_sync "$initiative_id" "$epic_repo" || {
+        echo "fleet_dispatch: sync warning for ${initiative_id} — continuing with dispatch" >&2
+      }
+    fi
+  fi
 
   # Step 2: Find child tickets with planned label + Backlog state
   echo "fleet_dispatch: enumerating child tickets..."

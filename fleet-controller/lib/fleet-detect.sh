@@ -652,6 +652,113 @@ _fleet_scan_initiative_dispatch() {
   fi
 }
 
+# ── D-12: Epic branch readiness ────────────────────────────────────────────────────
+# Per-ticket stub — fleet-wide scan in fleet_detect_all runs it once separately.
+detect_epic_branch_ready() {
+  echo "0"
+}
+
+# Fleet-wide epic branch readiness scan. Runs once per fleet_detect_all call.
+# Checks state:execution epics with Branch Directives: are all children Done?
+# Usage: _fleet_scan_epic_branch_ready <workspace>
+_fleet_scan_epic_branch_ready() {
+  local workspace="${1:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+
+  # Ensure linear-api.sh and epic-branch deps are available
+  if ! declare -f get_issue >/dev/null 2>&1; then
+    local _la_paths=("$HOME/.claude/skills/lib/linear-api.sh" "${_CONFIG_DIR}/../linear-api.sh")
+    for _lp in "${_la_paths[@]}"; do
+      [ -f "$_lp" ] && source "$_lp" && break
+    done
+  fi
+
+  if ! declare -f get_issue >/dev/null 2>&1; then
+    echo '{"severity":0,"findings":""}'
+    return
+  fi
+
+  # Source epic branch deps if available
+  local _tap_lib="${_CONFIG_DIR}/../../ticket-auto-pipeline/lib"
+  if ! declare -f _parse_directive >/dev/null 2>&1; then
+    [ -f "$_tap_lib/planned-ticket-check.sh" ] && source "$_tap_lib/planned-ticket-check.sh"
+    [ -f "$_tap_lib/branch-directive-check.sh" ] && source "$_tap_lib/branch-directive-check.sh"
+  fi
+
+  # Query epics with state:execution label — include description and children
+  local query='{"query":"{issues(filter:{state:{name:{eq:\\\"Backlog\\\"}},labels:{name:{eq:\\\"state:execution\\\"}}}){nodes{id identifier title description children{nodes{id identifier state{name} labels{nodes{name}}}}}}}"}'
+
+  local epics_json attempt=1 max_attempts=3 delay=1
+  while [ "$attempt" -le "$max_attempts" ]; do
+    epics_json=$(echo "$query" | curl -s -X POST "${LINEAR_API_URL:-https://api.linear.app/graphql}" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: ${LINEAR_API_KEY}" \
+      -d @- 2>/dev/null) && break
+    attempt=$((attempt + 1))
+    [ "$attempt" -le "$max_attempts" ] && sleep "$delay" && delay=$((delay * 2))
+  done
+
+  if [ -z "$epics_json" ]; then
+    echo '{"severity":0,"findings":""}'
+    return
+  fi
+
+  local ready_count=0
+  local ready_ids=""
+
+  local epic_count
+  epic_count=$(echo "$epics_json" | jq -r '.data.issues.nodes | length // 0' 2>/dev/null)
+  [ "${epic_count:-0}" -eq 0 ] && echo '{"severity":0,"findings":""}' && return
+
+  for i in $(seq 0 $((epic_count - 1))); do
+    local epic_id epic_description
+    epic_id=$(echo "$epics_json" | jq -r ".data.issues.nodes[$i].identifier // empty" 2>/dev/null)
+    epic_description=$(echo "$epics_json" | jq -r ".data.issues.nodes[$i].description // \"\"" 2>/dev/null)
+    [ -z "$epic_id" ] && continue
+
+    # Check for Branch Directive — skip epics without one
+    if ! echo "$epic_description" | grep -q "Branch Directive" 2>/dev/null; then
+      continue
+    fi
+
+    # Validate directive
+    if ! declare -f check_branch_directive_description >/dev/null 2>&1; then
+      # Without the validator, check the description for a directive block
+      if ! echo "$epic_description" | command grep -q '^\*\*Branch:\*\*' 2>/dev/null; then
+        continue
+      fi
+    fi
+
+    # Check child tickets — all must be Done
+    local child_count
+    child_count=$(echo "$epics_json" | jq -r ".data.issues.nodes[$i].children.nodes | length // 0" 2>/dev/null)
+    [ "${child_count:-0}" -eq 0 ] && continue
+
+    local all_done=true
+    for j in $(seq 0 $((child_count - 1))); do
+      local child_state
+      child_state=$(echo "$epics_json" | jq -r ".data.issues.nodes[$i].children.nodes[$j].state.name // empty" 2>/dev/null)
+      if [ "$child_state" != "Done" ]; then
+        all_done=false
+        break
+      fi
+    done
+
+    if [ "$all_done" = "true" ]; then
+      ready_count=$((ready_count + 1))
+      ready_ids="${ready_ids} ${epic_id}"
+    fi
+  done
+
+  local findings
+  findings=$(echo "$ready_ids" | sed 's/^ //')
+
+  if [ "$ready_count" -gt 0 ]; then
+    echo "{\"severity\":1,\"findings\":\"${ready_count} epic(s) ready for integration PR: ${findings}\"}"
+  else
+    echo '{"severity":0,"findings":""}'
+  fi
+}
+
 # Fleet-wide blocked-by scan. Runs once per fleet_detect_all call.
 # Checks all active tickets for resolved blocked-by dependencies.
 # Usage: _fleet_scan_blocked_by <workspace>
@@ -787,8 +894,8 @@ fleet_detect_all() {
 
     total=$((total + 1))
 
-    # Run all 9 per-ticket detectors (1-8 + planner_feedback), collect max severity
-    local s1 s2 s3 s4 s5 s6 s7 s8 s9 max_sev anomaly_types
+    # Run all 10 per-ticket detectors (1-8 + planner_feedback + epic-branch), collect max severity
+    local s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 max_sev anomaly_types
     s1=$(detect_phase_failures "$tid" "$workspace")
     s2=$(detect_stalls "$tid" "$workspace")
     s3=$(detect_zombies "$tid" "$workspace")
@@ -798,11 +905,12 @@ fleet_detect_all() {
     s7=$(detect_auto_mode_blocks "$tid" "$workspace")
     s8=$(detect_tool_errors "$tid" "$workspace")
     s9=$(detect_planner_feedback "$tid" "$workspace")
+    s10=$(detect_epic_branch_ready "$tid" "$workspace")
 
     max_sev=0
     anomaly_types=""
 
-    for s in "$s1" "$s2" "$s3" "$s4" "$s5" "$s6" "$s7" "$s8" "$s9"; do
+    for s in "$s1" "$s2" "$s3" "$s4" "$s5" "$s6" "$s7" "$s8" "$s9" "$s10"; do
       [ "$s" -gt "$max_sev" ] && max_sev="$s"
     done
 
@@ -816,6 +924,7 @@ fleet_detect_all() {
     [ "$s7" -ge 1 ] && anomaly_types="${anomaly_types} auto-block(S${s7})"
     [ "$s8" -ge 1 ] && anomaly_types="${anomaly_types} tool-errors(S${s8})"
     [ "$s9" -ge 1 ] && anomaly_types="${anomaly_types} planner-feedback(S${s9})"
+    [ "$s10" -ge 1 ] && anomaly_types="${anomaly_types} epic-branch-ready(S${s10})"
     anomaly_types=$(echo "$anomaly_types" | sed 's/^ //')
 
     # Cap severity at 2 (KILL) when auto-restart is disabled
@@ -895,6 +1004,22 @@ fleet_detect_all() {
   local id_sev
   id_sev=$(echo "$id_json" | jq -r '.severity // 0')
   [ "$id_sev" -ge 1 ] && warn=$((warn + 1))
+
+  # D-12: Epic branch readiness scan
+  local ebr_json
+  ebr_json=$(_fleet_scan_epic_branch_ready "$workspace" 2>/dev/null || echo '{"severity":0,"findings":""}')
+  [ "$fw_first" = "false" ] && fleet_wide="$fleet_wide,"
+  fw_first=false
+  fleet_wide="${fleet_wide}$(jq -nc \
+    --arg name "detect_epic_branch_ready" \
+    --argjson severity "$(echo "$ebr_json" | jq -r '.severity // 0')" \
+    --arg findings "$(echo "$ebr_json" | jq -r '.findings // ""')" \
+    --arg type "fleet-wide" \
+    '{name: $name, severity: $severity, findings: $findings, type: $type}')"
+
+  local ebr_sev
+  ebr_sev=$(echo "$ebr_json" | jq -r '.severity // 0')
+  [ "$ebr_sev" -ge 1 ] && warn=$((warn + 1))
 
   fleet_wide="$fleet_wide]"
 

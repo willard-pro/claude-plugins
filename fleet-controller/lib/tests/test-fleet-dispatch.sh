@@ -74,6 +74,14 @@ _mock_get_issue_blocker_done() {
   }
 }
 
+# Mock: get_issue returns an epic with no Branch Directive — ensures
+# ensure_epic_branch sees "no directive" and returns 0 (no-op).
+_mock_epic_no_directive() {
+  get_issue() {
+    echo '{"identifier":"INIT-42","description":"No branch directive here.","labels":{"nodes":[]}}'
+  }
+}
+
 # ── Tests ───────────────────────────────────────────────────────────────────────
 
 test_dispatch_no_linear_api() {
@@ -139,7 +147,10 @@ test_dispatch_no_child_tickets() {
     FLEET_DRY_RUN=true FLEET_INSTANCE_ID=test-nochild
     source '$LIB_DIR/fleet-dispatch.sh'
     $(declare -f _mock_epic_query_state_execution)
+    $(declare -f _mock_epic_no_directive)
+
     _mock_epic_query_state_execution
+    _mock_epic_no_directive
     fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
   " 2>/dev/null || true)
   echo "$output" | grep -qi "no child tickets\|no dispatchable" && return 0 || {

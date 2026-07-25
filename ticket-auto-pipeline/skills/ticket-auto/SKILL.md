@@ -1,6 +1,6 @@
 ---
 name: ticket-auto
-description: Fully autonomous ticket pipeline — appraise, exec, implement, PR review, merge. Thin stateless router that dispatches to per-phase agents. No inline LLM reasoning between phases. Requires zero user input beyond the ticket ID. Stops only for complex tickets at the approve gate. Use when the user says "/ticket-auto <ID>", "auto <ID>", "process ticket <ID>", or "run ticket <ID> end to end".
+description: Fully autonomous ticket pipeline — appraise, exec, implement, PR review, merge. Thin stateless router that dispatches to per-phase agents. No inline LLM reasoning between phases. Requires zero user input beyond the ticket ID. Stops only for complex tickets at the approve gate. Supports `--branch <name>` for explicit branch targeting (precedence: flag → parent epic directive → default). Use when the user says "/ticket-auto <ID>", "auto <ID>", "process ticket <ID>", or "run ticket <ID> end to end".
 ---
 
 # Ticket Auto — Thin Dispatch Router
@@ -135,8 +135,16 @@ else
   FROM_PLANNED="false"
 fi
 
+# Resolve --branch <name> for explicit branch targeting.
+# Precedence: --branch flag → parent epic directive → config default.
+# Validated by branch-resolve.sh's _validate_branch_name (same charset as directive).
+BRANCH_FLAG=""
+if echo "{TICKET_ARG}" | grep -q '\-\-branch'; then
+  BRANCH_FLAG=$(echo "{TICKET_ARG}" | sed -n 's/.*--branch \([^ ]*\).*/\1/p')
+fi
+
 # Strip flags from arg to get the bare ticket ID
-TICKET_ID=$(echo "{TICKET_ARG}" | sed 's/--semi-auto//;s/--auto//;s/--manual//;s/--from-planned//' | tr -s ' ' | xargs)
+TICKET_ID=$(echo "{TICKET_ARG}" | sed 's/--semi-auto//;s/--auto//;s/--manual//;s/--from-planned//;s/--branch [^ ]*//' | tr -s ' ' | xargs)
 ```
 
 Set `{AUTONOMY}` and `{TICKET_ID}` — used throughout the pipeline.
@@ -219,7 +227,54 @@ hb-wrap.sh source "linear-auth" "ok" "authenticated as $(echo "$me" | jq -r '.na
 
 ---
 
-## Step 0.5 — Detect project context
+## Step 0.5 — Branch resolution + project context
+
+### 0.5a — Resolve branch context
+
+Resolve branch decisions deterministically via `branch-resolve.sh`. This MUST run before
+Step 0.6 (pipeline log init) so the `META|branch-context` entry lands before the first
+agent spawn — crash at any later point recovers the decision.
+
+The precedence chain is: `--branch` CLI flag → parent epic directive → config default.
+
+```bash
+source ~/.claude/skills/lib/branch-resolve.sh
+
+# Build resolve command — include --branch only if set in Step 0.1
+BRANCH_ARGS="{TICKET_ID}"
+[ -n "{BRANCH_FLAG}" ] && BRANCH_ARGS="$BRANCH_ARGS --branch {BRANCH_FLAG}"
+
+BRANCH_OUTPUT=$(resolve_branch_context $BRANCH_ARGS 2>&1) || {
+  _rc=$?
+  if echo "$BRANCH_OUTPUT" | grep -q "BRANCH_DIRECTIVE_INVALID"; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|BRANCH_DIRECTIVE_INVALID" >> {LOG_FILE}
+    hb_gate "branch-context" "fail" "BRANCH_DIRECTIVE_INVALID" "{\"ticket\":\"{TICKET_ID}\"}"
+    exit 1
+  fi
+  # Non-zero for other reasons (API error, etc.) — also stop
+  echo "$BRANCH_OUTPUT" >&2
+  exit 2
+}
+
+# Parse BRANCH_CONTEXT_RESULT block
+TICKET_BRANCH=$(echo "$BRANCH_OUTPUT" | sed -n 's/^[[:space:]]*TICKET_BRANCH:[[:space:]]*//p')
+BASE_BRANCH=$(echo "$BRANCH_OUTPUT" | sed -n 's/^[[:space:]]*BASE_BRANCH:[[:space:]]*//p')
+INTEGRATION_BRANCH=$(echo "$BRANCH_OUTPUT" | sed -n 's/^[[:space:]]*INTEGRATION_BRANCH:[[:space:]]*//p')
+BRANCH_SOURCE=$(echo "$BRANCH_OUTPUT" | sed -n 's/^[[:space:]]*BRANCH_SOURCE:[[:space:]]*//p')
+```
+
+### 0.5b — Write branch-context to pipeline log
+
+Write immediately after resolution, before any agent spawn. The semicolon grammar
+(`base=<>;integration=<>;source=<>;ticket=<>`) is parsed by `detect-resume.sh` on crash-resume.
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|branch-context|info|base=${BASE_BRANCH};integration=${INTEGRATION_BRANCH};source=${BRANCH_SOURCE};ticket=${TICKET_BRANCH}" >> {LOG_FILE}
+hb_gate "branch-context" "ok" "branch decision recorded" \
+  "{\"base\":\"${BASE_BRANCH}\",\"integration\":\"${INTEGRATION_BRANCH}\",\"source\":\"${BRANCH_SOURCE}\",\"ticket\":\"${TICKET_BRANCH}\"}"
+```
+
+### 0.5c — Detect project context
 
 Read `CLAUDE.md` and extract ALL available project-context fields: `{REPOS_ROOT}`, `{ISSUE_PREFIX}`, `{BE_SERVICES}`, `{WIKI_ROOT}`, `{BE_TEST_CMD}`, `{BE_TEST_RUNNER}`, `{FE_TEST_CMD}`, `{LOCAL_URL}`, `{UAT_URL}`, `{SLACK_CHANNEL}`.
 
@@ -239,7 +294,10 @@ spawn_write_env \
   LOCAL_URL="{LOCAL_URL}" \
   UAT_URL="{UAT_URL}" \
   SLACK_CHANNEL="{SLACK_CHANNEL}" \
-  FROM_PLANNED="{FROM_PLANNED}"
+  FROM_PLANNED="{FROM_PLANNED}" \
+  BASE_BRANCH="${BASE_BRANCH}" \
+  INTEGRATION_BRANCH="${INTEGRATION_BRANCH}" \
+  TICKET_BRANCH="${TICKET_BRANCH}"
 ```
 
 This MUST run before Step 0.6 (pipeline log init) and before Step 1 (first agent spawn). The env file is needed by every `spawn_agent_pre` call — sub-agents source it via `source /tmp/ticket-auto-{TICKET_ID}-env.sh`.
@@ -374,7 +432,7 @@ DETECT_OUTPUT=$(bash "$DETECT_SH" "{TICKET_ID}")
 ```
 
 Parse the `DETECT_RESUME_RESULT` block and set all routing variables:
-`{RESUME_STEP}`, `{APPRAISE_FROM}`, `{REPRODUCE_FROM}`, `{EXEC_FROM}`, `{IMPLEMENT_FROM}`, `{MAINTENANCE_FROM}`, `{DOCUMENT_FROM}`, `{VERIFY_FROM}`, `{PR_REVIEW_FROM}`, `{PR_ITERATE_FROM}`, `{TICKET_DIR}`, `{COMPLEXITY}`, `{AUTONOMY}`, `{ARTIFACT_TYPE}`, `{BRANCH}`, `{TICKET_TITLE}`, `{VERIFY_ATTEMPTS}`, `{VERIFY_LAST}`, `{ITERATION}`, `{RECONCILE_CYCLE}`, `{PR_FEEDBACK_CYCLE}`.
+`{RESUME_STEP}`, `{APPRAISE_FROM}`, `{REPRODUCE_FROM}`, `{EXEC_FROM}`, `{IMPLEMENT_FROM}`, `{MAINTENANCE_FROM}`, `{DOCUMENT_FROM}`, `{VERIFY_FROM}`, `{PR_REVIEW_FROM}`, `{PR_ITERATE_FROM}`, `{TICKET_DIR}`, `{COMPLEXITY}`, `{AUTONOMY}`, `{ARTIFACT_TYPE}`, `{BRANCH}`, `{BASE_BRANCH}`, `{INTEGRATION_BRANCH}`, `{BRANCH_SOURCE}`, `{TICKET_TITLE}`, `{VERIFY_ATTEMPTS}`, `{VERIFY_LAST}`, `{ITERATION}`, `{RECONCILE_CYCLE}`, `{PR_FEEDBACK_CYCLE}`.
 
 **If `RESUME_STEP = SCHEMA_MISMATCH`:**
 Report the schema mismatch with log vs expected version numbers. Stop here.
@@ -386,6 +444,34 @@ Report that the ticket is still held and requires the `approved` label. Stop her
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|recovery|info|Resuming from {RESUME_STEP}" >> {LOG_FILE}
 ```
+
+**Before the recovery log entry, rehydrate the branch env vars from `detect-resume.sh` output** — on a crash-recovery the router does not re-run `resolve_branch_context`. The branch decisions were written to `META|branch-context` at Step 0.5b and are now in the `DETECT_RESUME_RESULT` block as `BASE_BRANCH`, `INTEGRATION_BRANCH`, `BRANCH_SOURCE`. Write them back to the env file so sub-agents see branch vars even on resume:
+
+```bash
+if [ -n "{BASE_BRANCH}" ] || [ -n "{TICKET_BRANCH}" ]; then
+  source ~/.claude/skills/lib/spawn-helper.sh
+  spawn_write_env \
+    TICKET_ID="{TICKET_ID}" \
+    REPOS_ROOT="{REPOS_ROOT}" \
+    ISSUE_PREFIX="{ISSUE_PREFIX}" \
+    BE_SERVICES="{BE_SERVICES}" \
+    WIKI_ROOT="{WIKI_ROOT}" \
+    BE_TEST_CMD="{BE_TEST_CMD}" \
+    BE_TEST_RUNNER="{BE_TEST_RUNNER}" \
+    FE_TEST_CMD="{FE_TEST_CMD}" \
+    LOCAL_URL="{LOCAL_URL}" \
+    UAT_URL="{UAT_URL}" \
+    SLACK_CHANNEL="{SLACK_CHANNEL}" \
+    FROM_PLANNED="{FROM_PLANNED}" \
+    BASE_BRANCH="{BASE_BRANCH}" \
+    INTEGRATION_BRANCH="{INTEGRATION_BRANCH}" \
+    TICKET_BRANCH="{TICKET_BRANCH}"
+fi
+```
+
+The guard `[ -n "{BASE_BRANCH}" ] || [ -n "{TICKET_BRANCH}" ]` skips this on
+legacy logs that predate branch-context. `spawn_write_env` is idempotent — the
+env file is regenerated with the same values.
 
 ---
 
@@ -821,6 +907,17 @@ written by `outcome-label-check.sh` — the confirmed Linear label — not from 
 terminal line, which never carries the Smooth/Rough/Hard value:
 
 ```bash
+# Auto-merge guard: integration PRs must never be auto-merged.
+# This is the second guard (the first is in epic_branch_open_pr itself).
+# If this ticket's PR targets an epic integration branch, skip auto-merge.
+if [ -n "{INTEGRATION_BRANCH}" ]; then
+  _pr_head=$(gh pr view "$_pr_num" --json headRefName --jq '.headRefName' 2>/dev/null || true)
+  if [ "$_pr_head" = "{INTEGRATION_BRANCH}" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|pr-auto-merge|skip|INTEGRATION_PR_GUARD: $_pr_num is integration PR, not auto-merging" >> "{LOG_FILE}"
+    _pr_num=""
+  fi
+fi
+
 if { [ "{AUTONOMY}" = "auto" ] || [ "{AUTONOMY}" = "semi-auto" ]; } && [ "{COMPLEXITY}" = "simple" ]; then
   OUTCOME=$(grep '^[^|]*|META|outcome-label|info|' "{LOG_FILE}" | tail -1 | cut -d'|' -f5-)
   if [ "$OUTCOME" = "Smooth" ]; then
@@ -919,9 +1016,18 @@ if grep -q '^[^|]*|VERIFY|verify|fail|' "{LOG_FILE}" 2>/dev/null; then
 fi
 ```
 
-If `NEEDS_RETRO=true`, spawn `ticket-retro` agent. Then write outcome:
+If `NEEDS_RETRO=true`, spawn `ticket-retro` agent. Then release the worktree (non-fatal) and write outcome:
 
 ```bash
+# Release worktree — non-fatal: a failed removal warns but never halts the pipeline.
+# Ordered after STEP_5 (ticket-document + wiki-maintenance) so document agents still
+# have access to the worktree for git diff/log operations.
+if [ -n "${WORKTREE_ROOT:-}" ] && [ -f "$HOME/.claude/skills/lib/worktree.sh" ]; then
+  source "$HOME/.claude/skills/lib/worktree.sh"
+  release_worktree "{TICKET_ID}" || \
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|worktree-release|warn|release_worktree failed for {TICKET_ID}" >> "{LOG_FILE}"
+fi
+
 # Idempotency guard: skip if outcome already written
 if ! grep -q '|META|outcome|info|' "{LOG_FILE}"; then
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|outcome|info|completed: {outcome summary}" >> "{LOG_FILE}"
@@ -968,6 +1074,6 @@ cat > {ticket-dir}/auto-session.md << 'TRACE'
 - [x] Step 4.5: Verify — {✅ PASS (N attempts)|❌ FAIL after N|skipped: no UI}
 - [x] Step 4.6: PR review — {✅|⚠️|❌}, {N} iterations
 - [x] Step 5: Document + Wiki — ai-context.md ({trivial|non-trivial}), {N} errata
-- [x] Step 6: Report — done
+- [x] Step 6: Report — retro check + worktree release + outcome
 TRACE
 ```
