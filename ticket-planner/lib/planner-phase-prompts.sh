@@ -691,13 +691,13 @@ fi
 
 # Build full context JSON with computed values
 context_json=$(jq -nc \
-  --argjson signals "$signals_json" \
-  --arg confidence "$confidence" \
-  --arg pre_approved "$pre_approved" \
-  --arg initiative "${initiative_id}" \
-  --arg epic "$EPIC_ID" \
-  --arg generated "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
-  '{
+    --argjson signals "$signals_json" \
+    --arg confidence "$confidence" \
+    --arg pre_approved "$pre_approved" \
+    --arg initiative "${initiative_id}" \
+    --arg epic "$EPIC_ID" \
+    --arg generated "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+    '{
     "Schema-Version": 1,
     "Initiative": $initiative,
     "Epic": $epic,

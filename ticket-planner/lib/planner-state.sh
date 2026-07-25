@@ -506,7 +506,7 @@ _planner_check_duplicate() {
       local last_status
       last_status=$(grep "^[^|]*|${phase}|${step}|" "$log_file" 2>/dev/null | tail -1 | cut -d'|' -f4)
       if [ "$last_status" = "fail" ]; then
-        return 0  # fail→done retry is allowed
+        return 0 # fail→done retry is allowed
       fi
       echo "planner-state: WARNING — duplicate done entry for ${phase}/${step} suppressed" >&2
       return 1
