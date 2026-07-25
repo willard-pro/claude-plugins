@@ -25,7 +25,7 @@ Business idea → [ticket-planner] → initiative epic + planned tickets (Planne
                                  [ticket-planner re-plan] → (on Regenerate flag) → read feedback → regenerate tickets
 ```
 
-**Plan → Build → Operate ring**: ticket-planner (Plan) → ticket-auto (Build) → Operate (incident→ticket, post-merge safety) → back to Plan. See `ticket-planner-implementation.md` for the system map.
+**Plan → Build → Operate ring**: ticket-planner (Plan) → ticket-auto (Build) → Operate (incident→ticket, post-merge safety) → back to Plan.
 
 **Determinism boundary**: bash orchestrates (state parsing, phase routing, validation, dispatch, feedback aggregation). Claude agents reason (appraisal, discovery, architecture, proposal, review, spec writing, ticket generation).
 
