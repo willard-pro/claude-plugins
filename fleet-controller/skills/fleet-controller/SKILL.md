@@ -1,6 +1,6 @@
 ---
 name: fleet-controller
-description: Monitors all active ticket-auto pipelines using 11 detection engines (phase failures, stalls, zombies, loops, abandonment, flow failures, auto-mode blocks, tool errors, planner feedback, blocked-by resolution, initiative dispatch) and escalates autonomously through OBSERVE → WARN → KILL → KILL+RESTART severity levels. All interventions execute through fleet lib functions — no silent mutations outside the declared tool set.
+description: Monitors all active ticket-auto pipelines using 12 detection engines (phase failures, stalls, zombies, loops, abandonment, flow failures, auto-mode blocks, tool errors, planner feedback, blocked-by resolution, initiative dispatch, epic-branch readiness) and escalates autonomously through OBSERVE → WARN → KILL → KILL+RESTART severity levels. All interventions execute through fleet lib functions — no silent mutations outside the declared tool set.
 allowed-tools: Bash, Read, Agent
 ---
 
@@ -84,7 +84,7 @@ Aggregate `META|planner-feedback` entries from pipeline logs across all active w
 
 ## Detection Rules
 
-The fleet controller runs 11 detection engines against every active pipeline:
+The fleet controller runs 12 detection engines against every active pipeline:
 
 | Detector | What it catches | Severity |
 |----------|----------------|----------|
@@ -99,6 +99,7 @@ The fleet controller runs 11 detection engines against every active pipeline:
 | Planner feedback | Uncollected `META\|planner-feedback` entries | WARN (uncollected feedback found) |
 | Blocked-by resolution | Tickets where blocking ticket is Done | WARN (unblocked ticket found) |
 | Initiative dispatch | `state:execution` epics with undispatched planned tickets | WARN (undispatched tickets found) |
+| Epic-branch readiness | Directive-carrying `state:execution` epics with all children Done | WARN (integration-ready epic found) |
 
 ## Escalation Path
 

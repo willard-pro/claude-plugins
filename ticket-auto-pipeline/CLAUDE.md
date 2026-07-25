@@ -86,7 +86,7 @@ REPOS_ROOT/.ticket-auto/
 | `env-check.sh` | Full environment check (env vars, MCP, CLI tools, CLAUDE.md). Dual-mode: `full` (pipe-delimited) and `validate` (colored output). |
 | `capture-transcript.sh` | Agent transcript capture for retro analysis. |
 | `reconcile-comments.sh` | PR comment reconciliation utility. |
-| `fleet-detect.sh` | **EXTRACTED to `fleet-controller/lib/`** — 11 detection engines now live in fleet-controller plugin. |
+| `fleet-detect.sh` | **EXTRACTED to `fleet-controller/lib/`** — 12 detection engines now live in fleet-controller plugin. |
 | `fleet-intervene.sh` | **EXTRACTED to `fleet-controller/lib/`** — intervention executor now lives in fleet-controller plugin. |
 | `fleet-dashboard.sh` | **EXTRACTED to `fleet-controller/lib/`** — dashboard renderer now lives in fleet-controller plugin. |
 | `gate-check.sh` | Deterministic bash gate logic. `--mode entry` checks artifact existence, complexity-artifact coherence, autonomy routing. `--mode reapprove` checks live Linear state for re-approval integrity. Replaces inline LLM gate reasoning. |

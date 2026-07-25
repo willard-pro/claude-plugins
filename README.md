@@ -8,9 +8,12 @@ A marketplace of installable Claude Code plugins. Add this marketplace to Claude
 
 | Plugin | Version | Description |
 |--------|---------|-------------|
-| `ticket-auto-pipeline` | 0.21.0 | Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. 20+ slash commands, state-machine-driven flow control, pipeline safety gates, and retrospective analysis. Supports shared epic branches via `## Branch Directive` block. |
+| `ticket-planner` | 0.3.1 | 12-phase autonomous planner — turns business ideas into dependency-ordered planned tickets. Produces Planner Context blocks, Branch Directives for shared epic branches, and initiative epics with planned tickets ready for fleet-controller dispatch. |
+| `ticket-auto-pipeline` | 0.21.1 | Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. 20+ slash commands, state-machine-driven flow control, pipeline safety gates, and retrospective analysis. Supports shared epic branches via `## Branch Directive` block, per-ticket git worktree isolation, and epic branch lifecycle integration. |
+| `fleet-controller` | 0.3.1 | Parent orchestrator above ticket-planner and ticket-auto. Dispatches planned tickets from initiative epics, monitors pipeline health via 12 detection engines, manages epic branch lifecycle (create, sync, GC), and aggregates execution feedback back to the planner. Bash-only, zero Claude agents. |
+| `knowledge-curator` | 0.1.0 | Durable cross-project knowledge tracking. Captures ideas, decisions, lessons, and discoveries with automatic resurfacing and a dispatchable work stack. |
 
-See the [plugin README](ticket-auto-pipeline/README.md) for full documentation.
+See the [ticket-auto-pipeline README](ticket-auto-pipeline/README.md) and [ticket-planner README](ticket-planner/README.md) for full documentation.
 
 ## How the Pipeline Works
 
