@@ -6,7 +6,7 @@
 # as a planner error, not a confusing pipeline error later.
 #
 # Also provides idempotency helpers: intent recording and existence checking
-# for entity-creating phases (Epic Gen, Story Gen, Ticket Gen).
+# for entity-creating phases (EpicGen, TicketGen).
 #
 # Usage:
 #   planner_validate_ticket <description> [has_planned_label]

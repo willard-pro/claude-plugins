@@ -340,7 +340,7 @@ planner_position_derive() {
 # ── Validation ─────────────────────────────────────────────────────────────────
 
 # Validate that a transition from one phase to another is legal.
-# The 12-phase sequence is strictly linear — no skipping, no backtracking.
+# The 9-phase sequence is strictly linear — no skipping, no backtracking.
 # Usage: planner_phase_validate_transition <initiative_id> <from_phase> <to_phase>
 # Returns: 0 if legal, 1 if illegal.
 planner_phase_validate_transition() {

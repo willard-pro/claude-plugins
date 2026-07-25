@@ -21,8 +21,8 @@ ticket-planner/
 ## 9-phase state machine
 
 ```
-Appraisal → Discovery → Architecture → Proposal → Review → Consensus →
-OpenSpec → Epic Gen → Story Gen → Ticket Gen → Execution → Completed
+Appraisal → Discovery → Architecture → Specify → Review → Consensus →
+EpicGen → TicketGen → Completed
 ```
 
 Each phase runs as an isolated agent. State lives in a durable append-only log under `${REPOS_ROOT}/.ticket-auto/initiatives/{ID}/`. The router reads the log to derive position — no state held in memory. Resume re-derives position by re-reading the log.
@@ -49,8 +49,8 @@ The router is bash; phases are Claude agents. The router never reasons about con
 
 | File | Exports |
 |------|---------|
-| `planner-state.sh` | State log format, state directory layout, `planner_state_read`, `planner_state_write`, `planner_position_derive`, `planner_initiative_dir` |
-| `planner-router.sh` | Phase router: `planner_phase_next`, `planner_phase_dispatch`, `planner_phase_validate_transition`. Reads state log, spawns phase agents. |
+| `planner-state.sh` | State log format, state directory layout, `planner_state_read`, `planner_state_write`, `planner_state_init`, `planner_position_derive`, `planner_initiative_dir`, `planner_phase_sequence`, `planner_phase_validate_transition`, `planner_phase_is_done`, `planner_phase_lock`/`planner_phase_unlock`, `planner_state_repair`, `planner_validate_initiative_id` |
+| `planner-router.sh` | Phase router: `planner_phase_dispatch`, `planner_run`, `planner_resume`. Reads state log, spawns phase agents. |
 | `planner-phase-prompts.sh` | Per-phase agent prompt templates: `planner_prompt_appraisal`, `planner_prompt_discovery`, `planner_prompt_architecture`, `planner_prompt_specify`, `planner_prompt_review`, `planner_prompt_consensus`, `planner_prompt_epicgen`, `planner_prompt_ticketgen`, `planner_prompt_completed`. Dispatch via `planner_prompt_for_phase`. |
 | `planner-context-gen.sh` | Deterministic Planner Context block generator, confidence derivation from concrete signals. |
 | `planner-deps-check.sh` | Dependency acyclicity validation (`tsort`-based), topological sort, missing-target detection. |
@@ -66,7 +66,7 @@ Pipe-delimited, same convention as ticket-auto's pipeline log:
 ISO|PHASE|STEP|STATUS|MSG
 ```
 
-Statuses: `start`, `done`, `fail`, `skip`. Phases match the 9-phase machine. `META` is a pseudo-phase for metadata (`schema`, `title`, `initiative-id`, `idea`).
+Statuses: `start`, `done`, `fail`, `skip`. Phases match the 9-phase machine: Appraisal, Discovery, Architecture, Specify, Review, Consensus, EpicGen, TicketGen, Completed. `META` is a pseudo-phase for metadata (`schema`, `title`, `initiative-id`, `idea`).
 
 Schema version is `1` — declared as first line.
 

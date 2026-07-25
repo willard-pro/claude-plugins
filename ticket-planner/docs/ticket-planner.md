@@ -26,11 +26,11 @@ The planner is a separate plugin from `ticket-auto-pipeline` and `fleet-controll
 /ticket-planner plan "Add real-time collaboration to the document editor"
 ```
 
-The planner initializes a state directory under `${REPOS_ROOT}/.ticket-auto/initiatives/{ID}/`, writes the idea to the state log, and begins the 12-phase state machine. Each phase runs as an isolated Claude agent. The router advances sequentially through phases with no inline reasoning between them.
+The planner initializes a state directory under `${REPOS_ROOT}/.ticket-auto/initiatives/{ID}/`, writes the idea to the state log, and begins the 9-phase state machine. Each phase runs as an isolated Claude agent. The router advances sequentially through phases with no inline reasoning between them.
 
 ### What auto-dispatch does
 
-When the Execution phase completes, the initiative epic receives the `state:execution` label. The fleet-controller detector `_fleet_scan_initiative_dispatch` finds it during its next poll cycle and — when `FLEET_AUTO_DISPATCH=true` — calls `fleet_dispatch_initiative`, which:
+When the TicketGen phase completes successfully, the initiative epic receives the `state:execution` label. The fleet-controller detector `_fleet_scan_initiative_dispatch` finds it during its next poll cycle and — when `FLEET_AUTO_DISPATCH=true` — calls `fleet_dispatch_initiative`, which:
 
 1. Validates the epic has `state:execution`
 2. Enumerates child tickets with `planned` label in `Backlog` state
@@ -67,11 +67,11 @@ Shows the current phase, initiative metadata, and the last few state log entries
 
 ## State Machine
 
-12 phases, strictly linear. Each phase runs as an isolated Claude agent. The router is bash — it reads the state log, derives position, and dispatches phases. It performs no reasoning of its own.
+9 phases, strictly linear. Each phase runs as an isolated Claude agent. The router is bash — it reads the state log, derives position, and dispatches phases. It performs no reasoning of its own.
 
 ```
-Appraisal → Discovery → Architecture → Proposal → Review → Consensus →
-OpenSpec → EpicGen → StoryGen → TicketGen → Execution → Completed
+Appraisal → Discovery → Architecture → Specify → Review → Consensus →
+EpicGen → TicketGen → Completed
 ```
 
 ### Phase Details
@@ -81,15 +81,14 @@ OpenSpec → EpicGen → StoryGen → TicketGen → Execution → Completed
 | 1 | **Appraisal** | Interprets the business idea, establishes initiative scope, identifies affected repositories | Scope summary, repo list | — |
 | 2 | **Discovery** | Explores affected repos, traces code paths, gathers context on symbols and APIs | Code paths, symbol references, API contracts | — |
 | 3 | **Architecture** | Determines technical approach, evaluates alternatives | Architecture decision record | — |
-| 4 | **Proposal** | Produces the full initiative proposal artifact | `proposal.md` in artifact plane | — |
-| 5 | **Review** | Critiques the proposal for gaps, risks, and feasibility | Review findings | Configurable hold (`PLANNER_REVIEW_HOLD`) |
-| 6 | **Consensus** | Resolves review findings into a settled, actionable plan | Finalized proposal | Configurable hold (`PLANNER_CONSENSUS_HOLD`) |
-| 7 | **OpenSpec** | Emits specification artifacts the generation phases consume | Spec documents in artifact plane | — |
-| 8 | **Epic Gen** | Creates the initiative epic in Linear with `state:execution` and `INIT-{id}` labels | Linear epic | Idempotency: records intent before creation, checks existence by initiative ID |
-| 9 | **Story Gen** | Generates story descriptions from specs | Story descriptions | May collapse into Ticket Gen if stories are always 1:1 with tickets |
-| 10 | **Ticket Gen** | Creates planned child tickets in Backlog with full labels and Planner Context blocks | Linear tickets | `planner-deps-check.sh` (acyclicity), `planner-context-gen.sh` (block format), `planned-ticket-check.sh` (validation before creation) |
-| 11 | **Execution** | Labels the epic for execution, hands off to fleet auto-dispatch | `state:execution` label on epic | `FLEET_AUTO_DISPATCH` flag gates actuation |
-| 12 | **Completed** | Terminal phase — no further transitions permitted | Completed state log entry | Phase transition validator rejects any transition from Completed |
+| 4 | **Specify** | Synthesizes proposal + writes per-ticket spec files with signals in a single pass | `proposal.md`, spec files in `artifacts/specs/` | — |
+| 5 | **Review** | Critiques the proposal for gaps, risks, and feasibility | Review findings | — |
+| 6 | **Consensus** | Resolves review findings into a settled, actionable plan | Finalized proposal | — |
+| 7 | **EpicGen** | Creates the initiative epic in Linear | Linear epic with `INIT-{id}` and `epic` labels | Idempotency: records intent before creation, checks existence by initiative ID |
+| 8 | **TicketGen** | Creates planned child tickets in Backlog with full labels and Planner Context blocks, validates dependency DAG, sets `state:execution` on epic | Linear tickets, `state:execution` label on epic | `planner-deps-check.sh` (acyclicity), `planner-context-gen.sh` (block format), `planned-ticket-check.sh` (validation before creation) |
+| 9 | **Completed** | Terminal phase — writes completion summary, no further transitions permitted | Completed state log entry, `COMPLETED.md` | Phase transition validator rejects any transition from Completed |
+
+**Phase merge notes:** The original 12-phase design separated Proposal, OpenSpec, StoryGen, and Execution as standalone phases. These were merged into Specify (Proposal + OpenSpec) and TicketGen (StoryGen + Execution labelling) to reduce phase count from 12 to 9. The merged phases handle all the same work — no capability was removed.
 
 ### Failure handling
 
@@ -98,7 +97,7 @@ If a phase fails (`fail` status in state log), the router halts. The operator ca
 - Manually intervene and skip the phase by writing `skip` to the state log
 - Abandon the initiative
 
-Max retries per phase: `PLANNER_MAX_PHASE_RETRIES` (default 2).
+Max retries per phase: retry on `fail` or crash (phases are idempotent, so re-running is safe). `PLANNER_MAX_PHASE_RETRIES` (default 2) is planned but not yet implemented in the router dispatch loop.
 
 ## State Representation
 
@@ -115,7 +114,7 @@ Schema version `1` declared as the first line. The router re-derives position by
 ```
 ${REPOS_ROOT}/.ticket-auto/initiatives/{INITIATIVE_ID}/
   state.log           # Append-only phase transition log
-  .intents/           # Idempotency intent files (one JSON per entity)
+  .intents/           # Idempotency intent files — created lazily on first intent write
     epic-main.json
     ticket-1.json
   artifacts/          # Per-phase artifacts (proposal.md, specs/, etc.)
@@ -126,7 +125,7 @@ ${REPOS_ROOT}/.ticket-auto/initiatives/{INITIATIVE_ID}/
 ## Resume Semantics
 
 1. Read the state log in reverse (`tac`).
-2. Find the last phase with a terminal entry (`done`, `fail`, `skip`).
+2. Find the last phase with a terminal entry (`done` or `skip`). `fail` is explicitly excluded — a failed phase is not complete and will be re-executed on resume.
 3. Check if a `start` entry exists after the last completed phase (crash mid-phase).
 4. If crashed mid-phase, resume at that phase (every phase is idempotent).
 5. If no crash detected, advance to the next phase after the last completed.
@@ -183,7 +182,7 @@ The planner produces against four frozen consumption-side contracts. These are s
 
 ### 3. Artifact Plane
 
-`planner-artifacts.sh` resolves per-ticket artifact directories from the Planner Context block's Initiative field. Path: `${REPOS_ROOT}/.ticket-auto/initiatives/{INIT}/tickets/{TID}/planner/`.
+`planner-artifacts.sh` (in `ticket-auto-pipeline/lib/`) resolves per-ticket artifact directories from the Planner Context block's Initiative field. Path: `${REPOS_ROOT}/.ticket-auto/initiatives/{INIT}/tickets/{TID}/planner/`.
 
 Per-initiative artifacts (proposal, specs) live under `${REPOS_ROOT}/.ticket-auto/initiatives/{INIT}/artifacts/`.
 
@@ -232,7 +231,7 @@ A cyclic dependency set produces no tickets — the error is reported before any
 
 ## Auto-Dispatch
 
-When the Execution phase completes, the initiative epic gets `state:execution`. The fleet-controller detector `_fleet_scan_initiative_dispatch` finds it during its next poll cycle.
+When TicketGen completes successfully, the initiative epic gets `state:execution`. The fleet-controller detector `_fleet_scan_initiative_dispatch` finds it during its next poll cycle.
 
 **Gating:** `FLEET_AUTO_DISPATCH=true` must be set. When false (default), the detector reports undispatched initiatives at severity 1 (WARN) but does not actuate. This allows observe-only operation during rollout.
 
@@ -269,15 +268,41 @@ The router never reasons about content. Phases never mutate state directly (they
 
 ## Configuration
 
+### Planner variables
+
 | Variable | Default | Description |
+|----------|---------|-------------|
+| `PLANNER_CONFIDENCE_THRESHOLD` | 0.85 | Minimum confidence for `pre-approved` label |
+| `PLANNER_IDEA_MAX_LENGTH` | 2000 | Maximum idea length in chars (truncated with warning) |
+| `PLANNER_TSORT_TIMEOUT` | 30 | Seconds before timing out dependency graph sort |
+| `PLANNER_PHASE_TIMEOUT` | 600 | Seconds before timing out a hung phase agent |
+
+### Cross-plugin variables (fleet-controller)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `FLEET_AUTO_DISPATCH` | false | Must be `true` to enable automatic dispatch from detection |
+| `FLEET_MAX_CONCURRENT` | 3 | Max concurrent pipelines for dispatch |
+| `FLEET_DRY_RUN` | false | When `true`, dispatch is preview-only |
+
+### Environment
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REPOS_ROOT` | `${HOME}/repos` | Root for initiative directories and repo discovery |
+| `LINEAR_API_KEY` | (required) | Linear API authentication token |
+| `LINEAR_API_URL` | `https://api.linear.app/graphql` | Linear GraphQL API endpoint |
+| `LINEAR_MAX_RETRIES` | 3 | Max Linear API call retries |
+| `LINEAR_RETRY_DELAYS` | `1 2 4` | Retry backoff delays in seconds |
+| `CLAUDE_PLUGIN_ROOT` | (resolved at runtime) | Plugin cache location for library sourcing |
+
+### Planned (not yet implemented)
+
+| Variable | Planned Default | Description |
 |----------|---------|-------------|
 | `PLANNER_REVIEW_HOLD` | false | When `true`, Review phase pauses for human input |
 | `PLANNER_CONSENSUS_HOLD` | false | When `true`, Consensus phase pauses for human input |
 | `PLANNER_MAX_PHASE_RETRIES` | 2 | Max retries per phase before failing the run |
-| `PLANNER_CONFIDENCE_THRESHOLD` | 0.5 | Minimum confidence for valid ticket (used by `planned-ticket-check.sh`) |
-| `FLEET_AUTO_DISPATCH` | false | Must be `true` to enable automatic dispatch from detection |
-| `FLEET_MAX_CONCURRENT` | 3 | Max concurrent pipelines for dispatch |
-| `FLEET_DRY_RUN` | false | When `true`, dispatch is preview-only |
 
 ## Planned-Entry Gate Dormancy
 
