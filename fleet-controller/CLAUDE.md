@@ -58,7 +58,7 @@ Fleet controller depends on two libraries defined in `ticket-auto-pipeline/`:
 
 These are sourced via `_source_if_missing` from `~/.claude/skills/lib/` (synced by the ticket-auto-pipeline SessionStart hook). Fleet controller does NOT maintain its own copies — it bridges to the canonical sources.
 
-## Detection engines (11 total)
+## Detection engines (12 total)
 
 | # | Detector | What it catches | Severity range |
 |---|----------|----------------|----------------|
@@ -73,6 +73,7 @@ These are sourced via `_source_if_missing` from `~/.claude/skills/lib/` (synced 
 | 9 | `detect_planner_feedback` | Uncollected `META\|planner-feedback` entries | 0–1 |
 | 10 | `detect_blocked_by` | Tickets with `blocked-by:{ID}` where blocker is Done | 0–1 |
 | 11 | `detect_initiative_dispatch` | `state:execution` epics with undispatched planned tickets | 0–1 |
+| 12 | `detect_epic_branch_ready` | Directive-carrying `state:execution` epics with all children Done | 0–1 |
 
 ## Severity scale
 
@@ -126,6 +127,8 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 | `FLEET_AUTO_DISPATCH` | false | Must be `true` to enable automatic dispatch of planned tickets from initiative epics. Detection still runs and reports; dispatch is the actuation step. Human approval gate still stops every auto-dispatched ticket. |
 | `FLEET_AUTO_RESTART` | false | Must be `true` to enable automatic restarts |
 | `FLEET_DRY_RUN` | false | When `true`, interventions are logged not executed |
+| `FLEET_EPIC_BRANCH_SYNC` | true | Sync base changes into epic branch each dispatch cycle — safety mechanism against branch rot |
+| `FLEET_EPIC_AUTO_PR` | false | Automatically open integration PRs when all children Done — detection runs, actuation is opt-in |
 | `FLEET_MAX_CONCURRENT` | 3 | Max concurrent pipelines for dispatch |
 | `FLEET_INSTANCE_ID` | default | Namespace for stop files and spawn queues |
 | `FLEET_SUMMARY_INTERVAL_CYCLES` | 10 | Cycles between forced fleet-summary heartbeat emissions |

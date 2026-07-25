@@ -907,6 +907,17 @@ written by `outcome-label-check.sh` — the confirmed Linear label — not from 
 terminal line, which never carries the Smooth/Rough/Hard value:
 
 ```bash
+# Auto-merge guard: integration PRs must never be auto-merged.
+# This is the second guard (the first is in epic_branch_open_pr itself).
+# If this ticket's PR targets an epic integration branch, skip auto-merge.
+if [ -n "{INTEGRATION_BRANCH}" ]; then
+  _pr_head=$(gh pr view "$_pr_num" --json headRefName --jq '.headRefName' 2>/dev/null || true)
+  if [ "$_pr_head" = "{INTEGRATION_BRANCH}" ]; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|pr-auto-merge|skip|INTEGRATION_PR_GUARD: $_pr_num is integration PR, not auto-merging" >> "{LOG_FILE}"
+    _pr_num=""
+  fi
+fi
+
 if { [ "{AUTONOMY}" = "auto" ] || [ "{AUTONOMY}" = "semi-auto" ]; } && [ "{COMPLEXITY}" = "simple" ]; then
   OUTCOME=$(grep '^[^|]*|META|outcome-label|info|' "{LOG_FILE}" | tail -1 | cut -d'|' -f5-)
   if [ "$OUTCOME" = "Smooth" ]; then

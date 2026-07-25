@@ -64,6 +64,11 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-corrections.sh
 	# retro GitHub issues tests
 	bash ticket-auto-pipeline/lib/tests/test-github-issues.sh
+	# shared-branch programme tests (Phases 1-3)
+	bash ticket-auto-pipeline/lib/tests/test-branch-directive-check.sh
+	bash ticket-auto-pipeline/lib/tests/test-branch-resolve.sh
+	bash ticket-auto-pipeline/lib/tests/test-worktree.sh
+	bash ticket-auto-pipeline/lib/tests/test-epic-branch.sh
 
 test-flow:
 	@echo "=== ticket-flow tests ==="

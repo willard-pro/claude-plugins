@@ -34,6 +34,17 @@ FLEET_QUEUE_MAX_RETRIES="${FLEET_QUEUE_MAX_RETRIES:-3}"
 # Base backoff seconds between queue append retries. Doubles on each attempt.
 FLEET_QUEUE_RETRY_BACKOFF_SECS="${FLEET_QUEUE_RETRY_BACKOFF_SECS:-2}"
 
+# ── Epic branch lifecycle ────────────────────────────────────────────────────────
+# When true, sync base changes into the epic branch on each dispatch cycle.
+# Sync is the safety mechanism that prevents long-lived branch rot — disabling it
+# means choosing to accept accumulating merge conflicts.
+FLEET_EPIC_BRANCH_SYNC="${FLEET_EPIC_BRANCH_SYNC:-true}"
+
+# When true, automatically open integration PRs from epic branches when all
+# children are Done. Off by default — detection reports, actuation is opt-in.
+# The integration PR is NEVER auto-merged regardless of this setting.
+FLEET_EPIC_AUTO_PR="${FLEET_EPIC_AUTO_PR:-false}"
+
 # ── Instance namespace ──────────────────────────────────────────────────────────
 # Namespace for spawn queue, stop files, run registry, and fence markers.
 # Prevents collisions between multiple fleet controller instances on the same host.

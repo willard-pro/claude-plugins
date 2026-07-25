@@ -36,6 +36,12 @@ _source_if_missing fleet_render_dashboard_from_data "$_MONITOR_DIR/fleet-dashboa
 # Source registry/fence helpers if available
 [ -f "$_MONITOR_DIR/fleet-registry.sh" ] && source "$_MONITOR_DIR/fleet-registry.sh"
 
+# Source worktree.sh for garbage collection of terminal-state worktrees
+_TAP_LIB="$_MONITOR_DIR/../../ticket-auto-pipeline/lib"
+if ! declare -f worktree_gc >/dev/null 2>&1; then
+  [ -f "$_TAP_LIB/worktree.sh" ] && source "$_TAP_LIB/worktree.sh"
+fi
+
 # ── Fleet controller log writer ───────────────────────────────────────────────────
 # Write a timestamped entry to the fleet controller's own log file.
 # Usage: fl_write <level> <component> <msg>
@@ -241,6 +247,14 @@ fleet_monitor_cycle() {
       fi
     fi
   done
+
+  # Garbage-collect worktrees for tickets in terminal Linear states.
+  # Non-fatal: a failure warns and the cycle continues.
+  if declare -f worktree_gc >/dev/null 2>&1; then
+    worktree_gc 2>/dev/null || {
+      fl_write "WARN" "monitor" "Worktree GC failed — continuing"
+    }
+  fi
 
   fl_write "INFO" "monitor" "Monitor cycle complete"
 

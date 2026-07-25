@@ -61,9 +61,9 @@ producing side is built against a proven consuming side.
 |---|---|---:|---:|---:|
 | 1 | `shared-branch-resolution` | 12 | 60 | 11 |
 | 2 | `ticket-worktree-isolation` | 11 | 55 | 11 |
-| 3 | `epic-branch-lifecycle` | 9 | 58 | 0 |
+| 3 | `epic-branch-lifecycle` | 9 | 58 | 9 |
 | 4 | `planner-branch-directive` | 10 | 56 | 0 |
-| | **Total** | **42** | **229** | **22** |
+| | **Total** | **42** | **229** | **31** |
 
 ---
 
@@ -114,15 +114,15 @@ Creates, syncs, and integrates the epic branch. Writes to shared git history —
 
 | # | Unit | Tasks | Status | Started | Finished | Note |
 |---|---|---:|---|---|---|---|
-| 3.1 | `lib/epic-branch.sh` (new) | 8 | todo | | | Sync refuses rather than force-pushes |
-| 3.2 | `lib/tests/test-epic-branch.sh` (new) | 12 | todo | | | |
-| 3.3 | `fleet-dispatch.sh` — branch precondition | 7 | todo | | | |
-| 3.4 | `fleet-detect.sh` — 12th detector | 6 | todo | | | |
-| 3.5 | Worktree GC wiring | 3 | todo | | | Closes the trigger left open by Phase 2 |
-| 3.6 | Auto-merge guard | 3 | todo | | | Integration PR must never auto-merge |
-| 3.7 | Configuration | 3 | todo | | | |
-| 3.8 | Documentation | 6 | todo | | | |
-| 3.9 | Verification | 10 | todo | | | Includes conflict-sync test + version bumps (two plugins) |
+| 3.1 | `lib/epic-branch.sh` (new) | 8 | done | 2026-07-25 | 2026-07-25 | 4 public + 5 internal functions; 14 self-tests pass; prefer-merge-not-rebase; FLEET_DRY_RUN guard |
+| 3.2 | `lib/tests/test-epic-branch.sh` (new) | 12 | done | 2026-07-25 | 2026-07-25 | 20/20 tests pass; proper origin fixture; gh function mocks; declare-guard stubs |
+| 3.3 | `fleet-dispatch.sh` — branch precondition | 7 | done | 2026-07-25 | 2026-07-25 | description in GQL; ensure_epic_branch before enqueue; sync gated on FLEET_EPIC_BRANCH_SYNC; EPIC_BRANCH_UNAVAILABLE skip |
+| 3.4 | `fleet-detect.sh` — 12th detector | 6 | done | 2026-07-25 | 2026-07-25 | detect_epic_branch_ready + _fleet_scan_epic_branch_ready; registered as D-12 in fleet_detect_all; _last_msg used; no-directive skip |
+| 3.5 | Worktree GC wiring | 3 | done | 2026-07-25 | 2026-07-25 | worktree_gc in fleet_monitor_cycle; non-fatal warn+continue; source bridge from TAP lib |
+| 3.6 | Auto-merge guard | 3 | done | 2026-07-25 | 2026-07-25 | INTEGRATION_PR_GUARD check before squash-merge in SKILL.md; two independent guards |
+| 3.7 | Configuration | 3 | done | 2026-07-25 | 2026-07-25 | FLEET_EPIC_BRANCH_SYNC (default true) + FLEET_EPIC_AUTO_PR (default false) in config.sh |
+| 3.8 | Documentation | 6 | done | 2026-07-25 | 2026-07-25 | Detection table 11→12; epic-branch.sh in lib table; config table entries; auto-merge guard doc |
+| 3.9 | Verification | 10 | done | 2026-07-25 | 2026-07-25 | lint+fmt green; TAP v0.20.0→0.21.0; FC v0.2.1→0.3.0; 9.2-9.9 deferred (need live Linear ticket) |
 
 ### Phase 4 — `planner-branch-directive`
 
@@ -179,5 +179,6 @@ Append one line per working session — date, units touched, outcome.
 
 2026-07-25 — 1.1 done. `_extract_md_section` generalised from `_extract_planner_context_block`; 4 callers untouched via thin wrapper; 49/49 tests pass. Next: 1.2 (schema doc).
 2026-07-25 — Phase 2 (units 2.3-2.11) done. spawn-helper WORKTREE_ROOT transport (60/60 tests). 5 skill files migrated to worktree: ticket-implement (ensure_worktree replaces cd+checkout), ticket-verify (gh pr via worktree), ticket-document (git diff/log via worktree), ticket-pr-review (diff/conflict via worktree), ticket-auto (release_worktree in STEP_6). Audit clean: 0 cd {repo-path}, 0 literal develop, REPOS_ROOT only in prescan. v0.20.0 in 3 places (fixed marketplace.json 0.18.0→0.20.0). lint + fmt green. 5 deferred tasks (11.2-11.6 need live Linear ticket).
+2026-07-25 — Phase 3 (units 3.1-3.9) done. epic-branch.sh (4 public + 5 internal functions, 14 self-tests). test-epic-branch.sh (20/20 tests, origin fixture, gh function mocks). fleet-dispatch.sh: description in GQL, ensure_epic_branch precondition, sync gated on FLEET_EPIC_BRANCH_SYNC. fleet-detect.sh: 12th detector (_fleet_scan_epic_branch_ready) registered in fleet_detect_all. fleet-monitor.sh: worktree_gc in cycle (non-fatal). SKILL.md: INTEGRATION_PR_GUARD before auto-merge. config.sh: FLEET_EPIC_BRANCH_SYNC + FLEET_EPIC_AUTO_PR. Documentation: detection table 11→12, lib table, config table. v0.20.0→0.21.0 (TAP), v0.2.1→0.3.0 (FC). Makefile: all 4 shared-branch tests added. lint+fmt green. Live tests (9.2-9.9) deferred.
 
 <!-- e.g. 2026-07-26 — 1.1, 1.2 done. Extractor refactor byte-identical, both suites green. -->
