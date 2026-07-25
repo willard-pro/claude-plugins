@@ -10,6 +10,10 @@ Architecture, contracts, and reference documentation for the ticket-planner plug
 
 - [../state-log-format.md](../state-log-format.md) — State log format spec: `ISO|PHASE|STEP|STATUS|MSG` schema, phases and steps, statuses, META pseudo-phase, integrity guarantees.
 
+## Diagrams
+
+- [../../docs/ticket-planner-pipeline-diagram.html](../../docs/ticket-planner-pipeline-diagram.html) — Interactive 9-phase pipeline diagram with drill-down detail panels (GitHub Pages).
+
 ## Skill Reference
 
 - [../skills/ticket-planner/SKILL.md](../skills/ticket-planner/SKILL.md) — Skill procedure: modes (`plan`, `resume`, `status`, `replan`), phase table, contracts, determinism boundary, configuration, and implementation instructions.

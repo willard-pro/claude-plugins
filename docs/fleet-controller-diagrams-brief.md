@@ -8,7 +8,7 @@
 
 Two diagrams in this repo:
 
-1. **`docs/pipeline-diagram.html`** — Interactive SVG of a SINGLE ticket pipeline. Shows 7 Linear states (Backlog → Todo → Approve → Ready → Review → UAT → Done) with 8 phase chips below (APPRAISE, REPRODUCE, EXEC, GATE, IMPLEMENT, PR-REVIEW, VERIFY, MAINTENANCE). Drills into each phase's steps, gates, labels, and stop codes.
+1. **`docs/ticket-auto-pipeline-diagram.html`** — Interactive SVG of a SINGLE ticket pipeline. Shows 7 Linear states (Backlog → Todo → Approve → Ready → Review → UAT → Done) with 8 phase chips below (APPRAISE, REPRODUCE, EXEC, GATE, IMPLEMENT, PR-REVIEW, VERIFY, MAINTENANCE). Drills into each phase's steps, gates, labels, and stop codes.
 
 2. **`docs/ticket-pipeline-animation.html`** — Animated version of the same single-pipeline flow.
 
@@ -70,7 +70,7 @@ An interactive diagram showing the fleet controller as the overseer of multiple 
 - Background: `#0b0d10`, panels: `#11151a`
 
 **Interactivity:**
-- Click a pipeline → drill into its state diagram (link to pipeline-diagram.html)
+- Click a pipeline → drill into its state diagram (link to ticket-auto-pipeline-diagram.html)
 - Hover a detection engine → show its thresholds and current counts
 - Click an escalation level → show the intervention that fires
 - Real-time-ish: severity dots pulse/change color based on detection data

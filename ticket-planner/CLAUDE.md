@@ -17,6 +17,13 @@ ticket-planner/
   lib/                            # Shared bash libraries (9 files)
   lib/tests/                      # Test suites (6 files)
   docs/                           # Architecture and reference docs
+  README.md                       # Marketplace entry point
+  plugin-overview.md              # Maintainer-facing design doc
+  state-log-format.md             # Standalone log format spec
+
+### Shared docs (repo root)
+
+  docs/ticket-planner-pipeline-diagram.html  # Interactive 9-phase diagram (GitHub Pages)
 ```
 
 ### `.ticket-auto/` artifact layout (on disk, outside source repos)
@@ -117,6 +124,7 @@ Statuses: `start`, `done`, `fail`, `skip`. Phases: Appraisal, Discovery, Archite
 - [ticket-planner architecture](docs/ticket-planner.md)
 - [State log format spec](state-log-format.md)
 - [Docs index](docs/README.md)
+- [Interactive pipeline diagram](../docs/ticket-planner-pipeline-diagram.html)
 - [Root CLAUDE.md](../CLAUDE.md)
 - [fleet-controller CLAUDE.md](../fleet-controller/CLAUDE.md)
 - [ticket-auto-pipeline CLAUDE.md](../ticket-auto-pipeline/CLAUDE.md)
