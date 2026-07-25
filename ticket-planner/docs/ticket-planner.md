@@ -371,7 +371,7 @@ The capability is left specified rather than removed so the design rationale is 
 
 ## Future Enhancements
 
-See `ticket-planner-implementation.md` in the repo root for the full candidate list:
+Candidate enhancements identified during the 7-part integration programme:
 
 - **Constitution / immutable-rules primitive** — per-initiative `constitution.md` validated at the entry gate
 - **EARS notation for acceptance criteria** — deterministically-checkable AC shape

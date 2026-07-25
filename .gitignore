@@ -18,3 +18,4 @@ sdk-tools.ts
 __pycache__/
 ticket-auto-pipeline/skills/ticket-flow/locks/
 docs/linkedin-posts/
+openspec/
