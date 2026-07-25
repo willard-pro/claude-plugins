@@ -66,7 +66,7 @@ Pipe-delimited, same convention as ticket-auto's pipeline log:
 ISO|PHASE|STEP|STATUS|MSG
 ```
 
-Statuses: `start`, `done`, `fail`, `skip`. Phases match the 12-phase machine. `META` is a pseudo-phase for metadata (`schema`, `title`, `initiative-id`, `idea`).
+Statuses: `start`, `done`, `fail`, `skip`. Phases match the 9-phase machine. `META` is a pseudo-phase for metadata (`schema`, `title`, `initiative-id`, `idea`).
 
 Schema version is `1` — declared as first line.
 
