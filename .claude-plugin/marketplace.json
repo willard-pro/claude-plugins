@@ -9,9 +9,15 @@
   "plugins": [
     {
       "name": "ticket-planner",
-      "version": "0.3.1",
+      "version": "0.4.0",
       "source": "./ticket-planner",
-      "description": "9-phase autonomous planner — turns business ideas into dependency-ordered planned tickets. Appraisal → Discovery → Architecture → Specify → Review → Consensus → Epic Gen → Ticket Gen → Completed. Produces Planner Context blocks, Branch Directives for shared epic branches, and initiative epics with planned tickets ready for fleet-controller dispatch."
+      "description": "9-phase autonomous planner — turns business ideas into dependency-ordered planned tickets. Appraisal → Discovery → Architecture → Specify → Review → Consensus → Epic Gen → Ticket Gen → Completed. Produces Planner Context blocks, Branch Directives for shared epic branches, and initiative epics with planned tickets ready for fleet-controller dispatch. Supports grill-me validated intent files as optional pre-flight gate."
+    },
+    {
+      "name": "grill-me",
+      "version": "0.1.0",
+      "source": "./grill-me",
+      "description": "Pre-work readiness gate — assesses business ideas against profile-driven dimensions, asks ranked clarification questions interactively, scores readiness deterministically, and produces cryptographically sealed Validated Business Intent documents. Any agent can invoke it before acting."
     },
     {
       "name": "ticket-auto-pipeline",

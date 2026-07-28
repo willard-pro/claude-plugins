@@ -1,0 +1,149 @@
+{
+  "id": "product-idea",
+  "label": "Product Idea Readiness",
+  "version": "1.0.0",
+  "thresholds": {
+    "ready": 80,
+    "warn": 55
+  },
+  "max_questions": 7,
+  "dimensions": [
+    {
+      "id": "objective",
+      "label": "Objective",
+      "weight": 14,
+      "critical": true,
+      "probes": [
+        "What is the single problem this solves?",
+        "Can you state the objective in one sentence?",
+        "Is the objective measurable?",
+        "Would five different readers agree on what success looks like?"
+      ]
+    },
+    {
+      "id": "users_problem",
+      "label": "Users & Problem",
+      "weight": 14,
+      "critical": true,
+      "probes": [
+        "Who experiences the problem?",
+        "How do they solve it today?",
+        "How often do they hit this problem?",
+        "Is there evidence the problem is real (requests, support tickets, analytics)?"
+      ]
+    },
+    {
+      "id": "success_criteria",
+      "label": "Success Criteria",
+      "weight": 14,
+      "critical": true,
+      "probes": [
+        "What metric moves and by how much?",
+        "How will you know this worked?",
+        "Are the criteria falsifiable — could the feature ship and fail them?",
+        "Is there a baseline measurement for the current state?"
+      ]
+    },
+    {
+      "id": "scope",
+      "label": "Scope",
+      "weight": 12,
+      "critical": true,
+      "probes": [
+        "What is explicitly in scope?",
+        "What is explicitly out of scope?",
+        "Are there multiple independently valuable slices?",
+        "Could this be delivered incrementally?"
+      ]
+    },
+    {
+      "id": "acceptance_criteria",
+      "label": "Acceptance Criteria",
+      "weight": 12,
+      "critical": true,
+      "probes": [
+        "What must be true for this to be considered done?",
+        "Are there concrete, testable conditions?",
+        "Does each criterion describe observable behavior?",
+        "Are edge-case behaviors specified?"
+      ]
+    },
+    {
+      "id": "constraints",
+      "label": "Constraints",
+      "weight": 8,
+      "critical": false,
+      "probes": [
+        "Are there technology, platform, or regulatory constraints?",
+        "Are there timeline or resource constraints?",
+        "Are there compatibility requirements?"
+      ]
+    },
+    {
+      "id": "dependencies",
+      "label": "Dependencies",
+      "weight": 8,
+      "critical": false,
+      "probes": [
+        "What other systems, teams, or services does this depend on?",
+        "Are any dependencies not yet ready?",
+        "What is the risk if a dependency slips?"
+      ]
+    },
+    {
+      "id": "risks",
+      "label": "Risks",
+      "weight": 8,
+      "critical": false,
+      "probes": [
+        "What could go wrong?",
+        "What is the blast radius if this fails?",
+        "Are there security, privacy, or compliance risks?",
+        "Is there a rollback plan?"
+      ]
+    },
+    {
+      "id": "edge_cases",
+      "label": "Edge Cases",
+      "weight": 6,
+      "critical": false,
+      "probes": [
+        "What happens with empty data?",
+        "What happens at scale extremes?",
+        "What happens when a dependency is unavailable?",
+        "What are the concurrency and race-condition scenarios?"
+      ]
+    },
+    {
+      "id": "assumptions",
+      "label": "Assumptions",
+      "weight": 4,
+      "critical": false,
+      "probes": [
+        "What are you assuming to be true?",
+        "Which assumptions, if wrong, would invalidate the approach?",
+        "Have any assumptions been validated?"
+      ]
+    }
+  ],
+  "flags": {
+    "overscoped": {
+      "label": "Over-scoped",
+      "description": "Too many features or services for a single deliverable; needs decomposition",
+      "penalty": 15,
+      "cap": "proceed-with-warnings"
+    },
+    "conflicting_requirements": {
+      "label": "Conflicting Requirements",
+      "description": "Requirements that cannot all be satisfied simultaneously",
+      "penalty": 10,
+      "cap": "proceed-with-warnings"
+    },
+    "solution_masquerading_as_problem": {
+      "label": "Solution Masquerading as Problem",
+      "description": "Input describes a solution rather than the problem to solve",
+      "penalty": 8,
+      "cap": null
+    }
+  }
+}

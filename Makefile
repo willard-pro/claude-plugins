@@ -1,8 +1,8 @@
 SCRIPTS := $(shell find . -name "*.sh" -not -path "./.git/*")
 
-.PHONY: test test-lib test-flow test-kc lint fmt-check fmt
+.PHONY: test test-lib test-flow test-kc lint fmt-check fmt test-grill test-planner-intent-gate
 
-test: test-lib test-planner test-flow test-kc
+test: test-lib test-planner test-flow test-kc test-grill test-planner-intent-gate
 
 test-lib:
 	@echo "=== lib unit tests ==="
@@ -80,6 +80,17 @@ test-planner:
 	bash ticket-planner/lib/tests/test-planner-integration.sh
 	bash ticket-planner/lib/tests/test-branch-decision.sh
 	bash ticket-planner/lib/tests/test-branch-directive-gen.sh
+
+test-planner-intent-gate:
+	@echo "=== planner intent gate tests ==="
+	bash ticket-planner/lib/tests/test-planner-intent-gate.sh
+
+test-grill:
+	@echo "=== grill-me unit tests ==="
+	bash grill-me/lib/tests/test-grill-profile.sh
+	bash grill-me/lib/tests/test-grill-score.sh
+	bash grill-me/lib/tests/test-grill-seal.sh
+	bash grill-me/lib/tests/test-grill-render.sh
 
 test-flow:
 	@echo "=== ticket-flow tests ==="
