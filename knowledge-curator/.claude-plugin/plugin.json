@@ -1,6 +1,6 @@
 {
   "name": "knowledge-curator",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Durable cross-project knowledge tracking — capture ideas, decisions, lessons, and discoveries with low friction, automatic resurfacing, and a dispatchable work stack. Curates over existing systems (claude-mem, Linear, openspec) rather than creating a new silo.",
   "author": {
     "name": "John Willard"

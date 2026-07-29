@@ -90,6 +90,8 @@ test-kc:
 	@echo "=== knowledge-curator unit tests ==="
 	bash knowledge-curator/test/test-kc-index.sh
 	bash knowledge-curator/test/test-kc-item.sh
+	bash knowledge-curator/test/test-kc-render.sh
+	bash knowledge-curator/test/test-kc-rank-log.sh
 	bash knowledge-curator/test/test-kc-resurface.sh
 	bash knowledge-curator/test/test-kc-prompt-match.sh
 

@@ -24,6 +24,7 @@ knowledge-curator/
 Each consuming repo gets a `knowledge/` directory at its root:
 - `knowledge/KC-NNNN--<slug>.md` — one markdown file per item with YAML frontmatter
 - `knowledge/INDEX.md` — generated summary of all items, rebuilt on every mutation
+- `knowledge/.kc-rank-log` — ranking telemetry, append-only, self-trimming (see below). Local churn — add it to the consuming repo's `.gitignore`.
 
 ## Skill categories
 
@@ -39,6 +40,8 @@ Each consuming repo gets a `knowledge/` directory at its root:
 |------|---------|
 | `kc-index.sh` | Rebuild `knowledge/INDEX.md` from item frontmatter. Called after every add/update. |
 | `kc-item.sh` | Deterministic item mutation: `claim`, `complete`, `release`, `add`, `edit`, `status`. `flock`-serialized. Sole agent mutation path. |
+| `kc-render.sh` | Deterministic ASCII stack renderer for `/kc` bare mode. Reads item files directly (not INDEX.md) so it can show `why` and full relation type. Hybrid rank score: priority + age decay − blocked penalty. Read-only, no mutation. |
+| `kc-rank-log.sh` | Ranking telemetry. Source for `kc_rank_log` (append), run for `stats`. Records what each render promoted vs what got claimed, so the rank weights can be retuned from evidence. Append-only, fail-open, `KC_RANK_LOG=0` to disable. |
 | `kc-resurface.sh` | SessionStart hook: inject top-N items as context when `knowledge/` exists. |
 | `kc-prompt-match.sh` | UserPromptSubmit hook: grep prompt against INDEX.md tags/titles, inject matches. |
 
@@ -55,6 +58,7 @@ project: <repo-slug>
 created: 2026-07-06T18:00:00Z
 updated: 2026-07-06T18:00:00Z
 source: manual | openspec:<change> | linear:<ID> | claude-mem:<obs-id> | plan:<slug> | agent:<item-id>
+why: "<one-line rationale — required>"
 tags: [tag1, tag2]
 relates:
   - rel: supersedes | contradicts | extends | depends | alternative | refines | discovered-from
@@ -70,6 +74,7 @@ relates:
 - **Deterministic mutation boundary**: `kc-item.sh` is the sole agent mutation path (mirrors `flow.sh` pattern from ticket-auto-pipeline). `flock` serialization prevents parallel corruption.
 - **Fail-open hooks**: Both SessionStart and UserPromptSubmit hooks exit 0 silently when `knowledge/` directory doesn't exist.
 - **Plan-mode compatibility**: Resurfacing hooks fire normally (read-only). `kc-capture` queues writes during plan mode, flushes after approval.
+- **The ranking is instrumented, not asserted**: the `/kc` rank weights are a judgement call that cannot be validated in the abstract. Rather than argue about them, `kc-rank-log.sh` records what each render promoted against what was actually claimed, and `/kc stats` reports the agreement. Writers are dumb and always return 0 — telemetry can never break a render or a mutation. Retune from the report, not from intuition.
 
 ## Related docs
 

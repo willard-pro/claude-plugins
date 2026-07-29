@@ -63,6 +63,7 @@ project: <repo-slug>
 created: <now>
 updated: <now>
 source: openspec:<change-name>
+why: "<one-line rationale, from proposal.md ## Why>"
 tags: [openspec, <from proposal keywords>]
 relates: []
 ---
@@ -113,6 +114,7 @@ project: <repo-slug>
 created: <now>
 updated: <now>
 source: linear:<TICKET-ID>
+why: "<one-line rationale, from ticket description or title>"
 tags: [linear, <ticket labels>]
 relates: []
 ---
