@@ -99,6 +99,7 @@ The router is bash; phases are Claude agents. The router never reasons about con
 | `planner-ticket-validate.sh` | Pre-creation validation: `planner_validate_ticket` (wraps `planned-ticket-check.sh`). Idempotency: `planner_record_intent`, `planner_entity_exists`, `planner_entity_get_id`, `planner_entity_mark_created`. Post-creation: `planner_verify_tickets`, `planner_dispatch_gate`. |
 | `planner-replan.sh` | Re-planning support: `planner_replan_flag_is_set`, `planner_replan_flag_set`, `planner_feedback_list`, `planner_feedback_read_all`, `planner_feedback_status`, `planner_drift_compute`, `planner_replan_eligible_tickets`, `planner_replan_validate_deps`, `planner_replan_record`. |
 | `planner-linear-api.sh` | Linear GraphQL API client with retry (3 attempts, exponential backoff). Wraps curl. `planner_linear_graphql`, `planner_linear_create_issue`, `planner_linear_get_issue`. |
+| `planner-intent-gate.sh` | Pre-flight intent file gate. `_resolve_grill_seal` (three-level fallback → grill-seal.sh), `planner_intent_gate <path>` (validate seal + recommendation), `planner_intent_gate_check_require` (PLANNER_REQUIRE_INTENT check). Resolves grill-me plugin's seal verifier — no bundled copy. |
 | `planner-spec-validate.sh` | Deterministic spec file validation gate. `planner_spec_validate_all`, `planner_spec_validate_one`. Checks required sections + parseable Signals JSON. |
 
 ## State log format
@@ -120,6 +121,7 @@ Statuses: `start`, `done`, `fail`, `skip`. Phases: Appraisal, Discovery, Archite
 - **Phase concurrency lock:** `planner_phase_lock` uses a PID-based lock file. If the lock holder crashes without cleanup, a stale lock blocks resume until manually removed or until the PID is no longer alive. `planner_state_init` auto-removes stale locks, but `planner_phase_lock` itself does not.
 - **Prompt phase indices:** The 9 agent prompt functions embed their phase position as "phase N of 9". If the phase sequence changes (new phase inserted, phase removed), every prompt function's index must be updated. There is no centralized constant — each function hardcodes its index. A mismatch would confuse agents about their position in the pipeline.
 - **`PLANNER_REVIEW_HOLD`, `PLANNER_CONSENSUS_HOLD`, `PLANNER_MAX_PHASE_RETRIES` documented but unimplemented.** These config variables appear in `docs/ticket-planner.md` under a "Planned" section. The router dispatch loop does not check them. If an operator sets them expecting behavior, nothing happens.
+- **Cross-plugin grill-me dependency:** `planner-intent-gate.sh` resolves `grill-seal.sh` from the grill-me plugin via a three-level fallback (plugin cache → `~/.claude/skills/lib` → relative path). If grill-me is not installed and an intent file is passed, the gate exits 3 with an install instruction. There is no bundled copy — a drifting duplicate would silently pass invalid seals. The gate runs before `planner_state_init` so a rejected intent leaves no state behind.
 
 ## Related docs
 

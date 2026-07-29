@@ -4,28 +4,29 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository purpose
 
-Claude Code plugin marketplace (`willard-pro-claude-plugins`). Ships four plugins:
+Claude Code plugin marketplace (`willard-pro-claude-plugins`). Ships five plugins:
 
 - **`ticket-planner`** — 9-phase autonomous planner turning business ideas into dependency-ordered planned tickets. Sits upstream of ticket-auto. Appraisal → Discovery → Architecture → Specify → Review → Consensus → Epic Gen → Ticket Gen → Completed. Generates Branch Directives for shared epic branches.
 - **`ticket-auto-pipeline`** — fully autonomous Linear ticket pipeline that appraises, implements, verifies, and merges tickets with zero user input. Consumes planner output via the `planned` label + Planner Context block.
 - **`fleet-controller`** — parent orchestrator above ticket-planner and ticket-auto. Dispatches planned tickets from initiative epics, monitors pipeline health via 12 detection engines, manages epic branch lifecycle (create, sync, GC), aggregates execution feedback back to the planner. Bash-only, zero Claude agents.
 - **`knowledge-curator`** — durable cross-project knowledge tracking. Captures ideas, decisions, lessons, and discoveries with automatic resurfacing.
+- **`grill-me`** — pre-work readiness gate. Assesses business ideas against profile-driven dimensions, asks ranked clarification questions interactively, and produces cryptographically sealed Validated Business Intent documents. Any agent can invoke it before acting. Sits upstream of ticket-planner as an optional pre-flight gate.
 
 ## Ecosystem architecture
 
 ```
-Business idea → [ticket-planner] → initiative epic + planned tickets (Planner Context + labels + Branch Directive)
-                                       ↓
-                                 [fleet-controller] → detect initiatives → ensure epic branch → dispatch tickets → spawn queue
-                                       ↓
-                                 [ticket-auto-pipeline] → resolve branch → appraise (fast-path for planned) → implement → verify → merge
-                                       ↓
-                                 [fleet-controller feedback] → aggregate execution results → per-initiative feedback JSON
-                                       ↓
-                                 [ticket-planner re-plan] → (on Regenerate flag) → read feedback → regenerate tickets
+Business idea → [/grill-me] → sealed intent → [ticket-planner] → initiative epic + planned tickets (Planner Context + labels + Branch Directive)
+                                                   ↓
+                                             [fleet-controller] → detect initiatives → ensure epic branch → dispatch tickets → spawn queue
+                                                   ↓
+                                             [ticket-auto-pipeline] → resolve branch → appraise (fast-path for planned) → implement → verify → merge
+                                                   ↓
+                                             [fleet-controller feedback] → aggregate execution results → per-initiative feedback JSON
+                                                   ↓
+                                             [ticket-planner re-plan] → (on Regenerate flag) → read feedback → regenerate tickets
 ```
 
-**Plan → Build → Operate ring**: ticket-planner (Plan) → ticket-auto (Build) → Operate (incident→ticket, post-merge safety) → back to Plan.
+**Plan → Build → Operate ring**: ticket-planner (Plan) → ticket-auto (Build) → Operate (incident→ticket, post-merge safety) → back to Plan. grill-me sits before Plan — it gates ideas before any state is created.
 
 **Determinism boundary**: bash orchestrates (state parsing, phase routing, validation, dispatch, feedback aggregation). Claude agents reason (appraisal, discovery, architecture, proposal, review, spec writing, ticket generation).
 

@@ -17,6 +17,63 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.4.0 · grill-me 0.1.0 (2026-07-26)
+
+New `grill-me` plugin — a pre-work readiness gate that assesses business ideas
+against profile-driven quality dimensions before any planning starts. The
+ticket-planner gains an optional pre-flight gate that validates sealed intent
+documents, making the planner refuse under-specified or tampered inputs before
+creating any initiative state.
+
+- New: `grill-me` plugin — profile-driven readiness assessment, deterministic
+  bash scoring engine, interactive clarification question loop, and a
+  cryptographic SHA-256 intent seal that makes tampering detectable.
+- New: `product-idea` profile with 10 weighted dimensions, 3 qualitative flags
+  (overscoped, conflicting_requirements, solution_masquerading_as_problem),
+  configurable thresholds, and per-dimension evaluation probes.
+- New: `planner-intent-gate.sh` — pre-flight gate that resolves `grill-seal.sh`
+  through a three-level fallback (plugin cache → skills lib → relative path) and
+  validates intent documents before `planner_state_init`. A tampered file, a
+  missing seal, or a `do-not-proceed` verdict is a hard stop. No bundled copy
+  of the verifier — a drifting duplicate would silently pass invalid seals.
+- New: `PLANNER_REQUIRE_INTENT` (default `false`) — when `true`, raw idea strings
+  are refused; the planner directs the user to `/grill-me`.
+- Changed: Appraisal phase prompt now reads `${state_dir}/artifacts/intent.md`
+  when present and treats it as authoritative for objective, scope, and criteria.
+- Changed: ticket-planner 0.3.1 → 0.4.0.
+- Tests: 55 new tests across 5 suites — profile validation (13), scoring engine
+  (23), seal generation/verification (11), document rendering (5), and planner
+  intent gate (14). Wired into `make test` via `test-grill` and
+  `test-planner-intent-gate` targets.
+- Fix: `planner-intent-gate.sh` carried file-scope `set -euo pipefail`, unlike
+  every other sourceable file in `ticket-planner/lib/` — sourcing it into the
+  router's shell silently turned on errexit there. A second leak in the same
+  function unconditionally re-enabled errexit after an internal `set +e` probe,
+  regardless of the caller's prior state; both now save/restore correctly.
+- Fix: `_resolve_grill_seal`'s plugin-cache fallback assumed a non-versioned
+  cache path that never matches the real marketplace-installed layout
+  (`.../grill-me/{version}/lib/grill-seal.sh`), silently falling through to
+  lower-priority resolution on every real install. Now mirrors
+  `_resolve_branch_directive_checker`'s versioned-glob pattern exactly.
+- Fix: `IDEA` derivation from `## Objective` in `ticket-planner`'s plan-mode
+  step produced an empty idea for multi-line objectives, lowercase-starting
+  prose, or the `_None specified_` placeholder, and its `|| echo "$path"`
+  fallback was dead code (`head` always exits 0). Replaced with a full-section
+  extraction that falls back on emptiness, not on exit status.
+- Fix: `### Out of scope` rendered the `scope` dimension's `gap` field
+  (assessment incompleteness) as if it were a stated exclusion. Added a
+  `boundary` field to the assessment JSON contract for explicitly-stated
+  exclusions; the renderer now sources `### Out of scope` from it.
+- Fix: `## Open Gaps` rows were built by index-aligning the result's
+  profile-ordered dimensions array against the assessment's array, which the
+  scorer's own omission-coercion behavior guarantees can diverge in order and
+  completeness — misattributing gap text across dimensions. Now looked up by
+  dimension id.
+- Docs: reconciled the `intent-document` openspec section-order requirement
+  with the renderer, skill doc, and render test (all of which already agreed
+  with each other) — only the spec had `Assumptions` ordered before
+  `Risks`/`Edge Cases`.
+
 ## 0.21.2 (2026-07-25)
 
 Documentation restructure — the root README covered install and configure but

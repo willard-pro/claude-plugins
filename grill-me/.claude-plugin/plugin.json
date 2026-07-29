@@ -1,0 +1,32 @@
+{
+  "name": "grill-me",
+  "version": "0.1.0",
+  "description": "Pre-work readiness gate — assesses business ideas and other inputs against profile-driven dimensions, scores them deterministically, and produces a cryptographically sealed Validated Business Intent document. Any agent can invoke it before acting.",
+  "author": {
+    "name": "John Willard"
+  },
+  "repository": "https://github.com/willard-pro/claude-plugins",
+  "license": "UNLICENSED",
+  "keywords": [
+    "readiness",
+    "quality-gate",
+    "intent",
+    "validation",
+    "scoring",
+    "seal"
+  ],
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'mkdir -p ~/.claude/skills/lib && cp \"${CLAUDE_PLUGIN_ROOT}/lib/\"*.sh ~/.claude/skills/lib/'",
+            "timeout": 10,
+            "statusMessage": "Syncing grill-me lib scripts..."
+          }
+        ]
+      }
+    ]
+  }
+}

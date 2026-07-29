@@ -29,6 +29,14 @@ Start a new planning run from a business idea. The planner initializes the state
 /ticket-planner plan "Add real-time collaboration to the document editor"
 ```
 
+Or, pass a grill-me validated intent file (recommended):
+
+```
+/ticket-planner plan ./intents/rt-collab.md
+```
+
+When an intent file is passed, the planner verifies the seal before creating any state. A missing seal, a tampered file, or a `do-not-proceed` verdict is a hard stop. On `ready`, the intent document is captured as `artifacts/intent.md` and the Appraisal phase treats it as authoritative.
+
 If the run is interrupted (crash, timeout, manual stop), resume with `resume` — the router re-derives position from the state log and continues from where it left off.
 
 ### Plan flags
@@ -112,6 +120,7 @@ The router never reasons about content; phases never mutate state directly (they
 | `PLANNER_TSORT_TIMEOUT` | 30 | Seconds before timing out dependency graph sort |
 | `PLANNER_CONFIDENCE_THRESHOLD` | 0.85 | Minimum confidence for `pre-approved` label |
 | `PLANNER_IDEA_MAX_LENGTH` | 2000 | Maximum idea length in chars (truncated with warning) |
+| `PLANNER_REQUIRE_INTENT` | false | When `true`, raw idea strings are refused — must pass a grill-me intent file |
 | `FLEET_AUTO_DISPATCH` | false | Must be true for automatic fleet-controller dispatch |
 
 ---
@@ -171,9 +180,32 @@ defers to it.
 When mode is `plan`:
 
 1. Extract the idea from the second argument.
-2. Generate an initiative ID: `INIT-$(date +%s)-$(shuf -i 1000-9999 -n 1)` to avoid collision.
-3. Initialize state: `planner_state_init "$INITIATIVE_ID" "$IDEA"`
-4. Run the dispatch loop (see below).
+2. **PLANNER_REQUIRE_INTENT check.** If `PLANNER_REQUIRE_INTENT=true` and the argument is a raw string (not an existing file), hard stop and direct the user to `/grill-me`.
+3. **Intent file gate (step 0).** If the argument resolves to an existing file:
+   - Source `planner-intent-gate.sh` and run `planner_intent_gate "$path"`.
+   - On hard stop (exit 1/2/3): report the reason and stop — no state created.
+   - On pass (exit 0): capture `PLANNER_INTENT_READINESS`, `PLANNER_INTENT_RECOMMENDATION`, `PLANNER_INTENT_HASH`, `PLANNER_INTENT_PROFILE`.
+   - Derive `IDEA` from the intent document's `## Objective` section: extract
+     every line between the `## Objective` heading and the next `## ` heading,
+     drop blank lines and the `_None specified_` placeholder, join with spaces,
+     and truncate to `PLANNER_IDEA_MAX_LENGTH`. The full untruncated document is
+     still available to phase agents via `artifacts/intent.md` — this value is
+     only the durable, human-readable idea recorded in the state log.
+     ```
+     IDEA=$(awk '/^## Objective$/{f=1;next}/^## /{f=0}f' "$path" \
+       | sed '/^[[:space:]]*$/d' | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+     [ "$IDEA" = "_None specified_" ] && IDEA=""
+     IDEA="${IDEA:-$path}"
+     IDEA="${IDEA:0:${PLANNER_IDEA_MAX_LENGTH:-2000}}"
+     ```
+     Do not gate the fallback on a command's exit status — `head`/`sed`/`awk`
+     pipelines exit 0 even when they match nothing, so an empty-string check is
+     the only reliable signal.
+   - The original file path is preserved as `PLANNER_INTENT_FILE` for later artifact capture.
+4. Generate an initiative ID: `INIT-$(date +%s)-$(shuf -i 1000-9999 -n 1)` to avoid collision.
+5. Initialize state: `planner_state_init "$INITIATIVE_ID" "$IDEA"`
+6. **If an intent file was accepted:** Copy the verified file byte-identically to `${state_dir}/artifacts/intent.md` and write a `META|intent|done|${READINESS},${RECOMMENDATION},${HASH}` state log entry.
+7. Run the dispatch loop (see below).
 
 ### 4. Resume mode
 
