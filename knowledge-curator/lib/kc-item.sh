@@ -6,7 +6,7 @@
 #   complete <id>         Mark item done (only from in_progress). Fails if not claimed.
 #   release <id>          Release an in_progress item back to active. Fails if not in_progress.
 #   add <file>            Validate and index a new item file (already written by caller).
-#   edit <id> <f> <v>     Update a single frontmatter field (title, priority, tags, relates, project).
+#   edit <id> <f> <v>     Update a single frontmatter field (title, priority, tags, relates, project, why).
 #   status <id>           Print current status of an item.
 #
 # All subcommands: update `updated` timestamp, regenerate INDEX.md.
@@ -24,6 +24,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 KNOWLEDGE_DIR="${KNOWLEDGE_DIR:-knowledge}"
+
+# Ranking telemetry — append-only, fail-open, never affects mutation outcome.
+# shellcheck source=/dev/null
+. "$SCRIPT_DIR/kc-rank-log.sh"
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -74,7 +78,7 @@ validate_item() {
   local file="$1"
   local errors=0
 
-  for field in id type title status priority project created updated source; do
+  for field in id type title status priority project created updated source why; do
     if ! grep -q "^${field}:" "$file"; then
       echo "Missing required field: ${field}" >&2
       errors=$((errors + 1))
@@ -145,6 +149,7 @@ claim)
 
   # Regenerate index
   "$SCRIPT_DIR/kc-index.sh" "$KNOWLEDGE_DIR"
+  kc_rank_log "$KNOWLEDGE_DIR" claim "$id"
   echo "Claimed: $id → in_progress"
   ;;
 
@@ -167,6 +172,7 @@ complete)
   ) 9>"$KNOWLEDGE_DIR/.lock"
 
   "$SCRIPT_DIR/kc-index.sh" "$KNOWLEDGE_DIR"
+  kc_rank_log "$KNOWLEDGE_DIR" complete "$id"
   echo "Completed: $id → done"
   ;;
 
@@ -189,6 +195,7 @@ release)
   ) 9>"$KNOWLEDGE_DIR/.lock"
 
   "$SCRIPT_DIR/kc-index.sh" "$KNOWLEDGE_DIR"
+  kc_rank_log "$KNOWLEDGE_DIR" release "$id"
   echo "Released: $id → active"
   ;;
 
@@ -255,7 +262,7 @@ edit)
 
   # Whitelist editable fields — prevents injection and protects structural fields
   case "$field" in
-  title | priority | tags | relates | project) ;;
+  title | priority | tags | relates | project | why) ;;
   status)
     die "Cannot edit status via edit. Use: claim | release | complete" 1
     ;;

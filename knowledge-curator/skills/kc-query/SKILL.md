@@ -1,23 +1,23 @@
 ---
 name: kc-query
-description: Query the knowledge store. Bare "/kc" shows the ranked outstanding stack (p1 first, then by staleness). "/kc dormant" shows items not updated recently. "/kc <query>" searches by topic, tag, or title across the knowledge store and claude-mem. "/kc --all-projects" aggregates across sibling repos. Use for "what do we know about X", "show me the knowledge stack", "what should I work on next", and any knowledge-related query.
+description: Query the knowledge store. Bare "/kc" shows the ranked outstanding stack (p1 first, then by staleness). "/kc dormant" shows items not updated recently. "/kc <query>" searches by topic, tag, or title across the knowledge store and claude-mem. "/kc --all-projects" aggregates across sibling repos. "/kc stats" reports whether the ranking matches what you actually work on. Use for "what do we know about X", "show me the knowledge stack", "what should I work on next", and any knowledge-related query.
 ---
 
 # Knowledge Query (/kc)
 
-Query and resurface knowledge items. Four modes depending on arguments.
+Query and resurface knowledge items. Five modes depending on arguments.
 
 ## Mode 1: Bare `/kc` — ranked stack view
 
-Show the outstanding items ranked: p1 items first (by updated timestamp, oldest first), then p2 items (by updated timestamp, oldest first), then p3. Exclude `done` and `obsolete` items.
-
-Read from `knowledge/INDEX.md`:
+Render the deterministic ASCII stack view. This is a bash script, not an LLM judgment call — the same store always renders the same way:
 
 ```bash
-cat knowledge/INDEX.md
+bash "${CLAUDE_PLUGIN_ROOT}/lib/kc-render.sh" knowledge
 ```
 
-Present as a clean table with the top items. If p1 items exist, prefix with: "**N p1 item(s) need attention.**"
+Print its output verbatim in a code block — do not re-summarize or re-rank it. It ranks by a hybrid score (priority + age decay − blocked penalty, see `lib/kc-render.sh` header comment), highlights the top unblocked item in a `NEXT` box, and shows each item's `why` line plus depth-1 relations with the relation type preserved (e.g. `depends → KC-0002`). `done`/`obsolete` items are excluded; blocked items are demoted, never hidden.
+
+Every render is logged to `knowledge/.kc-rank-log` (see Mode 5) — that is what makes the ranking auditable rather than a black box.
 
 ## Mode 2: `/kc dormant` — staleness view
 
@@ -52,6 +52,25 @@ done
 ```
 
 Aggregate and apply the same ranking rules as Mode 1 across all discovered repos. Note in the output that this is a live scan (may slow with many repos — documented limitation).
+
+## Mode 5: `/kc stats` — is the ranking any good?
+
+Report how often the `NEXT` box matched what actually got claimed:
+
+```bash
+bash "${CLAUDE_PLUGIN_ROOT}/lib/kc-render.sh" --stats knowledge
+```
+
+Print the output verbatim. It reports facts, not a verdict — there is no "correct" agreement rate, only the trend and what it implies:
+
+| Signal | What it means | Where to retune |
+|--------|---------------|-----------------|
+| High **NEXT box claimed** | The score matches how you work. Leave it alone. | — |
+| High **claimed further down** | Priority/age weights are misordering the stack. Check `avg position`. | `priority_weight()` / `age_bonus` in `lib/kc-render.sh` |
+| High **claims of blocked items** | The blocked penalty is too harsh — you work on blocked things anyway. | the `- (blocked * 60)` term |
+| High **claimed without a render** | The stack isn't being consulted at all — a workflow signal, not a scoring one. | — |
+
+Do not offer to retune the weights off a handful of claims. The numbers only mean something after a few weeks of real use. If the user asks for a change, it is confined to `priority_weight()`, the `age_bonus` line, and the `- (blocked * 60)` term in `lib/kc-render.sh`.
 
 ## Sequence/timeline questions — delegate to claude-mem
 

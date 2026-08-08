@@ -60,6 +60,7 @@ project: <repo-slug>
 created: <now>
 updated: <now>
 source: claude-mem:<obs-id>
+why: "<one-line rationale, derived from the observation>"
 tags: [<derived>]
 relates: []
 ---
