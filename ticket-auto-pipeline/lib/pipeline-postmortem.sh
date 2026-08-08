@@ -104,6 +104,25 @@ fi
 _iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "${_iso}|META|postmortem|info|{\"run_id\":\"${_run_id}\",\"status\":\"started\",\"exit_code\":${EXIT_CODE}}" >>"$LOG_FILE"
 
+# ── Source GitHub libraries ──────────────────────────────────────────────────────
+
+_GI_LIB="$(_resolve_lib "github-issues.sh")"
+_GIR_LIB="$(_resolve_lib "github-issue-retro.sh")"
+_CP_LIB="$(_resolve_lib "corrections-parse.sh")"
+
+[ -f "$_GI_LIB" ] && source "$_GI_LIB"
+[ -f "$_GIR_LIB" ] && source "$_GIR_LIB"
+[ -f "$_CP_LIB" ] && source "$_CP_LIB"
+
+# ── Helper: emit a postmortem META entry ─────────────────────────────────────────
+
+_pm_log() {
+  local level="$1" msg="$2"
+  local _iso
+  _iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "${_iso}|META|postmortem|${level}|${msg}" >>"$LOG_FILE"
+}
+
 # ── Capability detection ──────────────────────────────────────────────────────
 # Analysis (signal collection, exit path, summary) always runs regardless of
 # tool availability. Only issue FILING requires gh+jq — absent tools degrade
@@ -129,25 +148,6 @@ fi
 if [ "$_jq_available" != "true" ]; then
   _pm_log "warn" "jq unavailable — issue filing disabled, analysis continues"
 fi
-
-# ── Source GitHub libraries ──────────────────────────────────────────────────────
-
-_GI_LIB="$(_resolve_lib "github-issues.sh")"
-_GIR_LIB="$(_resolve_lib "github-issue-retro.sh")"
-_CP_LIB="$(_resolve_lib "corrections-parse.sh")"
-
-[ -f "$_GI_LIB" ] && source "$_GI_LIB"
-[ -f "$_GIR_LIB" ] && source "$_GIR_LIB"
-[ -f "$_CP_LIB" ] && source "$_CP_LIB"
-
-# ── Helper: emit a postmortem META entry ─────────────────────────────────────────
-
-_pm_log() {
-  local level="$1" msg="$2"
-  local _iso
-  _iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "${_iso}|META|postmortem|${level}|${msg}" >>"$LOG_FILE"
-}
 
 # ── Helper: JSON-escape a string (using jq -Rs) ──────────────────────────────────
 
