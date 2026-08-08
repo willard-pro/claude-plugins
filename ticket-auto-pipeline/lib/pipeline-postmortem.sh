@@ -104,7 +104,10 @@ fi
 _iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 echo "${_iso}|META|postmortem|info|{\"run_id\":\"${_run_id}\",\"status\":\"started\",\"exit_code\":${EXIT_CODE}}" >>"$LOG_FILE"
 
-# ── Fail-soft front gate: gh + jq availability ──────────────────────────────────
+# ── Capability detection ──────────────────────────────────────────────────────
+# Analysis (signal collection, exit path, summary) always runs regardless of
+# tool availability. Only issue FILING requires gh+jq — absent tools degrade
+# filing to warn-only, never block analysis.
 
 _gh_available=false
 _jq_available=false
@@ -120,17 +123,11 @@ if command -v jq &>/dev/null; then
 fi
 
 if [ "$_gh_available" != "true" ]; then
-  _iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "${_iso}|META|postmortem|warn|skipped: gh unavailable" >>"$LOG_FILE"
-  echo "${_iso}|META|postmortem|info|{\"run_id\":\"${_run_id}\",\"status\":\"skipped\",\"reason\":\"gh_unavailable\"}" >>"$LOG_FILE"
-  exit 0
+  _pm_log "warn" "gh unavailable — issue filing disabled, analysis continues"
 fi
 
 if [ "$_jq_available" != "true" ]; then
-  _iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  echo "${_iso}|META|postmortem|warn|skipped: jq unavailable" >>"$LOG_FILE"
-  echo "${_iso}|META|postmortem|info|{\"run_id\":\"${_run_id}\",\"status\":\"skipped\",\"reason\":\"jq_unavailable\"}" >>"$LOG_FILE"
-  exit 0
+  _pm_log "warn" "jq unavailable — issue filing disabled, analysis continues"
 fi
 
 # ── Source GitHub libraries ──────────────────────────────────────────────────────
@@ -793,8 +790,12 @@ if [ -f "$_pm_tmp/signals.txt" ]; then
       continue
     fi
 
-    # Skip if filing is disabled
+    # Skip if filing is disabled or tools unavailable
     if [ "${POSTMORTEM_FILE_ISSUES:-false}" != "true" ]; then
+      _summary_signatures="${_summary_signatures} ${_sig}"
+      continue
+    fi
+    if [ "$_gh_available" != "true" ] || [ "$_jq_available" != "true" ]; then
       _summary_signatures="${_summary_signatures} ${_sig}"
       continue
     fi

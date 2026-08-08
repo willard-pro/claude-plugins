@@ -327,24 +327,20 @@ test_fail_soft_gh_unauthenticated() {
   _write_log "
 2026-08-08T10:01:00Z|META|gate-stop|fail|EXEC_NO_ARTIFACT
 "
-  # gh is installed but not authenticated in CI/test — the postmortem
-  # front gate checks both command -v gh AND gh auth status.
-  # When auth fails, it writes "skipped: gh unavailable" and exits 0.
+  # Analysis always runs regardless of gh availability. When gh is absent
+  # or unauthenticated, analysis completes but filing is skipped.
+  # The postmortem should produce a completed summary (signals detected)
+  # with a warn about gh unavailability.
   POSTMORTEM_ENABLED=true POSTMORTEM_FILE_ISSUES=true \
     LOG_FILE="$_log_file" HB_FILE="/dev/null" TICKET_DIR="/tmp" \
     bash "$PM" "TEST-123" --exit-code 1 2>/dev/null || true
 
-  # Should have written "skipped: gh unavailable" (gh present but not authed)
-  if grep -q 'skipped: gh unavailable' "$_log_file" 2>/dev/null; then
-    _teardown
-    return 0
-  fi
-  # Alternative: if gh IS authed, the postmortem should have completed
+  # Analysis must complete (signals detected), even without gh
   if grep -q '|META|postmortem|info|.*"status":"completed"' "$_log_file" 2>/dev/null; then
     _teardown
     return 0
   fi
-  echo "FAIL: gh check didn't skip or complete" >&2
+  echo "FAIL: analysis didn't complete without gh" >&2
   _teardown
   return 1
 }
