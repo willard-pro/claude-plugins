@@ -349,6 +349,20 @@ fi
 hb-wrap.sh gate "phase-transition" "ok" "START → APPRAISE"
 ```
 
+### Step 0.65 — Exit finalizer (RLVR Phase 3)
+
+Every exit path in the router MUST call `pipeline-finalize.sh` to run post-mortem analysis and write `META|outcome`. This replaces the bash trap approach (which cannot persist across separate Bash tool calls in the harness execution model).
+
+**Usage pattern at every exit point:**
+```bash
+bash ~/.claude/skills/lib/pipeline-finalize.sh "{TICKET_ID}" <exit-code> "{LOG_FILE}" || true
+exit <exit-code>
+```
+
+`pipeline-finalize.sh` handles: postmortem analysis (fail-soft, timeout 60s), outcome derivation from log evidence (not exit code alone), and tail-check idempotency (F10: only skips if outcome IS the last log line — prevents stale outcomes from crash-resume blocking fresh writes).
+
+**Covered exit paths:** gate-stop, gate-held, VERIFY_EXHAUSTED, PR_FEEDBACK_EXHAUSTED, router-error, STEP_6 completion. Fleet-killed pipelines use the fleet-side trigger (`fleet-controller/lib/fleet-intervene.sh`).
+
 ### :rotating_light: CRITICAL — Agent isolation requirement
 
 **Every phase agent MUST run in an isolated Agent invocation, never inline.** The `Skill` tool runs skills INLINE in the router's context window — it burns tokens on phase-internal details that the router should never see. The `Agent` tool spawns an isolated subagent that returns only its final result.
@@ -629,6 +643,7 @@ if [ $_rc -ne 0 ]; then
   hb-wrap.sh retry "flow-sh" "fail" "flow.sh appraise-start failed (exit ${_rc})" \
     "{\"trigger\":\"appraise-start\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: appraise-start" >> {LOG_FILE}
+  bash ~/.claude/skills/lib/pipeline-finalize.sh "{TICKET_ID}" 1 "{LOG_FILE}" || true
   exit 1
 fi
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|ticket-claimed|info|{TICKET-ID} claimed → Todo" >> {LOG_FILE}
@@ -675,10 +690,13 @@ if [ $_gate_rc -eq 0 ]; then
 elif [ $_gate_rc -eq 1 ]; then
   # Held — fleet controller will detect, stop here
   echo "Gate held for {TICKET_ID}. Add 'approved' label to proceed."
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-held|info|held" >> {LOG_FILE}
+  bash ~/.claude/skills/lib/pipeline-finalize.sh "{TICKET_ID}" 0 "{LOG_FILE}" || true
   exit 0
 else
   # Gate-stop (exit 2) — structural failure
   echo "Gate-stop fired for {TICKET_ID}. Check pipeline log for code."
+  bash ~/.claude/skills/lib/pipeline-finalize.sh "{TICKET_ID}" 1 "{LOG_FILE}" || true
   exit 1
 fi
 ```
@@ -852,6 +870,7 @@ spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail VERDICT=FAIL MSG="<summary>" 
 if grep -q '^[^|]*|VERIFY|verify|fail|' "{LOG_FILE}"; then
   if [ "{VERIFY_ATTEMPTS}" -ge 2 ]; then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|VERIFY_EXHAUSTED" >> "{LOG_FILE}"
+    bash ~/.claude/skills/lib/pipeline-finalize.sh "{TICKET_ID}" 1 "{LOG_FILE}" || true
     exit 1
   fi
   # Re-implement with --from-auto, then outcome-check, then loop back to verify
@@ -959,6 +978,7 @@ leaving repeated new comments could cycle the pipeline indefinitely:
 if [ "{PR_FEEDBACK_CYCLE}" -ge 3 ]; then
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|PR_FEEDBACK_EXHAUSTED" >> "{LOG_FILE}"
   echo "PR feedback reconciliation exhausted after 3 cycles for {TICKET_ID}. Needs human review."
+  bash ~/.claude/skills/lib/pipeline-finalize.sh "{TICKET_ID}" 1 "{LOG_FILE}" || true
   exit 1
 fi
 ```
@@ -1016,7 +1036,7 @@ if grep -q '^[^|]*|VERIFY|verify|fail|' "{LOG_FILE}" 2>/dev/null; then
 fi
 ```
 
-If `NEEDS_RETRO=true`, spawn `ticket-retro` agent. Then release the worktree (non-fatal) and write outcome:
+If `NEEDS_RETRO=true`, spawn `ticket-retro` agent. Then release the worktree (non-fatal):
 
 ```bash
 # Release worktree — non-fatal: a failed removal warns but never halts the pipeline.
@@ -1028,10 +1048,9 @@ if [ -n "${WORKTREE_ROOT:-}" ] && [ -f "$HOME/.claude/skills/lib/worktree.sh" ];
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|worktree-release|warn|release_worktree failed for {TICKET_ID}" >> "{LOG_FILE}"
 fi
 
-# Idempotency guard: skip if outcome already written
-if ! grep -q '|META|outcome|info|' "{LOG_FILE}"; then
-  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|outcome|info|completed: {outcome summary}" >> "{LOG_FILE}"
-fi
+# META|outcome is written by pipeline-finalize.sh (Step 0.65) — called at
+# every exit point (gate-stop, gate-held, exhaustion, router-error, STEP_6).
+# Tail-check idempotency guard prevents double-writing on crash-resume.
 ```
 
 ### Default case — Unknown RESUME_STEP
@@ -1039,6 +1058,7 @@ fi
 ```bash
 echo "Unknown RESUME_STEP: {RESUME_STEP}" >&2
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|router-error|fail|Unknown RESUME_STEP: {RESUME_STEP}" >> "{LOG_FILE}"
+bash ~/.claude/skills/lib/pipeline-finalize.sh "{TICKET_ID}" 1 "{LOG_FILE}" || true
 exit 1
 ```
 

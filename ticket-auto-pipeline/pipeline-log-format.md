@@ -220,6 +220,26 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|model|info|{\"phase\":\"IMPLEMENT\",\"
 
 The model value resolves from the `ANTHROPIC_MODEL` environment variable, falling back to `unknown` when unset or empty (G4: the "router context" branch documented earlier was never implemented). Downstream consumers SHALL treat `unknown` as a first-class identity, never an error. The same model value is also appended as `MODEL=<value>` to the spawn-meta file.
 
+### Post-mortem entries (Phase 3 RLVR)
+
+Written by `pipeline-postmortem.sh` at the end of every pipeline run (via the router's EXIT trap or fleet-controller's kill path). Provides end-of-run analysis: signal counts, exit path derivation, filed issue counts, and mislabeled-outcome detection.
+
+```bash
+# "started" marker — written before any analysis begins (idempotency anchor)
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|postmortem|info|{\"run_id\":\"CRE-123-2026-08-08T10:00:00Z\",\"status\":\"started\",\"exit_code\":1}" >> "$LOG_FILE"
+
+# Summary entry — written after analysis completes
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|postmortem|info|{\"run_id\":\"CRE-123-2026-08-08T10:00:00Z\",\"status\":\"completed\",\"exit_path\":\"gate-stop:EXEC_NO_ARTIFACT\",\"signals\":1,\"filed\":0,\"skipped_known\":0,\"deferred_summary\":1,\"mislabeled_outcome\":\"false\"}" >> "$LOG_FILE"
+```
+
+**Status values**: `started` (analysis in progress), `completed` (analysis finished), `clean` (no signals found, no filing needed), `skipped` (gh unavailable, analysis skipped).
+
+**Warn entries**: `skipped: gh unavailable` — written when `gh` CLI is not installed or not authenticated.
+
+**Consumers**: fleet-dashboard.sh (AUTO-RETRO column), fleet-feedback.sh (mislabel detection), Phase 4 reward shaping.
+
+**Fleet-kill ordering**: On fleet-killed pipelines, `META|postmortem` entries MAY appear after `META|outcome`. This is a sanctioned exception to rule 1: fleet-intervene.sh owns the outcome write on kill paths (outcome must be written by the kill path, not the postmortem script), and postmortem runs as a deferred epilogue.
+
 ### Planned/unplanned asymmetry
 
 Confidence-weighted verdict processing applies only to planned tickets. Consumers of `META|verifier-result` SHALL check for `META|from-planned|info|true` before applying confidence weighting. Unplanned tickets get the verdict but not confidence-weighted treatment.

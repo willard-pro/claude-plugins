@@ -75,6 +75,34 @@ fleet_stop_background() {
   touch "$watchdog_stop" 2>/dev/null || true
 }
 
+# ── fleet_postmortem ────────────────────────────────────────────────────────────
+# Run pipeline post-mortem analysis after fleet-kill (RLVR Phase 3).
+# Fail-soft: failures are logged but never block the kill path.
+# Gated behind FLEET_POSTMORTEM_ON_KILL (default false).
+# F05: passes LOG_FILE and HB_FILE so postmortem finds the correct logs
+# regardless of fleetd's cwd.
+# Usage: _fleet_postmortem <tid> <log_file> <hb_file>
+_fleet_postmortem() {
+  local tid="$1"
+  local log_file="$2"
+  local hb_file="$3"
+
+  if [ "${FLEET_POSTMORTEM_ON_KILL:-false}" != "true" ]; then
+    return 0
+  fi
+
+  local _pm_script
+  _pm_script="$HOME/.claude/skills/lib/pipeline-postmortem.sh"
+  if [ ! -f "$_pm_script" ]; then
+    _pm_script=$(find "$HOME/.claude/plugins/cache" -name pipeline-postmortem.sh -path "*/ticket-auto-pipeline/*" 2>/dev/null | sort | tail -1)
+  fi
+
+  if [ -n "$_pm_script" ] && [ -f "$_pm_script" ]; then
+    LOG_FILE="${log_file}" HB_FILE="${hb_file}" \
+      timeout 60 bash "$_pm_script" "$tid" --exit-code 1 2>&1 || true
+  fi
+}
+
 # ── fleet_kill_pipeline ──────────────────────────────────────────────────────────
 # Kill a pipeline with verified escalation:
 #   stop-files → grace → kill -0 → SIGTERM → grace → kill -0 → SIGKILL → re-verify
@@ -128,6 +156,7 @@ fleet_kill_pipeline() {
     _log_pipeline "$log_file" "META" "outcome" "info" "stopped: fleet-kill (stop-files only); ${reason}"
     export HB_LOG_FILE="${hb_file}"
     hb_decision "fleet-kill" "fired" "reason=${reason}"
+    _fleet_postmortem "$tid" "$log_file" "$hb_file"
     echo "fleet_kill_pipeline: killed ${tid} (stop-files only) — ${reason}"
     return 0
   fi
@@ -142,6 +171,7 @@ fleet_kill_pipeline() {
     _log_pipeline "$log_file" "META" "outcome" "info" "stopped: fleet-kill (no registry PID); ${reason}"
     export HB_LOG_FILE="${hb_file}"
     hb_decision "fleet-kill" "fired" "reason=${reason}"
+    _fleet_postmortem "$tid" "$log_file" "$hb_file"
     echo "fleet_kill_pipeline: killed ${tid} (no registry PID, stop-files only) — ${reason}"
     return 0
   fi
@@ -161,6 +191,7 @@ fleet_kill_pipeline() {
       fence_write "$tid" "$registry_gen" "$state_dir"
     fi
 
+    _fleet_postmortem "$tid" "$log_file" "$hb_file"
     echo "fleet_kill_pipeline: killed ${tid} (cooperative exit) — ${reason}"
     return 0
   fi
@@ -210,6 +241,7 @@ fleet_kill_pipeline() {
       fence_write "$tid" "$registry_gen" "$state_dir"
     fi
 
+    _fleet_postmortem "$tid" "$log_file" "$hb_file"
     echo "fleet_kill_pipeline: killed ${tid} (SIGTERM) — ${reason}"
     return 0
   fi
@@ -228,6 +260,7 @@ fleet_kill_pipeline() {
       fence_write "$tid" "$registry_gen" "$state_dir"
     fi
 
+    _fleet_postmortem "$tid" "$log_file" "$hb_file"
     echo "fleet_kill_pipeline: killed ${tid} (SIGKILL) — ${reason}"
     return 0
   fi
