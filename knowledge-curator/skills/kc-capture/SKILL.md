@@ -71,6 +71,7 @@ project: <repo-slug>
 created: <ISO timestamp>
 updated: <ISO timestamp>
 source: manual
+why: "<one-line rationale — why this matters, in <=15 words>"
 tags: [<comma-separated>]
 relates: []
 ---
@@ -81,6 +82,8 @@ reader who sees this item days or weeks later.>
 ```
 
 **Priority defaults**: p2 (important) unless clearly p1 (critical/blocking) or p3 (nice-to-have). Only mark p1 if this item genuinely demands attention soon.
+
+**`why` field**: A single line answering "why does this matter" — the rationale, not a restatement of the title. This is what the stack view (`/kc`) shows under each item so the item is self-explaining weeks later without opening the file. Examples: "blocks fleet-controller dispatch until branch model settles", "bash bug rate crossed the migration threshold". Required — if you can't state why in one line, the item may not be durable enough to capture yet.
 
 ## Step 4 — Relationship suggestion (one-shot, accept/reject)
 

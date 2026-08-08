@@ -40,6 +40,7 @@ project: test-repo
 created: 2026-07-01T12:00:00Z
 updated: 2026-07-01T12:00:00Z
 source: manual
+why: "needed for claim/complete test coverage"
 tags: [test]
 relates: []
 ---
@@ -60,6 +61,7 @@ project: test-repo
 created: 2026-07-01T12:00:00Z
 updated: 2026-07-01T12:00:00Z
 source: manual
+why: "needed for concurrency test coverage"
 tags: [test]
 relates: []
 ---
@@ -182,6 +184,30 @@ else
   fail "add rejects item with missing fields"
 fi
 
+# Missing why field specifically (all other required fields present)
+cat >"$TEST_DIR/no-why-item.md" <<'EOF'
+---
+id: KC-0004
+type: idea
+title: "No why item"
+status: active
+priority: p2
+project: test-repo
+created: 2026-07-06T18:00:00Z
+updated: 2026-07-06T18:00:00Z
+source: manual
+tags: [test]
+relates: []
+---
+# No why item
+EOF
+
+if ! "$KC_ITEM" add "$TEST_DIR/no-why-item.md" 2>/dev/null; then
+  pass "add rejects item missing why field"
+else
+  fail "add rejects item missing why field"
+fi
+
 # Valid item
 cat >"$TEST_DIR/good-item.md" <<'EOF'
 ---
@@ -194,6 +220,7 @@ project: test-repo
 created: 2026-07-06T18:00:00Z
 updated: 2026-07-06T18:00:00Z
 source: manual
+why: "valid item fixture for add-command test coverage"
 tags: [test]
 relates: []
 ---
@@ -468,6 +495,7 @@ project: test-repo
 created: 2026-07-06T18:00:00Z
 updated: 2026-07-06T18:00:00Z
 source: manual
+why: "duplicate-id fixture for add-command test coverage"
 tags: [test]
 relates: []
 ---

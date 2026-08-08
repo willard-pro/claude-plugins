@@ -169,7 +169,10 @@ now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     echo "|----|------|-------|--------|----------|---------|------|---------|"
 
     sort -t"${TAB}" -k1,1n -k2,2r "$ITEMS_TMP" | while IFS="${TAB}" read -r sort_key updated id type title status priority created source tags relates; do
-      relate_short=$(echo "$relates" | grep -oE 'KC-[0-9]{4}' | tr '\n' ' ' | sed 's/ *$//' || true)
+      # Preserve relation type alongside the target id (e.g. "depends:KC-0002"),
+      # not just the bare id — the type is what makes a relation legible later.
+      relate_short=$( (echo "$relates" | grep -oE 'rel: [a-zA-Z_]+ id: KC-[0-9]{4}' |
+        sed -E 's/rel: ([a-zA-Z_]+) id: (KC-[0-9]{4})/\1:\2/' | paste -sd, - | sed 's/,/, /g') || true)
       printf '| %s | %s | %s | %s | %s | %s | %s | %s |\n' \
         "$id" "$type" "$title" "$status" "$priority" "$updated" "$tags" "$relate_short"
     done
@@ -184,6 +187,7 @@ now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
   echo "- **Status**: active | in_progress | dormant | done | obsolete"
   echo "- **Priority**: p1 (critical) | p2 (important) | p3 (nice-to-have)"
   echo "- **Types**: idea | proposal | discovery | lesson | decision | reference | experiment"
+  echo "- **Relates format**: \`<relation>:<id>\` (e.g. \`depends:KC-NNNN\`)"
   echo ""
 } >"$INDEX_FILE"
 
