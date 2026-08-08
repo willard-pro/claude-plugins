@@ -16,6 +16,12 @@ if [ -f "$_RCC_LIB_DIR/heartbeat.sh" ]; then
 elif [ -f "$_RCC_SCRIPT_DIR/heartbeat.sh" ]; then
   source "$_RCC_SCRIPT_DIR/heartbeat.sh"
 fi
+# Phase 0 RLVR — verifier-result recording
+if [ -f "$_RCC_LIB_DIR/verifier-result.sh" ]; then
+  source "$_RCC_LIB_DIR/verifier-result.sh"
+elif [ -f "$_RCC_SCRIPT_DIR/verifier-result.sh" ]; then
+  source "$_RCC_SCRIPT_DIR/verifier-result.sh"
+fi
 
 usage() {
   cat >&2 <<'EOF'
@@ -138,6 +144,22 @@ _emit() {
   printf 'UNCHECKED_ITEMS=%q\n' "${UNCHECKED_ITEMS:-}"
   printf 'REASON=%s\n' "${REASON:-unknown}"
   printf 'ARTIFACT_TYPE=%s\n' "${ARTIFACT_TYPE:-}"
+
+  # Phase 0 RLVR — record verifier result after return-completeness check
+  local verdict="PASS" criteria_met=1 criteria_total=1
+  if [ "${RETURN_COMPLETENESS_STATUS:-error}" = "incomplete" ]; then
+    verdict="FAIL"
+    criteria_met=$((TOTAL_COUNT - UNCHECKED_COUNT))
+    criteria_total="$TOTAL_COUNT"
+    [ "$criteria_total" -eq 0 ] && criteria_total=1
+  elif [ "${RETURN_COMPLETENESS_STATUS:-error}" = "error" ]; then
+    verdict="BLOCK"
+    criteria_met=0
+  fi
+  write_verifier_result \
+    verifier=return_completeness verdict="$verdict" \
+    criteria_met="$criteria_met" criteria_total="$criteria_total" \
+    attempt=1 phase=IMPLEMENT 2>/dev/null || true
 }
 
 # ── Main dispatch (only when executed directly, not when sourced for testing) ─

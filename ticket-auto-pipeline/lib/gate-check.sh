@@ -10,7 +10,33 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}"
 source "$LIB_DIR/heartbeat.sh"
 source "$LIB_DIR/linear-api.sh"
+# F2: guard source of verifier-result.sh — it may not exist on fresh installs
+# (the runtime lib path ~/.claude/skills/lib/ is populated by install.sh/Makefile)
+if [ -f "$LIB_DIR/verifier-result.sh" ]; then
+  source "$LIB_DIR/verifier-result.sh"
+elif [ -f "$SCRIPT_DIR/verifier-result.sh" ]; then
+  source "$SCRIPT_DIR/verifier-result.sh"
+fi
 source "$LIB_DIR/notes-parse.sh"
+
+# ── Verifier-result helper (Phase 0 RLVR) ──────────────────────────────────────
+# Writes a META|verifier-result at gate decision time.
+# Wrapped for set -e safety; failure never alters gate behaviour.
+_write_gate_verdict() {
+  local verdict="$1" criteria_met="${2:-0}" criteria_total="${3:-1}" phase="${4:-GATE}"
+  # F8: PASS defaults to 1/1 criteria (not 0/1 — contradictory with score=1.0)
+  if [ "$verdict" = "PASS" ] && [ "$criteria_met" = "0" ] && [ "$criteria_total" = "1" ]; then
+    criteria_met=1
+  fi
+  write_verifier_result \
+    verifier=gate_check verdict="$verdict" \
+    criteria_met="$criteria_met" criteria_total="$criteria_total" \
+    attempt=1 phase="$phase" || true
+  # F13: 2>/dev/null removed — in a jq-less environment, silently dropping
+  # every gate verdict with zero trace is worse than noisy stderr warnings.
+  # write_verifier_result is fail-open (returns 0 on all error paths),
+  # so stderr is the only signal of a configuration problem.
+}
 source "$SCRIPT_DIR/planned-ticket-check.sh"
 source "$SCRIPT_DIR/template-select.sh"
 source "$SCRIPT_DIR/planned-ticket-body-check.sh"
@@ -469,6 +495,7 @@ _gate_entry() {
     if [ "$approved" = "true" ]; then
       _plog "$LOG_FILE" "GATE" "gate" "done" "auto-approved (complex + $autonomy + approved)"
       hb_gate "entry-gate" "done" "complex auto-approved" "{\"complexity\":\"$complexity\",\"autonomy\":\"$autonomy\",\"approved\":true}"
+      _write_gate_verdict PASS
       # Pass through to verify flow.sh's post-trigger assertion still holds
       return 0
     fi
@@ -492,6 +519,7 @@ _gate_entry() {
     if [ "$_live_state" = "Ready" ] && [ "$_live_approved" = "true" ]; then
       _plog "$LOG_FILE" "GATE" "gate" "done" "manual mode overridden: approved label + Ready state confirmed in Linear"
       hb_gate "entry-gate" "ok" "manual mode overridden by Linear approval" "{\"autonomy\":\"manual\",\"linear_state\":\"$_live_state\"}"
+      _write_gate_verdict PASS
       return 0
     fi
     _plog "$LOG_FILE" "GATE" "gate" "fail" "held: manual mode"
@@ -506,6 +534,7 @@ _gate_entry() {
     fi
     _plog "$LOG_FILE" "GATE" "gate" "done" "auto-approved"
     hb_gate "entry-gate" "ok" "auto-approved" "{\"complexity\":\"$complexity\",\"autonomy\":\"$autonomy\"}"
+    _write_gate_verdict PASS
     return 0
   fi
 
@@ -541,6 +570,7 @@ _gate_reapprove() {
   if [ "$state" = "Ready" ] && [ "$has_approved" = "true" ]; then
     _plog "$LOG_FILE" "GATE" "reapprove" "done" ""
     hb_gate "reapprove-gate" "ok" "re-approval confirmed" "{\"state\":\"$state\",\"prior_failures\":\"${verify_count:-0}\"}"
+    _write_gate_verdict PASS
     return 0
   fi
 
@@ -556,6 +586,7 @@ _gate_reapprove() {
 
   _plog "$LOG_FILE" "META" "gate-stop" "fail" "APPROVAL_REVOKED"
   hb_gate "reapprove-gate" "fail" "APPROVAL_REVOKED" "{\"reason\":\"$reason\"}"
+  _write_gate_verdict BLOCK
   return 2
 }
 

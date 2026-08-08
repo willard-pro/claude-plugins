@@ -424,3 +424,17 @@ flock -u "$lock_fd"  # release
 Non-blocking: skip on contention with `PRESCAN_STATUS=skipped-locked`.
 
 **Compatibility:** `exec {lock_fd}>` (auto-allocated fd) requires bash 4.1+. macOS shipped bash 3.2 until recently — if running on an older system, replace `{lock_fd}` with a static fd number (e.g., `exec 9>"$LOCK_FILE"` and `flock -n 9`).
+
+## RLVR Phase 0 — Verifier Result
+
+After the prescan scaffold verification completes, record a verifier-result:
+```bash
+source ~/.claude/skills/lib/verifier-result.sh
+# Verdict: PASS if all docs verified fresh, WARN if some stale but re-scanned,
+# BLOCK if scaffold verification found structural failures
+write_verifier_result \
+  verifier=prescan_verify verdict=<PASS|WARN|BLOCK> \
+  criteria_met=<repos-passed> criteria_total=<total-repos> \
+  phase=PRESCAN
+```
+Called after `prescan-verify.sh` emits its scaffold check results, before the final handoff.

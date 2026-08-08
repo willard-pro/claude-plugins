@@ -205,3 +205,14 @@ error={reason}
 ```bash
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|document|done|ai-context.md written ({N} patterns, {N} decisions)" >> "$LOG_FILE"
 ```
+
+**G1 — RLVR Phase 0**: After writing the document log entry, record a verifier-result for the quality check:
+```bash
+source ~/.claude/skills/lib/verifier-result.sh
+# Verdict: PASS if significance=non-trivial and all sections populated,
+# WARN if some sections sparse, FAIL if generation errored
+write_verifier_result \
+  verifier=ticket_document verdict=<PASS|WARN|FAIL> \
+  criteria_met=<sections-populated> criteria_total=<total-sections-expected> \
+  phase=MAINTENANCE
+```

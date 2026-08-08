@@ -322,6 +322,14 @@ If the merge fails (conflicts, branch protection, etc.), report it to the user �
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|merge-decision|done|{merged|skipped}" >> "$LOG_FILE"
 
+### Post-verdict: Record verifier result (Phase 0 RLVR)
+
+After writing the merge decision, record the verifier result (✅ → PASS, ⚠️ → WARN, ❌ → BLOCK):
+```bash
+source ~/.claude/skills/lib/verifier-result.sh
+write_verifier_result verifier=pr_review verdict=<PASS|WARN|BLOCK> criteria_met=<met> criteria_total=<total> attempt=1 phase=PR-REVIEW
+```
+
 ---
 
 ## Step 7 — Report to user

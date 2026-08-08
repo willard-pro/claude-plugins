@@ -222,7 +222,7 @@ ENVEOF
 # Usage: spawn_agent_pre PHASE=<phase> STEP=<step> LOG_FILE=<path> \
 #          HB_LOG_FILE=<path> CLAUDE_LOG_FILE=<path> TICKET_ID=<id> \
 #          SKILL=<skill> [FLAGS=<flags>] [INSTRUCTIONS=<instructions>] \
-#          [DESCRIPTION=<desc>] [FROM_STEP=<step>]
+#          [DESCRIPTION=<desc>] [FROM_STEP=<step>] [ATTEMPT=<int>]
 #
 # Prints to stdout:
 #   AGENT_PROMPT=<the full agent spawn prompt>
@@ -239,6 +239,11 @@ spawn_agent_pre() {
   local INSTRUCTIONS="Follow the skill exactly. Report only the final handoff output."
   local DESCRIPTION=""
   local FROM_STEP=""
+  # F10: Router-supplied attempt number for RL episode integrity.
+  # The router owns counters (VERIFY_ATTEMPTS, ITERATION, etc.) and
+  # injects the current attempt via this param. Agents read it from
+  # spawn-meta instead of guessing.
+  local ATTEMPT=""
 
   for arg in "$@"; do
     case "$arg" in
@@ -253,6 +258,7 @@ spawn_agent_pre() {
     INSTRUCTIONS=*) INSTRUCTIONS="${arg#INSTRUCTIONS=}" ;;
     DESCRIPTION=*) DESCRIPTION="${arg#DESCRIPTION=}" ;;
     FROM_STEP=*) FROM_STEP="${arg#FROM_STEP=}" ;;
+    ATTEMPT=*) ATTEMPT="${arg#ATTEMPT=}" ;;
     *)
       echo "spawn_agent_pre: unknown parameter '$arg'" >&2
       return 1
@@ -300,11 +306,15 @@ spawn_agent_pre() {
   # Normalize phase to uppercase for detect-resume.sh compatibility
   phase_upper=$(echo "$PHASE" | tr '[:lower:]' '[:upper:]')
 
-  # 1. Write waiting log entry (idempotent: tail-check — allows retries after fail)
+  # 1. Write waiting log entry (idempotent: tail-2 check — allows retries after fail).
+  # Model write (6b) appends after the waiting line, so pure tail -1 would miss
+  # the waiting entry and duplicate on back-to-back spawn_agent_pre calls.
+  # tail -3 would span into prior brackets (fail/done) and suppress retries.
+  # tail -2: covers [waiting, model] but not [waiting, model, fail/done].
   if [ -n "$LOG_FILE" ]; then
-    local last_line
-    last_line=$(tail -1 "$LOG_FILE" 2>/dev/null || true)
-    if echo "$last_line" | grep -q "|${PHASE}|${phase_lower}|waiting|"; then
+    local last_lines
+    last_lines=$(tail -2 "$LOG_FILE" 2>/dev/null || true)
+    if echo "$last_lines" | grep -q "|${PHASE}|${phase_lower}|waiting|"; then
       : # already written, skip (back-to-back duplicate)
     else
       local desc="${DESCRIPTION:-agent for ${TICKET_ID}}"
@@ -333,7 +343,10 @@ spawn_agent_pre() {
 
     # 3b. Create empty agent progress file — agents write single-line status
     # updates here. The watchdog reads it each cycle for agent-progress heartbeats.
-    : >"$(_worker_progress_file)"
+    local _prog_file
+    _prog_file="$(_worker_progress_file)"
+    mkdir -p "$(dirname "$_prog_file")" 2>/dev/null || true
+    : >"$_prog_file"
   fi
 
   # 4. Write cl_write handoff
@@ -363,6 +376,33 @@ CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE
 PINGER_PID=$PINGER_PID
 WATCHDOG_PID=$WATCHDOG_PID
 EOF
+
+  # F10: Append ATTEMPT to spawn-meta when router supplies it.
+  # The router owns per-phase attempt counters (VERIFY_ATTEMPTS, ITERATION, etc.)
+  # and injects the current attempt so agents don't guess.
+  if [ -n "$ATTEMPT" ]; then
+    echo "ATTEMPT=${ATTEMPT}" >>"$meta_file" || true
+  fi
+
+  # 6a. Append MODEL to spawn-meta file (Phase 0 RLVR — model identity recording)
+  local model="${ANTHROPIC_MODEL:-unknown}"
+  # F6: guard against unwritable /tmp or full disk — must not abort router spawn
+  echo "MODEL=${model}" >>"$meta_file" || true
+
+  # 6b. Write META|model|info to pipeline log (wrapped for set -e safety)
+  local model_json
+  model_json=$(printf '{"phase":"%s","model":"%s"}' "$PHASE" "$model")
+  # F7: validate JSON with jq before appending — unescaped newlines or quotes
+  # in ANTHROPIC_MODEL would inject forged log lines or produce malformed JSON
+  if echo "$model_json" | jq -e . >/dev/null 2>&1; then
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|model|info|${model_json}" >>"$LOG_FILE" || true
+  else
+    # Fallback: escape the model value via jq -Rs, then embed in valid JSON
+    local safe_model
+    safe_model=$(printf '%s' "$model" | jq -Rs 'rtrimstr("\n")' 2>/dev/null || echo "\"unknown\"")
+    model_json=$(printf '{"phase":"%s","model":%s}' "$PHASE" "$safe_model")
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|model|info|${model_json}" >>"$LOG_FILE" || true
+  fi
 
   return 0
 }
@@ -482,7 +522,10 @@ spawn_agent_post() {
     hb_pinger_stop "$pinger_stop"
 
     # Truncate agent progress file — agent has returned
-    : >"$(_worker_progress_file)"
+    local _prog_file_post
+    _prog_file_post="$(_worker_progress_file)"
+    mkdir -p "$(dirname "$_prog_file_post")" 2>/dev/null || true
+    : >"$_prog_file_post"
 
     # Reap background processes — wait for captured PIDs to prevent zombie accumulation.
     # Handles stale PIDs (process already exited): wait on dead PID returns immediately

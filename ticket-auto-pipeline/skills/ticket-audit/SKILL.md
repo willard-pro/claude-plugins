@@ -297,6 +297,14 @@ Combine findings from Steps 6 and 7 into a 2-3 sentence summary:
 
 ### Write recommendation checklist
 
+### Post-audit: Record verifier result (Phase 0 RLVR)
+
+After generating the audit recommendations, record the result:
+```bash
+source ~/.claude/skills/lib/verifier-result.sh
+write_verifier_result verifier=audit verdict=<PASS|WARN> criteria_met=<clean_count> criteria_total=<total_tickets> attempt=1 phase=APPRAISE
+```
+
 Write to `{AUDIT_DIR}/recommendations/{context}-{date}.md`:
 
 ```markdown

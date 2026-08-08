@@ -541,6 +541,16 @@ rm -f "$INPUT_FILE" /tmp/issue-body-*.md /tmp/evidence-*.md
 
 ## Completion
 
+**G1 — RLVR Phase 0**: Before reporting, record the retro verdict as a verifier-result:
+```bash
+source ~/.claude/skills/lib/verifier-result.sh
+write_verifier_result \
+  verifier=ticket_retro verdict=<PASS|WARN|FAIL> \
+  criteria_met=<fixes-found> criteria_total=<failure-classes> \
+  phase=MAINTENANCE
+```
+Choose verdict: PASS if no failure classes found, WARN if failures found but diffs generated, FAIL if diffs could not be generated for critical classes.
+
 Report to the user:
 
 ```

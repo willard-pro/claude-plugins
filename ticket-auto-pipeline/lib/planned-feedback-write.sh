@@ -221,30 +221,14 @@ planned_feedback_write() {
 
 # ── Helpers ─────────────────────────────────────────────────────────────────────
 
-# Compute actual confidence from outcome and corrections.
-# Smooth → 0.85+, Rough → 0.50–0.84, Hard → <0.50
-# Corrections subtract 0.05 each.
-_compute_actual_confidence() {
-  local outcome="$1" corrections="${2:-0}"
-  local base
-
-  case "$outcome" in
-  Smooth) base=90 ;;
-  Rough) base=65 ;;
-  Hard) base=40 ;;
-  *) base=70 ;; # Unknown outcome — neutral
-  esac
-
-  # Subtract corrections
-  local penalty=$((corrections * 5))
-  local score=$((base - penalty))
-
-  # Floor at 10
-  [ "$score" -lt 10 ] && score=10
-
-  # Convert to 0-1 scale (divide by 100)
-  echo "0.${score}"
-}
+# F9: _compute_actual_confidence extracted to lib/confidence.sh to prevent drift
+# between verifier-result.sh and planned-feedback-write.sh.
+_PFW_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$_PFW_DIR/confidence.sh" ]; then
+  source "$_PFW_DIR/confidence.sh"
+elif [ -f "${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}/confidence.sh" ]; then
+  source "${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}/confidence.sh"
+fi
 
 # Compute decision drift label from predicted vs actual confidence.
 # none: ≤0.10, minor: 0.11–0.25, major: >0.25

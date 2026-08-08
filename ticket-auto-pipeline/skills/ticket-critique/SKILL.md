@@ -303,6 +303,15 @@ Combine individual BLOCKER findings, content quality score, and cumulative WARNI
 
 A ticket can have WARNINGs and still be CLEAR if the score is >= 70 and WARNING count < 3.
 
+### Post-critique: Record verifier result (Phase 0 RLVR)
+
+After the critique verdict is written, record the result:
+```bash
+source ~/.claude/skills/lib/verifier-result.sh
+write_verifier_result verifier=critique verdict=<PASS|WARN|BLOCK> criteria_met=<N> criteria_total=10 attempt=1 phase=APPRAISE
+```
+Map: CLEAR → PASS, WARNINGS → WARN, BLOCKED → BLOCK. Score = criteria_met/10.
+
 ## Write results to notes.md
 
 Append a `## Readiness Critique` section:
