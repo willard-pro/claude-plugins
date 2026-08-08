@@ -16,22 +16,22 @@
 set -eo pipefail
 
 _compute_actual_confidence() {
-	local outcome="$1" corrections="${2:-0}"
-	local base
+  local outcome="$1" corrections="${2:-0}"
+  local base
 
-	case "$outcome" in
-	Smooth) base=90 ;;
-	Rough) base=65 ;;
-	Hard) base=40 ;;
-	*) base=70 ;; # Unknown outcome — neutral
-	esac
+  case "$outcome" in
+  Smooth) base=90 ;;
+  Rough) base=65 ;;
+  Hard) base=40 ;;
+  *) base=70 ;; # Unknown outcome — neutral
+  esac
 
-	local penalty=$((corrections * 5))
-	local score=$((base - penalty))
+  local penalty=$((corrections * 5))
+  local score=$((base - penalty))
 
-	# Floor at 10
-	[ "$score" -lt 10 ] && score=10
+  # Floor at 10
+  [ "$score" -lt 10 ] && score=10
 
-	# Convert to 0-1 scale (divide by 100)
-	echo "0.${score}"
+  # Convert to 0-1 scale (divide by 100)
+  echo "0.${score}"
 }
