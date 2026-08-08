@@ -198,6 +198,36 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|fleet-restart-marker|info|restart-inte
 
 `fleet-restart-marker` entries are scanned by the monitor loop — each one triggers an `ACTION:spawn-restart` directive. `fleet-intervention` and `fleet-restart` entries serve as audit trail; `fleet_can_restart` counts `fleet-restart` entries to enforce the `FLEET_MAX_RESTARTS` circuit breaker.
 
+### Verifier-result entries (Phase 0 RLVR)
+
+Uniform verifier output from all verifier sites. Written by `write_verifier_result` in `lib/verifier-result.sh`. The MSG is a JSON object with fixed fields:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|verifier-result|info|{\"verifier\":\"gate_check\",\"verdict\":\"PASS\",\"score\":1.0,\"criteria_met\":1,\"criteria_total\":1,\"attempt\":1,\"phase\":\"GATE\"}" >> "$LOG_FILE"
+```
+
+JSON fields: `verifier` (identifier, e.g. `unit_tests`, `playwright_uat`, `gate_check`), `verdict` (PASS/FAIL/WARN/BLOCK), `score` (0.0–1.0 on the `_compute_actual_confidence` scale), `criteria_met` (integer), `criteria_total` (integer), `attempt` (integer), `phase` (pipeline phase token).
+
+**MSG parsing rule** (applies to ALL consumers of verifier-result and model entries): join fields 5+ with awk (`awk -F'|' '{s=$5; for(i=6;i<=NF;i++) s=s"|"$i; print s}'`), NEVER `cut -f5`. JSON payloads contain `|` characters that `cut -f5` silently truncates.
+
+### Model identity entries (Phase 0 RLVR)
+
+Written by `spawn_agent_pre` at every agent spawn. Records which model executed each phase:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|model|info|{\"phase\":\"IMPLEMENT\",\"model\":\"claude-sonnet-4\"}" >> "$LOG_FILE"
+```
+
+The model value resolves from the `ANTHROPIC_MODEL` environment variable, falling back to `unknown` when unset or empty (G4: the "router context" branch documented earlier was never implemented). Downstream consumers SHALL treat `unknown` as a first-class identity, never an error. The same model value is also appended as `MODEL=<value>` to the spawn-meta file.
+
+### Planned/unplanned asymmetry
+
+Confidence-weighted verdict processing applies only to planned tickets. Consumers of `META|verifier-result` SHALL check for `META|from-planned|info|true` before applying confidence weighting. Unplanned tickets get the verdict but not confidence-weighted treatment.
+
+### RETURN_INCOMPLETE coexistence
+
+`META|gate-warn|RETURN_INCOMPLETE` and `META|verifier-result` may coexist in the same log. Downstream consumers SHALL read only the verifier-result line, never both, to avoid double-counting.
+
 ## Schema version header
 
 Every new pipeline log begins with a schema declaration as its first line:

@@ -575,6 +575,15 @@ fi
 
 This moves state → `Done` and removes `claimed` + `reviewed`.
 
+### Post-verdict: Record verifier result (Phase 0 RLVR)
+
+After the final verdict is written to the log, source and call `write_verifier_result`:
+```bash
+source ~/.claude/skills/lib/verifier-result.sh
+write_verifier_result verifier=playwright_uat verdict=<PASS|FAIL> criteria_met=<N> criteria_total=<M> attempt=<A> phase=VERIFY
+```
+On PASS: criteria_met=criteria_total=total passing criteria. On FAIL: criteria_met=passed count, criteria_total=total.
+
 ---
 
 ## Step 7 — Failure report

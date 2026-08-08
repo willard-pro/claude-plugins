@@ -384,6 +384,15 @@ fi
 # outcome-label-check.sh reads this dedicated entry — not the general
 # implement|done| line which may contain prose like "2 files changed".
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement-outcome|info|{Smooth|Rough|Hard}" >> {LOG_FILE}
+
+### Post-implement: Record verifier result (Phase 0 RLVR)
+
+After writing the implement-outcome, source and call write_verifier_result:
+```bash
+source ~/.claude/skills/lib/verifier-result.sh
+write_verifier_result verifier=implement_tests verdict=<PASS|FAIL> outcome=<Smooth|Rough|Hard> corrections=<N> phase=IMPLEMENT
+```
+Map test results: all pass → PASS, any fail → FAIL. Pass outcome and corrections count.
 ```
 
 This adds the outcome label while preserving all existing labels including `simple`/`complex`. The pairing of predicted complexity and actual outcome is preserved for training and history.

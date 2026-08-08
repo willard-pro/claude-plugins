@@ -105,6 +105,9 @@ If `FAST_PATH_ELIGIBLE=true`:
 
    ```bash
    [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|fast-path|done|Eligible — ${FAST_PATH_REASON}, Strategy=${FAST_PATH_STRATEGY}, Confidence=${FAST_PATH_CONFIDENCE}" >> "$LOG_FILE"
+   # G3: write from-planned marker so downstream consumers (Phase 1 inspector,
+   # trajectory) can confidence-weight verifier results from planned tickets
+   [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|from-planned|info|true" >> "$LOG_FILE"
    ```
 
 4. **Skip to Step 2.7 (Readiness critique).** The following steps are COVERED by fast-path:

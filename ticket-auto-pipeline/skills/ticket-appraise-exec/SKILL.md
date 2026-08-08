@@ -295,6 +295,13 @@ If no overlap: write nothing — proceed silently.
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|regression-guard|done|{CONFLICT|ADJACENT|SUPERSEDES|clear}" >> "$LOG_FILE"
 
+### Post regression-guard: Record verifier result (Phase 0 RLVR)
+```bash
+source ~/.claude/skills/lib/verifier-result.sh
+write_verifier_result verifier=regression_guard verdict=<PASS|WARN> criteria_met=<N> criteria_total=<M> attempt=1 phase=EXEC
+```
+Map: clear → PASS, CONFLICT → WARN, ADJACENT → WARN, SUPERSEDES → PASS.
+
 ---
 
 ## Step 3.6 — Adversarial Review (complex tickets only)
@@ -403,6 +410,12 @@ Fix the plan, then re-run /ticket-appraise-exec {TICKET-ID} --from-step create-a
 If WARNINGS or PASS, proceed to Step 4.
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|adversarial-review|done|{PASS|WARNINGS|BLOCKED}" >> "$LOG_FILE"
+
+### Post adversarial-review: Record verifier result (Phase 0 RLVR)
+```bash
+source ~/.claude/skills/lib/verifier-result.sh
+write_verifier_result verifier=adversarial_review verdict=<PASS|WARN|BLOCK> criteria_met=<N> criteria_total=<M> attempt=1 phase=EXEC
+```
 
 ---
 
