@@ -306,12 +306,14 @@ spawn_agent_pre() {
   # Normalize phase to uppercase for detect-resume.sh compatibility
   phase_upper=$(echo "$PHASE" | tr '[:lower:]' '[:upper:]')
 
-  # 1. Write waiting log entry (idempotent: tail-3 check — allows retries after fail).
+  # 1. Write waiting log entry (idempotent: tail-2 check — allows retries after fail).
   # Model write (6b) appends after the waiting line, so pure tail -1 would miss
   # the waiting entry and duplicate on back-to-back spawn_agent_pre calls.
+  # tail -3 would span into prior brackets (fail/done) and suppress retries.
+  # tail -2: covers [waiting, model] but not [waiting, model, fail/done].
   if [ -n "$LOG_FILE" ]; then
     local last_lines
-    last_lines=$(tail -3 "$LOG_FILE" 2>/dev/null || true)
+    last_lines=$(tail -2 "$LOG_FILE" 2>/dev/null || true)
     if echo "$last_lines" | grep -q "|${PHASE}|${phase_lower}|waiting|"; then
       : # already written, skip (back-to-back duplicate)
     else
@@ -568,9 +570,9 @@ spawn_agent_post() {
       # done line after the first for loop phases (pr-review iterate, verify
       # retry), where the same PHASE|STEP recurs across brackets. Matches the
       # pre-guard's tail-check semantics (see spawn_agent_pre above).
-      local last_lines
-      last_lines=$(tail -3 "${LOG_FILE}" 2>/dev/null || true)
-      if echo "$last_lines" | grep -q "|$phase_upper|${phase_lower:-unknown}|done|"; then
+      local last_line
+      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
+      if echo "$last_line" | grep -q "|$phase_upper|${phase_lower:-unknown}|done|"; then
         : # already written, skip (back-to-back duplicate)
       else
         _plog "$LOG_FILE" "$phase_upper" "${phase_lower:-unknown}" "done" "${done_msg}"
@@ -595,9 +597,9 @@ spawn_agent_post() {
     [ "$fail_action" = "warn-continue" ] && suffix=" — continuing"
 
     if [ -n "${LOG_FILE:-}" ]; then
-      local last_lines
-      last_lines=$(tail -3 "${LOG_FILE}" 2>/dev/null || true)
-      if echo "$last_lines" | grep -q "|$phase_upper|${phase_lower:-unknown}|fail|"; then
+      local last_line
+      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
+      if echo "$last_line" | grep -q "|$phase_upper|${phase_lower:-unknown}|fail|"; then
         : # already written, skip (back-to-back duplicate)
       else
         _plog "$LOG_FILE" "$phase_upper" "${phase_lower:-unknown}" "fail" "${fail_msg}${suffix}"
