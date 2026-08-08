@@ -306,11 +306,13 @@ spawn_agent_pre() {
   # Normalize phase to uppercase for detect-resume.sh compatibility
   phase_upper=$(echo "$PHASE" | tr '[:lower:]' '[:upper:]')
 
-  # 1. Write waiting log entry (idempotent: tail-check — allows retries after fail)
+  # 1. Write waiting log entry (idempotent: tail-3 check — allows retries after fail).
+  # Model write (6b) appends after the waiting line, so pure tail -1 would miss
+  # the waiting entry and duplicate on back-to-back spawn_agent_pre calls.
   if [ -n "$LOG_FILE" ]; then
-    local last_line
-    last_line=$(tail -1 "$LOG_FILE" 2>/dev/null || true)
-    if echo "$last_line" | grep -q "|${PHASE}|${phase_lower}|waiting|"; then
+    local last_lines
+    last_lines=$(tail -3 "$LOG_FILE" 2>/dev/null || true)
+    if echo "$last_lines" | grep -q "|${PHASE}|${phase_lower}|waiting|"; then
       : # already written, skip (back-to-back duplicate)
     else
       local desc="${DESCRIPTION:-agent for ${TICKET_ID}}"
@@ -339,7 +341,10 @@ spawn_agent_pre() {
 
     # 3b. Create empty agent progress file — agents write single-line status
     # updates here. The watchdog reads it each cycle for agent-progress heartbeats.
-    : >"$(_worker_progress_file)"
+    local _prog_file
+    _prog_file="$(_worker_progress_file)"
+    mkdir -p "$(dirname "$_prog_file")" 2>/dev/null || true
+    : >"$_prog_file"
   fi
 
   # 4. Write cl_write handoff
@@ -515,7 +520,10 @@ spawn_agent_post() {
     hb_pinger_stop "$pinger_stop"
 
     # Truncate agent progress file — agent has returned
-    : >"$(_worker_progress_file)"
+    local _prog_file_post
+    _prog_file_post="$(_worker_progress_file)"
+    mkdir -p "$(dirname "$_prog_file_post")" 2>/dev/null || true
+    : >"$_prog_file_post"
 
     # Reap background processes — wait for captured PIDs to prevent zombie accumulation.
     # Handles stale PIDs (process already exited): wait on dead PID returns immediately
@@ -560,9 +568,9 @@ spawn_agent_post() {
       # done line after the first for loop phases (pr-review iterate, verify
       # retry), where the same PHASE|STEP recurs across brackets. Matches the
       # pre-guard's tail-check semantics (see spawn_agent_pre above).
-      local last_line
-      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
-      if echo "$last_line" | grep -q "|$phase_upper|${phase_lower:-unknown}|done|"; then
+      local last_lines
+      last_lines=$(tail -3 "${LOG_FILE}" 2>/dev/null || true)
+      if echo "$last_lines" | grep -q "|$phase_upper|${phase_lower:-unknown}|done|"; then
         : # already written, skip (back-to-back duplicate)
       else
         _plog "$LOG_FILE" "$phase_upper" "${phase_lower:-unknown}" "done" "${done_msg}"
@@ -587,9 +595,9 @@ spawn_agent_post() {
     [ "$fail_action" = "warn-continue" ] && suffix=" — continuing"
 
     if [ -n "${LOG_FILE:-}" ]; then
-      local last_line
-      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
-      if echo "$last_line" | grep -q "|$phase_upper|${phase_lower:-unknown}|fail|"; then
+      local last_lines
+      last_lines=$(tail -3 "${LOG_FILE}" 2>/dev/null || true)
+      if echo "$last_lines" | grep -q "|$phase_upper|${phase_lower:-unknown}|fail|"; then
         : # already written, skip (back-to-back duplicate)
       else
         _plog "$LOG_FILE" "$phase_upper" "${phase_lower:-unknown}" "fail" "${fail_msg}${suffix}"
