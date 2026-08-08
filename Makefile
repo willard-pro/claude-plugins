@@ -17,6 +17,7 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-error-handler.sh
 	bash ticket-auto-pipeline/lib/tests/test-trajectory.sh
 	bash ticket-auto-pipeline/lib/tests/test-verifier-result.sh
+	bash ticket-auto-pipeline/lib/tests/test-pipeline-postmortem.sh
 	# fleet-controller tests
 	bash fleet-controller/lib/tests/test-fleet-detect.sh
 	bash fleet-controller/lib/tests/test-fleet-detect-new.sh

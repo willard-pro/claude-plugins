@@ -15,6 +15,27 @@ fi
 # Source fleet-detect.sh for fleet_detect_all if not already loaded
 _source_if_missing fleet_detect_all "$_DASH_DIR/fleet-detect.sh"
 
+# ── Post-mortem issue count ──────────────────────────────────────────────────────
+# Reads the pipeline log for the latest META|postmortem summary and returns the
+# count of filed issues. Returns 0 if no postmortem data found.
+# Usage: _postmortem_issue_count <tid> <workspace>
+_postmortem_issue_count() {
+  local tid="$1"
+  local workspace="${2:-./logs}"
+  local log_file="${workspace}/${tid}-pipeline.log"
+
+  if [ ! -f "$log_file" ]; then
+    echo "0"
+    return 0
+  fi
+
+  local _filed
+  _filed=$(grep '|META|postmortem|info|' "$log_file" 2>/dev/null | tail -1 |
+    awk -F'|' '{for(i=5;i<=NF;i++) printf "%s%s", $i, (i==NF?"":"|")}' |
+    jq -r '.filed // 0' 2>/dev/null || echo "0")
+  echo "${_filed:-0}"
+}
+
 # ── Severity info helper ─────────────────────────────────────────────────────────
 # Combined icon + label for a severity level.
 # When FLEET_AUTO_RESTART=false, severity 3 (RESTART) is capped to 2 (KILL).
@@ -77,8 +98,8 @@ fleet_render_dashboard_from_data() {
   fi
 
   # Header
-  printf "%-12s %-12s %-6s %-8s %s\n" "TICKET" "PHASE" "STALL" "SEV" "ANOMALIES"
-  printf "%-12s %-12s %-6s %-8s %s\n" "------" "------" "----" "--" "--------"
+  printf "%-12s %-12s %-6s %-8s %-9s %s\n" "TICKET" "PHASE" "STALL" "SEV" "AUTO-RETRO" "ANOMALIES"
+  printf "%-12s %-12s %-6s %-8s %-9s %s\n" "------" "------" "----" "--" "----------" "--------"
 
   # Sort by severity descending, then by ticket ID
   echo "$data" | jq -r '.pipelines | sort_by([-.severity, .tid]) | .[] | "\(.tid)|\(.phase)|\(.hb_age_secs)|\(.severity)|\(.anomalies)"' | while IFS='|' read -r tid phase hb_age sev anomalies; do
@@ -93,7 +114,12 @@ fleet_render_dashboard_from_data() {
       stall_str="$((hb_age / 60))m$((hb_age % 60))s"
     fi
 
-    printf "%-12s %-12s %-6s %s %s\n" "${tid}" "${phase}" "${stall_str}" "${icon}${label}" "${anomalies}"
+    # Post-mortem auto-retro open issue count
+    local pm_count
+    pm_count=$(_postmortem_issue_count "$tid" "$workspace")
+    local pm_str="${pm_count} open"
+
+    printf "%-12s %-12s %-6s %s %-9s %s\n" "${tid}" "${phase}" "${stall_str}" "${icon}${label}" "${pm_str}" "${anomalies}"
   done
 
   echo ""

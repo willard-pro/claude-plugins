@@ -20,9 +20,9 @@ append_correction() {
   fi
 
   case "$source" in
-  appraise | exec | prescan | wiki) ;;
+  appraise | exec | prescan | wiki | inspector | postmortem) ;;
   *)
-    echo "append_correction: source must be one of: appraise, exec, prescan, wiki" >&2
+    echo "append_correction: source must be one of: appraise, exec, prescan, wiki, inspector, postmortem" >&2
     return 2
     ;;
   esac

@@ -130,6 +130,7 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 | `FLEET_EPIC_BRANCH_SYNC` | true | Sync base changes into epic branch each dispatch cycle — safety mechanism against branch rot |
 | `FLEET_EPIC_AUTO_PR` | false | Automatically open integration PRs when all children Done — detection runs, actuation is opt-in |
 | `FLEET_MAX_CONCURRENT` | 3 | Max concurrent pipelines for dispatch |
+| `FLEET_POSTMORTEM_ON_KILL` | false | Run pipeline post-mortem analysis on fleet-killed pipelines (RLVR Phase 3). Opt-in — kills can be mass interventions; network cost and gh rate limits argue for per-kill opt-in. |
 | `FLEET_INSTANCE_ID` | default | Namespace for stop files and spawn queues |
 | `FLEET_SUMMARY_INTERVAL_CYCLES` | 10 | Cycles between forced fleet-summary heartbeat emissions |
 
