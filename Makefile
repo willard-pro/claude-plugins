@@ -18,6 +18,8 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-trajectory.sh
 	bash ticket-auto-pipeline/lib/tests/test-verifier-result.sh
 	bash ticket-auto-pipeline/lib/tests/test-pipeline-postmortem.sh
+	bash ticket-auto-pipeline/lib/tests/test-phase-inspector.sh
+	bash ticket-auto-pipeline/lib/tests/test-inspect-verifiers.sh
 	# fleet-controller tests
 	bash fleet-controller/lib/tests/test-fleet-detect.sh
 	bash fleet-controller/lib/tests/test-fleet-detect-new.sh

@@ -111,6 +111,7 @@ add_rule() {
 
 add_rule "Bash(source ${HOME}/.claude/skills/lib/spawn-helper.sh *)"
 add_rule "Bash(source ${HOME}/.claude/skills/lib/heartbeat.sh *)"
+add_rule "Bash(source ${HOME}/.claude/skills/lib/phase-inspector.sh *)"
 add_rule "Write(${PWD}/logs/**)"
 
 echo "ticket-auto-pipeline: added $ADDED permission rule(s) to $SETTINGS_FILE"
