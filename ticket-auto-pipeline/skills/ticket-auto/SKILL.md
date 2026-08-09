@@ -742,7 +742,7 @@ risk of timeout during initial context load.
 
 ```
 STEP=implement PHASE=IMPLEMENT SKILL=/ticket-implement FROM_STEP={IMPLEMENT_FROM}
-EXTRA_FLAGS="--from-auto"
+EXTRA_FLAGS="--from-auto --mode extract"
 DESCRIPTION="Implement the changes described in the artifact"
 INSTRUCTIONS="Use Serena for all code navigation. For openspec tickets: first read tasks.md in full, then proceed task by task. Pre-warm by reading all task descriptions before starting implementation."
 NEXT_PHASE=IMPLEMENT
@@ -809,7 +809,7 @@ fi
 
 ```
 STEP=phase-inspector-implement PHASE=IMPLEMENT SKILL=/guidance-extractor
-EXTRA_FLAGS="--from-auto"
+EXTRA_FLAGS="--from-auto --mode extract"
 DESCRIPTION="Phase inspector for IMPLEMENT"
 INSTRUCTIONS=<_pi_instructions contents>
 FAIL_ACTION=warn-continue
@@ -881,7 +881,7 @@ fi
 
 ```
 STEP=verify PHASE=VERIFY SKILL=/ticket-verify FROM_STEP={VERIFY_FROM}
-EXTRA_FLAGS="--from-auto"
+EXTRA_FLAGS="--from-auto --mode extract"
 DESCRIPTION="Run Playwright UAT verification"
 INSTRUCTIONS="Follow the skill exactly. Use per-criterion checkpointing: after each criterion passes, write VERIFY|checkpoint|done|criterion-{N}-pass to LOG_FILE. If the agent crashes, resume from the last checkpoint — do not restart from criterion 1."
 NEXT_PHASE=VERIFY
@@ -911,7 +911,7 @@ fi
 
 ```
 STEP=phase-inspector-verify PHASE=VERIFY SKILL=/guidance-extractor
-EXTRA_FLAGS="--from-auto"
+EXTRA_FLAGS="--from-auto --mode extract"
 DESCRIPTION="Phase inspector for VERIFY"
 INSTRUCTIONS=<_pi_instructions contents>
 FAIL_ACTION=warn-continue
@@ -980,7 +980,7 @@ fi
 
 ```
 STEP=phase-inspector-pr-review PHASE=PR-REVIEW SKILL=/guidance-extractor
-EXTRA_FLAGS="--from-auto"
+EXTRA_FLAGS="--from-auto --mode extract"
 DESCRIPTION="Phase inspector for PR-REVIEW"
 INSTRUCTIONS=<_pi_instructions contents>
 FAIL_ACTION=warn-continue
