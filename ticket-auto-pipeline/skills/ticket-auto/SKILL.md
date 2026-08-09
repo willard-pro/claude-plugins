@@ -282,6 +282,7 @@ After extraction, write the env file that sub-agents source for project context:
 
 ```bash
 source ~/.claude/skills/lib/spawn-helper.sh
+source ~/.claude/skills/lib/phase-inspector.sh
 spawn_write_env \
   TICKET_ID="{TICKET_ID}" \
   REPOS_ROOT="{REPOS_ROOT}" \
@@ -789,6 +790,36 @@ if [ -f "$_feedback_sh" ]; then
   source "$_feedback_sh"
   planned_feedback_write "{TICKET_ID}" "{LOG_FILE}" || true
 fi
+
+# Phase inspector (RLVR Phase 1): post-IMPLEMENT advisory inspection.
+# Assembles verifier context; if results exist, spawn guidance-extractor-agent.
+# Uses standard spawn pattern — assemble_inspector_context produces INSTRUCTIONS,
+# router spawns agent, then runs spawn_capture + spawn_agent_post.
+source ~/.claude/skills/lib/phase-inspector.sh 2>/dev/null || true
+_pi_out=$(assemble_inspector_context "IMPLEMENT" "{TICKET_ID}" "{LOG_FILE}") || true
+if echo "$_pi_out" | grep -q '^INSPECTOR_INSTRUCTIONS='; then
+  _pi_instructions=$(echo "$_pi_out" | awk '/^INSPECTOR_INSTRUCTIONS=/{sub(/^INSPECTOR_INSTRUCTIONS=/,""); found=1; print; next} found{print}')
+  echo "PHASE_INSPECTOR_READY=IMPLEMENT"
+else
+  echo "PHASE_INSPECTOR_READY=skip"
+fi
+```
+
+**If PHASE_INSPECTOR_READY is not "skip":** spawn the guidance-extractor-agent using the standard pattern:
+
+```
+STEP=phase-inspector-implement PHASE=IMPLEMENT SKILL=/guidance-extractor
+EXTRA_FLAGS="--from-auto"
+DESCRIPTION="Phase inspector for IMPLEMENT"
+INSTRUCTIONS=<_pi_instructions contents>
+FAIL_ACTION=warn-continue
+```
+
+After the agent returns:
+
+```bash
+spawn_capture TICKET_ID={TICKET-ID} PHASE=IMPLEMENT RESULT="$AGENT_RESULT"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done MSG="Phase inspector completed for IMPLEMENT" PHASE=IMPLEMENT STEP=phase-inspector-implement 2>/dev/null || true
 ```
 
 Then transition from Ready → Review via implement-complete:
@@ -864,6 +895,38 @@ depends on router prose, then re-run `detect-resume.sh` and check VERIFY_ATTEMPT
 spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done VERDICT=PASS MSG="<summary>" NEXT_PHASE=PR-REVIEW LOOP_BEARING=true  # on PASS
 spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail VERDICT=FAIL MSG="<summary>" LOOP_BEARING=true                         # on FAIL
 
+# Phase inspector (RLVR Phase 1): post-VERIFY advisory inspection.
+# Assembles verifier context; if results exist, spawn guidance-extractor-agent.
+# Non-blocking — runs before the retry/advance decision but does not affect it.
+_pi_out=$(assemble_inspector_context "VERIFY" "{TICKET_ID}" "{LOG_FILE}" "IMPLEMENT") || true
+if echo "$_pi_out" | grep -q '^INSPECTOR_INSTRUCTIONS='; then
+  _pi_instructions=$(echo "$_pi_out" | awk '/^INSPECTOR_INSTRUCTIONS=/{sub(/^INSPECTOR_INSTRUCTIONS=/,""); found=1; print; next} found{print}')
+  echo "PHASE_INSPECTOR_READY=VERIFY"
+else
+  echo "PHASE_INSPECTOR_READY=skip"
+fi
+```
+
+**If PHASE_INSPECTOR_READY is not "skip":** spawn the guidance-extractor-agent:
+
+```
+STEP=phase-inspector-verify PHASE=VERIFY SKILL=/guidance-extractor
+EXTRA_FLAGS="--from-auto"
+DESCRIPTION="Phase inspector for VERIFY"
+INSTRUCTIONS=<_pi_instructions contents>
+FAIL_ACTION=warn-continue
+```
+
+After the agent returns:
+
+```bash
+spawn_capture TICKET_ID={TICKET-ID} PHASE=VERIFY RESULT="$AGENT_RESULT"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done MSG="Phase inspector completed for VERIFY" PHASE=VERIFY STEP=phase-inspector-verify 2>/dev/null || true
+```
+
+Then evaluate the verify verdict for retry/advance:
+
+```bash
 # If VERIFY fail AND VERIFY_ATTEMPTS < 2 (hard cap) → loop to re-implement
 # Hard cap reduced from 3 to 2 — verify agent instability means retry #3
 # rarely succeeds and just wastes tokens on crash-loops.
@@ -899,6 +962,35 @@ counts on, so it must never be skipped or left as free-text prose:
 # ⚠️ → VERDICT=WARN
 # ❌ → VERDICT=BLOCK
 spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done VERDICT=<OK|WARN|BLOCK> MSG="Verdict: <emoji> <summary>" NEXT_PHASE=<next> LOOP_BEARING=true
+```
+
+**After spawn_agent_post**, run the phase inspector (RLVR Phase 1) — post-PR-REVIEW advisory inspection. Non-blocking:
+
+```bash
+_pi_out=$(assemble_inspector_context "PR-REVIEW" "{TICKET_ID}" "{LOG_FILE}" "IMPLEMENT VERIFY") || true
+if echo "$_pi_out" | grep -q '^INSPECTOR_INSTRUCTIONS='; then
+  _pi_instructions=$(echo "$_pi_out" | awk '/^INSPECTOR_INSTRUCTIONS=/{sub(/^INSPECTOR_INSTRUCTIONS=/,""); found=1; print; next} found{print}')
+  echo "PHASE_INSPECTOR_READY=PR-REVIEW"
+else
+  echo "PHASE_INSPECTOR_READY=skip"
+fi
+```
+
+**If PHASE_INSPECTOR_READY is not "skip":** spawn the guidance-extractor-agent:
+
+```
+STEP=phase-inspector-pr-review PHASE=PR-REVIEW SKILL=/guidance-extractor
+EXTRA_FLAGS="--from-auto"
+DESCRIPTION="Phase inspector for PR-REVIEW"
+INSTRUCTIONS=<_pi_instructions contents>
+FAIL_ACTION=warn-continue
+```
+
+After the agent returns:
+
+```bash
+spawn_capture TICKET_ID={TICKET-ID} PHASE=PR-REVIEW RESULT="$AGENT_RESULT"
+spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done MSG="Phase inspector completed for PR-REVIEW" PHASE=PR-REVIEW STEP=phase-inspector-pr-review 2>/dev/null || true
 ```
 
 Then evaluate verdict:

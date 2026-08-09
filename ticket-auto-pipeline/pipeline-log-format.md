@@ -220,6 +220,37 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|model|info|{\"phase\":\"IMPLEMENT\",\"
 
 The model value resolves from the `ANTHROPIC_MODEL` environment variable, falling back to `unknown` when unset or empty (G4: the "router context" branch documented earlier was never implemented). Downstream consumers SHALL treat `unknown` as a first-class identity, never an error. The same model value is also appended as `MODEL=<value>` to the spawn-meta file.
 
+### Phase-inspector entries (Phase 1 RLVR)
+
+Written by the `guidance-extractor-agent` after each pipeline phase completes (post-IMPLEMENT, post-VERIFY, post-PR-REVIEW). Provides per-phase inspection verdicts by reading `META|verifier-result` entries and checking for known defect patterns. The inspector is advisory only — it never gates the pipeline.
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|phase-inspector|info|{\"phase\":\"IMPLEMENT\",\"verdict\":\"PASS\",\"signals\":0,\"detail\":\"All verifiers clean: unit_tests PASS, return_completeness complete, gate_check PASS\",\"verifiers_consulted\":[\"unit_tests\",\"return_completeness\",\"gate_check\"],\"patterns\":[]}" >> "$LOG_FILE"
+```
+
+JSON fields:
+- `phase` (string): pipeline phase being inspected — IMPLEMENT, VERIFY, or PR-REVIEW
+- `verdict` (string): overall inspection verdict — PASS (0 patterns), WARN (≥1 WARN pattern, 0 FAIL), FAIL (≥1 FAIL pattern)
+- `signals` (integer): count of detected defect patterns
+- `detail` (string): human-readable summary, ≤ 200 characters
+- `verifiers_consulted` (array of strings): verifier IDs read for this inspection
+- `patterns` (array of objects): detected patterns, each with `pattern` (identifier), `severity` (warn/fail), `evidence` (specific citation)
+
+Detection patterns (Phase 1, all WARN severity):
+1. `flaky_tests` — PASS verifier + FAIL verifier on overlapping criteria
+2. `missing_requirement` — PR review OK but critique/audit found gaps
+3. `trivial_pass` — any verifier PASS with criteria_total ≤ 1
+4. `verdict_disagreement` — two verifiers in same phase disagree
+5. `incomplete_implementation` — PASS verifier + RETURN_INCOMPLETE gate-warn
+
+**MSG parsing rule**: use awk-join (`awk -F'|' '{s=$5; for(i=6;i<=NF;i++) s=s"|"$i; print s}'`), never `cut -f5`. JSON payloads contain `|` characters.
+
+**Advisory-only semantics**: phase-inspector verdicts are observational. They do not gate pipeline decisions. The router's retry/advance decisions use the phase agent's VERDICT, not the inspector verdict. Phase 2 (Guidance Store) may add optional gate integration after patterns are validated.
+
+**Skip entries**: when no verifier-result entries exist for a phase (e.g., Phase 0 not yet shipped), `phase-inspector.sh` writes a skip entry with `verdict: "WARN"`, `signals: 0`, `verifiers_consulted: []`, and skips agent spawn — zero token burn on empty phases.
+
+**Consumers**: Phase 2 Guidance Store (accumulate and classify), Phase 3 Post-Mortem (cross-run pattern analysis), Phase 4 Reward Shaping (prompt adjustment).
+
 ### Post-mortem entries (Phase 3 RLVR)
 
 Written by `pipeline-postmortem.sh` at the end of every pipeline run (via the router's EXIT trap or fleet-controller's kill path). Provides end-of-run analysis: signal counts, exit path derivation, filed issue counts, and mislabeled-outcome detection.

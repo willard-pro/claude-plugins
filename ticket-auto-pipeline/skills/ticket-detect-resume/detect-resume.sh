@@ -173,7 +173,10 @@ if [ -s "$LOG_FILE" ]; then
       _z_phase=$(echo "$_zline" | awk -F'|' '{print $2}')
       _z_step=$(echo "$_zline" | awk -F'|' '{print $3}')
 
-      # Skip non-phase lines (META, schema headers)
+      # Skip non-phase lines (META, schema headers) and inspector steps.
+      # Inspector spawns are advisory observers; their zombies must not
+      # trigger phase re-runs (RLVR Phase 1 — F4 fix).
+      case "$_z_step" in phase-inspector-*) continue ;; esac
       case "$_z_phase" in APPRAISE | REPRODUCE | EXEC | GATE | IMPLEMENT | VERIFY | PR-REVIEW | MAINTENANCE) ;; *) continue ;; esac
 
       _z_epoch=$(date -d "$_z_iso" +%s 2>/dev/null || echo 0)
@@ -248,6 +251,7 @@ if [ -s "$LOG_FILE" ]; then
 
   IMPLEMENT_FROM=$(grep '^[^|]*|IMPLEMENT|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
     grep -v '|IMPLEMENT|implement|done|' |
+    grep -v '|IMPLEMENT|phase-inspector-' |
     tail -1 | awk -F'|' '{print $3}' || true)
 
   MAINTENANCE_FROM=$(grep '^[^|]*|MAINTENANCE|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
@@ -261,11 +265,13 @@ if [ -s "$LOG_FILE" ]; then
 
   VERIFY_FROM=$(grep '^[^|]*|VERIFY|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
     grep -v '|VERIFY|verify|done|' |
+    grep -v '|VERIFY|phase-inspector-' |
     tail -1 | awk -F'|' '{print $3}' || true)
 
   PR_REVIEW_FROM=$(grep '^[^|]*|PR-REVIEW|[^|]*|done|' "$LOG_FILE" 2>/dev/null |
     grep -v '|PR-REVIEW|pr-review|done|' |
     grep -v '|PR-REVIEW|plan-iterate' |
+    grep -v '|PR-REVIEW|phase-inspector-' |
     tail -1 | awk -F'|' '{print $3}' || true)
 
   PR_ITERATE_FROM=$(grep '^[^|]*|PR-REVIEW|iterate-[^|]*|done|' "$LOG_FILE" 2>/dev/null |
