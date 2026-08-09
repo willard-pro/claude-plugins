@@ -67,6 +67,7 @@ test-lib:
 	# pipeline-integrity tests
 	bash ticket-auto-pipeline/lib/tests/test-return-completeness.sh
 	bash ticket-auto-pipeline/lib/tests/test-corrections.sh
+	bash ticket-auto-pipeline/lib/tests/test-guidance-store.sh
 	# retro GitHub issues tests
 	bash ticket-auto-pipeline/lib/tests/test-github-issues.sh
 	# shared-branch programme tests (Phases 1-3)

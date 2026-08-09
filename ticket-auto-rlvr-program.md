@@ -81,26 +81,27 @@ results, checks for patterns (e.g., "implement ran tests but they were flaky",
 
 ---
 
-## Phase 2 — Guidance Store ⚫ NOT YET IN OPENSPEC
+## Phase 2 — Guidance Store 🟢 IN OPENSPEC
 
-**Status**: Design discussed, not yet spec'd.
+**Status**: `openspec/changes/ticket-auto-phase-2-guidance-store/` —
+proposal, design, tasks, specs complete. Ready to implement.
 
 **What**: Accumulate inspector verdicts and post-mortem findings into a durable
-guidance store. The `guidance-extractor-agent` (shared with Phase 3) classifies
+guidance store. The `guidance-extractor-agent` (shared with Phase 1) classifies
 root causes (`skill-file | lib-script | agent-prompt | network-flake`) and
 updates a guidance file that skills can reference. CORRECTIONS blocks gain an
 `inspector` source.
 
 **Delivers**:
 - Guidance store at `~/.claude/state/ticket-auto/guidance/`
-- `guidance-extractor-agent` named agent type
-- `lib/corrections-parse.sh` source enum extended with `inspector`
+- `lib/guidance-store.sh` with `guidance_upsert`, `guidance_query`, `guidance_confirm`, `guidance_deprecate`, `guidance_stats`
+- `guidance-extractor-agent` Phase 2 extension (root cause classification + store writes)
 - Guidance confirm/deprecate lifecycle
 - Skill authors can query guidance before making decisions
 
 **Dependencies**: Phase 1 (reads inspector verdicts).
 
-**Openspec**: Not yet created.
+**Openspec**: `openspec/changes/ticket-auto-phase-2-guidance-store/`
 
 ---
 
@@ -160,8 +161,11 @@ Phase 0 (verifier-standardization)     ← IMPLEMENT NOW
 Phase 3 (pipeline-postmortem)          ← IMPLEMENT NOW (depends on 0/1/2
                                           for full function; ships
                                           warn-only until deps land)
-Phase 1 (phase-inspector)              ← SPEC & IMPLEMENT NEXT
-Phase 2 (guidance-store)               ← SPEC & IMPLEMENT AFTER 1
+Phase 1 (phase-inspector)              ← SHIPPED (merged to main)
+Phase 2 (guidance-store)               ← IMPLEMENT NOW
+Phase 3 (pipeline-postmortem)          ← SPEC COMPLETE (depends on 2
+                                          for full function; ships
+                                          warn-only until deps land)
 Phase 4 (reward-shaping)               ← DESIGN AFTER 0–3 SHIP
 ```
 
