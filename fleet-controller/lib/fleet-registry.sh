@@ -10,8 +10,8 @@
 
 _REGISTRY_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Source config for the canonical state-directory resolver
-if [ -f "$_REGISTRY_DIR/config.sh" ]; then
-  source "$_REGISTRY_DIR/config.sh"
+if [ -f "$_REGISTRY_DIR/fleet-config.sh" ]; then
+  source "$_REGISTRY_DIR/fleet-config.sh"
 fi
 
 # ── Run registry ────────────────────────────────────────────────────────────────

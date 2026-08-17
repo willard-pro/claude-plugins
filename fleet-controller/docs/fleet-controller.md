@@ -9,7 +9,7 @@ Parent orchestrator above ticket-planner and ticket-auto. Dispatches planned tic
 │              Fleet Controller                │
 │  ┌─────────┐ ┌──────────┐ ┌──────────────┐ │
 │  │ Detect  │→│Intervene │→│   Dispatch    │ │
-│  │ (11 eng)│ │(verified │ │(spawn queue + │ │
+│  │(12 eng) │ │(verified │ │(spawn queue + │ │
 │  │         │ │ escalate)│ │   flock)      │ │
 │  └─────────┘ └──────────┘ └──────────────┘ │
 │         ↑            ↓           ↓          │
@@ -48,7 +48,7 @@ Parent orchestrator above ticket-planner and ticket-auto. Dispatches planned tic
 
 **CLI bridge**: The `/fleet-controller` skill writes to `{state_dir}/kill-requests/{tid}.json`; fleetd processes requests and writes result files. No dual authority for process signalling.
 
-## Detection Engines (11 total)
+## Detection Engines (12 total)
 
 Each engine scores pipelines 0–3 (OBSERVE/WARN/KILL/KILL+RESTART) and returns structured JSON with anomalies. Detection is stateless — engines read pipeline/heartbeat logs on each cycle.
 
@@ -106,6 +106,12 @@ Each engine scores pipelines 0–3 (OBSERVE/WARN/KILL/KILL+RESTART) and returns 
 **What it catches**: `state:execution` epics with undispatched planned child tickets.
 **Severity**: 1 (WARN, undispatched tickets found).
 **Mechanism**: Linear query for epics with `state:execution`, cross-referenced against spawn queue for already-dispatched children.
+
+### 12. Epic Branch Ready (`detect_epic_branch_ready`)
+**What it catches**: Directive-carrying `state:execution` epics whose planned children are all Done — the epic is ready for its integration PR.
+**Severity**: 1 (WARN, ready epic with no integration PR yet).
+**Actuation**: When `FLEET_EPIC_AUTO_PR=true`, the detector calls `epic_branch_open_pr` once per repository the epic branch was created in (the same repo set dispatch's precondition iterates — shared `_fleet_repos_under_root` enumeration, not a re-guess). With actuation off (default) the finding is reported but no PR opens. Repeated cycles are no-ops via `epic_branch_open_pr`'s existing-PR idempotency check. The integration PR is **never auto-merged** under any configuration — merging stays a permanent human gate enforced by two independent guards.
+**Readiness**: Delegated to the canonical `epic_branch_children_done` helper — no independent inline evaluation. This codebase has exactly one implementation of "are all of this epic's children Done".
 
 ### Detection Output Format
 
@@ -274,6 +280,8 @@ All persistent state is workspace-relative — survives host reboot:
 | `{state_dir}/ticket-auto-{tid}-watchdog-stop` | Background watchdog shutdown | Empty sentinel file |
 | `{state_dir}/{tid}-run.json` | Worker ownership record | JSON: tid, pid, generation, started_at, reason |
 | `{state_dir}/{tid}-fence` | Generation fence marker | JSON: tid, fenced_generation, fenced_at |
+| `{state_dir}/{tid}-last-generation` | Preserved last-known generation (written before a stale registry entry is deleted) | JSON: generation |
+| `{state_dir}/fleet-{instance}-spawn-queue-dead-letter.jsonl` | Entries that could not be enqueued or restarted | JSONL, human-readable and replayable |
 
 `state_dir` resolves to `FLEET_STATE_DIR` (env var) or falls back to the workspace directory.
 
@@ -298,7 +306,7 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `FLEET_MAX_RESTARTS` | 2 | Max automatic restarts before giving up |
-| `FLEET_AUTO_RESTART` | false | Enable automatic restarts |
+| `FLEET_AUTO_RESTART` | true | Automatic restarts enabled by default; set `false` to opt out |
 | `FLEET_DRY_RUN` | false | Interventions logged, not executed |
 | `FLEET_MAX_CONCURRENT` | 3 | Max concurrent pipelines for dispatch |
 | `FLEET_KILL_GRACE_SECS` | 10 | Wait for cooperative shutdown before SIGTERM |
@@ -330,8 +338,69 @@ These are sourced from `~/.claude/skills/lib/` (synced by the ticket-auto-pipeli
 - **Fence markers**: Persist until cleared by a new generation spawn. Ensure zombie mutations are blocked even across controller restarts.
 - **Pipeline logs**: Fleet controller reads pipeline logs; it never writes to them except for intervention markers (`META|fleet-intervention`, `META|outcome`, `META|kill-unverified`).
 
+### fleetd's own restart is externally supervised
+
+fleetd does not supervise itself — a crashed daemon is restarted by the host's
+init system, not by fleetd. See [Process Supervision](process-supervision.md):
+a shipped systemd unit (`Restart=always`, bounded `RestartSec`) is the primary
+path, with a documented cron-watchdog fallback for non-systemd hosts. The
+existing single-instance `flock` guard composes with both: a supervisor
+restart racing a still-shutting-down instance fails the lock instead of
+running two supervisors.
+
+### Startup orphan reconciliation
+
+A worker that dies *while fleetd is down* leaves a stale run-registry entry
+that `scan_workers` deletes — without this step the ticket would be silently
+lost. Once at startup, immediately after worker adoption and before the first
+detection cycle, fleetd runs `fleet_reconcile_orphans` (bash,
+`fleet-controller/lib/fleet-reconcile.sh`):
+
+1. Glob every `{tid}-pipeline.log` in the state dir.
+2. Skip tickets with an adopted-live worker (the just-adopted set is passed
+   in) or an unconsumed spawn-queue entry.
+3. Classify the rest read-only (no Linear/gh calls): `done` (terminal outcome
+   or gate-stop), `gate-held` (waiting on the human), `incomplete` (mid-flight).
+4. Re-enqueue `incomplete` tickets via the shared `_fleet_queue_append`
+   (same flock/retry/dead-letter logic as normal dispatch). Entries carry no
+   branch/epic context — the re-spawned `ticket-auto` resolves or rehydrates
+   its own, exactly as for any other re-invocation.
+5. Restart counting and the cap use the **existing**
+   `fleet_can_restart`/`_count_restarts`/`FLEET_MAX_RESTARTS` mechanism — a
+   live-reap restart and an orphan restart are the same event type and share
+   one counter. At the cap the ticket is dead-lettered with reason
+   `orphaned-after-max-restarts` instead of looping forever.
+
+A reconciliation failure logs and continues — it never blocks daemon startup.
+
+### Generation continuity across stale-registry deletion
+
+Before `scan_registry` deletes a stale `{tid}-run.json` (dead PID or
+unverifiable ownership), it preserves the entry's `generation` to
+`{tid}-last-generation` in the same state dir. The next spawn computes
+`generation = max(fence's fenced_generation, registry generation,
+preserved last-known generation) + 1` — so a reconciled re-spawn continues the
+existing generation sequence instead of restarting at 1. This continuity
+holds on the fleetd path (fleetd computes the generation itself); the
+cron/monitor path trusts the queue entry's `generation` field, which writers
+always emit as 1 — a monitor-spawned restart of a fenced ticket runs at
+generation 1 and IS rejected by `fleet-generation-fencing`.
+
+### Dead-lettered tickets are surfaced
+
+Every dead-letter write (queue-contention-exhausted from the append path,
+orphaned-after-max-restarts from reconciliation) also emits a structured line
+— `fleet-dead-letter|tid=<TID>|reason=<REASON>` — and the reconciliation path
+writes a `META|dead-letter|warn|reason=<REASON>` marker to the ticket's own
+pipeline log. The dead-letter file is human-readable and replayable — feed
+its lines back through `_fleet_queue_append` to re-queue. No shipped
+consumer scans dead-letters yet (`/ticket-overseer` does not); wire one
+before assuming visibility. A permanently-stuck ticket no longer sits
+silently on disk, but it needs an operator (or a future dashboard) to see it.
+
 ## Related Docs
 
+- [Process Supervision](process-supervision.md) — systemd unit + cron watchdog fallback for keeping fleetd itself running
 - [Fleet-controller robustness critique](fleet-controller-robustness-critique-2026-07-15.md) — deep-dive analysis of pre-escalation gaps
 - [Root CLAUDE.md](../CLAUDE.md) — marketplace-wide conventions
 - [ticket-auto-pipeline CLAUDE.md](../ticket-auto-pipeline/CLAUDE.md) — pipeline-level guidance

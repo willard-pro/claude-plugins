@@ -16,8 +16,8 @@
 _MONITOR_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source dependencies with declare-guard pattern
-if [ -f "$_MONITOR_DIR/config.sh" ]; then
-  source "$_MONITOR_DIR/config.sh"
+if [ -f "$_MONITOR_DIR/fleet-config.sh" ]; then
+  source "$_MONITOR_DIR/fleet-config.sh"
 fi
 
 # Bridge: heartbeat.sh uses HB_LOG_FILE; fleet controller uses FLEET_HB_LOG_FILE.

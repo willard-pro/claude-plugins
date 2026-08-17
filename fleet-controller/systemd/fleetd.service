@@ -1,0 +1,73 @@
+# fleetd.service — systemd unit for the fleet-controller supervisor daemon.
+#
+# Every crash-recovery guarantee fleetd provides (worker adoption, generation
+# fencing, startup orphan reconciliation) only takes effect once fleetd's own
+# process comes back up. This unit makes that automatic.
+#
+# Install (system unit, as root):
+#   sudo cp fleet-controller/systemd/fleetd.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now fleetd
+#
+# Install (user unit, no root):
+#   mkdir -p ~/.config/systemd/user
+#   cp fleet-controller/systemd/fleetd.service ~/.config/systemd/user/
+#   # Adjust ExecStart below: user units cannot set User=/Group=.
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now fleetd
+#
+# Non-systemd hosts: see docs/process-supervision.md for the cron watchdog
+# fallback.
+#
+# A clean, intentional stop (systemctl stop fleetd) is NOT restarted —
+# Restart=always only fires on a non-clean exit.
+
+[Unit]
+Description=Fleet controller supervisor daemon (fleetd)
+Documentation=https://github.com/willard-pro/claude-plugins/tree/main/fleet-controller/docs
+After=network-online.target
+Wants=network-online.target
+# Rate-limit restarts: give up (until manual intervention) after 10 starts
+# within 10 minutes — a persistently-crashing fleetd should not loop forever.
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Service]
+Type=simple
+# Adjust these paths and the user to your deployment.
+# Module resolution: `python -m fleet-controller.fleetd` needs the
+# claude-plugins checkout (the parent of fleet-controller/) on sys.path.
+# Either install the package or set e.g.
+#   Environment=PYTHONPATH=/path/to/claude-plugins
+ExecStart=/usr/bin/python3 -m fleet-controller.fleetd
+WorkingDirectory=/path/to/tickets-workspace
+# Spawned workers inherit fleetd's environment, so Linear/GitHub tokens must
+# be present HERE for ticket-auto to run (e.g. via Environment= or an
+# EnvironmentFile=). Workers also see PrivateTmp below: point any /tmp-based
+# handshakes at FLEET_STATE_DIR instead.
+# CONTRACT: FLEET_STATE_DIR must be the directory that DIRECTLY CONTAINS the
+# per-ticket pipeline logs ({tid}-pipeline.log). Workers write their logs to
+# $PWD/logs (their cwd is WorkingDirectory above), so the state dir points at
+# the workspace's logs/ directory. Detection globs {FLEET_STATE_DIR}/*-pipeline.log
+# and startup reconciliation classifies exactly those files — pointing the
+# state dir at a subdirectory that holds no logs makes both silent no-ops.
+Environment=FLEET_STATE_DIR=/path/to/tickets-workspace/logs
+Environment=FLEETD_WORKSPACE=/path/to/tickets-workspace
+# Spawn workers only after the operator has reviewed fleetd in observe mode.
+# Environment=FLEETD_SPAWN_ENABLED=1
+User=CHANGE_ME
+Group=CHANGE_ME
+
+# Restart on any non-clean exit (crash, unhandled exception, OOM kill).
+Restart=always
+# Bounded restart delay — prevents a tight crashloop while still converging
+# on automatic recovery.
+RestartSec=5
+
+# Hardening that does not interfere with fleetd's job (process spawning,
+# file state, network health endpoint).
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

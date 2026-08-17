@@ -17,6 +17,42 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.26.0 · fleet-controller 0.4.0 (2026-08-17)
+
+`fleetd` process supervision hardening plus two epic-branch correctness fixes.
+
+- New: `fleet-reconcile.sh` — startup orphan reconciliation. Classifies every
+  ticket with a pipeline log using the log alone (no Linear/gh calls) and
+  re-enqueues tickets whose worker died while `fleetd` itself was down, so a
+  controller crash no longer silently ends the run.
+- New: `fleet-controller/systemd/fleetd.service` and
+  `docs/process-supervision.md` — `fleetd` is externally supervised
+  (`Restart=always`), not self-supervised; the existing single-instance
+  `flock` guard prevents a supervisor restart from racing a still-shutting-down
+  instance into a second concurrent supervisor.
+- Fix: generation continuity survives registry-entry deletion. A dead or
+  unverifiable worker's generation is preserved to `{tid}-last-generation`
+  before its registry entry is deleted, so a reconciled re-spawn continues the
+  generation sequence instead of restarting at 1.
+- Fix: the spawn-queue rewrite in `fleetd` is now serialized with the same
+  `flock` sidecar the bash dispatch-append path uses — a dispatch append
+  landing between `fleetd`'s read and its rename was previously silently lost.
+- Fix: `_fleet_scan_initiative_dispatch` now threads the workspace through to
+  dispatch, so auto-dispatched spawn-queue entries resolve to the durable path
+  `fleetd` actually reads instead of a CWD-relative one; also drops a stray
+  epic Linear-state filter that made `state:execution` epics invisible to
+  detection.
+- Fix (`ticket-auto-pipeline`): epic-directive branch resolution was setting
+  the base branch to the directive's `Base` instead of its `Branch` —
+  children were not actually branching off / PR'ing into the shared epic
+  branch as designed.
+- Fix (`ticket-auto-pipeline`): `epic_branch_children_done` counted
+  non-planned children toward the total, making epic readiness practically
+  unreachable on epics with any unplanned future work.
+- Chore: `fleet-controller/lib/config.sh` renamed to `fleet-config.sh` to
+  avoid a collision with the SessionStart lib-sync step; `ticket-auto-pipeline`
+  callers fall back to the old name for pre-rename installs.
+
 ## ticket-planner 0.4.0 · grill-me 0.1.0 (2026-07-26)
 
 New `grill-me` plugin — a pre-work readiness gate that assesses business ideas

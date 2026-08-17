@@ -8,8 +8,8 @@
 
 # Source config for threshold defaults
 _INTERVENE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$_INTERVENE_DIR/config.sh" ]; then
-  source "$_INTERVENE_DIR/config.sh"
+if [ -f "$_INTERVENE_DIR/fleet-config.sh" ]; then
+  source "$_INTERVENE_DIR/fleet-config.sh"
 fi
 # Source registry/fence helpers if available
 if [ -f "$_INTERVENE_DIR/fleet-registry.sh" ]; then
@@ -51,13 +51,19 @@ _flow_mutex_held() {
 
 # Count fleet-restart markers in pipeline log.
 # Args: log_file
+# Always emits exactly one integer line. `grep -c` prints "0" AND exits 1 on
+# zero matches, so `|| echo "0"` used to emit a second line ("0\n0") — which
+# then broke the `[ "$restarts" -ge "$cap" ]` integer comparison. `|| true`
+# keeps grep's own "0" as the single output; `${count:-0}` covers grep errors.
 _count_restarts() {
   local file="$1"
   if [ ! -f "$file" ]; then
     echo "0"
     return
   fi
-  grep -c '|META|fleet-restart|' "$file" 2>/dev/null || echo "0"
+  local count
+  count=$(grep -c '|META|fleet-restart|' "$file" 2>/dev/null || true)
+  echo "${count:-0}"
 }
 
 # ── fleet_stop_background ────────────────────────────────────────────────────────
@@ -278,17 +284,19 @@ fleet_kill_pipeline() {
 
 # ── fleet_can_restart ────────────────────────────────────────────────────────────
 # Check restart eligibility. Returns 0 if eligible, 1 with reason otherwise.
-# Checks: FLEET_AUTO_RESTART=true, restart count < FLEET_MAX_RESTARTS,
-#         no flow.sh mutex held.
+# Checks: FLEET_AUTO_RESTART != false (default-enabled — resume-on-failure is the
+#         feature; a recovery mechanism that is off by default is not a recovery
+#         mechanism), restart count < FLEET_MAX_RESTARTS, no flow.sh mutex held.
 # Usage: fleet_can_restart <tid> [workspace]
 fleet_can_restart() {
   local tid="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local log_file="${workspace}/${tid}-pipeline.log"
 
-  # Check auto-restart enabled
-  if [ "${FLEET_AUTO_RESTART:-false}" != "true" ]; then
-    echo "fleet_can_restart: auto-restart disabled (set FLEET_AUTO_RESTART=true to enable)"
+  # Check auto-restart enabled. Default is enabled; set FLEET_AUTO_RESTART=false
+  # to opt out.
+  if [ "${FLEET_AUTO_RESTART:-true}" != "true" ]; then
+    echo "fleet_can_restart: auto-restart disabled (set FLEET_AUTO_RESTART=false to disable)"
     return 1
   fi
 

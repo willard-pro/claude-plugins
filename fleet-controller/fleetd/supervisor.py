@@ -50,7 +50,7 @@ DEFAULT_PIDFILE = os.environ.get(
 
 
 def _resolve_state_dir():
-    """Resolve the fleet state directory using the same rule as config.sh."""
+    """Resolve the fleet state directory using the same rule as fleet-config.sh."""
     if FLEET_STATE_DIR:
         return Path(FLEET_STATE_DIR)
     return Path(DEFAULT_WORKSPACE)
@@ -174,6 +174,20 @@ class ChildTable:
 
 # ── Registry scanner ───────────────────────────────────────────────────────
 
+def _write_last_generation(state_dir, tid, generation):
+    """Persist the last-known generation for `tid` before its registry entry
+    is deleted as stale. One small JSON side record (`{tid}-last-generation`)
+    in the same state dir — the only durable trace of how many generations a
+    ticket has been through once the run-registry file is gone. Fail-soft:
+    a lost side record degrades to pre-change behavior, never blocks startup.
+    """
+    try:
+        last_file = Path(state_dir) / f'{tid}-last-generation'
+        last_file.write_text(json.dumps({'generation': generation}))
+    except OSError:
+        pass
+
+
 def scan_registry(state_dir, verify_ownership=False):
     """Read existing run-registry files and return parsed entries.
 
@@ -181,6 +195,11 @@ def scan_registry(state_dir, verify_ownership=False):
     When verify_ownership is True (crash recovery on startup), each entry's
     PID is checked not just for liveness but also for start-time consistency
     with the registry. Entries that fail ownership verification are excluded.
+
+    Stale entries (dead PID, or unverifiable ownership) are deleted after
+    their generation is preserved via `_write_last_generation`, so a later
+    re-spawn of the same ticket continues the generation sequence instead of
+    restarting at 1 — see `_resolve_generation`.
 
     Zero-PID entries (sentinel for "never actually spawned") are always skipped.
     """
@@ -196,6 +215,7 @@ def scan_registry(state_dir, verify_ownership=False):
             continue
 
         tid = data.get('tid', '')
+        generation = data.get('generation', 0)
         pid_str = data.get('pid', '0')
         try:
             pid = int(pid_str)
@@ -215,16 +235,20 @@ def scan_registry(state_dir, verify_ownership=False):
         if verify_ownership and alive:
             ownership_verified = _verify_pid_ownership(pid, started_at, tid)
             if not ownership_verified:
-                # PID ownership cannot be confirmed — clear the stale entry
-                # and do NOT adopt. Never signal an unverified PID.
+                # PID ownership cannot be confirmed — preserve the last-known
+                # generation, clear the stale entry, and do NOT adopt.
+                # Never signal an unverified PID.
+                _write_last_generation(state_dir, tid, generation)
                 try:
                     run_file.unlink()
                 except OSError:
                     pass
                 continue
 
-        # If the PID is dead, clear the stale registry entry.
+        # If the PID is dead, preserve the last-known generation and clear
+        # the stale registry entry.
         if not alive:
+            _write_last_generation(state_dir, tid, generation)
             try:
                 run_file.unlink()
             except OSError:
@@ -552,7 +576,7 @@ class DetectionCycle:
 
         # Build a bash invocation that sources the detection library then
         # calls fleet_detect_all. The script resolves its own dependencies
-        # (config.sh etc.) relative to its location on disk.
+        # (fleet-config.sh etc.) relative to its location on disk.
         bash_cmd = (
             f'source "{detect_script}" && fleet_detect_all "{ws}"'
         )
@@ -602,7 +626,7 @@ def _write_stop_files(tid, state_dir):
     """Touch the cooperative-stop files the worker's spawn-helper.sh watches.
 
     Idempotent — touching files that already exist is harmless.
-    Uses the same path conventions as config.sh's _fleet_stop_file().
+    Uses the same path conventions as fleet-config.sh's _fleet_stop_file().
     """
     state = Path(state_dir)
     for stop_type in ('pinger', 'watchdog'):
@@ -771,32 +795,48 @@ def _read_queue_entries(state_dir):
 
 
 def _remove_consumed_entries(state_dir, consumed_tids):
-    """Rewrite the spawn queue without entries whose TIDs are in `consumed_tids`."""
+    """Rewrite the spawn queue without entries whose TIDs are in `consumed_tids`.
+
+    The read-modify-rewrite is serialized against concurrent appends with the
+    SAME sidecar lock file the bash append path uses
+    (`{queue}.lock`, see _fleet_queue_append in fleet-dispatch.sh). Without the
+    lock, a dispatch append landing between fleetd's read and its rename was
+    silently lost — the ticket was never spawned and never dead-lettered.
+    The file is re-read under the lock so entries appended since the initial
+    (unlocked) scan are kept rather than clobbered.
+    """
     if not consumed_tids:
         return
     queue_file = Path(state_dir) / f'fleet-{FLEET_INSTANCE_ID}-spawn-queue.jsonl'
     if not queue_file.is_file():
         return
-    kept = []
-    with open(queue_file) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                kept.append(line)
-                continue
-            if entry.get('tid', '') not in consumed_tids:
-                kept.append(line)
 
-    if kept:
-        tmp = Path(str(queue_file) + '.tmp.' + str(os.getpid()))
-        tmp.write_text('\n'.join(kept) + '\n')
-        tmp.rename(queue_file)
-    else:
-        queue_file.unlink()
+    lock_file = Path(str(queue_file) + '.lock')
+    kept = []
+    with open(lock_file, 'a') as lock_fd:
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX)
+        try:
+            with open(queue_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except json.JSONDecodeError:
+                        kept.append(line)
+                        continue
+                    if entry.get('tid', '') not in consumed_tids:
+                        kept.append(line)
+
+            if kept:
+                tmp = Path(str(queue_file) + '.tmp.' + str(os.getpid()))
+                tmp.write_text('\n'.join(kept) + '\n')
+                tmp.rename(queue_file)
+            else:
+                queue_file.unlink()
+        finally:
+            fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
 
 
 # ── Worker spawning ────────────────────────────────────────────────────────
@@ -1030,6 +1070,9 @@ class Supervisor:
         )
         self._max_concurrent = max_concurrent if max_concurrent is not None else FLEET_MAX_CONCURRENT
         self._claude_bin = claude_bin or CLAUDE_BIN
+        self._fleet_lib_dir = (
+            Path(fleet_lib_dir) if fleet_lib_dir else Path(_DEFAULT_FLEET_LIB)
+        )
         self._lock = InstanceLock(self._pidfile)
         self._children = ChildTable()
         self._reaper = ChildReaper()
@@ -1089,6 +1132,80 @@ class Supervisor:
             )
         self._sync_health()
 
+    def reconcile_orphaned_tickets(self):
+        """One-shot startup reconciliation of tickets orphaned by a restart.
+
+        Runs the bash fleet-reconcile.sh once, immediately after worker
+        adoption: classifies every known ticket by its own pipeline log
+        (read-only, no Linear/gh calls) and re-enqueues `incomplete`
+        tickets that have no adopted-live worker and no existing queue
+        entry. The adopted-live TID set is passed in so the bash side can
+        exclude workers this instance just adopted.
+
+        A reconciliation failure logs and continues — it must never block
+        daemon startup (matching the sync-failure-does-not-block-dispatch
+        pattern).
+        """
+        reconcile_script = self._fleet_lib_dir / 'fleet-reconcile.sh'
+        if not reconcile_script.is_file():
+            print(
+                f"fleetd[{os.getpid()}]: reconcile script not found: "
+                f"{reconcile_script} — skipping orphan reconciliation"
+            )
+            return
+
+        queue_file = (
+            self._state_dir
+            / f'fleet-{FLEET_INSTANCE_ID}-spawn-queue.jsonl'
+        )
+        live_tids = ' '.join(sorted(
+            tid for tid, entry in self._children._workers.items()
+            if entry.get('adopted')
+        ))
+
+        # Values that originate outside this process (state-dir file names,
+        # adopted TIDs from run-registry entries, env-derived paths) are
+        # passed via environment variables, never interpolated into the bash
+        # source string — a malicious `{tid}-run.json` in a shared workspace
+        # must not become shell syntax.
+        bash_cmd = (
+            'source "$FLEET_RECONCILE_SCRIPT" && '
+            'fleet_reconcile_orphans "$FLEET_RECONCILE_STATE_DIR" '
+            '"$FLEET_RECONCILE_QUEUE_FILE" "$FLEET_RECONCILE_LIVE_TIDS"'
+        )
+        try:
+            proc = subprocess.run(
+                ['bash', '-c', bash_cmd],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env={
+                    **os.environ,
+                    'FLEET_PIPELINE_LOG_DIR': str(self._state_dir),
+                    'FLEET_RECONCILE_SCRIPT': str(reconcile_script),
+                    'FLEET_RECONCILE_STATE_DIR': str(self._state_dir),
+                    'FLEET_RECONCILE_QUEUE_FILE': str(queue_file),
+                    'FLEET_RECONCILE_LIVE_TIDS': live_tids,
+                },
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            print(
+                f"fleetd[{os.getpid()}]: orphan reconciliation failed "
+                f"({exc}) — continuing"
+            )
+            return
+
+        if proc.returncode != 0:
+            stderr_tail = proc.stderr.strip().split('\n')[-3:] if proc.stderr else []
+            print(
+                f"fleetd[{os.getpid()}]: orphan reconciliation exited "
+                f"{proc.returncode} — continuing: {stderr_tail}"
+            )
+            return
+
+        for line in (proc.stdout or '').strip().splitlines():
+            print(f"fleetd[{os.getpid()}]: {line}")
+
     def poll_adopted_workers(self):
         """Detect exits of adopted workers by liveness polling.
 
@@ -1101,6 +1218,13 @@ class Supervisor:
             if not entry.get('adopted'):
                 continue
             if not _pid_is_alive(entry['pid']):
+                # Preserve the last-known generation before deleting the
+                # registry entry — same continuity contract as scan_registry's
+                # stale-deletion path (see _write_last_generation). Without
+                # it, the generation sequence depends solely on the fence
+                # marker surviving.
+                _write_last_generation(self._state_dir, entry['tid'],
+                                       entry.get('generation', 0))
                 self._children.remove(entry['tid'])
                 # Clear the stale registry file too.
                 run_file = self._state_dir / f"{entry['tid']}-run.json"
@@ -1166,10 +1290,13 @@ class Supervisor:
     def _resolve_generation(self, tid):
         """Determine the generation for the next spawn of `tid`.
 
-        Reads any existing fence marker and run registry to find the highest
-        previously recorded generation, then increments. This ensures a
-        restarted worker is never fenced by its predecessor — its generation
-        is always strictly greater than the fenced generation.
+        Reads the fence marker, the run registry, and the preserved
+        last-known generation record (written by `scan_registry` when it
+        deleted a stale registry entry), taking the maximum, then increments.
+        This ensures a restarted worker is never fenced by its predecessor —
+        its generation is always strictly greater than any previously
+        recorded one, including generations whose registry file was deleted
+        as stale.
 
         Returns 1 if no prior record exists.
         """
@@ -1194,6 +1321,19 @@ class Supervisor:
                 prev = run_data.get('generation', 0)
                 if prev > prior_gen:
                     prior_gen = prev
+        except (json.JSONDecodeError, OSError):
+            pass
+
+        # Check the preserved last-known generation (written by
+        # scan_registry before deleting a stale registry entry — the record
+        # that survives a full registry-file deletion).
+        last_file = self._state_dir / f'{tid}-last-generation'
+        try:
+            if last_file.is_file():
+                last_data = json.loads(last_file.read_text())
+                last_gen = last_data.get('generation', 0)
+                if last_gen > prior_gen:
+                    prior_gen = last_gen
         except (json.JSONDecodeError, OSError):
             pass
 
@@ -1272,6 +1412,19 @@ class Supervisor:
             tid = entry['tid']
             # Don't double-spawn a ticket that's already running.
             if self._children.get(tid) is not None:
+                continue
+
+            # Skip entries whose ticket already reached a terminal state.
+            # The crash window between spawn_worker and queue removal leaves
+            # a stale entry behind; without this check a restart would
+            # re-spawn a finished pipeline.
+            log_file = self._state_dir / f'{tid}-pipeline.log'
+            if log_file.is_file() and '|META|outcome|' in log_file.read_text():
+                consumed.add(tid)
+                print(
+                    f"fleetd[{os.getpid()}]: skipping {tid} — pipeline log "
+                    f"already terminal, removing stale queue entry"
+                )
                 continue
 
             # The supervisor assigns generations, not the queue entry.
@@ -1400,6 +1553,10 @@ class Supervisor:
         )
         self.scan_workers()
         print(f"fleetd[{os.getpid()}]: observed {len(self._children)} worker(s) from registry")
+        # One-shot startup reconciliation: re-enqueue tickets orphaned by a
+        # controller crash (worker died while fleetd itself was down).
+        # Runs once, right after adoption, before the first detection cycle.
+        self.reconcile_orphaned_tickets()
 
         health = HealthServer(self._bind, self._port)
         health.start(self._health_state)

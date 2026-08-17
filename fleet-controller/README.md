@@ -41,7 +41,7 @@ One-shot health dashboard for every active pipeline. Read-only — it never inte
 **3. Start supervising, in dry-run mode:**
 
 ```bash
-FLEET_DRY_RUN=true FLEET_AUTO_RESTART=false
+FLEET_DRY_RUN=true
 ```
 
 ```
@@ -50,9 +50,9 @@ FLEET_DRY_RUN=true FLEET_AUTO_RESTART=false
 
 Detection runs and interventions are **logged but not executed**. Watch a few cycles and confirm the decisions it *would* make are ones you'd want.
 
-**4. Go live** once the dry-run output looks right — unset `FLEET_DRY_RUN`, and set `FLEET_AUTO_RESTART=true` only if you want automatic restarts.
+**4. Go live** once the dry-run output looks right — unset `FLEET_DRY_RUN`.
 
-> **Both safety switches are conservative by default.** `FLEET_DRY_RUN` is `false` (interventions execute), but `FLEET_AUTO_RESTART` is `false` — so out of the box the controller will kill a hung pipeline but never respawn one. Turn on auto-restart deliberately.
+> **`FLEET_DRY_RUN` is conservative by default** (`false` = interventions execute). Automatic restarts are **enabled by default** — resume-on-failure is the feature, not an opt-in — and are always capped at `FLEET_MAX_RESTARTS` (default 2). For kill-only operation, set `FLEET_AUTO_RESTART=false`.
 
 ## Modes
 
@@ -139,7 +139,7 @@ OBSERVE (0) → WARN (1) → KILL (2) → KILL+RESTART (3)
 - **OBSERVE** — record only
 - **WARN** — surface on the dashboard, nothing destructive
 - **KILL** — verified escalation: stop-file → grace → `SIGTERM` → grace → `SIGKILL` → re-verify. The pipeline log is finalized **only after the PID is confirmed gone**, then a generation fence marker blocks any superseded zombie from mutating Linear.
-- **KILL+RESTART** — kill, then spawn a fresh `/ticket-auto {ID} --auto`. Requires `FLEET_AUTO_RESTART=true` and restart count below `FLEET_MAX_RESTARTS`.
+- **KILL+RESTART** — kill, then spawn a fresh `/ticket-auto {ID} --auto`. Enabled unless `FLEET_AUTO_RESTART=false`, and restart count below `FLEET_MAX_RESTARTS`.
 
 ## fleetd — the supervisor daemon
 
@@ -166,7 +166,7 @@ Single-instance enforced via `fcntl.flock` on a pidfile. On restart it verifies 
 
 ## Configuration
 
-All settings live in `lib/config.sh` using `${VAR:-default}` — override via environment. Safe defaults; nothing is required.
+All settings live in `lib/fleet-config.sh` using `${VAR:-default}` — override via environment. Safe defaults; nothing is required.
 
 **Detection thresholds**
 
@@ -185,7 +185,7 @@ All settings live in `lib/config.sh` using `${VAR:-default}` — override via en
 | Variable | Default | Meaning |
 |----------|---------|---------|
 | `FLEET_DRY_RUN` | false | `true` = log interventions, don't execute |
-| `FLEET_AUTO_RESTART` | false | Must be `true` for automatic restarts |
+| `FLEET_AUTO_RESTART` | true | Automatic restarts enabled by default; set to `false` to opt out |
 | `FLEET_MAX_RESTARTS` | 2 | Restart attempts before giving up |
 | `FLEET_MAX_CONCURRENT` | 3 | Concurrent pipeline cap for dispatch |
 | `FLEET_KILL_GRACE_SECS` | 10 | Cooperative-shutdown wait before SIGTERM |

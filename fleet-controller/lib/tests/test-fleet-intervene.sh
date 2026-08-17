@@ -234,6 +234,38 @@ test_count_restarts_single_restart_counts_one() {
   [ "$rc" -eq 0 ]
 }
 
+# Regression: zero restart markers must emit exactly one "0" line. The old
+# `grep -c ... || echo "0"` pattern printed grep's "0" AND echoed another,
+# producing "0\n0" — which broke the integer comparison in fleet_can_restart.
+test_count_restarts_zero_matches_single_zero_line() {
+  local ws
+  ws=$(_setup_workspace)
+  (
+    cd "$ws"
+    mkdir -p logs
+    _make_pipeline_log "./logs" "CRE-48"
+    source "$LIB_DIR/fleet-intervene.sh"
+    local count lines
+    count=$(_count_restarts "./logs/CRE-48-pipeline.log")
+    lines=$(printf '%s\n' "$count" | wc -l)
+    [ "$count" = "0" ] && [ "$lines" = "1" ] || {
+      echo "expected exactly one '0' line, got [$count] (${lines} lines)" >&2
+      exit 1
+    }
+    # And the exact failure it caused: fleet_can_restart must make a clean
+    # integer comparison when the log has zero restarts.
+    export FLEET_AUTO_RESTART=true
+    export FLEET_MAX_RESTARTS=0
+    if fleet_can_restart "CRE-48" "./logs" 2>/dev/null; then
+      echo "expected cap reached at 0 restarts with MAX=0" >&2
+      exit 1
+    fi
+  )
+  local rc=$?
+  rm -rf "$ws"
+  [ "$rc" -eq 0 ]
+}
+
 test_fleet_can_restart_not_exhausted_after_single_restart() {
   local ws
   ws=$(_setup_workspace)
@@ -336,14 +368,14 @@ test_stop_file_path_equality_default() {
   (
     cd "$ws"
     mkdir -p logs
-    source "$LIB_DIR/config.sh"
+    source "$LIB_DIR/fleet-config.sh"
     source "$LIB_DIR/fleet-intervene.sh"
 
     # Simulate what fleet_stop_background does
     local fleet_pinger
     fleet_pinger=$(_fleet_stop_file "TEST-TID" "pinger" "./logs")
 
-    # Simulate what _worker_stop_file in spawn-helper.sh does when config.sh is
+    # Simulate what _worker_stop_file in spawn-helper.sh does when fleet-config.sh is
     # available — same constructor, same workspace default (FLEET_PIPELINE_LOG_DIR
     # unset → ./logs). After the spawn-helper fix, the FLEET_STATE_DIR guard is
     # removed, so both call sites resolve through _fleet_stop_file.
@@ -371,7 +403,7 @@ test_stop_file_path_equality_fleet_state_dir_set() {
   (
     cd "$ws"
     mkdir -p logs
-    source "$LIB_DIR/config.sh"
+    source "$LIB_DIR/fleet-config.sh"
     source "$LIB_DIR/fleet-intervene.sh"
 
     export FLEET_STATE_DIR="/var/fleet/state"
@@ -403,7 +435,7 @@ test_stop_file_path_equality_both_types() {
   (
     cd "$ws"
     mkdir -p logs
-    source "$LIB_DIR/config.sh"
+    source "$LIB_DIR/fleet-config.sh"
 
     for stype in pinger watchdog; do
       local fleet_path worker_path
@@ -433,6 +465,7 @@ for fn in \
   test_fleet_kill_pipeline_normal \
   test_fleet_kill_pipeline_dry_run_does_not_mutate \
   test_count_restarts_single_restart_counts_one \
+  test_count_restarts_zero_matches_single_zero_line \
   test_fleet_can_restart_not_exhausted_after_single_restart \
   test_fleet_restart_pipeline_no_restart_eligible_stdout \
   test_fleet_restart_pipeline_writes_restart_marker \

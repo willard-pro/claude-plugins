@@ -336,13 +336,24 @@ test_queue_entry_survives_simulated_restart() {
     fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1 >/dev/null
   " 2>/dev/null || true
 
-  if [ -f "$queue_file" ] && [ -s "$queue_file" ]; then
-    local count
-    count=$(wc -l <"$queue_file" 2>/dev/null || echo "0")
-    [[ "$count" -ge 1 ]] && return 0
-  fi
-  echo "queue file $queue_file empty or missing after dispatch"
-  return 1
+  # Real restart simulation: a FRESH shell re-sources the library (as a
+  # restarted daemon/monitor would) and re-reads the durable queue file.
+  # The entry must be intact AND recognized — that recognition is exactly
+  # what prevents re-investigation/re-dispatch after a restart.
+  bash -c "
+    FLEET_INSTANCE_ID=test-restart
+    source '$LIB_DIR/fleet-dispatch.sh'
+    _queue_has_ticket 'CRE-101' '$queue_file'
+  " 2>/dev/null || {
+    echo "queue entry lost or unrecognized after restart"
+    return 1
+  }
+  # Entry must still be valid JSON with the expected fields.
+  jq -e 'select(.tid == "CRE-101") | .generation >= 1' "$queue_file" >/dev/null 2>&1 || {
+    echo "queue entry not valid JSON with expected fields: $(cat "$queue_file")"
+    return 1
+  }
+  return 0
 }
 
 test_dead_letter_on_exhausted_retries() {
@@ -352,15 +363,126 @@ test_dead_letter_on_exhausted_retries() {
   local dead_letter_file="${queue_file%.jsonl}-dead-letter.jsonl"
   rm -f "$queue_file" "$dead_letter_file"
 
-  echo '{"tid":"CRE-999","reason":"test","restarts":3}' >>"$dead_letter_file"
+  # Force the real retry→dead-letter path (flock always fails), then verify
+  # the dead-letter file's claim: "human-readable and replayable" — the
+  # dead-lettered entry must be replayable into a working queue.
+  local output
+  output=$(bash -c "
+    flock() { return 1; }
+    export -f flock
+    FLEET_INSTANCE_ID=test-dl
+    FLEET_QUEUE_LOCK_TIMEOUT=1
+    FLEET_QUEUE_MAX_RETRIES=2
+    FLEET_QUEUE_RETRY_BACKOFF_SECS=1
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_with_children)
+    $(declare -f _mock_get_issue_blocker_in_progress)
+    _mock_epic_query_with_children
+    _mock_get_issue_blocker_in_progress
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
 
-  if [ -f "$dead_letter_file" ]; then
-    local content
-    content=$(cat "$dead_letter_file" 2>/dev/null)
-    [[ "$content" == *"CRE-999"* ]] && return 0
-  fi
-  echo "dead-letter file $dead_letter_file not created or missing entry"
-  return 1
+  echo "$output" | grep -qi "dead-letter" || {
+    echo "expected dead-letter message in output: $output" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  [ -f "$dead_letter_file" ] || {
+    echo "dead-letter file not created" >&2
+    rm -rf "$ws"
+    return 1
+  }
+
+  # Cross-verify: the dead-lettered entry matches what dispatch intended —
+  # a planned ticket from INIT-42, not arbitrary test content.
+  local entry
+  entry=$(grep -m1 '"tid":"CRE-101"' "$dead_letter_file" 2>/dev/null || true)
+  [ -n "$entry" ] || {
+    echo "dead-letter file missing the dispatched ticket: $(cat "$dead_letter_file")" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  echo "$entry" | jq -e '.tid == "CRE-101" and .dispatch_type == "initial"' >/dev/null 2>&1 || {
+    echo "dead-letter entry malformed: $entry" >&2
+    rm -rf "$ws"
+    return 1
+  }
+
+  # Replayability: feed the dead-lettered entry back through the shared
+  # append into a fresh queue — it must land as a valid queue entry.
+  local replay_queue="${ws}/fleet-test-dl-replay.jsonl"
+  rm -f "$replay_queue"
+  bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    _fleet_queue_append '$entry' '$replay_queue' 2>/dev/null
+  " || {
+    echo "dead-letter entry not replayable" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  jq -e '.tid == "CRE-101"' "$replay_queue" >/dev/null 2>&1 || {
+    echo "replayed entry not valid JSON in queue: $(cat "$replay_queue" 2>/dev/null)" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  rm -rf "$ws"
+  return 0
+}
+
+# ── Torn/corrupt queue line handling ────────────────────────────────────────────
+
+# A torn JSON line containing the tid substring must NOT make
+# _queue_has_ticket match — the old substring grep skipped the ticket forever
+# (fleetd also skips malformed lines, so nothing would ever spawn it).
+test_torn_queue_line_does_not_false_match() {
+  local ws
+  ws=$(_setup_workspace)
+  local queue_file="${ws}/fleet-test-torn-spawn-queue.jsonl"
+  rm -f "$queue_file"
+
+  # Torn append: tid present as substring, JSON unterminated.
+  echo '{"tid":"CRE-101","reason":"planned-dispatch from IN' >>"$queue_file"
+
+  bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    _queue_has_ticket 'CRE-101' '$queue_file'
+  " 2>/dev/null && {
+    echo "torn line false-matched _queue_has_ticket"
+    return 1
+  }
+  return 0
+}
+
+# End-to-end: dispatch with a pre-existing torn line must still enqueue the
+# ticket it names (valid JSON entry appears), instead of skipping it.
+test_dispatch_enqueues_despite_torn_queue_line() {
+  local ws
+  ws=$(_setup_workspace)
+  # Must match the queue file dispatch derives: $ws + instance id
+  # fleet-test-torn-dispatch → {ws}/fleet-test-torn-dispatch-spawn-queue.jsonl
+  local queue_file="${ws}/fleet-test-torn-dispatch-spawn-queue.jsonl"
+  rm -f "$queue_file"
+  echo '{"tid":"CRE-101","reason":"planned-dispatch from IN' >>"$queue_file"
+
+  bash -c "
+    FLEET_INSTANCE_ID=test-torn-dispatch
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_with_children)
+    $(declare -f _mock_get_issue_blocker_in_progress)
+    $(declare -f _mock_epic_no_directive)
+    _mock_epic_query_with_children
+    _mock_get_issue_blocker_in_progress
+    _mock_epic_no_directive
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1 >/dev/null
+  " 2>/dev/null || true
+
+  # Match only COMPLETE single-line JSON (the torn line also contains the
+  # tid substring — that is the point of the regression).
+  grep '"tid":"CRE-101".*}$' "$queue_file" | head -1 | jq -e '.tid == "CRE-101"' >/dev/null 2>&1 || {
+    echo "ticket CRE-101 not enqueued despite torn line: $(cat "$queue_file")" >&2
+    return 1
+  }
+  return 0
 }
 
 # Exercise the retry→dead-letter path by mocking flock to always fail.
@@ -370,7 +492,7 @@ test_contended_append_retried_then_dead_lettered() {
   local ws
   ws=$(_setup_workspace)
   # Derive paths via the constructor so they match what the dispatch uses
-  source "$LIB_DIR/config.sh"
+  source "$LIB_DIR/fleet-config.sh"
   local instance_id="test-contend"
   local queue_file dead_letter_file
   queue_file=$(FLEET_INSTANCE_ID="$instance_id" _fleet_queue_file "$ws")
@@ -403,6 +525,13 @@ test_contended_append_retried_then_dead_lettered() {
     return 1
   }
 
+  # Structured notification line: names the ticket and the reason.
+  echo "$output" | grep -q "fleet-dead-letter|tid=CRE-101|reason=queue-contention-exhausted" || {
+    echo "expected structured fleet-dead-letter line in output: $output" >&2
+    rm -rf "$ws"
+    return 1
+  }
+
   if [ -f "$dead_letter_file" ] && grep -q "CRE-101" "$dead_letter_file" 2>/dev/null; then
     rm -rf "$ws"
     return 0
@@ -417,7 +546,7 @@ test_contended_append_retried_then_dead_lettered() {
 test_contended_append_retried_and_lands() {
   local ws
   ws=$(_setup_workspace)
-  source "$LIB_DIR/config.sh"
+  source "$LIB_DIR/fleet-config.sh"
   local instance_id="test-retry-land"
   local queue_file
   queue_file=$(FLEET_INSTANCE_ID="$instance_id" _fleet_queue_file "$ws")
@@ -462,6 +591,242 @@ test_contended_append_retried_and_lands() {
   return 1
 }
 
+# ── Multi-repo epic branch precondition tests ──────────────────────────────────
+
+# Fixture: REPOS_ROOT containing two git repos and one non-git directory.
+_make_multi_repo_root() {
+  local root="$1"
+  mkdir -p "$root/repo-a" "$root/repo-b" "$root/not-a-repo"
+  git -C "$root/repo-a" init -q -b main 2>/dev/null || git -C "$root/repo-a" init -q
+  git -C "$root/repo-b" init -q -b main 2>/dev/null || git -C "$root/repo-b" init -q
+}
+
+# Mock ensure_epic_branch/epic_branch_sync: record the repo path passed for each
+# call, optionally failing for a repo whose path contains $_FAIL_REPO.
+# NOTE: _MOCK_CALLS_FILE is deliberately global (not local) — the mocks read it
+# at call time, after _mock_branch_ops has returned, so a local would be gone.
+_mock_branch_ops() {
+  _MOCK_CALLS_FILE="$1"
+  ensure_epic_branch() {
+    echo "ensure:$2" >>"$_MOCK_CALLS_FILE"
+    case "${_FAIL_REPO:-}" in
+    "") return 0 ;;
+    *) case "$2" in
+      *"$_FAIL_REPO"*) return 1 ;;
+      *) return 0 ;;
+      esac ;;
+    esac
+  }
+  epic_branch_sync() {
+    echo "sync:$2" >>"$_MOCK_CALLS_FILE"
+    case "${_SYNC_FAIL_REPO:-}" in
+    "") return 0 ;;
+    *) case "$2" in
+      *"$_SYNC_FAIL_REPO"*) return 1 ;;
+      *) return 0 ;;
+      esac ;;
+    esac
+  }
+}
+
+test_multi_repo_creation_covers_all_repos() {
+  local ws
+  ws=$(_setup_workspace)
+  local repos_root="${ws}/repos"
+  _make_multi_repo_root "$repos_root"
+  local calls_file="${ws}/calls.log"
+  rm -f "$calls_file"
+
+  local output
+  output=$(bash -c "
+    FLEET_DRY_RUN=true FLEET_INSTANCE_ID=test-mrepo
+    REPOS_ROOT='$repos_root'
+    $(declare -f _mock_branch_ops)
+    _mock_branch_ops '$calls_file'
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_with_children)
+    $(declare -f _mock_get_issue_blocker_in_progress)
+    _mock_epic_query_with_children
+    _mock_get_issue_blocker_in_progress
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  # Both git repos must be visited; the non-git directory must not.
+  grep -q "ensure:.*repo-a" "$calls_file" 2>/dev/null || {
+    echo "ensure_epic_branch not called for repo-a; calls: $(cat "$calls_file" 2>/dev/null)" >&2
+    return 1
+  }
+  grep -q "ensure:.*repo-b" "$calls_file" 2>/dev/null || {
+    echo "ensure_epic_branch not called for repo-b; calls: $(cat "$calls_file" 2>/dev/null)" >&2
+    return 1
+  }
+  grep -q "not-a-repo" "$calls_file" 2>/dev/null && {
+    echo "non-git directory visited: $(cat "$calls_file")" >&2
+    return 1
+  }
+  # Dispatch still proceeded (dry-run enqueue of CRE-101)
+  echo "$output" | grep -q "CRE-101" || {
+    echo "expected CRE-101 enqueue after multi-repo creation; output: $output" >&2
+    return 1
+  }
+  return 0
+}
+
+test_multi_repo_creation_failure_gate_stops() {
+  local ws
+  ws=$(_setup_workspace)
+  local repos_root="${ws}/repos"
+  _make_multi_repo_root "$repos_root"
+  local calls_file="${ws}/calls.log"
+  rm -f "$calls_file"
+
+  local output
+  output=$(bash -c "
+    FLEET_DRY_RUN=true FLEET_INSTANCE_ID=test-mrepo-fail
+    REPOS_ROOT='$repos_root'
+    _FAIL_REPO='repo-b'
+    $(declare -f _mock_branch_ops)
+    _mock_branch_ops '$calls_file'
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_with_children)
+    $(declare -f _mock_get_issue_blocker_in_progress)
+    _mock_epic_query_with_children
+    _mock_get_issue_blocker_in_progress
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  # Gate-stop must name the failing repo and enqueue nothing.
+  echo "$output" | grep -q "EPIC_BRANCH_UNAVAILABLE" || {
+    echo "expected EPIC_BRANCH_UNAVAILABLE; output: $output" >&2
+    return 1
+  }
+  echo "$output" | grep -q "repo-b" || {
+    echo "gate-stop must name failing repo; output: $output" >&2
+    return 1
+  }
+  echo "$output" | grep -q "would enqueue" && {
+    echo "children enqueued despite gate-stop; output: $output" >&2
+    return 1
+  }
+  return 0
+}
+
+test_multi_repo_sync_failure_does_not_block() {
+  local ws
+  ws=$(_setup_workspace)
+  local repos_root="${ws}/repos"
+  _make_multi_repo_root "$repos_root"
+  local calls_file="${ws}/calls.log"
+  rm -f "$calls_file"
+
+  local output
+  output=$(bash -c "
+    FLEET_DRY_RUN=true FLEET_INSTANCE_ID=test-mrepo-syncfail
+    REPOS_ROOT='$repos_root'
+    _SYNC_FAIL_REPO='repo-a'
+    $(declare -f _mock_branch_ops)
+    _mock_branch_ops '$calls_file'
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_with_children)
+    $(declare -f _mock_get_issue_blocker_in_progress)
+    _mock_epic_query_with_children
+    _mock_get_issue_blocker_in_progress
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  # Sync failure reported...
+  echo "$output" | grep -q "sync warning" || {
+    echo "expected sync warning; output: $output" >&2
+    return 1
+  }
+  # ...but sync still attempted for the remaining repo...
+  grep -q "sync:.*repo-b" "$calls_file" 2>/dev/null || {
+    echo "sync not attempted for repo-b after repo-a failure; calls: $(cat "$calls_file" 2>/dev/null)" >&2
+    return 1
+  }
+  # ...and ready children still enqueue.
+  echo "$output" | grep -q "CRE-101" || {
+    echo "expected CRE-101 enqueue despite sync failure; output: $output" >&2
+    return 1
+  }
+  return 0
+}
+
+# ── Priority ordering tests ─────────────────────────────────────────────────────
+
+# Mock epic with dispatchable children at given priorities. Prio values are
+# Linear's numeric priority: 1=Urgent, 2=High, 3=Medium, 4=Low, 0=No priority.
+_mock_epic_query_priorities() {
+  _fleet_linear_query() {
+    echo "$_PRIORITY_CHILDREN_JSON"
+  }
+}
+
+# Extract the enqueue order from dry-run output as space-separated TIDs.
+_dispatch_order() {
+  echo "$1" | grep -o '"tid":"[A-Z]*-[A-Z0-9]*"' | sed 's/"tid":"//;s/"//' | tr '\n' ' ' | sed 's/ $//'
+}
+
+_test_dispatch_order() {
+  local name="$1"
+  local children_json="$2"
+  local expected="$3"
+  local max_concurrent="${4:-3}"
+  local ws
+  ws=$(_setup_workspace)
+
+  local output
+  output=$(bash -c "
+    FLEET_DRY_RUN=true FLEET_INSTANCE_ID=test-prio-${name}
+    FLEET_MAX_CONCURRENT=${max_concurrent}
+    source '$LIB_DIR/fleet-dispatch.sh'
+    _PRIORITY_CHILDREN_JSON='$children_json'
+    $(declare -f _mock_epic_query_priorities _mock_epic_no_directive)
+    _mock_epic_query_priorities
+    _mock_epic_no_directive
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  local order
+  order=$(_dispatch_order "$output")
+  [ "$order" = "$expected" ] || {
+    echo "expected order [$expected], got [$order]; output: $output" >&2
+    return 1
+  }
+  return 0
+}
+
+test_priority_urgent_before_low() {
+  local children
+  children='{"data":{"issue":{"identifier":"INIT-42","labels":{"nodes":[{"name":"state:execution"}]},"children":{"nodes":[
+    {"identifier":"CRE-LOW","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"}]},"priority":4},
+    {"identifier":"CRE-URG","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"}]},"priority":1}
+  ]}}}}'
+  _test_dispatch_order "urglow" "$children" "CRE-URG CRE-LOW"
+}
+
+test_priority_no_priority_sorts_last_not_first() {
+  local children
+  children='{"data":{"issue":{"identifier":"INIT-42","labels":{"nodes":[{"name":"state:execution"}]},"children":{"nodes":[
+    {"identifier":"CRE-NONE","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"}]},"priority":0},
+    {"identifier":"CRE-LOW","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"}]},"priority":4},
+    {"identifier":"CRE-URG","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"}]},"priority":1}
+  ]}}}}'
+  _test_dispatch_order "nonelast" "$children" "CRE-URG CRE-LOW CRE-NONE"
+}
+
+test_priority_all_five_levels_full_order() {
+  local children
+  children='{"data":{"issue":{"identifier":"INIT-42","labels":{"nodes":[{"name":"state:execution"}]},"children":{"nodes":[
+    {"identifier":"CRE-LOW","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"}]},"priority":4},
+    {"identifier":"CRE-NONE","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"}]},"priority":0},
+    {"identifier":"CRE-HIGH","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"}]},"priority":2},
+    {"identifier":"CRE-URG","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"}]},"priority":1},
+    {"identifier":"CRE-MED","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"}]},"priority":3}
+  ]}}}}'
+  _test_dispatch_order "fivelevels" "$children" "CRE-URG CRE-HIGH CRE-MED CRE-LOW CRE-NONE" 5
+}
+
 # ── Run all tests ────────────────────────────────────────────────────────────────
 
 _run "dispatch_no_linear_api" test_dispatch_no_linear_api
@@ -478,6 +843,14 @@ _run "queue_entry_survives_restart" test_queue_entry_survives_simulated_restart
 _run "dead_letter_on_exhausted_retries" test_dead_letter_on_exhausted_retries
 _run "contended_append_retried_then_dead_lettered" test_contended_append_retried_then_dead_lettered
 _run "contended_append_retried_and_lands" test_contended_append_retried_and_lands
+_run "torn_queue_line_no_false_match" test_torn_queue_line_does_not_false_match
+_run "dispatch_enqueues_despite_torn_queue_line" test_dispatch_enqueues_despite_torn_queue_line
+_run "multi_repo_creation_covers_all_repos" test_multi_repo_creation_covers_all_repos
+_run "multi_repo_creation_failure_gate_stops" test_multi_repo_creation_failure_gate_stops
+_run "multi_repo_sync_failure_does_not_block" test_multi_repo_sync_failure_does_not_block
+_run "priority_urgent_before_low" test_priority_urgent_before_low
+_run "priority_no_priority_sorts_last" test_priority_no_priority_sorts_last_not_first
+_run "priority_all_five_levels_order" test_priority_all_five_levels_full_order
 
 echo ""
 echo "=== Results ==="

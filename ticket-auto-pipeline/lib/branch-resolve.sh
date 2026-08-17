@@ -6,7 +6,7 @@
 #
 # Precedence chain (first match wins):
 #   1. --branch flag               (BRANCH_SOURCE=flag)
-#   2. Parent epic branch directive (BRANCH_SOURCE=directive)
+#   2. Parent epic branch directive (BRANCH_SOURCE=epic-directive)
 #   3. config.sh BASE_BRANCH        (BRANCH_SOURCE=default)
 #
 # Dependencies: config.sh, linear-api.sh, branch-directive-check.sh, jq
@@ -126,9 +126,9 @@ resolve_branch_context() {
       parsed_base=$(echo "$directive_output" | sed -n "s/^BRANCH_DIRECTIVE_BASE='\\(.*\\)'$/\\1/p")
 
       if [ -n "$parsed_branch" ] && [ -n "$parsed_base" ]; then
-        base_branch="$parsed_base"
+        base_branch="$parsed_branch"
         integration_branch="$parsed_branch"
-        branch_source="directive"
+        branch_source="epic-directive"
       fi
     fi
   fi

@@ -190,10 +190,16 @@ TEAM_JSON=$(get_team "$TEAM_ID")
 # generations. Missing generation token on a fenced ticket → fail-closed.
 FENCE_ENFORCE="${FLEET_FENCE_ENFORCE:-true}"
 if [ "$FENCE_ENFORCE" = "true" ]; then
-  # Discover and source config.sh for _fleet_fence_file constructor.
+  # Discover and source fleet-config.sh (renamed from config.sh to avoid the
+  # SessionStart lib-sync collision) for _fleet_fence_file constructor.
   # Look relative to this script (monorepo), then installed plugin paths.
+  # The old config.sh name is kept as a fallback for installed pre-rename
+  # fleet-controller versions.
   _flow_config_sh=""
   for _cand in \
+    "$SCRIPT_DIR/../../../fleet-controller/lib/fleet-config.sh" \
+    "$HOME/.claude/skills/fleet-controller/lib/fleet-config.sh" \
+    "$HOME/.claude/plugins/fleet-controller/lib/fleet-config.sh" \
     "$SCRIPT_DIR/../../../fleet-controller/lib/config.sh" \
     "$HOME/.claude/skills/fleet-controller/lib/config.sh" \
     "$HOME/.claude/plugins/fleet-controller/lib/config.sh"; do
