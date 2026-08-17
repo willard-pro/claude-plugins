@@ -296,6 +296,7 @@ test_readiness_matches_children_done_helper() {
   epic_branch_children_done "INIT-42" "$ONE_IN_PROGRESS_CHILDREN" 2>/dev/null || helper_notready=$?
 
   ready_out=$(bash -c "
+    get_issue() { echo '{\"data\":{\"issue\":{\"identifier\":\"STUB\",\"description\":\"\"}}}'; }
     _FIXTURE_EPICS_JSON='$(_make_epics_json "$ALL_DONE_CHILDREN_ARR" "$VALID_DIRECTIVE")'
     $(declare -f _mock_linear_curl)
     _mock_linear_curl
@@ -305,6 +306,7 @@ test_readiness_matches_children_done_helper() {
   " 2>/dev/null || true)
 
   notready_out=$(bash -c "
+    get_issue() { echo '{\"data\":{\"issue\":{\"identifier\":\"STUB\",\"description\":\"\"}}}'; }
     _FIXTURE_EPICS_JSON='$(_make_epics_json "$ONE_IN_PROGRESS_CHILDREN_ARR" "$VALID_DIRECTIVE")'
     $(declare -f _mock_linear_curl)
     _mock_linear_curl
