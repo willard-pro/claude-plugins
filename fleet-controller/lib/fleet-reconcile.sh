@@ -168,6 +168,7 @@ fleet_reconcile_orphans() {
   local state_dir="$1"
   local queue_file="$2"
   local live_tids="${3:-}"
+  local pinned_tids="${4:-}"
 
   [ -d "$state_dir" ] || return 0
 
@@ -180,6 +181,16 @@ fleet_reconcile_orphans() {
     # Skip tickets whose worker was adopted live by scan_workers.
     case " $live_tids " in
     *" $tid "*) continue ;;
+    esac
+
+    # Skip tickets pinned by any stop-file — reconciliation has no epic
+    # context of its own, so the pinned tid list is what makes a stop
+    # survive a fleetd restart.
+    case " $pinned_tids " in
+    *" $tid "*)
+      echo "fleet_reconcile: ${tid} — pinned by stop-file, left alone"
+      continue
+      ;;
     esac
 
     # Skip tickets whose worker process is still alive — see _fleet_tid_live.

@@ -45,6 +45,19 @@ FLEET_EPIC_BRANCH_SYNC="${FLEET_EPIC_BRANCH_SYNC:-true}"
 # The integration PR is NEVER auto-merged regardless of this setting.
 FLEET_EPIC_AUTO_PR="${FLEET_EPIC_AUTO_PR:-false}"
 
+# ── Dispatch ─────────────────────────────────────────────────────────────────────
+# When false (the default), fleetd sits idle — detection runs and health/status
+# are served, but no epic is auto-enqueued; dispatch happens only when explicitly
+# triggered (the /fleet-controller dispatch skill or the fleetd HTTP POST /dispatch
+# endpoint). When true, the global sweep behaviour is unchanged: every
+# state:execution-labelled epic found in the workspace is dispatched automatically.
+FLEET_AUTO_DISPATCH="${FLEET_AUTO_DISPATCH:-false}"
+
+# Seconds to wait for the epic-scoped dispatch flock per attempt. Serializes
+# fleet_dispatch_initiative / fleet_stop_initiative per epic across processes
+# (skill session vs. fleetd HTTP handler vs. auto-sweep).
+FLEET_DISPATCH_LOCK_TIMEOUT="${FLEET_DISPATCH_LOCK_TIMEOUT:-5}"
+
 # ── Instance namespace ──────────────────────────────────────────────────────────
 # Namespace for spawn queue, stop files, run registry, and fence markers.
 # Prevents collisions between multiple fleet controller instances on the same host.
@@ -100,6 +113,15 @@ _fleet_queue_lock() {
 _fleet_run_file() {
   local tid="$1" workspace="${2:-./logs}"
   echo "$(_fleet_state_dir "$workspace")/${tid}-run.json"
+}
+
+# Epic stop-file path — gates every dispatch trigger path for that epic until
+# an explicit resume clears it (fleet-epic-stop). Distinct from the worker
+# stop-file constructor above (that one is for pinger/watchdog stop files).
+# Usage: _fleet_epic_stop_file <workspace> <epic_id>
+_fleet_epic_stop_file() {
+  local workspace="$1" epic_id="$2"
+  echo "$(_fleet_state_dir "$workspace")/stop-${epic_id}.json"
 }
 
 # Fence marker path — written at kill, read by flow.sh pre-mutation guard.

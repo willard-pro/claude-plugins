@@ -14,6 +14,7 @@ import fcntl
 import http.server
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
@@ -126,10 +127,11 @@ class ChildTable:
     """
 
     def __init__(self):
-        # {tid: {pid, started_at, generation, reason, adopted, phase}}
+        # {tid: {pid, started_at, generation, reason, adopted, phase, anomalies}}
         self._workers = {}
 
-    def add(self, tid, pid, generation=0, reason='', adopted=False, phase=''):
+    def add(self, tid, pid, generation=0, reason='', adopted=False, phase='',
+            anomalies=''):
         self._workers[tid] = {
             'tid': tid,
             'pid': pid,
@@ -138,6 +140,7 @@ class ChildTable:
             'reason': reason,
             'adopted': adopted,
             'phase': phase,
+            'anomalies': anomalies,
         }
 
     def remove(self, tid):
@@ -150,6 +153,11 @@ class ChildTable:
         entry = self._workers.get(tid)
         if entry:
             entry['phase'] = phase
+
+    def update_anomalies(self, tid, anomalies):
+        entry = self._workers.get(tid)
+        if entry:
+            entry['anomalies'] = anomalies
 
     def __iter__(self):
         return iter(self._workers.values())
@@ -168,6 +176,7 @@ class ChildTable:
                 'reason': w['reason'],
                 'adopted': w['adopted'],
                 'phase': w['phase'],
+                'anomalies': w['anomalies'],
             }
             for w in self._workers.values()
         ]
@@ -393,17 +402,130 @@ def get_queue_depth(state_dir):
         return 0
 
 
+# ── Per-worker enrichment readers (group: worker status API) ──────────────
+
+def _sum_tokens(pipeline_log_path):
+    """Sum token usage across all META|tokens entries in a pipeline log.
+
+    Each entry's payload has the shape token-tracker.sh writes:
+      {PHASE}:{input}/{output}/{cache_read+cache_create}{|elapsed_ms=...}
+    All three numeric components of every entry are summed. Returns 0 for a
+    missing/empty log or unparseable payloads — a fresh worker has legitimately
+    used no tokens yet.
+    """
+    log_path = Path(pipeline_log_path)
+    total = 0
+    try:
+        if not log_path.is_file():
+            return 0
+        with open(log_path) as f:
+            for line in f:
+                if '|META|tokens|' not in line:
+                    continue
+                parts = line.rstrip('\n').split('|')
+                if len(parts) < 5:
+                    continue
+                msg = '|'.join(parts[4:])
+                payload = msg.split('|elapsed_ms=', 1)[0]
+                if ':' in payload:
+                    payload = payload.split(':', 1)[1]
+                for num in payload.split('/'):
+                    try:
+                        total += int(num)
+                    except ValueError:
+                        pass
+    except OSError:
+        return 0
+    return total
+
+
+def _read_confidence_actual(pipeline_log_path):
+    """Read confidence_actual from the last META|planner-feedback entry.
+
+    The entry is written once, near/at ticket completion, by
+    planned-feedback-write.sh. Returns None (explicit null downstream) until
+    that entry exists — never coerced to 0.
+    """
+    log_path = Path(pipeline_log_path)
+    try:
+        if not log_path.is_file():
+            return None
+        last_payload = None
+        with open(log_path) as f:
+            for line in f:
+                if '|META|planner-feedback|' not in line:
+                    continue
+                parts = line.rstrip('\n').split('|')
+                if len(parts) < 5:
+                    continue
+                last_payload = '|'.join(parts[4:])
+        if last_payload is None:
+            return None
+        data = json.loads(last_payload)
+        val = data.get('confidence_actual')
+        if val is None:
+            return None
+        try:
+            return float(val)
+        except (TypeError, ValueError):
+            return None
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _read_confidence_predicted(tid, fleet_lib_dir):
+    """Read the ticket's predicted confidence from its Planner Context block.
+
+    Shells out to fleet-feedback.sh's _fleet_confidence_predicted — the single
+    canonical parser for the Planner Context Confidence field (same extraction
+    planned-feedback-write.sh uses when writing META|planner-feedback). One
+    Linear API call per invocation; the caller is expected to cache the result.
+    Returns a float, or None when the value is unavailable.
+    """
+    feedback_script = os.path.join(str(fleet_lib_dir), 'fleet-feedback.sh')
+    if not os.path.isfile(feedback_script):
+        return None
+    bash_cmd = (
+        f'source "{feedback_script}" && _fleet_confidence_predicted "{tid}"'
+    )
+    try:
+        proc = subprocess.run(
+            ['bash', '-c', bash_cmd],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    out = (proc.stdout or '').strip()
+    if not out or out == 'null':
+        return None
+    try:
+        return float(out)
+    except ValueError:
+        return None
+
+
 # ── Health HTTP server ─────────────────────────────────────────────────────
 
 class HealthHandler(http.server.BaseHTTPRequestHandler):
-    """HTTP request handler for the fleetd health endpoint.
+    """HTTP request handler for fleetd's control/query surface.
 
-    GET /health — returns JSON with live workers, queue depth, cycle info.
-    All other paths → 404.
+    GET  /health        — daemon health (documented, unchanged shape)
+    GET  /workers       — list of all workers with live status enrichment
+    GET  /workers/<tid> — live status for one worker (404 when unknown)
+    GET  /queue         — spawn queue contents (entries + malformed lines)
+    GET  /epics         — epics fleetd's state dir knows about
+    POST /dispatch      — on-demand scoped dispatch of one epic
+    POST /stop          — epic-scoped stop (purge + kill + stop-file)
+
+    All other paths → 404. The handler stays a thin delegator — business
+    logic lives in the Supervisor, which the server attaches at start.
     """
 
-    # Set by the Supervisor before starting the server.
+    # Set by the Supervisor / HealthServer before serving.
     supervisor_state = None
+    supervisor = None
 
     def log_message(self, format, *args):
         """Suppress default stderr logging — fleetd health is polled frequently."""
@@ -412,6 +534,14 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/health':
             self._handle_health()
+        elif self.path == '/workers':
+            self._handle_workers()
+        elif self.path.startswith('/workers/'):
+            self._handle_worker_status(self.path[len('/workers/'):])
+        elif self.path == '/queue':
+            self._handle_queue()
+        elif self.path == '/epics':
+            self._handle_epics()
         else:
             self.send_error(404)
 
@@ -422,6 +552,47 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
         else:
             self.send_error(404)
+
+    def do_POST(self):
+        if self.path == '/dispatch':
+            self._handle_dispatch()
+        elif self.path == '/stop':
+            self._handle_stop()
+        else:
+            self.send_error(404)
+
+    # ── helpers ────────────────────────────────────────────────────────────
+
+    def _send_json(self, status, payload):
+        body = json.dumps(payload).encode('utf-8')
+        self.send_response(status)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Content-Length', str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _read_json_body(self):
+        """Parse the request body as JSON. Returns None when absent/invalid."""
+        try:
+            length = int(self.headers.get('Content-Length', '0') or '0')
+        except ValueError:
+            return None
+        if length <= 0:
+            return None
+        try:
+            data = json.loads(self.rfile.read(length))
+        except (json.JSONDecodeError, ValueError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _require_epic_id(self):
+        data = self._read_json_body()
+        if data is None or not data.get('epic_id'):
+            self._send_json(400, {'error': 'epic_id is required'})
+            return None
+        return data
+
+    # ── GET handlers ───────────────────────────────────────────────────────
 
     def _handle_health(self):
         state = self.supervisor_state or {}
@@ -437,13 +608,69 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
             'last_summary': state.get('last_summary'),
             'pipeline_count': state.get('pipeline_count', 0),
         }
+        self._send_json(200, payload)
 
-        body = json.dumps(payload).encode('utf-8')
-        self.send_response(200)
-        self.send_header('Content-Type', 'application/json')
-        self.send_header('Content-Length', str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+    def _handle_workers(self):
+        if self.supervisor is None:
+            self._send_json(503, {'error': 'supervisor not attached'})
+            return
+        tids = sorted(self.supervisor.child_tids())
+        self._send_json(
+            200,
+            [self.supervisor.get_worker_status(tid) for tid in tids],
+        )
+
+    def _handle_worker_status(self, tid):
+        if self.supervisor is None:
+            self._send_json(503, {'error': 'supervisor not attached'})
+            return
+        status = self.supervisor.get_worker_status(tid)
+        if status is None:
+            self._send_json(
+                404, {'error': f'no worker or pipeline log for {tid}'})
+            return
+        self._send_json(200, status)
+
+    def _handle_queue(self):
+        if self.supervisor is None:
+            self._send_json(503, {'error': 'supervisor not attached'})
+            return
+        self._send_json(200, self.supervisor.list_queue())
+
+    def _handle_epics(self):
+        if self.supervisor is None:
+            self._send_json(503, {'error': 'supervisor not attached'})
+            return
+        self._send_json(200, self.supervisor.list_epics())
+
+    # ── POST handlers ──────────────────────────────────────────────────────
+
+    def _handle_dispatch(self):
+        data = self._require_epic_id()
+        if data is None:
+            return
+        if self.supervisor is None:
+            self._send_json(503, {'error': 'supervisor not attached'})
+            return
+        result = self.supervisor.dispatch_epic(
+            str(data.get('epic_id')),
+            dry_run=bool(data.get('dry_run', False)),
+            resume=bool(data.get('resume', False)),
+        )
+        self._send_json(200, result)
+
+    def _handle_stop(self):
+        data = self._require_epic_id()
+        if data is None:
+            return
+        if self.supervisor is None:
+            self._send_json(503, {'error': 'supervisor not attached'})
+            return
+        result = self.supervisor.stop_epic(
+            str(data.get('epic_id')),
+            reason=str(data.get('reason', '')),
+        )
+        self._send_json(200, result)
 
 
 class HealthServer:
@@ -461,9 +688,15 @@ class HealthServer:
         self._httpd = None
         self._thread = None
 
-    def start(self, supervisor_state_ref):
-        """Start serving in a daemon thread."""
-        HealthHandler.supervisor_state = supervisor_state_ref
+    def start(self, supervisor):
+        """Start serving in a daemon thread.
+
+        Attaches the Supervisor itself (not just its health-state dict) so
+        the POST/DETAIL routes can delegate to Supervisor methods. The
+        /health handler keeps reading supervisor_state exactly as before.
+        """
+        HealthHandler.supervisor_state = supervisor._health_state
+        HealthHandler.supervisor = supervisor
         self._httpd = http.server.HTTPServer(
             (self._bind, self._port),
             HealthHandler,
@@ -770,6 +1003,37 @@ CLAUDE_CMD = os.environ.get('CLAUDE_CMD', '')
 
 # ── Spawn queue consumer ───────────────────────────────────────────────────
 
+def _parse_queue_with_malformed(state_dir):
+    """Parse the spawn queue JSONL into (entries, malformed_lines).
+
+    The single canonical parse of the queue file — `_read_queue_entries`
+    (consume time) and `GET /queue` (read time) both go through it, so the
+    two views can never diverge. Malformed lines are reported, not silently
+    dropped. A missing file parses as empty.
+    """
+    entries = []
+    malformed = []
+    queue_file = Path(state_dir) / f'fleet-{FLEET_INSTANCE_ID}-spawn-queue.jsonl'
+    try:
+        if not queue_file.is_file():
+            return entries, malformed
+        with open(queue_file) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError:
+                    malformed.append(line)
+                    continue
+                if entry.get('tid', ''):
+                    entries.append(entry)
+    except OSError:
+        pass
+    return entries, malformed
+
+
 def _read_queue_entries(state_dir):
     """Yield parsed entries from the spawn queue JSONL file.
 
@@ -777,26 +1041,12 @@ def _read_queue_entries(state_dir):
     halt queue consumption. Callers should remove consumed entries by
     rewriting the file.
     """
-    queue_file = Path(state_dir) / f'fleet-{FLEET_INSTANCE_ID}-spawn-queue.jsonl'
-    if not queue_file.is_file():
-        return
-
-    with open(queue_file) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                # Malformed entry — skip, don't halt consumption.
-                print(f"fleetd: skipping malformed queue entry: {line[:80]}...",
-                      file=sys.stderr)
-                continue
-            tid = entry.get('tid', '')
-            if not tid:
-                continue
-            yield entry
+    entries, malformed = _parse_queue_with_malformed(state_dir)
+    for line in malformed:
+        # Malformed entry — skip, don't halt consumption.
+        print(f"fleetd: skipping malformed queue entry: {line[:80]}...",
+              file=sys.stderr)
+    yield from entries
 
 
 def _remove_consumed_entries(state_dir, consumed_tids):
@@ -1059,6 +1309,94 @@ def _write_kill_result(state_dir, tid, success, method, error=None):
     result_file.write_text(json.dumps(result))
 
 
+# ── Stop-file pinned tickets ───────────────────────────────────────────────
+
+def _collect_stop_pinned_tids(state_dir):
+    """Collect the union of ticket ids pinned by any stop-*.json file.
+
+    Used by startup reconciliation — it has no epic context of its own, so
+    the pinned tid list is what makes a stop survive a fleetd restart.
+    """
+    pinned = set()
+    state = Path(state_dir)
+    try:
+        for stop_file in sorted(state.glob('stop-*.json')):
+            try:
+                data = json.loads(stop_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            for tid in data.get('tickets', []):
+                if isinstance(tid, str) and tid:
+                    pinned.add(tid)
+    except OSError:
+        pass
+    return pinned
+
+
+# ── Epic view (pure state-dir derivation) ─────────────────────────────────
+
+def _list_epics(state_dir, workers):
+    """Derive the epic view for GET /epics from state-dir files only.
+
+    Merges three sources into one object per epic: stop-files (`stopped`),
+    spawn-queue entry reasons (`queued`), and worker record reasons
+    (`running`). An epic appearing in none of them is not listed — fleetd's
+    knowledge horizon is its own state dir. No Linear calls.
+    """
+    epics = {}
+    state = Path(state_dir)
+
+    def _epic(epic_id):
+        if epic_id not in epics:
+            epics[epic_id] = {
+                'epic_id': epic_id,
+                'stopped': False,
+                'stopped_at': None,
+                'stop_reason': None,
+                'tickets': [],
+                'queued': [],
+                'running': [],
+            }
+        return epics[epic_id]
+
+    # Stop-files: stop-{epic}.json → initiative_id/tickets/reason/stopped_at.
+    try:
+        for stop_file in sorted(state.glob('stop-*.json')):
+            epic_id = stop_file.name[len('stop-'):-len('.json')]
+            try:
+                data = json.loads(stop_file.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            entry = _epic(data.get('initiative_id') or epic_id)
+            entry['stopped'] = True
+            entry['stopped_at'] = data.get('stopped_at')
+            entry['stop_reason'] = data.get('reason', '')
+            for tid in data.get('tickets', []):
+                if tid not in entry['tickets']:
+                    entry['tickets'].append(tid)
+    except OSError:
+        pass
+
+    # Queue entries: reason = "planned-dispatch from {epic}".
+    entries, _malformed = _parse_queue_with_malformed(state_dir)
+    for entry in entries:
+        match = re.search(r'planned-dispatch from (\S+)',
+                          entry.get('reason', ''))
+        if not match:
+            continue
+        _epic(match.group(1))['queued'].append(entry.get('tid', ''))
+
+    # Running workers: reason carries through spawn → registry → child table.
+    for worker in workers:
+        match = re.search(r'planned-dispatch from (\S+)',
+                          worker.get('reason', ''))
+        if not match:
+            continue
+        _epic(match.group(1))['running'].append(worker.get('tid', ''))
+
+    return [epics[key] for key in sorted(epics)]
+
+
 # ── Supervisor ─────────────────────────────────────────────────────────────
 
 class Supervisor:
@@ -1090,10 +1428,17 @@ class Supervisor:
             Path(fleet_lib_dir) if fleet_lib_dir else Path(_DEFAULT_FLEET_LIB)
         )
         self._lock = InstanceLock(self._pidfile)
+        # RLock (not plain Lock): dispatch_epic/stop_epic hold the lock while
+        # calling helpers (_consume_queue) that also acquire it.
+        self._state_lock = threading.RLock()
         self._children = ChildTable()
         self._reaper = ChildReaper()
         self._detection = DetectionCycle(fleet_lib_dir=fleet_lib_dir)
         self._cycle_cache = None  # created fresh per cycle
+        # Per-tid cache for predicted confidence — parsed once from the
+        # ticket's Planner Context block (one Linear call), then served from
+        # memory for the daemon's lifetime.
+        self._confidence_cache = {}
         self._health_state = {
             'workers': [],
             'queue_depth': 0,
@@ -1178,6 +1523,9 @@ class Supervisor:
             tid for tid, entry in self._children._workers.items()
             if entry.get('adopted')
         ))
+        # Tickets pinned by any stop-*.json must not be resurrected by
+        # reconciliation — a stop survives a fleetd restart through this pin.
+        pinned_tids = ' '.join(sorted(_collect_stop_pinned_tids(self._state_dir)))
 
         # Values that originate outside this process (state-dir file names,
         # adopted TIDs from run-registry entries, env-derived paths) are
@@ -1187,7 +1535,8 @@ class Supervisor:
         bash_cmd = (
             'source "$FLEET_RECONCILE_SCRIPT" && '
             'fleet_reconcile_orphans "$FLEET_RECONCILE_STATE_DIR" '
-            '"$FLEET_RECONCILE_QUEUE_FILE" "$FLEET_RECONCILE_LIVE_TIDS"'
+            '"$FLEET_RECONCILE_QUEUE_FILE" "$FLEET_RECONCILE_LIVE_TIDS" '
+            '"$FLEET_RECONCILE_PINNED_TIDS"'
         )
         try:
             proc = subprocess.run(
@@ -1202,6 +1551,7 @@ class Supervisor:
                     'FLEET_RECONCILE_STATE_DIR': str(self._state_dir),
                     'FLEET_RECONCILE_QUEUE_FILE': str(queue_file),
                     'FLEET_RECONCILE_LIVE_TIDS': live_tids,
+                    'FLEET_RECONCILE_PINNED_TIDS': pinned_tids,
                 },
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
@@ -1228,7 +1578,13 @@ class Supervisor:
         Adopted workers were not forked by this daemon instance, so their
         exits cannot be reaped via waitpid. Instead we periodically check
         whether their PID is still alive and remove any that have exited.
+
+        Acquires _state_lock — mutates the child table and run-registry files.
         """
+        with self._state_lock:
+            self._poll_adopted_workers_locked()
+
+    def _poll_adopted_workers_locked(self):
         removed = []
         for entry in list(self._children._workers.values()):
             if not entry.get('adopted'):
@@ -1284,6 +1640,21 @@ class Supervisor:
             summary = result.get('summary', {})
             self._health_state['last_summary'] = summary
             self._health_state['pipeline_count'] = summary.get('total', 0)
+
+            # Merge per-ticket phase/anomalies into live worker records
+            # instead of discarding everything but the summary. A tid the
+            # detection knows but the child table doesn't (e.g. an adopted-
+            # but-not-yet-registered ticket) is a no-op, not an error.
+            with self._state_lock:
+                for pipeline in result.get('pipelines', []):
+                    tid = pipeline.get('tid', '')
+                    if not tid or self._children.get(tid) is None:
+                        continue
+                    self._children.update_phase(tid, pipeline.get('phase', ''))
+                    anomalies = pipeline.get('anomalies', '')
+                    if anomalies in (None, 'none'):
+                        anomalies = ''
+                    self._children.update_anomalies(tid, anomalies)
 
         self._sync_health()
 
@@ -1381,14 +1752,216 @@ class Supervisor:
             except OSError:
                 pass
 
+    # ── on-demand dispatch / stop / status (HTTP control surface) ─────────
+
+    def _bash_dispatch(self, bash_cmd, timeout=300):
+        """Run a fleet bash action subprocess and return (rc, stdout, stderr).
+
+        Passes FLEET_PIPELINE_LOG_DIR / FLEET_STATE_DIR through the
+        environment so sourced fleet libs resolve the same state dir the
+        daemon uses, regardless of the caller's cwd.
+        """
+        try:
+            proc = subprocess.run(
+                ['bash', '-c', bash_cmd],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env={
+                    **os.environ,
+                    'FLEET_PIPELINE_LOG_DIR': str(self._state_dir),
+                    'FLEET_STATE_DIR': str(self._state_dir),
+                },
+            )
+            return proc.returncode, proc.stdout or '', proc.stderr or ''
+        except subprocess.TimeoutExpired:
+            return -1, '', f'timed out after {timeout}s'
+        except OSError as exc:
+            return -1, '', f'failed to invoke: {exc}'
+
+    def dispatch_epic(self, epic_id, dry_run=False, resume=False):
+        """Dispatch one epic on demand via fleet_dispatch_initiative.
+
+        Acquires _state_lock, runs the same bash function the skill and the
+        auto-sweep call — behavior (label validation, blocked-by resolution,
+        queue idempotency, stop-file gate) is identical regardless of
+        trigger path — then immediately consumes the resulting spawn-queue
+        entries (unless dry_run) so tickets spawn without waiting for the
+        next poll cycle.
+
+        Returns {'queued': [...], 'spawned': [...], 'message': str}.
+        """
+        with self._state_lock:
+            dispatch_script = self._fleet_lib_dir / 'fleet-dispatch.sh'
+            if not dispatch_script.is_file():
+                return {
+                    'queued': [], 'spawned': [],
+                    'message': f'dispatch script not found: {dispatch_script}',
+                }
+
+            flags = ' --resume' if resume else ''
+            bash_cmd = (
+                f'source "{dispatch_script}" && '
+                f'FLEET_DRY_RUN="{"true" if dry_run else "false"}" '
+                f'fleet_dispatch_initiative "{epic_id}" '
+                f'"{self._state_dir}"{flags}'
+            )
+            rc, stdout, stderr = self._bash_dispatch(bash_cmd)
+
+            # Ticket-id shape only — the summary line "enqueued N ticket(s)"
+            # must not be captured as a tid.
+            queued = re.findall(r'enqueued\s+([A-Z]+-\d+)', stdout)
+            if dry_run:
+                # Dry-run lines carry the would-be entry as JSON — parse tids.
+                for match in re.finditer(r'would enqueue: (\{.*?\})', stdout):
+                    try:
+                        entry = json.loads(match.group(1))
+                        if entry.get('tid'):
+                            queued.append(entry['tid'])
+                    except json.JSONDecodeError:
+                        pass
+            queued = list(dict.fromkeys(queued))  # dedupe, preserve order
+
+            lines = stdout.strip().splitlines()
+            message = lines[-1] if lines else ''
+            if rc != 0:
+                err_lines = stderr.strip().splitlines()
+                message = (err_lines or lines or ['dispatch failed'])[-1]
+
+            spawned = []
+            if not dry_run and rc == 0:
+                spawned = sorted(self._consume_queue())
+
+            return {'queued': queued, 'spawned': spawned, 'message': message}
+
+    def stop_epic(self, epic_id, reason=''):
+        """Stop one epic per the fleet-epic-stop contract.
+
+        Shells out to fleet_stop_initiative — the single bash stop
+        implementation, also invoked by the skill's stop subcommand — which
+        purges the epic's queue entries, escalate-kills its running workers,
+        and writes the stop-file, all under the epic-scoped dispatch lock.
+        Held under _state_lock so the HTTP thread and main loop never mutate
+        state concurrently.
+
+        Returns {'purged': [...], 'killed': [...], 'message': str}.
+        """
+        with self._state_lock:
+            dispatch_script = self._fleet_lib_dir / 'fleet-dispatch.sh'
+            if not dispatch_script.is_file():
+                return {
+                    'purged': [], 'killed': [],
+                    'message': f'dispatch script not found: {dispatch_script}',
+                }
+
+            bash_cmd = (
+                f'source "{dispatch_script}" && '
+                f'fleet_stop_initiative "{epic_id}" "{reason}" '
+                f'"{self._state_dir}"'
+            )
+            rc, stdout, stderr = self._bash_dispatch(bash_cmd)
+
+            purged, killed = [], []
+            match = re.search(r'STOP_RESULT\|purged=(.+?)\|killed=(.+)',
+                              stdout, re.DOTALL)
+            if match:
+                try:
+                    purged = json.loads(match.group(1))
+                except json.JSONDecodeError:
+                    pass
+                try:
+                    killed = json.loads(match.group(2))
+                except json.JSONDecodeError:
+                    pass
+
+            # Drop killed workers from the child table — the bash escalation
+            # already verified termination (or it is imminent). The registry
+            # files are cleaned by the normal scan/poll paths on next sight.
+            for tid in killed:
+                if self._children.get(tid) is not None:
+                    self._children.remove(tid)
+            self._sync_health()
+
+            lines = stdout.strip().splitlines()
+            message = lines[-1] if lines else ''
+            if rc != 0:
+                err_lines = stderr.strip().splitlines()
+                message = (err_lines or lines or ['stop failed'])[-1]
+            return {'purged': purged, 'killed': killed, 'message': message}
+
+    def child_tids(self):
+        """TIDs of all workers in the child table."""
+        return list(self._children._workers.keys())
+
+    def get_worker_status(self, tid):
+        """Assemble live status for one worker (GET /workers/<tid>).
+
+        Returns None when the ticket is entirely unknown — no worker record
+        and no pipeline log. `phase`/`anomalies` come from the child table
+        (latest detection cycle); `tokens_used_so_far` and
+        `confidence_actual` are computed live from the pipeline log;
+        `confidence_predicted` is parsed once from the ticket's Planner
+        Context block and cached for the daemon's lifetime.
+        """
+        log_file = self._state_dir / f'{tid}-pipeline.log'
+        child = self._children.get(tid)
+        if child is None and not log_file.is_file():
+            return None
+
+        if child is not None:
+            status = {
+                'tid': tid,
+                'pid': child['pid'],
+                'generation': child['generation'],
+                'started_at': child['started_at'],
+                'reason': child['reason'],
+                'adopted': child['adopted'],
+                'phase': child.get('phase', ''),
+                'anomalies': child.get('anomalies', ''),
+            }
+        else:
+            # Known ticket (pipeline log exists) but no live worker record.
+            status = {
+                'tid': tid,
+                'pid': None,
+                'generation': None,
+                'started_at': None,
+                'reason': '',
+                'adopted': False,
+                'phase': '',
+                'anomalies': '',
+            }
+
+        status['tokens_used_so_far'] = _sum_tokens(log_file)
+
+        if tid not in self._confidence_cache:
+            self._confidence_cache[tid] = _read_confidence_predicted(
+                tid, self._fleet_lib_dir)
+        status['confidence_predicted'] = self._confidence_cache[tid]
+        status['confidence_actual'] = _read_confidence_actual(log_file)
+        return status
+
+    def list_queue(self):
+        """Spawn queue contents for GET /queue."""
+        entries, malformed = _parse_queue_with_malformed(self._state_dir)
+        return {'entries': entries, 'malformed': malformed}
+
+    def list_epics(self):
+        """Epic view for GET /epics — pure state-dir derivation."""
+        return _list_epics(self._state_dir, self._children.list_workers())
+
     # ── spawn and reap (group 6) ──────────────────────────────────────────
 
     def _reap_children(self):
         """Reap any exited children and update the child table.
 
         Removes reaped workers from the child table and records their exit
-        status. Called from the main loop each cycle.
+        status. Called from the main loop each cycle. Acquires _state_lock.
         """
+        with self._state_lock:
+            self._reap_children_locked()
+
+    def _reap_children_locked(self):
         newly_reaped = self._reaper.reap()
         for pid, exit_code, exit_type in newly_reaped:
             # Find the child entry by PID and remove it.
@@ -1411,7 +1984,14 @@ class Supervisor:
 
         Only acts when spawn_enabled is True. Skips malformed entries.
         Returns the set of TIDs that were consumed.
+
+        Acquires _state_lock — HTTP-triggered dispatch and the main loop
+        must never mutate the child table or spawn-queue file concurrently.
         """
+        with self._state_lock:
+            return self._consume_queue_locked(cmd_override)
+
+    def _consume_queue_locked(self, cmd_override=None):
         if not self._spawn_enabled:
             return set()
 
@@ -1494,8 +2074,12 @@ class Supervisor:
         process-group signalling. Adopted workers get cooperative-stop-only
         because we didn't fork them and can't verify process-group ownership.
 
-        Returns a KillResult.
+        Returns a KillResult. Acquires _state_lock — see _consume_queue.
         """
+        with self._state_lock:
+            return self._kill_worker_locked(tid, reason, grace_secs)
+
+    def _kill_worker_locked(self, tid, reason='fleet-kill', grace_secs=None):
         child = self._children.get(tid)
         if child is None:
             return KillResult(False, 'none',
@@ -1577,7 +2161,7 @@ class Supervisor:
         self.reconcile_orphaned_tickets()
 
         health = HealthServer(self._bind, self._port)
-        health.start(self._health_state)
+        health.start(self)
         print(f"fleetd[{os.getpid()}]: health endpoint on {self._bind}:{self._port}")
 
         shutdown_event = threading.Event()

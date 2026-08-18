@@ -17,6 +17,44 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## fleet-controller 0.6.0 (2026-08-18)
+
+fleetd grows an on-demand HTTP control/query surface, an epic-scoped stop
+lifecycle, and per-worker live status.
+
+- New: HTTP API on the existing loopback server — `POST /dispatch` (scoped
+  dispatch of one epic against the running daemon, independent of
+  `FLEET_AUTO_DISPATCH`; reuses `fleet_dispatch_initiative`, so validation
+  and idempotency are identical to the skill path, and spawns immediately
+  rather than waiting for the poll cycle), `POST /stop` (epic-scoped stop:
+  purge queue, escalate-kill workers, write stop-file), `GET /workers` and
+  `GET /workers/<tid>` (live phase/anomalies/tokens/confidence per worker),
+  `GET /queue` (entries + malformed lines), `GET /epics` (state-dir
+  derivation — stopped/queued/running, no Linear calls). `GET /health`
+  shape is unchanged and now documented. A single `threading.RLock`
+  serializes all state mutation between the HTTP thread and the main loop.
+- New: `fleet_stop_initiative` — the single stop implementation (skill
+  `stop` subcommand and `POST /stop` both call it; works with fleetd down).
+  Writes `stop-{epic}.json` pinning stopped tickets; every dispatch trigger
+  path early-exits for a stopped epic, startup reconciliation skips pinned
+  tickets, and only an explicit resume (`--resume` / `"resume": true`)
+  clears it — dispatch is the single start/resume/un-stop entry point.
+- New: epic-scoped dispatch flock (`{queue}.{epic}.dispatch.lock`) closes
+  the check-then-append race between concurrent dispatchers (skill vs. HTTP
+  vs. auto-sweep); `FLEET_DISPATCH_LOCK_TIMEOUT` (default 5).
+- New: `FLEET_AUTO_DISPATCH` is a documented `fleet-config.sh` flag
+  (default `false`, idle-until-invoked — behavior unchanged, now explicit).
+- New: detection-cycle per-ticket results (phase, anomalies) are merged
+  into live worker records instead of discarded — the previously-dead
+  `ChildTable.update_phase` is now wired, with an `update_anomalies`
+  sibling. Tokens are summed from `META|tokens` entries at query time;
+  `confidence_predicted` is parsed once from the Planner Context block
+  (cached), `confidence_actual` stays explicit `null` until the
+  `META|planner-feedback` entry exists.
+- New: `detect_initiative_dispatch` findings name an epic's stop-file when
+  one is present, so a stopped epic is visible on the dashboard, not just
+  on disk.
+
 ## fleet-controller 0.5.0 (2026-08-18)
 
 `fleetd` worker spawn command is now configurable, plus a new environment

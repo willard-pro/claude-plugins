@@ -34,6 +34,8 @@ fleet-controller/
 
 **Gating:** Set `FLEETD_SPAWN_ENABLED=1` to enable worker spawning. Default is observe-only (detection + health API, no spawns).
 
+**HTTP control surface (on-demand, loopback-bound):** alongside `GET /health`, fleetd serves `POST /dispatch` (scoped dispatch of one epic against the running daemon — same `fleet_dispatch_initiative` the skill and auto-sweep call, spawns immediately instead of waiting for the poll cycle), `POST /stop` (epic-scoped stop: purge queue, escalate-kill workers, write `stop-{epic}.json`; the single bash implementation is `fleet_stop_initiative`, also reachable via the skill's `stop` subcommand with the daemon down), and read-only `GET /workers`, `GET /workers/<tid>` (phase/anomalies/tokens/confidence per worker), `GET /queue`, `GET /epics`. Use these as an alternative to the `/fleet-controller dispatch` skill (on-demand, no restart-to-reconfigure) and to the fleet dashboard (per-ticket detail without re-rendering the whole fleet). Dispatch is the single start/resume/un-stop entry point: a stop-file gates every dispatch trigger path until an explicit `resume: true` clears it; the auto-sweep never clears. See README "HTTP API" for request/response shapes.
+
 ## Skills
 
 - `fleet-controller` — `/fleet-controller:fleet-controller` slash command. Subcommands: `detect`, `intervene`, `dashboard`, `dispatch`, `feedback`.
@@ -134,6 +136,8 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 | `FLEET_DRY_RUN` | false | When `true`, interventions are logged not executed |
 | `FLEET_EPIC_BRANCH_SYNC` | true | Sync base changes into epic branch each dispatch cycle — safety mechanism against branch rot |
 | `FLEET_EPIC_AUTO_PR` | false | Automatically open integration PRs when all children Done — detection runs, actuation is opt-in |
+| `FLEET_AUTO_DISPATCH` | false | When `false` (the documented default) fleetd sits idle — detection reports, dispatch happens only when explicitly triggered (skill or `POST /dispatch`). When `true`, the global sweep of `state:execution` epics runs unchanged. |
+| `FLEET_DISPATCH_LOCK_TIMEOUT` | 5 | Seconds to wait for the epic-scoped dispatch flock (`{queue}.{epic}.dispatch.lock`) per attempt — serializes dispatch/stop per epic across processes |
 | `FLEET_MAX_CONCURRENT` | 3 | Max concurrent pipelines for dispatch |
 | `FLEET_POSTMORTEM_ON_KILL` | false | Run pipeline post-mortem analysis on fleet-killed pipelines (RLVR Phase 3). Opt-in — kills can be mass interventions; network cost and gh rate limits argue for per-kill opt-in. |
 | `FLEET_INSTANCE_ID` | default | Namespace for stop files and spawn queues |

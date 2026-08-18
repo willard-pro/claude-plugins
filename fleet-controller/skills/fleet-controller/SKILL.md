@@ -16,6 +16,7 @@ Parent orchestrator above ticket-planner and ticket-auto. Dispatches planned tic
 | `/fleet-controller status` | One-shot health dashboard + markdown report |
 | `/fleet-controller intervene <TICKET_ID>` | Manual kill or restart of a specific pipeline |
 | `/fleet-controller dispatch <INITIATIVE_ID>` | Dispatch planned child tickets from an initiative epic |
+| `/fleet-controller stop <INITIATIVE_ID>` | Epic-scoped stop — purge queue, kill workers, write stop-file |
 | `/fleet-controller feedback` | Aggregate planner feedback across all initiatives |
 
 ## Modes
@@ -57,8 +58,9 @@ Manual kill or restart for a specific ticket. Useful for operator-driven recover
 Enqueue planned child tickets from an initiative epic for execution by the monitor loop.
 
 ```
-/fleet-controller dispatch INIT-42           # dispatch all planned child tickets
+/fleet-controller dispatch INIT-42            # dispatch all planned child tickets
 /fleet-controller dispatch INIT-42 --dry-run  # preview without enqueuing
+/fleet-controller dispatch INIT-42 --resume   # un-stop: clear stop-file, then dispatch
 ```
 
 - Validates the epic has `state:execution` label
@@ -67,6 +69,22 @@ Enqueue planned child tickets from an initiative epic for execution by the monit
 - Writes to spawn queue at `${state_dir}/fleet-{instance}-spawn-queue.jsonl` (workspace-relative, not `/tmp`)
 - Respects `FLEET_MAX_CONCURRENT` cap
 - Idempotent — re-running won't duplicate already-queued tickets
+- Serialized per epic via an epic-scoped flock (`{queue}.{epic}.dispatch.lock`) — concurrent invocations (skill, `POST /dispatch`, auto-sweep) never double-enqueue
+- A stopped epic enqueues nothing without `--resume` — dispatch is the single start/resume/un-stop entry point
+
+### Stop (`stop`)
+
+Epic-scoped stop: purge that epic's spawn-queue entries, escalate-kill its running workers, and write `stop-{epic}.json` so no dispatch trigger path re-enqueues it. Works with fleetd down — workers outlive a dead daemon.
+
+```
+/fleet-controller stop INIT-42              # stop an initiative epic
+/fleet-controller stop INIT-42 "operator decision"  # with a recorded reason
+```
+
+- Single implementation in `fleet_dispatch_initiative`'s sibling `fleet_stop_initiative` (fleet-dispatch.sh) — `POST /stop` shells out to the same function
+- Kills via `fleet_kill_pipeline`'s verified escalation (stop-files → grace → SIGTERM → SIGKILL, PID-reuse guard)
+- The stop-file pins stopped tickets against fleetd's startup reconciliation
+- Only an explicit resume (`dispatch --resume` or `POST /dispatch {"resume": true}`) clears it
 
 ### Feedback (`feedback`)
 
@@ -160,6 +178,12 @@ fleet_kill_pipeline "$TICKET_ID" "manual-intervention" ./logs
 # Dispatch mode — enqueue planned tickets
 source fleet-controller/lib/fleet-dispatch.sh
 fleet_dispatch_initiative "INIT-42"
+# Resume a stopped epic:
+fleet_dispatch_initiative "INIT-42" ./logs --resume
+
+# Stop mode — epic-scoped stop (works with fleetd down)
+source fleet-controller/lib/fleet-dispatch.sh
+fleet_stop_initiative "INIT-42" "operator decision" ./logs
 
 # Feedback mode — aggregate planner feedback
 source fleet-controller/lib/fleet-feedback.sh
@@ -189,9 +213,11 @@ fleetd replaces cron-based fleet invocation. It runs detection cycles on a confi
 ### CLI with fleetd running
 
 When fleetd is running, the `/fleet-controller` skill operates through shared state:
-- **dispatch**: Writes to spawn queue JSONL → fleetd consumes on next cycle
+- **dispatch**: Writes to spawn queue JSONL → fleetd consumes on next cycle (or immediately via `POST /dispatch` — same validation, same `fleet_dispatch_initiative`)
+- **stop**: Calls `fleet_stop_initiative` directly — does not depend on the daemon; kills via verified escalation and writes the stop-file regardless
 - **intervene/kill**: Writes to `{state_dir}/kill-requests/{tid}.json` → fleetd processes and writes result
 - **status**: Queries fleetd health API (`GET /health`) for live worker set instead of running `fleet_detect_all` directly
+- **per-worker detail**: `GET /workers/<tid>` for live phase/anomalies/tokens/confidence of one ticket
 
 ## Output
 
