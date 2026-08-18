@@ -14,6 +14,7 @@ import fcntl
 import http.server
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -759,6 +760,10 @@ def _signal_process_group(pid, sig):
 FLEETD_SPAWN_ENABLED = os.environ.get('FLEETD_SPAWN_ENABLED', '') == '1'
 FLEET_MAX_CONCURRENT = _env_int('FLEET_MAX_CONCURRENT', 3)
 CLAUDE_BIN = os.environ.get('CLAUDE_BIN', 'claude')
+# Full worker command line (binary + leading args), e.g. "claude-deepseek 2 --bypass".
+# Takes precedence over CLAUDE_BIN when set. The ticket-auto invocation
+# (`-p '/ticket-auto {tid} ...'`) is always appended after it.
+CLAUDE_CMD = os.environ.get('CLAUDE_CMD', '')
 
 # pylint: disable=invalid-name
 
@@ -854,13 +859,19 @@ def _write_run_registry(state_dir, tid, pid, generation, reason='dispatched'):
     run_file.write_text(json.dumps(entry))
 
 
-def _build_worker_cmd(tid, claude_bin=None):
+def _build_worker_cmd(tid, claude_bin=None, claude_cmd=None):
     """Build the argument list for spawning a ticket-auto worker.
+
+    `claude_cmd` (or the CLAUDE_CMD env var) is a shell-style command line —
+    e.g. "claude-deepseek 2 --bypass" — that replaces the bare binary name
+    and takes precedence over `claude_bin`/CLAUDE_BIN. The ticket-auto
+    invocation is always appended after it.
 
     Returns a list suitable for os.execvpe().
     """
-    bin_path = claude_bin or CLAUDE_BIN
-    return [bin_path, '-p', f'/ticket-auto {tid} --auto --from-planned']
+    cmd_str = claude_cmd or CLAUDE_CMD
+    prefix = shlex.split(cmd_str) if cmd_str else [claude_bin or CLAUDE_BIN]
+    return prefix + ['-p', f'/ticket-auto {tid} --auto --from-planned']
 
 
 class SpawnError(Exception):
@@ -868,7 +879,7 @@ class SpawnError(Exception):
 
 
 def spawn_worker(tid, generation, state_dir, reason='dispatched',
-                 cmd_override=None):
+                 cmd_override=None, claude_bin=None, claude_cmd=None):
     """Fork and exec a worker for `tid`. Returns the child PID.
 
     The child is placed in its own process group so that kill escalation
@@ -876,8 +887,11 @@ def spawn_worker(tid, generation, state_dir, reason='dispatched',
 
     cmd_override: if provided, used as the argv list instead of the default
     claude invocation. This allows tests to spawn a simple Python process.
+    claude_bin/claude_cmd: forwarded to _build_worker_cmd when cmd_override
+    is not given — see its docstring.
     """
-    cmd = cmd_override if cmd_override is not None else _build_worker_cmd(tid)
+    cmd = cmd_override if cmd_override is not None else _build_worker_cmd(
+        tid, claude_bin=claude_bin, claude_cmd=claude_cmd)
 
     pid = os.fork()
     if pid == 0:
@@ -1059,7 +1073,8 @@ class Supervisor:
 
     def __init__(self, state_dir=None, pidfile=None, port=None, bind=None,
                  fleet_lib_dir=None, cycle_interval=30,
-                 spawn_enabled=None, max_concurrent=None, claude_bin=None):
+                 spawn_enabled=None, max_concurrent=None, claude_bin=None,
+                 claude_cmd=None):
         self._state_dir = Path(state_dir) if state_dir else _resolve_state_dir()
         self._pidfile = pidfile or DEFAULT_PIDFILE
         self._port = port or FLEETD_PORT
@@ -1070,6 +1085,7 @@ class Supervisor:
         )
         self._max_concurrent = max_concurrent if max_concurrent is not None else FLEET_MAX_CONCURRENT
         self._claude_bin = claude_bin or CLAUDE_BIN
+        self._claude_cmd = claude_cmd or CLAUDE_CMD
         self._fleet_lib_dir = (
             Path(fleet_lib_dir) if fleet_lib_dir else Path(_DEFAULT_FLEET_LIB)
         )
@@ -1440,6 +1456,8 @@ class Supervisor:
                     state_dir=str(self._state_dir),
                     reason=reason,
                     cmd_override=cmd_override,
+                    claude_bin=self._claude_bin,
+                    claude_cmd=self._claude_cmd,
                 )
             except OSError as exc:
                 print(

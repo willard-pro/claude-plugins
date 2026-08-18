@@ -17,6 +17,29 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## fleet-controller 0.5.0 (2026-08-18)
+
+`fleetd` worker spawn command is now configurable, plus a new environment
+check skill.
+
+- New: `CLAUDE_CMD` env var — a full shell-style command line (e.g.
+  `claude-deepseek 2 --bypass`) that replaces the bare worker binary name.
+  Takes precedence over the existing `CLAUDE_BIN`; the `-p '/ticket-auto
+  {tid} --auto --from-planned'` invocation is always appended after it.
+- Fix: `Supervisor._claude_bin` was set from the `claude_bin` constructor
+  arg / `CLAUDE_BIN` env var but never threaded through to `spawn_worker` —
+  it had no effect since the class was introduced. Now wired through
+  `_consume_queue` alongside the new `_claude_cmd`.
+- New: `/fleet-env-check` skill + `lib/fleet-env-check.sh` — validates
+  `LINEAR_API_KEY`, `REPOS_ROOT`, `GITHUB_PERSONAL_ACCESS_TOKEN`/`GH_TOKEN`
+  (only required when `FLEET_EPIC_AUTO_PR=true`), the fleetd worker spawn
+  command (surfaces a missing `CLAUDE_CMD`/`CLAUDE_BIN` binary before
+  fleetd hits it as a silent per-spawn `OSError`), and `jq`/`git`/`python3`/`gh`
+  presence. Same pipe-delimited contract as ticket-auto-pipeline's
+  `env-check.sh`, but scoped to fleet-controller's much smaller surface —
+  no hooks/spawn-permission/UAT_URL checks. Masks secret values to `****` +
+  last 4 chars rather than echoing them in full.
+
 ## ticket-auto-pipeline 0.26.0 · fleet-controller 0.4.0 (2026-08-17)
 
 `fleetd` process supervision hardening plus two epic-branch correctness fixes.

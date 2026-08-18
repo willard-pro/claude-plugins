@@ -15,6 +15,9 @@ Environment variables (all optional):
     FLEETD_BIND        — health endpoint bind address (default: 127.0.0.1)
     FLEETD_PIDFILE     — single-instance lock file (default: /tmp/fleetd.pid)
     FLEETD_WORKSPACE   — fallback workspace when FLEET_STATE_DIR is unset
+    CLAUDE_BIN         — worker binary name (default: "claude")
+    CLAUDE_CMD         — full worker command line, overrides CLAUDE_BIN,
+                          e.g. "claude-deepseek 2 --bypass"
 """
 
 import sys

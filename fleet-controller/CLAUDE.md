@@ -34,9 +34,10 @@ fleet-controller/
 
 **Gating:** Set `FLEETD_SPAWN_ENABLED=1` to enable worker spawning. Default is observe-only (detection + health API, no spawns).
 
-## Skill
+## Skills
 
 - `fleet-controller` — `/fleet-controller:fleet-controller` slash command. Subcommands: `detect`, `intervene`, `dashboard`, `dispatch`, `feedback`.
+- `fleet-env-check` — `/fleet-controller:fleet-env-check` slash command. Validates `LINEAR_API_KEY`, `REPOS_ROOT`, the fleetd worker spawn command (`CLAUDE_BIN`/`CLAUDE_CMD`), and `jq`/`git`/`python3`/`gh`. Read-only, smaller scope than ticket-auto-pipeline's `ticket-env-check` (no hooks/spawn-permission/UAT_URL checks — those are ticket-auto concerns).
 
 ## Shared libraries (`lib/`)
 
@@ -50,6 +51,7 @@ fleet-controller/
 | `fleet-dashboard.sh` | Dashboard renderer: `fleet_render_dashboard` / `fleet_render_dashboard_from_data` (terminal health table) and `fleet_write_report` / `fleet_write_report_from_data` (markdown report). |
 | `fleet-dispatch.sh` | Planned-ticket dispatch. Reads initiative epics from Linear via `lib/linear-api.sh`, validates `state:execution`, ensures the epic branch exists in **every** working repo under `REPOS_ROOT` before enqueue (multi-repo precondition — creation failure in any repo gate-stops with `EPIC_BRANCH_UNAVAILABLE`; sync failure in one repo warns and continues), resolves `blocked-by` dependencies, orders tickets by explicit dispatch rank (`Urgent`→`High`→`Medium`→`Low`→`No priority` last), writes spawn queue JSONL with `generation` field via shared `_fleet_queue_append` (flock, retry, dead-letter). Respects `FLEET_MAX_CONCURRENT` and `FLEET_DRY_RUN`. |
 | `fleet-feedback.sh` | Feedback aggregation. Scans pipeline logs for `META\|planner-feedback`, groups by `{initiative-id}`, computes confidence drift, writes `$REPOS_ROOT/.ticket-auto/initiatives/{ID}/feedback/{rundate}.json`. |
+| `fleet-env-check.sh` | Standalone (not sourced) — validates `LINEAR_API_KEY`, `REPOS_ROOT`, `GITHUB_PERSONAL_ACCESS_TOKEN`/`GH_TOKEN` (only required when `FLEET_EPIC_AUTO_PR=true`), the fleetd worker spawn command (`CLAUDE_CMD` if set, else `CLAUDE_BIN`), and `jq`/`git`/`python3`/`gh` presence. Same `NAME\|STATUS\|VALUE\|LOCATION\|NOTE` pipe-delimited contract as ticket-auto-pipeline's `env-check.sh`. Masks `LINEAR_API_KEY`/`GITHUB_PERSONAL_ACCESS_TOKEN`/`GH_TOKEN` values to `****` + last 4 chars — never echoes secrets in full. |
 ### Canonical library sources (dependency bridge)
 
 Fleet controller depends on two libraries defined in `ticket-auto-pipeline/`:
@@ -136,6 +138,8 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 | `FLEET_POSTMORTEM_ON_KILL` | false | Run pipeline post-mortem analysis on fleet-killed pipelines (RLVR Phase 3). Opt-in — kills can be mass interventions; network cost and gh rate limits argue for per-kill opt-in. |
 | `FLEET_INSTANCE_ID` | default | Namespace for stop files and spawn queues |
 | `FLEET_SUMMARY_INTERVAL_CYCLES` | 10 | Cycles between forced fleet-summary heartbeat emissions |
+| `CLAUDE_BIN` | `claude` | Worker binary name used by fleetd's `spawn_worker` |
+| `CLAUDE_CMD` | (unset) | Full worker command line, overrides `CLAUDE_BIN` — e.g. `claude-deepseek 2 --bypass`. The `-p '/ticket-auto {tid} ...'` invocation is always appended after it |
 
 ## Known sharp edges
 
