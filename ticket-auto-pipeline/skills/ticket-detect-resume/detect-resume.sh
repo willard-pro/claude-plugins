@@ -392,7 +392,7 @@ fi
 #   BRANCH            — git branch name (from IMPLEMENT checkout)
 #   BASE_BRANCH       — base branch resolved at Step 0.5 (from META|branch-context)
 #   INTEGRATION_BRANCH — integration branch if epic-scoped (from META|branch-context; empty if none)
-#   BRANCH_SOURCE     — flag|directive|default (from META|branch-context; empty on legacy logs)
+#   BRANCH_SOURCE     — flag|epic-directive|default (from META|branch-context; empty on legacy logs)
 #   TICKET_TITLE      — human-readable ticket title
 #   VERIFY_ATTEMPTS   — count of terminal verify fail entries in pipeline log (PASS excluded)
 #   VERIFY_LAST       — "fail" if the last terminal VERIFY event is a fail with no

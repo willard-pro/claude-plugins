@@ -284,7 +284,7 @@ test_cycle_fallback_json_includes_fleet_wide_key() {
 # fence markers where consumers (worker, monitor, flow.sh) expect to find them.
 
 test_path_consistency_default_resolves_to_workspace() {
-  source "$LIB_DIR/config.sh"
+  source "$LIB_DIR/fleet-config.sh"
   local ws="/tmp/test-su-$$"
   local stop_file
   stop_file=$(_fleet_stop_file "WIL-66" "pinger" "$ws")
@@ -293,7 +293,7 @@ test_path_consistency_default_resolves_to_workspace() {
 
 test_path_consistency_custom_state_dir() {
   local custom="/tmp/test-custom-$$"
-  source "$LIB_DIR/config.sh"
+  source "$LIB_DIR/fleet-config.sh"
   local stop_file
   FLEET_STATE_DIR="$custom" stop_file=$(_fleet_stop_file "WIL-66" "pinger" "./logs")
   [[ "$stop_file" == "$custom/ticket-auto-WIL-66-pinger-stop" ]]
@@ -301,7 +301,7 @@ test_path_consistency_custom_state_dir() {
 
 test_path_consistency_queue_file_uses_state_dir() {
   local custom="/tmp/test-custom-$$"
-  source "$LIB_DIR/config.sh"
+  source "$LIB_DIR/fleet-config.sh"
   local queue_file
   FLEET_STATE_DIR="$custom" queue_file=$(_fleet_queue_file "./logs")
   [[ "$queue_file" == "$custom/fleet-default-spawn-queue.jsonl" ]]
@@ -309,7 +309,7 @@ test_path_consistency_queue_file_uses_state_dir() {
 
 test_path_consistency_fence_file_uses_state_dir() {
   local custom="/tmp/test-custom-$$"
-  source "$LIB_DIR/config.sh"
+  source "$LIB_DIR/fleet-config.sh"
   local fence_file
   FLEET_STATE_DIR="$custom" fence_file=$(_fleet_fence_file "WIL-66" "./logs")
   [[ "$fence_file" == "$custom/WIL-66-fence" ]]
@@ -317,7 +317,7 @@ test_path_consistency_fence_file_uses_state_dir() {
 
 test_path_consistency_run_file_uses_state_dir() {
   local custom="/tmp/test-custom-$$"
-  source "$LIB_DIR/config.sh"
+  source "$LIB_DIR/fleet-config.sh"
   local run_file
   FLEET_STATE_DIR="$custom" run_file=$(_fleet_run_file "WIL-66" "./logs")
   [[ "$run_file" == "$custom/WIL-66-run.json" ]]
@@ -330,7 +330,7 @@ test_path_consistency_run_file_uses_state_dir() {
 
 test_stop_file_agreement_default_config() {
   local ws="/tmp/test-sfa-$$"
-  source "$LIB_DIR/config.sh"
+  source "$LIB_DIR/fleet-config.sh"
   local intervention_file worker_file
   unset FLEET_STATE_DIR
   intervention_file=$(_fleet_stop_file "WIL-66" "pinger" "$ws")
@@ -341,7 +341,7 @@ test_stop_file_agreement_default_config() {
 
 test_stop_file_agreement_custom_state_dir() {
   local custom="/tmp/test-sfa-custom-$$"
-  source "$LIB_DIR/config.sh"
+  source "$LIB_DIR/fleet-config.sh"
   local intervention_file worker_file
   FLEET_STATE_DIR="$custom" intervention_file=$(_fleet_stop_file "WIL-66" "pinger" "./logs")
   FLEET_STATE_DIR="$custom" worker_file=$(_fleet_stop_file "WIL-66" "pinger" "./logs")
@@ -351,7 +351,7 @@ test_stop_file_agreement_custom_state_dir() {
 
 test_stop_file_pinger_watchdog_agree_on_dir() {
   local ws="/tmp/test-sfa-pw-$$"
-  source "$LIB_DIR/config.sh"
+  source "$LIB_DIR/fleet-config.sh"
   local pinger_file watchdog_file
   unset FLEET_STATE_DIR
   pinger_file=$(_fleet_stop_file "WIL-66" "pinger" "$ws")

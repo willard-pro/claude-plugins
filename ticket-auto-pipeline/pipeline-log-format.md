@@ -130,7 +130,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|branch-context|info|base=develop;integ
 ```
 
 `MSG` grammar: semicolon-delimited key=value pairs. Keys: `base` (always present),
-`integration` (empty when base=integration), `source` (flag|directive|default),
+`integration` (empty when base=integration), `source` (flag|epic-directive|default),
 `ticket` (always present). Values MUST NOT contain `|` per the pipe-delimited format
 constraint. Branch names are already validated to exclude `;` and `|` by
 `_validate_branch_name`, so the semicolon grammar is safe.

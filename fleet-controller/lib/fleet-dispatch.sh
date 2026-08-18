@@ -23,8 +23,8 @@ _fleet_linear_query() {
 _DISPATCH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Source config for state-directory resolver (used for queue path construction)
-if [ -f "$_DISPATCH_DIR/config.sh" ]; then
-  source "$_DISPATCH_DIR/config.sh"
+if [ -f "$_DISPATCH_DIR/fleet-config.sh" ]; then
+  source "$_DISPATCH_DIR/fleet-config.sh"
 fi
 
 # Source linear-api.sh from canonical path (synced by ticket-auto-pipeline SessionStart hook)
@@ -35,23 +35,40 @@ if ! declare -f get_issue >/dev/null 2>&1; then
 fi
 
 # Source epic-branch.sh and its transitive deps for epic branch lifecycle ops.
-# planned-ticket-check.sh → branch-directive-check.sh → epic-branch.sh
-_TAP_LIB="$_DISPATCH_DIR/../../ticket-auto-pipeline/lib"
-if ! declare -f ensure_epic_branch >/dev/null 2>&1; then
+# planned-ticket-check.sh → branch-directive-check.sh → epic-branch.sh.
+# Two candidate locations: the monorepo checkout (../../) and the installed
+# plugin layout, where the ticket-auto-pipeline SessionStart hook syncs its
+# libs to ~/.claude/skills/lib. Without the second, dispatch silently skips
+# the epic branch precondition in installed deployments.
+for _TAP_LIB in "$_DISPATCH_DIR/../../ticket-auto-pipeline/lib" "$HOME/.claude/skills/lib"; do
+  if declare -f ensure_epic_branch >/dev/null 2>&1; then
+    break
+  fi
   [ -f "$_TAP_LIB/planned-ticket-check.sh" ] && source "$_TAP_LIB/planned-ticket-check.sh"
   [ -f "$_TAP_LIB/branch-directive-check.sh" ] && source "$_TAP_LIB/branch-directive-check.sh"
   [ -f "$_TAP_LIB/epic-branch.sh" ] && source "$_TAP_LIB/epic-branch.sh"
-fi
+done
 
 # ── Helpers ──────────────────────────────────────────────────────────────────────
 
 # Check if a ticket is already in the spawn queue.
 # Args: tid, queue_file
+# Line-by-line jq parse: a torn/corrupt append must NOT false-match. The old
+# substring grep matched the tid inside a torn JSON line and skipped the
+# ticket forever — fleetd also skips malformed lines, so a torn line meant
+# the ticket was neither spawned nor re-enqueued, ever. Valid JSON only.
 _queue_has_ticket() {
   local tid="$1"
   local queue_file="$2"
   [ ! -f "$queue_file" ] && return 1
-  grep -q "\"tid\":\"${tid}\"" "$queue_file" 2>/dev/null
+  local line
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    if echo "$line" | jq -e --arg tid "$tid" '.tid == $tid' >/dev/null 2>&1; then
+      return 0
+    fi
+  done <"$queue_file"
+  return 1
 }
 
 # Get current active pipeline count by counting non-completed pipeline logs.
@@ -67,6 +84,112 @@ _active_pipeline_count() {
     done
   fi
   echo "$count"
+}
+
+# _fleet_dispatch_rank <priority>
+# Maps a Linear priority value to an explicit dispatch rank for ordering:
+# Urgent(1)→1, High(2)→2, Medium(3)→3, Low(4)→4, No priority(0) and any
+# unexpected value→5 (sorted last, never ahead of Urgent).
+_fleet_dispatch_rank() {
+  case "$1" in
+  1) echo "1" ;;
+  2) echo "2" ;;
+  3) echo "3" ;;
+  4) echo "4" ;;
+  *) echo "5" ;;
+  esac
+}
+
+# _fleet_repos_under_root [root]
+# Emits one path per line: REPOS_ROOT itself when it is a git repo (single-repo
+# workspace), plus every direct child directory that is a working git repo.
+# Bare repositories are excluded — children build in working clones, and
+# running branch creation against a stray bare repo (no origin remote, no
+# working tree) would fail and gate-stop dispatch for unrelated layouts.
+# Shared by dispatch's epic-branch precondition and the epic-branch-readiness
+# detector so both cover the same repository set — the detector must not
+# re-guess a different set than dispatch created branches in.
+_fleet_repos_under_root() {
+  local root="${1:-${EPIC_REPO_PATH:-${REPOS_ROOT:-.}}}"
+  local _erd
+
+  _fleet_is_worktree_repo() {
+    local d="$1"
+    { [ -d "$d/.git" ] || git -C "$d" rev-parse --git-dir >/dev/null 2>&1; } &&
+      [ "$(git -C "$d" rev-parse --is-bare-repository 2>/dev/null)" = "false" ]
+  }
+
+  if _fleet_is_worktree_repo "$root"; then
+    echo "$root"
+  fi
+  for _erd in "$root"/*/; do
+    [ -d "$_erd" ] || continue
+    if _fleet_is_worktree_repo "$_erd"; then
+      echo "$_erd"
+    fi
+  done
+}
+
+# _fleet_queue_append <entry_json> <queue_file> [dead_letter_reason]
+# Shared spawn-queue append: flock-protected write with bounded retry and
+# exponential backoff; dead-letters the entry when all attempts are exhausted.
+# Single canonical implementation — both the normal dispatch enqueue path and
+# fleetd startup reconciliation MUST append through this function.
+#
+# On dead-lettering, emits a structured, greppable line
+#   fleet-dead-letter|tid=<TID>|reason=<REASON>
+# so a permanently-stuck ticket is surfaced rather than sitting silently on
+# disk (the tickets workspace's status-reporting convention scans for it).
+#
+# Exit codes:
+#   0 — entry appended to the queue
+#   1 — entry dead-lettered (queue unavailable after all retries)
+_fleet_queue_append() {
+  local entry="$1"
+  local queue_file="$2"
+  local dead_letter_reason="${3:-queue-contention-exhausted}"
+
+  # Bounded retry with backoff for queue append. A single flock timeout
+  # does not mean the queue is permanently unavailable — the monitor may
+  # be mid-rewrite. Retry with backoff; dead-letter entries that exhaust
+  # all attempts so nothing is silently lost.
+  local lock_file="${queue_file}.lock"
+  local lock_timeout="${FLEET_QUEUE_LOCK_TIMEOUT:-5}"
+  local max_retries="${FLEET_QUEUE_MAX_RETRIES:-3}"
+  local backoff_secs="${FLEET_QUEUE_RETRY_BACKOFF_SECS:-2}"
+  local attempt=0
+
+  while [ "$attempt" -lt "$max_retries" ]; do
+    attempt=$((attempt + 1))
+    if (
+      flock -w "$lock_timeout" 9 2>/dev/null || exit 1
+      echo "$entry" >>"$queue_file"
+    ) 9>"$lock_file"; then
+      return 0
+    fi
+    if [ "$attempt" -lt "$max_retries" ]; then
+      sleep "$backoff_secs"
+      # Use bc for multiplication to support fractional backoff values
+      # (bash $(( )) is integer-only). Fall back to integer arithmetic if
+      # bc is unavailable in a stripped environment.
+      if command -v bc >/dev/null 2>&1; then
+        backoff_secs=$(echo "$backoff_secs * 2" | bc)
+      else
+        backoff_secs=$((backoff_secs * 2))
+      fi
+    fi
+  done
+
+  # Dead-letter: write to a separate file so the entry is not lost.
+  # The dead-letter file is human-readable and replayable.
+  local dead_letter_file="${queue_file%.jsonl}-dead-letter.jsonl"
+  echo "$entry" >>"$dead_letter_file"
+
+  # Structured notification — greppable, names the ticket and the reason.
+  local _dl_tid
+  _dl_tid=$(echo "$entry" | jq -r '.tid // empty' 2>/dev/null)
+  echo "fleet-dead-letter|tid=${_dl_tid}|reason=${dead_letter_reason}"
+  return 1
 }
 
 # ── fleet_dispatch_initiative ────────────────────────────────────────────────────
@@ -121,34 +244,42 @@ fleet_dispatch_initiative() {
   echo "fleet_dispatch: initiative ${initiative_id} validated (state:execution)"
 
   # Step 1.5: Epic branch precondition — ensure the declared branch exists
-  # and sync it with its base before any child ticket needs it.
-  # Only meaningful when the epic carries a Branch Directive; no-op otherwise.
-  if declare -f ensure_epic_branch >/dev/null 2>&1; then
-    # Resolve repo path for epic branch operations
-    local epic_repo="${EPIC_REPO_PATH:-${REPOS_ROOT:-.}}"
-    # If REPOS_ROOT has multiple repos, use the first one
-    if [ ! -d "$epic_repo/.git" ] && [ -d "$epic_repo" ]; then
-      for _erd in "$epic_repo"/*/; do
-        if [ -d "$_erd/.git" ] || git -C "$_erd" rev-parse --git-dir >/dev/null 2>&1; then
-          epic_repo="$_erd"
-          break
-        fi
-      done
-    fi
-
-    if ! ensure_epic_branch "$initiative_id" "$epic_repo"; then
-      echo "EPIC_BRANCH_UNAVAILABLE: initiative ${initiative_id} — cannot ensure epic branch, skipping dispatch" >&2
-      return 0
-    fi
+  # and sync it with its base before any child ticket needs it, in every
+  # repository under REPOS_ROOT. Only meaningful when the epic carries a
+  # Branch Directive; no-op otherwise (ensure_epic_branch exits 0 for that).
+  if ! declare -f ensure_epic_branch >/dev/null 2>&1; then
+    echo "fleet_dispatch: WARNING: epic-branch.sh not sourceable — epic branch precondition skipped (children may enqueue against an uncreated branch)" >&2
+  else
+    # Enumerate every git repo to cover: REPOS_ROOT itself (single-repo
+    # workspace) plus every direct child directory that is a git repo.
+    # Deliberate over-approximation — dispatch has no structured source for
+    # which repos an epic's children touch, and branch creation is idempotent.
+    local _epic_repos
+    _epic_repos=$(_fleet_repos_under_root)
 
     # Sync: integrate base changes into the epic branch per the directive's policy.
     # Sync failure warns but does not block dispatch — children still enqueue.
     local epic_sync_enabled="${FLEET_EPIC_BRANCH_SYNC:-true}"
-    if [ "$epic_sync_enabled" = "true" ]; then
-      epic_branch_sync "$initiative_id" "$epic_repo" || {
-        echo "fleet_dispatch: sync warning for ${initiative_id} — continuing with dispatch" >&2
-      }
-    fi
+
+    while IFS= read -r _epic_repo; do
+      [ -z "$_epic_repo" ] && continue
+
+      # Creation failure in any one repo gate-stops the whole initiative —
+      # enqueueing children at a base that does not exist somewhere would turn
+      # one clear failure into one failure per child.
+      if ! ensure_epic_branch "$initiative_id" "$_epic_repo"; then
+        echo "EPIC_BRANCH_UNAVAILABLE: initiative ${initiative_id} — cannot ensure epic branch in ${_epic_repo}, skipping dispatch" >&2
+        return 0
+      fi
+
+      # A sync failure in one repo is reported and does not block syncing the
+      # remaining repos, nor dispatch of ready children.
+      if [ "$epic_sync_enabled" = "true" ]; then
+        epic_branch_sync "$initiative_id" "$_epic_repo" || {
+          echo "fleet_dispatch: sync warning for ${initiative_id} in ${_epic_repo} — continuing with dispatch" >&2
+        }
+      fi
+    done <<<"$_epic_repos"
   fi
 
   # Step 2: Find child tickets with planned label + Backlog state
@@ -201,17 +332,22 @@ fleet_dispatch_initiative() {
 
     [ "$is_blocked" = "true" ] && continue
 
-    # Get priority for sorting
-    local priority
+    # Get priority and map it to an explicit dispatch rank. Raw-value sorting
+    # is wrong in both directions: descending puts Low (4) before Urgent (1);
+    # ascending puts No priority (0) before Urgent (1). The rank mapping
+    # fixes the semantic: Urgent(1)→1, High(2)→2, Medium(3)→3, Low(4)→4,
+    # No priority(0)/anything unexpected→5.
+    local priority rank
     priority=$(echo "$child" | jq -r '.priority // 0' 2>/dev/null)
     [ -z "$priority" ] && priority=0
+    rank=$(_fleet_dispatch_rank "$priority")
 
-    dispatchable="${dispatchable}${priority}|${child_id}"$'\n'
+    dispatchable="${dispatchable}${rank}|${child_id}|${priority}"$'\n'
   done <<<"$children_json"
 
-  # Sort by priority (descending)
+  # Sort ascending on the mapped dispatch rank (Urgent first, No priority last)
   local sorted
-  sorted=$(echo "$dispatchable" | sort -t'|' -k1 -rn | grep -v '^$' || true)
+  sorted=$(echo "$dispatchable" | sort -t'|' -k1 -n | grep -v '^$' || true)
   if [ -z "$sorted" ]; then
     echo "no dispatchable tickets for ${initiative_id}"
     return 0
@@ -227,7 +363,7 @@ fleet_dispatch_initiative() {
 
   # Step 5: Write spawn queue
   local enqueued=0
-  while IFS='|' read -r priority child_id; do
+  while IFS='|' read -r rank child_id priority; do
     [ -z "$child_id" ] && continue
     [ "$enqueued" -ge "$max_to_enqueue" ] && break
 
@@ -249,53 +385,14 @@ fleet_dispatch_initiative() {
 
     if [ "$dry_run" = "true" ]; then
       echo "[DRY-RUN] would enqueue: ${entry}"
+    elif _fleet_queue_append "$entry" "$queue_file"; then
+      echo "  enqueued ${child_id} (priority=${priority})"
     else
-      # Bounded retry with backoff for queue append. A single flock timeout
-      # does not mean the queue is permanently unavailable — the monitor may
-      # be mid-rewrite. Retry with backoff; dead-letter entries that exhaust
-      # all attempts so nothing is silently lost.
-      local lock_file="${queue_file}.lock"
-      local lock_timeout="${FLEET_QUEUE_LOCK_TIMEOUT:-5}"
-      local max_retries="${FLEET_QUEUE_MAX_RETRIES:-3}"
-      local backoff_secs="${FLEET_QUEUE_RETRY_BACKOFF_SECS:-2}"
-      local attempt=0
-      local enqueued_ok=false
-
-      while [ "$attempt" -lt "$max_retries" ]; do
-        attempt=$((attempt + 1))
-        if (
-          flock -w "$lock_timeout" 9 2>/dev/null || exit 1
-          echo "$entry" >>"$queue_file"
-        ) 9>"$lock_file"; then
-          enqueued_ok=true
-          break
-        fi
-        if [ "$attempt" -lt "$max_retries" ]; then
-          sleep "$backoff_secs"
-          # Use bc for multiplication to support fractional backoff values
-          # (bash $(( )) is integer-only). Fall back to integer arithmetic if
-          # bc is unavailable in a stripped environment.
-          if command -v bc >/dev/null 2>&1; then
-            backoff_secs=$(echo "$backoff_secs * 2" | bc)
-          else
-            backoff_secs=$((backoff_secs * 2))
-          fi
-        fi
-      done
-
-      if $enqueued_ok; then
-        echo "  enqueued ${child_id} (priority=${priority})"
-      else
-        # Dead-letter: write to a separate file so the entry is not lost.
-        # The dead-letter file is human-readable and replayable.
-        local dead_letter_file="${queue_file%.jsonl}-dead-letter.jsonl"
-        echo "  ERROR: failed to enqueue ${child_id} after ${max_retries} attempts — dead-lettering" >&2
-        echo "$entry" >>"$dead_letter_file"
-        echo "  dead-lettered ${child_id} → ${dead_letter_file}" >&2
-        # Do not count as enqueued; the dead-letter file must be manually
-        # replayed or the dispatch re-run.
-        continue
-      fi
+      # Dead-lettered by the shared append function — the dead-letter file
+      # must be manually replayed or the dispatch re-run.
+      echo "  ERROR: failed to enqueue ${child_id} — dead-lettering" >&2
+      echo "  dead-lettered ${child_id} → ${queue_file%.jsonl}-dead-letter.jsonl" >&2
+      continue
     fi
     enqueued=$((enqueued + 1))
   done <<<"$sorted"

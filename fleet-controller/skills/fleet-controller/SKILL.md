@@ -110,11 +110,11 @@ OBSERVE (sev=0) → WARN (sev=1) → KILL (sev=2) → KILL+RESTART (sev=3)
 - **OBSERVE**: Log detection results, no action
 - **WARN**: Write alert to dashboard, no destructive action
 - **KILL**: Verified escalation — stop-files → grace period → `kill -0` → SIGTERM → grace → `kill -0` → SIGKILL → re-verify. Finalizes pipeline log ONLY after PID confirmed gone. Writes generation fence marker (`{tid}-fence`) to prevent superseded zombie mutations. When no registry PID exists, falls back to stop-file-only.
-- **KILL+RESTART**: Kill + spawn new `/ticket-auto {ID} --auto` agent (if `FLEET_AUTO_RESTART=true` and restart count < `FLEET_MAX_RESTARTS`). New spawn increments the run registry generation.
+- **KILL+RESTART**: Kill + spawn new `/ticket-auto {ID} --auto` agent (unless `FLEET_AUTO_RESTART=false`, and restart count < `FLEET_MAX_RESTARTS`). New spawn increments the run registry generation.
 
 ## Configuration
 
-All settings in `lib/config.sh` with `${VAR:-default}` pattern:
+All settings in `lib/fleet-config.sh` with `${VAR:-default}` pattern:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -126,7 +126,7 @@ All settings in `lib/config.sh` with `${VAR:-default}` pattern:
 | `FLEET_ABANDON_KILL_HOURS` | 4 | Abandonment threshold for KILL+RESTART |
 | `FLEET_ZOMBIE_SECS` | 900 | Unresolved waiting entry threshold |
 | `FLEET_MAX_RESTARTS` | 2 | Max automatic restarts before giving up |
-| `FLEET_AUTO_RESTART` | false | Must be `true` to enable automatic restarts |
+| `FLEET_AUTO_RESTART` | true | Automatic restarts enabled by default; set `false` to opt out |
 | `FLEET_DRY_RUN` | false | When `true`, interventions are logged not executed |
 | `FLEET_MAX_CONCURRENT` | 3 | Max concurrent pipelines for dispatch |
 | `FLEET_INSTANCE_ID` | default | Namespace for stop files and spawn queues |

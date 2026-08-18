@@ -16,23 +16,29 @@ fi
 
 # ── State-directory resolution ──────────────────────────────────────────────────
 # Resolve stop-file and progress-file paths consistently with
-# fleet-controller/lib/config.sh so the worker watches the same directory the
-# fleet controller writes to. Without this, the worker watches /tmp while
+# fleet-controller/lib/fleet-config.sh (renamed from config.sh to avoid the
+# SessionStart lib-sync collision) so the worker watches the same directory
+# the fleet controller writes to. Without this, the worker watches /tmp while
 # fleet-intervene.sh writes to the workspace — cooperative kill never reaches
 # the worker.
 #
 # Discovery order:
 #   1. FLEET_STATE_DIR env var — explicit override, always wins
-#   2. config.sh constructors — when fleet-controller is co-installed
+#   2. fleet-config.sh constructors — when fleet-controller is co-installed
 #   3. /tmp — backward compatible with non-fleet-controller environments
 #
 # Usage: _worker_stop_file <type>
 #   type: pinger | watchdog
 
-# Discover and source config.sh for _fleet_stop_file constructor.
+# Discover and source fleet-config.sh for _fleet_stop_file constructor.
 # Look relative to this script (monorepo), then installed plugin paths.
+# The old config.sh name is kept as a fallback for installed pre-rename
+# fleet-controller versions.
 _worker_config_sh=""
 for _w_cand in \
+  "$(dirname "${BASH_SOURCE[0]}")/../../fleet-controller/lib/fleet-config.sh" \
+  "$HOME/.claude/skills/fleet-controller/lib/fleet-config.sh" \
+  "$HOME/.claude/plugins/fleet-controller/lib/fleet-config.sh" \
   "$(dirname "${BASH_SOURCE[0]}")/../../fleet-controller/lib/config.sh" \
   "$HOME/.claude/skills/fleet-controller/lib/config.sh" \
   "$HOME/.claude/plugins/fleet-controller/lib/config.sh"; do

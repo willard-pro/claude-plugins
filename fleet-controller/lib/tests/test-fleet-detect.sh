@@ -598,7 +598,7 @@ test_detect_all_mixed_health() {
   restart=$(echo "$r" | jq -r '.summary.restart')
   rm -rf "$ws"
   # Note: severity 3 survives because FLEET_AUTO_RESTART defaults to false
-  # in config.sh which caps sev 3→2, but this test predates the cap.
+  # in fleet-config.sh which caps sev 3→2, but this test predates the cap.
   # With the cap active, CRE-03 (gate-stop PR_REVIEW_VERDICT_UNPARSEABLE → sev=3)
   # becomes sev=2 (kill). The test still passes: healthy=1, warn=1, kill=1.
   # The count for "restart" is 0 since sev 3 is capped.
@@ -742,6 +742,41 @@ test_auto_mode_blocks_integrated_in_fleet_detect_all() {
   [ "$sev" -eq 1 ] && echo "$anomalies" | grep -q "auto-block(S1)"
 }
 
+# ── D-11 auto-dispatch workspace threading ────────────────────────────────────────
+# Regression: _fleet_scan_initiative_dispatch must forward its workspace to
+# fleet_dispatch_initiative. Without it the spawn queue resolved to a
+# ./logs-relative path under the caller's CWD — fleetd consumed from
+# {state_dir}/fleet-{instance}-spawn-queue.jsonl and never saw the entries.
+
+test_auto_dispatch_forwards_workspace() {
+  local ws
+  ws=$(_setup_workspace)
+  # Stubs defined BEFORE sourcing fleet-detect.sh so the scan uses them
+  # instead of sourcing the real linear-api.sh / fleet-dispatch.sh libs.
+  get_issue() { :; }
+  fleet_dispatch_initiative() {
+    echo "$1|$2" >"$ws/dispatch-args.txt"
+  }
+  curl() {
+    echo '{"data":{"issues":{"nodes":[{"id":"x","identifier":"INIT-42","children":{"nodes":[{"id":"c","identifier":"CRE-900","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"}]}}]}}]}}}'
+  }
+  source "$LIB_DIR/fleet-detect.sh"
+  FLEET_AUTO_DISPATCH=true _fleet_scan_initiative_dispatch "$ws" >/dev/null 2>&1
+  local rc=$?
+  [ "$rc" -eq 0 ] && [ -f "$ws/dispatch-args.txt" ] || {
+    echo "stub dispatch never called" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  local args
+  args=$(cat "$ws/dispatch-args.txt")
+  rm -rf "$ws"
+  [ "$args" = "INIT-42|$ws" ] || {
+    echo "expected dispatch args 'INIT-42|$ws', got '$args'" >&2
+    return 1
+  }
+}
+
 # ── Gate-hold lifecycle detection (gate-check.sh compatibility) ───────────────────
 
 test_gate_held_fresh_not_stall() {
@@ -847,6 +882,7 @@ for fn in \
   test_auto_mode_blocks_agent_log_denial_pattern \
   test_auto_mode_blocks_combined_pipeline_and_agent_blocks \
   test_auto_mode_blocks_integrated_in_fleet_detect_all \
+  test_auto_dispatch_forwards_workspace \
   test_gate_held_fresh_not_stall \
   test_gate_held_abandoned_detected \
   test_gate_stop_from_gate_check_detected; do

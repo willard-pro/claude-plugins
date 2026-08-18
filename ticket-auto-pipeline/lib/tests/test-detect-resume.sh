@@ -283,7 +283,7 @@ test_branch_context_survives_resume() {
   out=$(_detect_resume_with_log "TEST-BC" \
     "2026-07-25T10:00:00Z|META|schema|info|1" \
     "2026-07-25T10:00:01Z|META|title|info|TEST-BC: Fix auth" \
-    "2026-07-25T10:00:02Z|META|branch-context|info|base=epic/test-x;integration=epic/test-x;source=directive;ticket=feat/TEST-BC-fix-auth" \
+    "2026-07-25T10:00:02Z|META|branch-context|info|base=epic/test-x;integration=epic/test-x;source=epic-directive;ticket=feat/TEST-BC-fix-auth" \
     "2026-07-25T10:00:03Z|APPRAISE|setup-workspace|start|")
   [ "$(_field "$out" BASE_BRANCH)" = "epic/test-x" ] || {
     echo "BASE_BRANCH mismatch: $(_field "$out" BASE_BRANCH)" >&2
@@ -293,7 +293,7 @@ test_branch_context_survives_resume() {
     echo "INTEGRATION_BRANCH mismatch: $(_field "$out" INTEGRATION_BRANCH)" >&2
     return 1
   }
-  [ "$(_field "$out" BRANCH_SOURCE)" = "directive" ] || {
+  [ "$(_field "$out" BRANCH_SOURCE)" = "epic-directive" ] || {
     echo "BRANCH_SOURCE mismatch: $(_field "$out" BRANCH_SOURCE)" >&2
     return 1
   }

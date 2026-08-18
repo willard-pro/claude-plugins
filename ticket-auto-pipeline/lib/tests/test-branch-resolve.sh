@@ -39,7 +39,10 @@ FAIL=0
 _run() {
   local name="$1"
   shift
-  if "$@" 2>/dev/null; then
+  # Subshell isolation: tests eval parsed output into global variables
+  # (BASE_BRANCH, BRANCH_SOURCE, ...); without isolation one test's values
+  # leak into the next test's resolve_branch_context default fallback.
+  if ("$@") 2>/dev/null; then
     echo "PASS: $name"
     ((PASS++)) || true
   else
@@ -145,12 +148,12 @@ test_directive_beats_default() {
   parsed=$(echo "$output" | _parse_result)
   eval "$parsed"
 
-  [ "$BRANCH_SOURCE" = "directive" ] || {
-    echo "  expected BRANCH_SOURCE=directive, got $BRANCH_SOURCE" >&2
+  [ "$BRANCH_SOURCE" = "epic-directive" ] || {
+    echo "  expected BRANCH_SOURCE=epic-directive, got $BRANCH_SOURCE" >&2
     return 1
   }
-  [ "$BASE_BRANCH" = "develop" ] || {
-    echo "  expected BASE_BRANCH=develop, got $BASE_BRANCH" >&2
+  [ "$BASE_BRANCH" = "epic/debt-collection-v2" ] || {
+    echo "  expected BASE_BRANCH=epic/debt-collection-v2 (directive Branch, not Base), got $BASE_BRANCH" >&2
     return 1
   }
   [ "$INTEGRATION_BRANCH" = "epic/debt-collection-v2" ] || {
@@ -387,7 +390,8 @@ test_long_title_capped() {
 }
 _run "very long title is capped at 60 chars" test_long_title_capped
 
-# Different base branch in directive
+# Directive declares a base different from its branch: the directive's Branch
+# still wins for BASE_BRANCH (per branch-resolution spec), not the declared Base
 test_directive_different_base() {
   local parent='{
     "id": "CRE-300",
@@ -402,8 +406,8 @@ test_directive_different_base() {
   parsed=$(echo "$output" | _parse_result)
   eval "$parsed"
 
-  [ "$BASE_BRANCH" = "main" ] || {
-    echo "  expected BASE_BRANCH=main, got $BASE_BRANCH" >&2
+  [ "$BASE_BRANCH" = "epic/hotfix" ] || {
+    echo "  expected BASE_BRANCH=epic/hotfix (directive Branch), got $BASE_BRANCH" >&2
     return 1
   }
   [ "$INTEGRATION_BRANCH" = "epic/hotfix" ] || {
@@ -412,7 +416,7 @@ test_directive_different_base() {
   }
   return 0
 }
-_run "directive with different base branch" test_directive_different_base
+_run "directive Branch beats declared Base" test_directive_different_base
 
 echo ""
 echo "=== Results: $((PASS + FAIL)) tests, $PASS passed, $FAIL failed ==="

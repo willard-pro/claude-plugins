@@ -12,6 +12,7 @@ Run:
     python fleet-controller/fleetd/tests/test_supervisor.py
 """
 
+import fcntl
 import http.client
 import json
 import os
@@ -19,6 +20,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -728,6 +730,160 @@ class SpawnAndReapTest(unittest.TestCase):
         finally:
             sup.release_lock()
 
+    def test_remove_consumed_preserves_unconsumed_and_malformed(self):
+        """Rewrite removes only consumed TIDs; malformed lines survive."""
+        from fleetd.supervisor import _remove_consumed_entries
+
+        queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+        lines = [
+            json.dumps({'tid': 'TST-A', 'reason': 'test'}),
+            'torn line without closing brace',
+            json.dumps({'tid': 'TST-B', 'reason': 'test'}),
+        ]
+        queue_file.write_text('\n'.join(lines) + '\n')
+
+        _remove_consumed_entries(str(self.workspace), {'TST-A'})
+
+        remaining = queue_file.read_text()
+        self.assertNotIn('TST-A', remaining,
+                         "consumed entry should be removed")
+        self.assertIn('TST-B', remaining,
+                      "unconsumed entry must survive the rewrite")
+        self.assertIn('torn line', remaining,
+                      "malformed lines must be preserved, not dropped")
+
+    def test_remove_consumed_serializes_with_bash_append(self):
+        """A bash-style flock append racing the rewrite is never lost.
+
+        Regression for the lock-less tmp+rename rewrite: a dispatch append
+        landing between fleetd's read and its rename used to vanish with the
+        old inode — the ticket was never spawned and never dead-lettered.
+        """
+        from fleetd.supervisor import _remove_consumed_entries
+
+        queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+        lock_file = Path(str(queue_file) + '.lock')
+        queue_file.write_text(
+            json.dumps({'tid': 'TST-A', 'reason': 'test'}) + '\n')
+
+        # Main thread holds the same sidecar lock the bash append path uses
+        # (_fleet_queue_append flocks {queue}.lock), so both contenders block
+        # until it releases.
+        held = threading.Event()
+        released = threading.Event()
+
+        def hold_lock():
+            with open(lock_file, 'a') as fd:
+                fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
+                held.set()
+                released.wait(5)
+                fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+
+        def append_entry():
+            # Mirrors _fleet_queue_append: flock, append, unlock.
+            with open(lock_file, 'a') as fd:
+                fcntl.flock(fd.fileno(), fcntl.LOCK_EX)
+                try:
+                    with open(queue_file, 'a') as qf:
+                        qf.write(json.dumps(
+                            {'tid': 'TST-C', 'reason': 'test'}) + '\n')
+                finally:
+                    fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+
+        def remove_consumed():
+            _remove_consumed_entries(str(self.workspace), {'TST-A'})
+
+        holder = threading.Thread(target=hold_lock)
+        holder.start()
+        self.assertTrue(held.wait(5),
+                        "lock holder thread should acquire the lock")
+
+        remover = threading.Thread(target=remove_consumed)
+        appender = threading.Thread(target=append_entry)
+        remover.start()
+        appender.start()
+
+        # Give both contenders time to block on the lock, then release.
+        time.sleep(0.5)
+        released.set()
+        holder.join(5)
+        remover.join(5)
+        appender.join(5)
+
+        remaining = queue_file.read_text()
+        self.assertNotIn('TST-A', remaining,
+                         "consumed entry should be removed")
+        self.assertIn('TST-C', remaining,
+                      "append racing the rewrite was lost — lock contract broken")
+
+    def test_terminal_pipeline_not_respawned_from_stale_entry(self):
+        """A stale entry whose ticket already has a terminal log is removed,
+        not re-spawned (crash window between spawn and queue removal)."""
+        from fleetd.supervisor import Supervisor
+
+        queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+        queue_file.write_text(
+            json.dumps({'tid': 'TST-T1', 'reason': 'test'}) + '\n')
+        log_file = self.workspace / 'TST-T1-pipeline.log'
+        log_file.write_text('2026-01-01T00:00:00Z|META|outcome|info|completed\n')
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            consumed = sup._consume_queue(
+                cmd_override=_make_worker_cmd(sleep_secs=5))
+            self.assertEqual(consumed, {'TST-T1'},
+                             "stale entry should be consumed (removed)")
+            self.assertNotIn('TST-T1', sup._children,
+                             "terminal ticket must not be spawned")
+            remaining = (queue_file.read_text()
+                         if queue_file.is_file() else '')
+            self.assertNotIn('TST-T1', remaining,
+                             "stale entry should be removed from the queue")
+        finally:
+            sup.release_lock()
+
+    def test_poll_adopted_workers_preserves_generation(self):
+        """poll_adopted_workers preserves the last-known generation before
+        deleting the registry — same contract as scan_registry."""
+        from fleetd.supervisor import Supervisor
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        # A worker that already exited — PID not alive.
+        proc = subprocess.Popen([sys.executable, '-c', 'pass'])
+        dead_pid = proc.pid
+        proc.wait()
+        sup._children.add(
+            tid='TST-ADOPT',
+            pid=dead_pid,
+            generation=7,
+            reason='dispatched',
+            adopted=True,
+        )
+        run_file = self.workspace / 'TST-ADOPT-run.json'
+        run_file.write_text(json.dumps({'tid': 'TST-ADOPT', 'pid': str(dead_pid),
+                                        'generation': 7}))
+
+        sup.poll_adopted_workers()
+
+        last_file = self.workspace / 'TST-ADOPT-last-generation'
+        self.assertTrue(last_file.is_file(),
+                        "last-generation side record should exist")
+        self.assertEqual(json.loads(last_file.read_text())['generation'], 7,
+                         "preserved generation should be 7")
+        self.assertFalse(run_file.exists(),
+                         "stale registry file should be removed")
+
     def test_spawn_disabled_does_not_consume(self):
         """When spawn_enabled is False, queue is not consumed."""
         from fleetd.supervisor import Supervisor
@@ -1314,6 +1470,78 @@ class GenerationFencingTest(unittest.TestCase):
         self.assertEqual(gen, 6,
                          "new generation should be max(fence, registry) + 1")
 
+    # ── Generation continuity across stale-registry deletion ───────────────
+
+    def _write_stale_run_file(self, tid, generation, dead_pid):
+        """Write a run-registry entry whose PID is known dead."""
+        run_file = self.workspace / f'{tid}-run.json'
+        run_file.write_text(json.dumps({
+            'tid': tid,
+            'pid': str(dead_pid),
+            'generation': generation,
+            'started_at': datetime.now(timezone.utc).isoformat(),
+            'reason': 'test',
+        }))
+        return run_file
+
+    def test_scan_registry_preserves_generation_before_delete(self):
+        """Stale-entry deletion keeps the last-known generation on disk."""
+        from fleetd.supervisor import scan_registry
+
+        # A PID that is guaranteed dead: a child that already exited.
+        sleeper = subprocess.Popen([sys.executable, '-c', 'pass'])
+        sleeper.wait(timeout=5)
+        dead_pid = sleeper.pid
+
+        run_file = self._write_stale_run_file('CRE-14', 2, dead_pid)
+
+        entries = scan_registry(self.workspace, verify_ownership=False)
+        self.assertEqual(entries, [],
+                         "dead-PID entry must not be adopted")
+        self.assertFalse(run_file.exists(),
+                         "stale run-registry file should be deleted")
+
+        last_file = self.workspace / 'CRE-14-last-generation'
+        self.assertTrue(last_file.exists(),
+                        "last-generation record should be preserved")
+        data = json.loads(last_file.read_text())
+        self.assertEqual(data.get('generation'), 2,
+                         "preserved generation should match the deleted entry")
+
+    def test_next_spawn_continues_preserved_generation(self):
+        """A spawn after stale deletion continues the sequence, not restart at 1."""
+        from fleetd.supervisor import Supervisor
+
+        # Simulate the state after scan_registry deleted a gen-2 entry:
+        # no run registry, no fence, only the preserved record.
+        last_file = self.workspace / 'CRE-14-last-generation'
+        last_file.write_text(json.dumps({'generation': 2}))
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+        )
+        self.assertEqual(sup._resolve_generation('CRE-14'), 3,
+                         "next spawn should be preserved_gen + 1")
+
+    def test_fence_higher_than_preserved_still_wins(self):
+        """A higher fenced generation beats the preserved value."""
+        from fleetd.supervisor import Supervisor
+
+        last_file = self.workspace / 'CRE-14-last-generation'
+        last_file.write_text(json.dumps({'generation': 2}))
+        fence_file = self.workspace / 'CRE-14-fence'
+        fence_file.write_text(json.dumps({
+            'tid': 'CRE-14', 'fenced_generation': 4,
+        }))
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+        )
+        self.assertEqual(sup._resolve_generation('CRE-14'), 5,
+                         "next spawn should be max(preserved, fenced) + 1")
+
     def test_killed_worker_fences_generation(self):
         """Killing a worker writes a fence for its generation."""
         from fleetd.supervisor import Supervisor
@@ -1413,6 +1641,185 @@ class GenerationFencingTest(unittest.TestCase):
                              "registry generation should match child table")
         finally:
             sup.release_lock()
+
+
+# ── Startup orphan reconciliation tests ──────────────────────────────────
+
+
+class _RunOnceSupervisor:
+    """Wraps Supervisor for startup-sequence assertions.
+
+    Patches the loop-body methods to record call order and raise SystemExit
+    on the first queue-consume, so run_observe() exits after exactly one
+    loop iteration (reconciliation happens before the loop starts, so one
+    iteration is enough to prove it runs once at startup, not per cycle).
+    """
+
+    def __init__(self, supervisor, calls):
+        self._sup = supervisor
+        self._calls = calls
+
+    def __getattr__(self, name):
+        return getattr(self._sup, name)
+
+
+class StartupReconciliationTest(unittest.TestCase):
+    """run_observe calls reconciliation once at startup, after adoption."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+        self.pidfile = self.workspace / 'test.pid'
+        self.port = _find_free_port()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _make_patched_supervisor(self):
+        from fleetd.supervisor import Supervisor
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.pidfile),
+            port=self.port,
+            cycle_interval=0.05,
+        )
+        calls = []
+
+        def record(name):
+            def _fn(*args, **kwargs):
+                calls.append(name)
+                return None
+            return _fn
+
+        sup.scan_workers = record('scan_workers')
+        sup.reconcile_orphaned_tickets = record('reconcile_orphaned_tickets')
+        sup.run_detection_cycle = record('run_detection_cycle')
+        sup._reap_children = record('_reap_children')
+        sup._process_kill_requests = record('_process_kill_requests')
+
+        def _consume_queue(*args, **kwargs):
+            calls.append('_consume_queue')
+            raise SystemExit(0)
+
+        sup._consume_queue = _consume_queue
+        return sup, calls
+
+    def test_run_observe_reconciles_once_after_scan(self):
+        """run_observe: scan_workers → reconcile_orphaned_tickets → detection."""
+        from fleetd.supervisor import Supervisor
+
+        sup, calls = self._make_patched_supervisor()
+        with self.assertRaises(SystemExit):
+            sup.run_observe()
+
+        # Reconcile happens exactly once, immediately after scan_workers and
+        # before the first detection cycle; the single loop iteration adds
+        # no second call.
+        self.assertEqual(calls.count('reconcile_orphaned_tickets'), 1,
+                         "reconciliation must run exactly once at startup")
+        scan_idx = calls.index('scan_workers')
+        recon_idx = calls.index('reconcile_orphaned_tickets')
+        detect_idx = calls.index('run_detection_cycle')
+        self.assertLess(scan_idx, recon_idx,
+                        "reconciliation must run after scan_workers")
+        self.assertLess(recon_idx, detect_idx,
+                        "reconciliation must run before the first detection cycle")
+
+    def test_reconcile_passes_adopted_tids_to_bash(self):
+        """The bash reconciliation call receives the adopted-live TID set."""
+        from unittest import mock
+        from fleetd.supervisor import Supervisor
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.pidfile),
+            port=self.port,
+        )
+        # Simulate scan_workers having adopted two survivors; a third child
+        # exists in the table but is not adopted.
+        sup._children.add(tid='CRE-12', pid=1, adopted=True)
+        sup._children.add(tid='CRE-13', pid=2, adopted=True)
+        sup._children.add(tid='CRE-14', pid=3, adopted=False)
+
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured['cmd'] = cmd
+            captured['env'] = kwargs.get('env', {})
+            return mock.Mock(returncode=0, stdout='', stderr='')
+
+        with mock.patch('fleetd.supervisor.subprocess.run', side_effect=fake_run):
+            sup.reconcile_orphaned_tickets()
+
+        self.assertIn('cmd', captured, "bash reconciliation not invoked")
+        argv = captured['cmd']
+        bash_source = argv[2] if len(argv) > 2 and argv[:2] == ['bash', '-c'] else ''
+        self.assertIn('fleet_reconcile_orphans', bash_source,
+                      f"bash source missing call: {argv}")
+        # Untrusted values travel via environment variables, not inline
+        # interpolation — the bash source contains only fixed variable refs.
+        env = captured['env']
+        self.assertEqual(env.get('FLEET_RECONCILE_LIVE_TIDS'), 'CRE-12 CRE-13',
+                         "adopted TIDs not passed via env")
+        self.assertNotIn('CRE-14', env.get('FLEET_RECONCILE_LIVE_TIDS', ''),
+                         "non-adopted TID leaked into live set")
+        self.assertEqual(env.get('FLEET_RECONCILE_STATE_DIR'), str(self.workspace))
+        self.assertTrue(env.get('FLEET_RECONCILE_QUEUE_FILE', '').endswith(
+            'fleet-default-spawn-queue.jsonl'))
+
+    def test_reconcile_no_inline_interpolation_of_untrusted_values(self):
+        """No state-dir-derived value is spliced into the bash source string.
+
+        A malicious `{tid}-run.json` (e.g. tid `x"; rm -rf ~; "`) in a shared
+        workspace must not become shell syntax at reconciliation time.
+        """
+        from unittest import mock
+        from fleetd.supervisor import Supervisor
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.pidfile),
+            port=self.port,
+        )
+        # A hostile adopted TID that would be catastrophic if interpolated.
+        hostile_tid = 'EVIL"; touch /tmp/pwned; "'
+        sup._children.add(tid=hostile_tid, pid=1, adopted=True)
+
+        captured = {}
+
+        def fake_run(cmd, **kwargs):
+            captured['cmd'] = cmd
+            captured['env'] = kwargs.get('env', {})
+            return mock.Mock(returncode=0, stdout='', stderr='')
+
+        with mock.patch('fleetd.supervisor.subprocess.run', side_effect=fake_run):
+            sup.reconcile_orphaned_tickets()
+
+        bash_source = captured['cmd'][2]
+        # The hostile value appears nowhere in the parsed command source.
+        self.assertNotIn('pwned', bash_source)
+        self.assertNotIn(hostile_tid, bash_source)
+        # It rides in the environment instead, where bash cannot parse it.
+        self.assertIn(hostile_tid, captured['env']['FLEET_RECONCILE_LIVE_TIDS'])
+
+    def test_reconcile_failure_does_not_block(self):
+        """A reconciliation subprocess failure is reported, not raised."""
+        from unittest import mock
+        from fleetd.supervisor import Supervisor
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.pidfile),
+            port=self.port,
+        )
+
+        with mock.patch(
+            'fleetd.supervisor.subprocess.run',
+            return_value=mock.Mock(returncode=1, stdout='', stderr='boom'),
+        ):
+            # Must not raise.
+            sup.reconcile_orphaned_tickets()
 
 
 # ── Group 10: CLI alignment tests ────────────────────────────────────────

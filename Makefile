@@ -1,8 +1,8 @@
 SCRIPTS := $(shell find . -name "*.sh" -not -path "./.git/*")
 
-.PHONY: test test-lib test-flow test-kc lint fmt-check fmt test-grill test-planner-intent-gate
+.PHONY: test test-lib test-fleetd test-flow test-kc lint fmt-check fmt test-grill test-planner-intent-gate
 
-test: test-lib test-planner test-flow test-kc test-grill test-planner-intent-gate
+test: test-lib test-fleetd test-planner test-flow test-kc test-grill test-planner-intent-gate
 
 test-lib:
 	@echo "=== lib unit tests ==="
@@ -23,12 +23,15 @@ test-lib:
 	# fleet-controller tests
 	bash fleet-controller/lib/tests/test-fleet-detect.sh
 	bash fleet-controller/lib/tests/test-fleet-detect-new.sh
+	bash fleet-controller/lib/tests/test-detect-epic-branch-ready.sh
 	bash fleet-controller/lib/tests/test-fleet-intervene.sh
 	bash fleet-controller/lib/tests/test-fleet-dashboard.sh
 	bash fleet-controller/lib/tests/test-fleet-dispatch.sh
+	bash fleet-controller/lib/tests/test-fleet-reconcile.sh
 	bash fleet-controller/lib/tests/test-fleet-feedback.sh
 	bash fleet-controller/lib/tests/test-fleet-monitor.sh
 	bash fleet-controller/lib/tests/test-fleet-monitor-dispatch.sh
+	bash fleet-controller/lib/tests/test-plugin-structure.sh
 	# ticket-planner enrichment tests
 	bash ticket-auto-pipeline/lib/tests/test-planned-ticket-check.sh
 	bash ticket-auto-pipeline/lib/tests/test-appraise-fast-path.sh
@@ -75,6 +78,10 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-branch-resolve.sh
 	bash ticket-auto-pipeline/lib/tests/test-worktree.sh
 	bash ticket-auto-pipeline/lib/tests/test-epic-branch.sh
+
+test-fleetd:
+	@echo "=== fleetd supervisor tests (must run from repo root) ==="
+	python3 -m pytest fleet-controller/fleetd/tests/test_supervisor.py -v
 
 test-planner:
 	@echo "=== ticket-planner unit tests ==="

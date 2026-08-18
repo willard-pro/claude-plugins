@@ -12,8 +12,8 @@
 
 # Source config for threshold defaults (but allow override via env)
 _CONFIG_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-if [ -f "$_CONFIG_DIR/config.sh" ]; then
-  source "$_CONFIG_DIR/config.sh"
+if [ -f "$_CONFIG_DIR/fleet-config.sh" ]; then
+  source "$_CONFIG_DIR/fleet-config.sh"
 fi
 
 # ── Helpers ──────────────────────────────────────────────────────────────────────
@@ -543,8 +543,14 @@ detect_initiative_dispatch() {
 }
 
 # Fleet-wide initiative dispatch scan. Runs once per fleet_detect_all call.
-# Usage: _fleet_scan_initiative_dispatch
+# Usage: _fleet_scan_initiative_dispatch [workspace]
+# The workspace is threaded through to fleet_dispatch_initiative so the spawn
+# queue resolves to the same durable path the daemon consumes
+# ({state_dir}/fleet-{instance}-spawn-queue.jsonl) instead of a ./logs-relative
+# path under the caller's CWD — auto-dispatched entries were otherwise written
+# somewhere fleetd never reads.
 _fleet_scan_initiative_dispatch() {
+  local workspace="${1:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   if ! declare -f get_issue >/dev/null 2>&1; then
     local _la_paths=("$HOME/.claude/skills/lib/linear-api.sh" "${_CONFIG_DIR}/../linear-api.sh")
     for _lp in "${_la_paths[@]}"; do
@@ -560,7 +566,10 @@ _fleet_scan_initiative_dispatch() {
   # Query Linear for epics with state:execution label.
   # Use GraphQL bulk query for efficiency (single round-trip vs N+1 get_issue calls).
   # Retry pattern matches linear-api.sh: 3 attempts with exponential backoff.
-  local query='{"query":"{issues(filter:{state:{name:{eq:\\"Backlog\\"}},labels:{name:{eq:\\"state:execution\\"}}}){nodes{id identifier title children{nodes{id identifier state{name} labels{nodes{name}}}}}}}"}'
+  # NOTE: no epic Linear-state filter — the state:execution label is the gate.
+  # This matches fleet_dispatch_initiative's population exactly; a state filter
+  # here made epics invisible to detection while still dispatchable.
+  local query='{"query":"{issues(filter:{labels:{name:{eq:\\"state:execution\\"}}}){nodes{id identifier title children{nodes{id identifier state{name} labels{nodes{name}}}}}}}"}'
 
   local epics_json attempt=1 max_attempts=3 delay=1
   while [ "$attempt" -le "$max_attempts" ]; do
@@ -677,15 +686,39 @@ _fleet_scan_epic_branch_ready() {
     return
   fi
 
-  # Source epic branch deps if available
-  local _tap_lib="${_CONFIG_DIR}/../../ticket-auto-pipeline/lib"
-  if ! declare -f _parse_directive >/dev/null 2>&1; then
-    [ -f "$_tap_lib/planned-ticket-check.sh" ] && source "$_tap_lib/planned-ticket-check.sh"
-    [ -f "$_tap_lib/branch-directive-check.sh" ] && source "$_tap_lib/branch-directive-check.sh"
+  # Source epic branch deps if available. Two candidate locations — the
+  # monorepo checkout (../../) and the installed plugin layout where the
+  # ticket-auto-pipeline SessionStart hook syncs libs to ~/.claude/skills/lib.
+  # Without the second, D-12 silently never fires in installed deployments.
+  local _tap_lib
+  for _tap_lib in "${_CONFIG_DIR}/../../ticket-auto-pipeline/lib" "$HOME/.claude/skills/lib"; do
+    if ! declare -f _parse_directive >/dev/null 2>&1; then
+      [ -f "$_tap_lib/planned-ticket-check.sh" ] && source "$_tap_lib/planned-ticket-check.sh"
+      [ -f "$_tap_lib/branch-directive-check.sh" ] && source "$_tap_lib/branch-directive-check.sh"
+    fi
+    if ! declare -f epic_branch_children_done >/dev/null 2>&1; then
+      [ -f "$_tap_lib/epic-branch.sh" ] && source "$_tap_lib/epic-branch.sh"
+    fi
+    if declare -f epic_branch_children_done >/dev/null 2>&1; then
+      break
+    fi
+  done
+  # Fail loud, not silently: an un-sourceable helper must not degrade to
+  # "never ready" (which reads as healthy-but-idle).
+  if ! declare -f epic_branch_children_done >/dev/null 2>&1; then
+    echo '{"severity":0,"findings":"epic-branch.sh not sourceable"}' >&2
+    return
+  fi
+  # Repo enumeration must match dispatch's — source the shared helper.
+  if ! declare -f _fleet_repos_under_root >/dev/null 2>&1; then
+    local _dispatch_lib="${_CONFIG_DIR}/fleet-dispatch.sh"
+    [ -f "$_dispatch_lib" ] && source "$_dispatch_lib"
   fi
 
-  # Query epics with state:execution label — include description and children
-  local query='{"query":"{issues(filter:{state:{name:{eq:\\\"Backlog\\\"}},labels:{name:{eq:\\\"state:execution\\\"}}}){nodes{id identifier title description children{nodes{id identifier state{name} labels{nodes{name}}}}}}}"}'
+  # Query epics with state:execution label — include description and children.
+  # No epic Linear-state filter: the label is the gate, matching the dispatch
+  # population (see the same note on the D-11 query).
+  local query='{"query":"{issues(filter:{labels:{name:{eq:\\\"state:execution\\\"}}}){nodes{id identifier title description children{nodes{id identifier state{name} labels{nodes{name}}}}}}}"}'
 
   local epics_json attempt=1 max_attempts=3 delay=1
   while [ "$attempt" -le "$max_attempts" ]; do
@@ -728,24 +761,29 @@ _fleet_scan_epic_branch_ready() {
       fi
     fi
 
-    # Check child tickets — all must be Done
-    local child_count
-    child_count=$(echo "$epics_json" | jq -r ".data.issues.nodes[$i].children.nodes | length // 0" 2>/dev/null)
-    [ "${child_count:-0}" -eq 0 ] && continue
+    # Readiness is delegated to the single canonical children-done helper —
+    # no independent inline evaluation (duplicated checks have drifted before).
+    # The helper consumes JSONL (one child object per line), matching the
+    # jq -c '.children[] // empty' stream its own fetch path produces.
+    local children_nodes
+    children_nodes=$(echo "$epics_json" | jq -c ".data.issues.nodes[$i].children.nodes[] // empty" 2>/dev/null)
 
-    local all_done=true
-    for j in $(seq 0 $((child_count - 1))); do
-      local child_state
-      child_state=$(echo "$epics_json" | jq -r ".data.issues.nodes[$i].children.nodes[$j].state.name // empty" 2>/dev/null)
-      if [ "$child_state" != "Done" ]; then
-        all_done=false
-        break
-      fi
-    done
-
-    if [ "$all_done" = "true" ]; then
+    if epic_branch_children_done "$epic_id" "$children_nodes"; then
       ready_count=$((ready_count + 1))
       ready_ids="${ready_ids} ${epic_id}"
+
+      # Actuation: once ready, open the integration PR in every repository the
+      # epic branch was created in (same repo set dispatch iterated — the
+      # shared helper, not a re-guess). epic_branch_open_pr is idempotent
+      # (existing-PR check) and never merges; it is only called when
+      # FLEET_EPIC_AUTO_PR is enabled, matching the detector's opt-in convention.
+      if [ "${FLEET_EPIC_AUTO_PR:-false}" = "true" ] && declare -f epic_branch_open_pr >/dev/null 2>&1; then
+        local _ebr_repo
+        while IFS= read -r _ebr_repo; do
+          [ -z "$_ebr_repo" ] && continue
+          epic_branch_open_pr "$epic_id" "$_ebr_repo" 2>/dev/null || true
+        done < <(_fleet_repos_under_root)
+      fi
     fi
   done
 
@@ -853,8 +891,11 @@ extract_diagnostics() {
 }
 
 # ── Aggregator ───────────────────────────────────────────────────────────────────
-# Enumerates active pipeline logs, runs all 11 detectors per pipeline + fleet-wide,
-# outputs JSON results array.
+# Enumerates active pipeline logs, runs all 12 detectors: 8 legacy per-ticket
+# detectors + planner_feedback + blocked_by + initiative_dispatch +
+# epic_branch_ready. Detectors 9-10 run per-ticket; 10-12 have fleet-wide
+# scans collected into the fleet_wide array.
+# Outputs JSON results array.
 # Usage: fleet_detect_all <workspace>
 fleet_detect_all() {
   local workspace="${1:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
@@ -991,7 +1032,7 @@ fleet_detect_all() {
 
   # D-11: Initiative dispatch scan
   local id_json
-  id_json=$(_fleet_scan_initiative_dispatch 2>/dev/null || echo '{"severity":0,"findings":""}')
+  id_json=$(_fleet_scan_initiative_dispatch "$workspace" 2>/dev/null || echo '{"severity":0,"findings":""}')
   [ "$fw_first" = "false" ] && fleet_wide="$fleet_wide,"
   fw_first=false
   fleet_wide="${fleet_wide}$(jq -nc \

@@ -167,14 +167,20 @@ ensure_epic_branch() {
     return 0
   fi
 
-  # Create branch from base
-  if ! git -C "$repo_path" checkout -b "$branch" "origin/$base" >/dev/null 2>&1; then
+  # Create the branch as a plain ref — no checkout. The shared clone may be
+  # used concurrently by other processes; branch creation must never move
+  # its checked-out HEAD or touch its working tree.
+  if ! git -C "$repo_path" branch "$branch" "origin/$base" >/dev/null 2>&1; then
     echo "epic-branch: failed to create branch '$branch' from '$base'" >&2
     return 1
   fi
 
-  # Push to origin
+  # Push to origin. On failure, delete the local ref: leaving it behind makes
+  # _branch_exists short-circuit every later cycle, so the remote branch would
+  # never be (re)created — the epic wedges until manual cleanup. Deleting lets
+  # the next dispatch cycle retry creation from scratch.
   if ! git -C "$repo_path" push origin "$branch" >/dev/null 2>&1; then
+    git -C "$repo_path" branch -D "$branch" >/dev/null 2>&1 || true
     echo "epic-branch: failed to push branch '$branch' to origin" >&2
     return 1
   fi
@@ -353,9 +359,16 @@ epic_branch_children_done() {
 
   while IFS= read -r child; do
     [ -z "$child" ] && continue
-    child_count=$((child_count + 1))
-    local child_state
+    local child_state child_labels
     child_state=$(echo "$child" | jq -r '.state.name // empty')
+    child_labels=$(echo "$child" | jq -r '.labels.nodes[]?.name // empty' 2>/dev/null)
+    # Readiness contract: the epic's PLANNED children must all be Done.
+    # Non-planned children (future work not yet planned) are out of scope —
+    # counting them blocked readiness forever.
+    if ! echo "$child_labels" | grep -q "planned" 2>/dev/null; then
+      continue
+    fi
+    child_count=$((child_count + 1))
     if [ "$child_state" = "Done" ]; then
       done_count=$((done_count + 1))
     fi

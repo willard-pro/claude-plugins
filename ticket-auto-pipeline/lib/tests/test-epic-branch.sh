@@ -137,6 +137,12 @@ echo ""
 test_create_branch() {
   _setup_fixture
 
+  # Branch creation must be a plain ref operation — the shared clone's
+  # checked-out branch and working tree are untouched.
+  local head_before status_before
+  head_before=$(git -C "$FIXTURE_REPO" rev-parse --abbrev-ref HEAD)
+  status_before=$(git -C "$FIXTURE_REPO" status --porcelain)
+
   # ensure_epic_branch should create and push the branch
   ensure_epic_branch "CRE-100" "$FIXTURE_REPO" 2>&1 || return 1
 
@@ -153,6 +159,22 @@ test_create_branch() {
   main_head=$(git -C "$FIXTURE_REPO" rev-parse main)
   [ "$merge_base" = "$main_head" ] || {
     echo "  branch not based on main" >&2
+    return 1
+  }
+
+  # Checked-out branch unchanged
+  local head_after
+  head_after=$(git -C "$FIXTURE_REPO" rev-parse --abbrev-ref HEAD)
+  [ "$head_after" = "$head_before" ] || {
+    echo "  checked-out branch moved: $head_before → $head_after" >&2
+    return 1
+  }
+
+  # Working tree unchanged
+  local status_after
+  status_after=$(git -C "$FIXTURE_REPO" status --porcelain)
+  [ "$status_after" = "$status_before" ] || {
+    echo "  working tree modified: before=[$status_before] after=[$status_after]" >&2
     return 1
   }
 
@@ -187,6 +209,73 @@ test_idempotent_create() {
   return 0
 }
 _run "idempotent create does not modify existing branch" test_idempotent_create
+
+# ── 2.3b: Push-failure wedge regression ─────────────────────────────────────
+# Creation succeeds locally, push fails. The local ref must be cleaned up so
+# _branch_exists does not short-circuit every later cycle — the remote branch
+# would otherwise never be (re)created.
+
+test_push_failure_cleans_local_ref() {
+  _setup_fixture
+
+  # Break the remote AFTER the initial fixture push so origin/main is still
+  # resolvable locally: `git branch epic/test-branch origin/main` succeeds,
+  # then `git push origin` fails.
+  git -C "$FIXTURE_REPO" remote set-url origin "$FIXTURE_DIR/nonexistent-remote.git"
+
+  local exit_code=0
+  ensure_epic_branch "CRE-100" "$FIXTURE_REPO" 2>/dev/null || exit_code=$?
+  [ "$exit_code" -eq 1 ] || {
+    echo "  expected exit 1 on push failure, got $exit_code" >&2
+    return 1
+  }
+
+  # Wedge fix: the half-created local ref must not survive the failure.
+  git -C "$FIXTURE_REPO" rev-parse --verify "epic/test-branch" >/dev/null 2>&1 && {
+    echo "  local ref left behind after failed push — retry wedge" >&2
+    return 1
+  }
+
+  # Restore the remote — the next dispatch cycle must succeed, proving the
+  # failure did not wedge future retries.
+  git -C "$FIXTURE_REPO" remote set-url origin "$ORIGIN_REPO"
+  ensure_epic_branch "CRE-100" "$FIXTURE_REPO" 2>&1 || {
+    echo "  second ensure after remote restore failed" >&2
+    return 1
+  }
+  git -C "$FIXTURE_REPO" rev-parse --verify "epic/test-branch" >/dev/null 2>&1 || {
+    echo "  branch not created after remote restore" >&2
+    return 1
+  }
+
+  return 0
+}
+_run "push failure cleans local ref, retry succeeds" test_push_failure_cleans_local_ref
+
+# Creation failure: the directive's base does not exist on origin, so the
+# `git branch <branch> origin/<base>` call fails. Exit 1, no local ref left.
+test_create_failure_nonexistent_base() {
+  _setup_fixture
+
+  local rc=0
+  MOCK_DESCRIPTION='## Branch Directive
+**Schema-Version:** 1
+**Branch:** epic/nope-base
+**Base:** develop
+**Merge Policy:** manual
+**Sync Policy:** none' \
+    ensure_epic_branch "CRE-100" "$FIXTURE_REPO" 2>/dev/null || rc=$?
+  [ "$rc" -eq 1 ] || {
+    echo "  expected exit 1 on creation failure, got $rc" >&2
+    return 1
+  }
+  git -C "$FIXTURE_REPO" rev-parse --verify "epic/nope-base" >/dev/null 2>&1 && {
+    echo "  half-created branch left behind after failed create" >&2
+    return 1
+  }
+  return 0
+}
+_run "creation failure leaves no local ref" test_create_failure_nonexistent_base
 
 # ── 2.4: No-directive case ──────────────────────────────────────────────────
 
@@ -428,6 +517,39 @@ test_children_all_done_jsonl() {
 }
 _run "three children all Done → ready" test_children_all_done_jsonl
 
+test_children_non_planned_excluded() {
+  # A Done child WITHOUT the planned label is out of scope — it must not
+  # block readiness (the doc contract is "planned children are all Done").
+  local children_json
+  children_json=$(
+    cat <<'EOJSON'
+{"id":"child-1","identifier":"CRE-1","state":{"name":"Done"},"labels":{"nodes":[{"name":"planned"}]}}
+{"id":"child-2","identifier":"CRE-2","state":{"name":"Todo"},"labels":{"nodes":[]}}
+EOJSON
+  )
+  epic_branch_children_done "CRE-100" "$children_json" 2>/dev/null && return 0
+  echo "  non-planned child must not block readiness" >&2
+  return 1
+}
+_run "non-planned child excluded from readiness" test_children_non_planned_excluded
+
+test_children_only_non_planned_not_ready() {
+  # No planned children at all — not ready (zero in-scope children).
+  local children_json
+  children_json=$(
+    cat <<'EOJSON'
+{"id":"child-1","identifier":"CRE-1","state":{"name":"Done"},"labels":{"nodes":[]}}
+{"id":"child-2","identifier":"CRE-2","state":{"name":"Done"},"labels":{"nodes":[]}}
+EOJSON
+  )
+  epic_branch_children_done "CRE-100" "$children_json" 2>/dev/null && {
+    echo "  zero planned children should NOT be ready" >&2
+    return 1
+  }
+  return 0
+}
+_run "only non-planned children → not ready" test_children_only_non_planned_not_ready
+
 echo ""
 echo "=== PR tests ==="
 echo ""
@@ -561,8 +683,12 @@ test_pr_idempotent() {
 
   ensure_epic_branch "CRE-100" "$FIXTURE_REPO" 2>&1 || return 1
 
-  # Override gh as function; simulate existing PR (list returns number)
+  # gh mock records its calls so the "no duplicate PR" invariant is asserted,
+  # not assumed: pr create must NEVER be called while a PR already exists.
+  local gh_log
+  gh_log="$FIXTURE_DIR/gh-create.log"
   gh() {
+    echo "$*" >>"$gh_log"
     case "$1" in
     pr)
       case "$2" in
@@ -576,11 +702,27 @@ test_pr_idempotent() {
 
   git -C "$FIXTURE_REPO" remote set-url origin "git@github.com:test-org/test-repo.git"
 
+  # First call: existing PR detected → no-op.
   FLEET_EPIC_AUTO_PR=true epic_branch_open_pr "CRE-100" "$FIXTURE_REPO" 2>&1 || {
     echo "  epic_branch_open_pr failed" >&2
     return 1
   }
+  # Second call: still no create.
+  FLEET_EPIC_AUTO_PR=true epic_branch_open_pr "CRE-100" "$FIXTURE_REPO" 2>&1 || {
+    echo "  second epic_branch_open_pr failed" >&2
+    return 1
+  }
 
+  ! grep -q "pr create" "$gh_log" || {
+    echo "  gh pr create called despite existing PR: $(cat "$gh_log")" >&2
+    return 1
+  }
+  local list_count
+  list_count=$(grep -c "pr list" "$gh_log" 2>/dev/null || true)
+  [ "$list_count" = "2" ] || {
+    echo "  expected existing-PR check on both calls, got ${list_count}" >&2
+    return 1
+  }
   return 0
 }
 _run "idempotent PR open — second call is no-op" test_pr_idempotent
