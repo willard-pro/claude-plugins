@@ -1065,6 +1065,177 @@ test_stop_initiative_idempotent() {
   return 0
 }
 
+# F2: purge flock failure must abort the stop — no silent "success" report,
+# queue untouched, no stop-file.
+test_stop_purge_flock_failure_aborts() {
+  local ws
+  ws=$(_setup_workspace)
+  echo '{"tid":"CRE-101","reason":"planned-dispatch from INIT-42","timestamp":"2026-08-18T00:00:00Z","restarts":0,"dispatch_type":"initial","generation":1}' >"$ws/fleet-default-spawn-queue.jsonl"
+
+  local output rc
+  output=$(bash -c "
+    flock() { return 1; }
+    export -f flock
+    FLEET_QUEUE_LOCK_TIMEOUT=1
+    source '$LIB_DIR/fleet-dispatch.sh'
+    fleet_stop_initiative 'INIT-42' 'test' '$ws' 2>&1
+  " 2>/dev/null)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || {
+    echo "expected non-zero rc on purge flock failure, got $rc; output: $output" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  echo "$output" | grep -q "stop aborted" || {
+    echo "expected abort message; output: $output" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  grep -q "CRE-101" "$ws/fleet-default-spawn-queue.jsonl" || {
+    echo "queue entry lost on failed purge" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  [ ! -f "$ws/stop-INIT-42.json" ] || {
+    echo "stop-file written despite failed purge" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  rm -rf "$ws"
+  return 0
+}
+
+# F2: the purge re-reads the queue UNDER the flock. An append landing when
+# the lock is acquired (another epic's dispatch) must survive the rewrite —
+# the pre-fix code read first and clobbered such appends with stale content.
+test_stop_purge_keeps_entry_appended_at_lock_time() {
+  local ws
+  ws=$(_setup_workspace)
+  echo '{"tid":"CRE-101","reason":"planned-dispatch from INIT-42","timestamp":"2026-08-18T00:00:00Z","restarts":0,"dispatch_type":"initial","generation":1}' >"$ws/fleet-default-spawn-queue.jsonl"
+
+  local output
+  output=$(bash -c "
+    # On lock acquisition, a concurrent dispatcher for INIT-99 appends its
+    # entry — the purge must see it and keep it (it re-reads after flock).
+    flock() {
+      echo '{\"tid\":\"CRE-201\",\"reason\":\"planned-dispatch from INIT-99\",\"timestamp\":\"2026-08-18T00:00:00Z\",\"restarts\":0,\"dispatch_type\":\"initial\",\"generation\":1}' >>'$ws/fleet-default-spawn-queue.jsonl'
+      return 0
+    }
+    export -f flock
+    source '$LIB_DIR/fleet-dispatch.sh'
+    fleet_stop_initiative 'INIT-42' 'test' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  grep -q "CRE-201" "$ws/fleet-default-spawn-queue.jsonl" || {
+    echo "concurrent append clobbered by purge; queue: $(cat "$ws/fleet-default-spawn-queue.jsonl")" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  grep -q "CRE-101" "$ws/fleet-default-spawn-queue.jsonl" && {
+    echo "INIT-42 entry not purged; queue: $(cat "$ws/fleet-default-spawn-queue.jsonl")" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  rm -rf "$ws"
+  return 0
+}
+
+# F3: a refused kill (rc != 0) must pin the tid WITHOUT reporting it killed.
+test_stop_kill_refused_pins_not_killed() {
+  local ws
+  ws=$(_setup_workspace)
+  sleep 30 &
+  local worker_pid=$!
+  echo "{\"tid\":\"CRE-102\",\"pid\":\"${worker_pid}\",\"generation\":1,\"started_at\":\"2026-08-18T00:00:00Z\",\"reason\":\"planned-dispatch from INIT-42\"}" >"$ws/CRE-102-run.json"
+
+  local output
+  output=$(bash -c "
+    fleet_kill_pipeline() { return 1; }
+    export -f fleet_kill_pipeline
+    source '$LIB_DIR/fleet-dispatch.sh'
+    fleet_stop_initiative 'INIT-42' 'test' '$ws' 2>&1
+  " 2>/dev/null || true)
+  kill "$worker_pid" 2>/dev/null || true
+
+  echo "$output" | grep -q 'STOP_RESULT|purged=\[\]|killed=\[\]|pinned=\["CRE-102"\]' || {
+    echo "output: $output" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  jq -e '.tickets == ["CRE-102"]' "$ws/stop-INIT-42.json" >/dev/null 2>&1 || {
+    echo "stop-file tickets: $(cat "$ws/stop-INIT-42.json")" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  rm -rf "$ws"
+  return 0
+}
+
+# F6: a kill that returns success without terminating (kill-unverified
+# survivor) is pinned, never reported killed.
+test_stop_unverified_survivor_pinned_not_killed() {
+  local ws
+  ws=$(_setup_workspace)
+  sleep 30 &
+  local worker_pid=$!
+  echo "{\"tid\":\"CRE-102\",\"pid\":\"${worker_pid}\",\"generation\":1,\"started_at\":\"2026-08-18T00:00:00Z\",\"reason\":\"planned-dispatch from INIT-42\"}" >"$ws/CRE-102-run.json"
+
+  local output
+  output=$(bash -c "
+    fleet_kill_pipeline() { return 0; }
+    export -f fleet_kill_pipeline
+    source '$LIB_DIR/fleet-dispatch.sh'
+    fleet_stop_initiative 'INIT-42' 'test' '$ws' 2>&1
+  " 2>/dev/null || true)
+  kill "$worker_pid" 2>/dev/null || true
+
+  echo "$output" | grep -q 'killed=\[\]|pinned=\["CRE-102"\]' || {
+    echo "output: $output" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  jq -e '.tickets == ["CRE-102"]' "$ws/stop-INIT-42.json" >/dev/null 2>&1 || {
+    echo "stop-file tickets: $(cat "$ws/stop-INIT-42.json")" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  rm -rf "$ws"
+  return 0
+}
+
+# F6: a dead worker with NO queue entry must be pinned on the FIRST stop —
+# otherwise restart reconciliation resurrects the stopped epic's ticket.
+test_stop_dead_worker_without_queue_entry_pinned() {
+  local ws
+  ws=$(_setup_workspace)
+  echo '{"tid":"CRE-102","pid":"999999999","generation":1,"started_at":"2026-08-18T00:00:00Z","reason":"planned-dispatch from INIT-42"}' >"$ws/CRE-102-run.json"
+
+  local output
+  output=$(bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    fleet_stop_initiative 'INIT-42' 'test' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  echo "$output" | grep -q 'purged=\[\]|killed=\[\]|pinned=\["CRE-102"\]' || {
+    echo "output: $output" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  jq -e '.tickets == ["CRE-102"]' "$ws/stop-INIT-42.json" >/dev/null 2>&1 || {
+    echo "stop-file tickets: $(cat "$ws/stop-INIT-42.json")" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  rm -rf "$ws"
+  return 0
+}
+
+_run "stop_purge_flock_failure_aborts" test_stop_purge_flock_failure_aborts
+_run "stop_purge_keeps_entry_appended_at_lock_time" test_stop_purge_keeps_entry_appended_at_lock_time
+_run "stop_kill_refused_pins_not_killed" test_stop_kill_refused_pins_not_killed
+_run "stop_unverified_survivor_pinned_not_killed" test_stop_unverified_survivor_pinned_not_killed
+_run "stop_dead_worker_without_queue_entry_pinned" test_stop_dead_worker_without_queue_entry_pinned
 _run "concurrent_same_epic_dispatch_single_entry" test_concurrent_same_epic_dispatch_single_entry
 _run "dispatch_lock_different_epics_do_not_block" test_dispatch_lock_different_epics_do_not_block
 _run "stopped_epic_enqueues_nothing" test_stopped_epic_enqueues_nothing

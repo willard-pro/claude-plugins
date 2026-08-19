@@ -211,7 +211,7 @@ curl -s -X POST http://127.0.0.1:21001/dispatch \
   -d '{"epic_id": "INIT-42", "resume": true}'
 ```
 
-**POST /stop** — body `{"epic_id": "...", "reason": "optional"}`. Implements the stop contract: purges the epic's spawn-queue entries, escalate-kills its running workers (via `fleet_kill_pipeline`'s verified escalation), and writes `stop-{epic}.json` pinning the stopped tickets against reconciliation resurrection. Returns `{"purged": [...], "killed": [...], "message": "..."}`. Idempotent — stopping an already-stopped epic returns empty lists. Works without the daemon too: the skill's `stop` subcommand calls the same bash implementation directly, since workers outlive a dead fleetd.
+**POST /stop** — body `{"epic_id": "...", "reason": "optional"}`. Implements the stop contract: purges the epic's spawn-queue entries, escalate-kills its running workers (via `fleet_kill_pipeline`'s verified escalation), and writes `stop-{epic}.json` pinning the stopped tickets against reconciliation resurrection. Returns `{"purged": [...], "killed": [...], "pinned": [...], "message": "..."}` — `killed` lists only workers whose death was verified; every other ticket recorded for the epic (kill refused/deferred, kill-unverified survivor, worker already dead) lands in `pinned` and in the stop-file union, so a stop never lies about a kill and never leaves a ticket unpinned. Idempotent — stopping an already-stopped epic returns empty lists. Works without the daemon too: the skill's `stop` subcommand calls the same bash implementation directly, since workers outlive a dead fleetd.
 
 ```bash
 curl -s -X POST http://127.0.0.1:21001/stop \

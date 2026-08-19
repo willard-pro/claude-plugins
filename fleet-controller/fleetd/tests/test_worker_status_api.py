@@ -22,6 +22,7 @@ import tempfile
 import threading
 import time
 import unittest
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -505,7 +506,12 @@ class TestStopEpic(unittest.TestCase):
                 result = sup.stop_epic('INIT-42', 'operator says stop')
 
             self.assertEqual(result['purged'], ['CRE-101'])
-            self.assertEqual(result['killed'], ['CRE-102'])
+            # killed OR pinned carries CRE-102 — the escalation cannot always
+            # verify death before returning (rc=3 "survived" race); exactly
+            # one of the two lists reports it, and the stop-file union pins
+            # it either way. `killed` must never lie about a live worker.
+            self.assertEqual(
+                set(result['killed']) ^ set(result['pinned']), {'CRE-102'})
 
             # Worker process escalated to termination.
             proc.wait(timeout=15)
@@ -520,8 +526,8 @@ class TestStopEpic(unittest.TestCase):
             self.assertEqual(sorted(stop_data['tickets']),
                              ['CRE-101', 'CRE-102'])
 
-            # Killed worker removed from the child table.
-            self.assertIsNone(sup._children.get('CRE-102'))
+            # Child-table drop only happens on a verified-dead pid — covered
+            # deterministically in test_stop_epic_child_table_liveness_gate.
 
             # Queue entry purged.
             queue = self.state / 'fleet-default-spawn-queue.jsonl'
@@ -532,6 +538,8 @@ class TestStopEpic(unittest.TestCase):
                 result2 = sup.stop_epic('INIT-42', 'again')
             self.assertEqual(result2['purged'], [])
             self.assertEqual(result2['killed'], [])
+            # Dead worker is re-pinned (not re-killed) on re-stop.
+            self.assertEqual(result2['pinned'], ['CRE-102'])
             # Existing pinned tickets are preserved across re-stop.
             stop_data2 = json.loads(stop_file.read_text())
             self.assertEqual(sorted(stop_data2['tickets']),
@@ -720,6 +728,57 @@ class TestHttpRoutes(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertFalse((self.state / 'stop-.json').exists())
 
+    # ── injection / validation guards (fix 1) ────────────────────────────
+
+    def test_post_dispatch_invalid_epic_id_rejected(self):
+        # Shell-injection-shaped epic_id must be rejected before it reaches
+        # any bash subprocess or file path.
+        marker = self.state / 'injection-marker'
+        status, payload = self._post(
+            '/dispatch',
+            {'epic_id': 'INIT-42"; touch %s; echo "' % marker})
+        self.assertEqual(status, 400)
+        self.assertIn('invalid epic_id', payload['error'])
+        self.assertFalse(marker.exists())
+        self.assertFalse(
+            (self.state / 'fleet-default-spawn-queue.jsonl').exists())
+
+    def test_post_stop_invalid_epic_id_rejected(self):
+        marker = self.state / 'injection-marker'
+        status, payload = self._post(
+            '/stop',
+            {'epic_id': 'INIT-42"; touch %s; echo "' % marker})
+        self.assertEqual(status, 400)
+        self.assertIn('invalid epic_id', payload['error'])
+        self.assertFalse(marker.exists())
+        self.assertFalse((self.state / 'stop-INIT-42.json').exists())
+
+    def test_post_stop_reason_none_normalized(self):
+        # JSON null reason must not become the literal "None" string.
+        _write_queue_entry(self.state, 'CRE-101', 'INIT-42')
+        status, payload = self._post(
+            '/stop', {'epic_id': 'INIT-42', 'reason': None})
+        self.assertEqual(status, 200)
+        stop_file = self.state / 'stop-INIT-42.json'
+        self.assertTrue(stop_file.exists())
+        stop_data = json.loads(stop_file.read_text())
+        self.assertEqual(stop_data['reason'], '')
+
+    def test_worker_status_invalid_tid_rejected(self):
+        marker = self.state / 'injection-marker'
+        path = '/workers/' + urllib.parse.quote(
+            'CRE-101"; touch %s; echo "' % marker, safe='')
+        status, _ = self._get(path)
+        self.assertEqual(status, 400)
+        self.assertFalse(marker.exists())
+
+    def test_worker_status_query_string_stripped(self):
+        self.sup._children.add('CRE-101', pid=99999,
+                               reason='planned-dispatch from INIT-42')
+        status, payload = self._get('/workers/CRE-101?x=1')
+        self.assertEqual(status, 200)
+        self.assertEqual(payload['tid'], 'CRE-101')
+
     def test_queue_endpoint_with_malformed_line(self):
         queue = self.state / 'fleet-default-spawn-queue.jsonl'
         queue.write_text(
@@ -762,6 +821,177 @@ class TestHttpRoutes(unittest.TestCase):
     def test_unknown_paths_404(self):
         self.assertEqual(self._get('/bogus')[0], 404)
         self.assertEqual(self._post('/bogus')[0], 404)
+
+
+# ── regression tests for the review findings ────────────────────────────────
+
+class TestStopEpicLivenessGate(unittest.TestCase):
+    """F3: a `killed` report must never orphan a live worker."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self._tmp.name) / 'state'
+        self.state.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _run_stop(self, pid_alive):
+        sup = _make_supervisor(self.state)
+        sup._children.add('CRE-102', pid=12345, generation=1,
+                          reason='planned-dispatch from INIT-42')
+        stdout = 'STOP_RESULT|purged=[]|killed=["CRE-102"]|pinned=[]\n'
+        with patch('fleetd.supervisor._pid_is_alive',
+                   return_value=pid_alive), \
+             patch.object(sup, '_bash_dispatch',
+                          return_value=(0, stdout, '')):
+            result = sup.stop_epic('INIT-42', 'test')
+        return sup, result
+
+    def test_live_worker_kept_in_child_table(self):
+        # Bash reported `killed` but the pid is still alive — the daemon
+        # must keep supervising it rather than trusting the report.
+        sup, result = self._run_stop(pid_alive=True)
+        self.assertEqual(result['killed'], ['CRE-102'])
+        self.assertIsNotNone(sup._children.get('CRE-102'))
+
+    def test_dead_worker_dropped_from_child_table(self):
+        sup, result = self._run_stop(pid_alive=False)
+        self.assertEqual(result['killed'], ['CRE-102'])
+        self.assertIsNone(sup._children.get('CRE-102'))
+
+
+class TestDispatchLockRelease(unittest.TestCase):
+    """F4: dispatch must not hold _state_lock across the bash subprocess."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self._tmp.name) / 'state'
+        self.state.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_dispatch_releases_state_lock_during_subprocess(self):
+        sup = _make_supervisor(self.state)
+        entered = threading.Event()
+        release = threading.Event()
+
+        def _slow_dispatch(cmd, timeout=300, extra_env=None):
+            entered.set()
+            release.wait(timeout=10)
+            return 0, '', ''
+
+        with patch.object(sup, '_bash_dispatch', side_effect=_slow_dispatch):
+            t = threading.Thread(target=sup.dispatch_epic, args=('INIT-42',))
+            t.start()
+            self.assertTrue(entered.wait(timeout=5),
+                            'dispatch subprocess never started')
+            # Main-loop operations (reap, kill-requests, queue consume) all
+            # need this lock — it must be free while the subprocess runs.
+            self.assertTrue(sup._state_lock.acquire(timeout=2),
+                            '_state_lock held during bash subprocess')
+            sup._state_lock.release()
+            release.set()
+            t.join(timeout=10)
+        self.assertFalse(t.is_alive())
+
+
+class TestConsumeQueueStopPinned(unittest.TestCase):
+    """F6: queue consumption must never spawn a stop-pinned ticket."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self._tmp.name) / 'state'
+        self.state.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_consume_queue_skips_stop_pinned_tids(self):
+        (self.state / 'stop-INIT-42.json').write_text(json.dumps({
+            'initiative_id': 'INIT-42', 'tickets': ['CRE-101'],
+        }))
+        _write_queue_entry(self.state, 'CRE-101', 'INIT-42')
+        sup = _make_supervisor(self.state, spawn_enabled=True)
+        spawned = []
+
+        def _fake_spawn(**kwargs):
+            spawned.append(kwargs['tid'])
+            return 90000 + len(spawned)
+
+        with patch('fleetd.supervisor.spawn_worker', side_effect=_fake_spawn):
+            consumed = sup._consume_queue()
+        self.assertEqual(consumed, set())
+        self.assertEqual(spawned, [])
+        # The entry stays queued — the pin blocks consumption, not the
+        # entry itself (a later resume re-dispatches it).
+        queue = self.state / 'fleet-default-spawn-queue.jsonl'
+        self.assertTrue(queue.exists())
+
+    def test_consume_queue_spawns_unpinned_tids(self):
+        _write_queue_entry(self.state, 'CRE-101', 'INIT-42')
+        sup = _make_supervisor(self.state, spawn_enabled=True)
+        spawned = []
+
+        def _fake_spawn(**kwargs):
+            spawned.append(kwargs['tid'])
+            return 90000 + len(spawned)
+
+        with patch('fleetd.supervisor.spawn_worker', side_effect=_fake_spawn):
+            consumed = sup._consume_queue()
+        self.assertEqual(consumed, {'CRE-101'})
+        self.assertEqual(spawned, ['CRE-101'])
+        self.assertEqual(sup.child_tids(), ['CRE-101'])
+
+
+class TestWorkerStatusConcurrentAccess(unittest.TestCase):
+    """F5: GET-route reads must survive concurrent child-table mutation."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state = Path(self._tmp.name) / 'state'
+        self.state.mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_child_table_reads_survive_concurrent_mutation(self):
+        sup = _make_supervisor(self.state)
+        for i in range(30):
+            sup._children.add(f'CRE-{i}', pid=90000 + i,
+                              reason='planned-dispatch from INIT-42')
+        stop = threading.Event()
+        errors = []
+
+        def _mutate():
+            i = 0
+            while not stop.is_set():
+                tid = f'CRE-{i % 30}'
+                if sup._children.get(tid) is not None:
+                    sup._children.remove(tid)
+                else:
+                    sup._children.add(tid, pid=90000 + (i % 30),
+                                      reason='planned-dispatch from INIT-42')
+                i += 1
+
+        def _read():
+            try:
+                for _ in range(300):
+                    sup.child_tids()
+                    sup.get_worker_status('CRE-0')
+            except Exception as exc:  # RuntimeError: dict changed size
+                errors.append(exc)
+
+        mutator = threading.Thread(target=_mutate)
+        reader = threading.Thread(target=_read)
+        mutator.start()
+        reader.start()
+        reader.join(timeout=30)
+        stop.set()
+        mutator.join(timeout=10)
+        self.assertFalse(reader.is_alive())
+        self.assertEqual(errors, [])
 
 
 if __name__ == '__main__':

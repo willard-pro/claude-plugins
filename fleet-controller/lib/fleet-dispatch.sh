@@ -505,7 +505,11 @@ _fleet_dispatch_initiative_locked() {
 # down: workers forked into their own process groups outlive a dead fleetd.
 #
 # Usage: fleet_stop_initiative <epic_id> [reason] [workspace]
-# Emits a final structured line: STOP_RESULT|purged=<json-array>|killed=<json-array>
+# Emits a final structured line:
+#   STOP_RESULT|purged=<json-array>|killed=<json-array>|pinned=<json-array>
+# `killed` carries ONLY tids whose workers are verified dead; `pinned` carries
+# every other tid recorded for the epic (refused/unverified kills, already-dead
+# workers) — the stop-file union pins both.
 fleet_stop_initiative() {
   local epic_id="$1"
   local reason="${2:-}"
@@ -536,43 +540,60 @@ _fleet_stop_initiative_locked() {
   state_dir=$(_fleet_state_dir "$workspace")
 
   # 1. Purge queue entries whose reason names this epic. Malformed lines are
-  # kept untouched. The rewrite holds the queue flock — same idiom as the
-  # consume-time rewrite.
-  local purged="[]" purged_list=""
+  # kept untouched. Read AND rewrite both happen under the queue flock —
+  # mirroring the consume-time rewrite — so an append landing mid-purge
+  # (another epic's dispatch, startup reconcile) is never clobbered. The
+  # flock result is checked: a busy lock aborts the stop instead of silently
+  # reporting a purge that did not happen.
+  local purged="[]" purged_tmp purge_rc=0
   if [ -f "$queue_file" ]; then
-    local kept="" line entry tid entry_reason
-    while IFS= read -r line; do
-      [ -z "$line" ] && continue
-      if ! entry=$(echo "$line" | jq -c . 2>/dev/null); then
-        kept="${kept}${line}"$'\n'
-        continue
-      fi
-      tid=$(echo "$entry" | jq -r '.tid // empty' 2>/dev/null)
-      entry_reason=$(echo "$entry" | jq -r '.reason // empty' 2>/dev/null)
-      if echo "$entry_reason" | grep -qE "planned-dispatch from ${epic_id}( |$)"; then
-        purged_list="${purged_list}${tid}"$'\n'
-        echo "  purged ${tid} from queue"
-      else
-        kept="${kept}${line}"$'\n'
-      fi
-    done <"$queue_file"
+    purged_tmp=$(mktemp)
     (
       flock -w "${FLEET_QUEUE_LOCK_TIMEOUT:-5}" 9 || exit 1
+      local kept="" line entry tid entry_reason
+      while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        if ! entry=$(echo "$line" | jq -c . 2>/dev/null); then
+          kept="${kept}${line}"$'\n'
+          continue
+        fi
+        tid=$(echo "$entry" | jq -r '.tid // empty' 2>/dev/null)
+        entry_reason=$(echo "$entry" | jq -r '.reason // empty' 2>/dev/null)
+        if echo "$entry_reason" | grep -qE "planned-dispatch from ${epic_id}( |$)"; then
+          printf '%s\n' "$tid" >>"$purged_tmp"
+          echo "  purged ${tid} from queue"
+        else
+          kept="${kept}${line}"$'\n'
+        fi
+      done <"$queue_file"
       if [ -n "$kept" ]; then
         printf '%s' "$kept" >"$queue_file"
       else
         rm -f "$queue_file"
       fi
-    ) 9>"${queue_file}.lock"
-    if [ -n "$purged_list" ]; then
-      purged=$(echo "$purged_list" | grep -v '^$' | jq -R -s -c 'split("\n") | map(select(length > 0))' 2>/dev/null || echo "[]")
+      # `|| purge_rc=$?` (not a plain capture): linear-api.sh sources with
+      # `set -e`, so a failing subshell would kill the whole caller before
+      # the rc could be checked. The || form keeps the failure in a
+      # condition context while still capturing the rc.
+    ) 9>"${queue_file}.lock" || purge_rc=$?
+    if [ "$purge_rc" -ne 0 ]; then
+      rm -f "$purged_tmp"
+      echo "ERROR: queue purge failed (flock rc=${purge_rc}) — stop aborted" >&2
+      return 1
     fi
+    if [ -s "$purged_tmp" ]; then
+      purged=$(jq -R -s -c 'split("\n") | map(select(length > 0))' "$purged_tmp" 2>/dev/null || echo "[]")
+    fi
+    rm -f "$purged_tmp"
   fi
 
   # 2. Kill running workers whose run-registry reason names this epic, via
-  # fleet_kill_pipeline's verified escalation. A refused kill (e.g. no
-  # pipeline log) still pins the tid — reconciliation must not resurrect it.
-  local killed="[]" killed_list=""
+  # fleet_kill_pipeline's verified escalation. `killed` carries ONLY tids
+  # verified dead; every other tid for this epic — survivors of a refused or
+  # unverified kill, and workers already dead — lands in `pinned` so the
+  # stop-file union pins them regardless. Reconciliation must never
+  # resurrect a ticket of a stopped epic.
+  local killed="[]" killed_list="" pinned="[]" pinned_list=""
   local run_file run_data run_tid run_reason run_pid
   for run_file in "${state_dir}"/*-run.json; do
     [ -f "$run_file" ] || continue
@@ -583,10 +604,11 @@ _fleet_stop_initiative_locked() {
     run_pid=$(echo "$run_data" | jq -r '.pid // empty' 2>/dev/null)
     [ -z "$run_tid" ] && continue
     if echo "$run_reason" | grep -qE "planned-dispatch from ${epic_id}( |$)"; then
-      # Liveness guard: a dead worker needs no kill and no pin — an existing
-      # stop-file already pins it, and killing nothing is the idempotent case.
+      # Dead worker: nothing to kill, but pin it anyway — a FIRST stop must
+      # record it, or restart reconciliation resurrects the ticket.
       if [ -z "$run_pid" ] || [ "$run_pid" = "0" ] || ! kill -0 "$run_pid" 2>/dev/null; then
-        echo "  ${run_tid} — worker pid gone, nothing to kill"
+        pinned_list="${pinned_list}${run_tid}"$'\n'
+        echo "  ${run_tid} — worker pid gone, pinned (no kill needed)"
         continue
       fi
       if declare -f fleet_kill_pipeline >/dev/null 2>&1; then
@@ -594,40 +616,47 @@ _fleet_stop_initiative_locked() {
           # fleet_kill_pipeline returns 0 even on kill-unverified (PID-reuse
           # guard declined to signal). Verify liveness so `killed` only ever
           # reports workers actually terminated; unverified survivors are
-          # still pinned so reconciliation cannot resurrect them.
+          # pinned so reconciliation cannot resurrect them.
           if kill -0 "$run_pid" 2>/dev/null; then
-            echo "  ${run_tid} survived escalation (kill-unverified) — pinned anyway"
+            pinned_list="${pinned_list}${run_tid}"$'\n'
+            echo "  ${run_tid} survived escalation (kill-unverified) — pinned"
           else
             killed_list="${killed_list}${run_tid}"$'\n'
             echo "  killed ${run_tid}"
           fi
         else
-          killed_list="${killed_list}${run_tid}"$'\n'
-          echo "  kill refused for ${run_tid} — pinned anyway"
+          # Refused/deferred kill (flow.sh mutex held, no pipeline log, or
+          # survived SIGKILL): the worker may still be running — pin it,
+          # but do NOT report it as killed. The daemon keeps supervising it.
+          pinned_list="${pinned_list}${run_tid}"$'\n'
+          echo "  kill refused for ${run_tid} — pinned, still supervised"
         fi
       else
+        pinned_list="${pinned_list}${run_tid}"$'\n'
         echo "  WARNING: fleet_kill_pipeline not available — ${run_tid} pinned without kill" >&2
-        killed_list="${killed_list}${run_tid}"$'\n'
       fi
     fi
   done
   if [ -n "$killed_list" ]; then
     killed=$(echo "$killed_list" | grep -v '^$' | jq -R -s -c 'split("\n") | map(select(length > 0))' 2>/dev/null || echo "[]")
   fi
+  if [ -n "$pinned_list" ]; then
+    pinned=$(echo "$pinned_list" | grep -v '^$' | jq -R -s -c 'split("\n") | map(select(length > 0))' 2>/dev/null || echo "[]")
+  fi
 
-  # 3. Write the stop-file with the union of purged, killed, and any tickets
-  # pinned by an existing stop-file — an idempotent re-stop must never unpin
-  # tickets a previous stop recorded.
+  # 3. Write the stop-file with the union of purged, killed, pinned, and any
+  # tickets pinned by an existing stop-file — an idempotent re-stop must
+  # never unpin tickets a previous stop recorded.
   local existing="[]"
   if _fleet_is_stopped "$workspace" "$epic_id"; then
     existing=$(jq -c '.tickets // []' "$(_fleet_epic_stop_file "$workspace" "$epic_id")" 2>/dev/null || echo "[]")
   fi
   local tickets
-  tickets=$(jq -nc --argjson p "$purged" --argjson k "$killed" --argjson e "$existing" '($p + $k + $e) | unique')
+  tickets=$(jq -nc --argjson p "$purged" --argjson k "$killed" --argjson n "$pinned" --argjson e "$existing" '($p + $k + $n + $e) | unique')
   _fleet_stop_write "$workspace" "$epic_id" "$tickets" "$reason"
   echo "stop-file written: stop-${epic_id}.json ($(echo "$tickets" | jq 'length') ticket(s) pinned)"
 
-  echo "STOP_RESULT|purged=${purged}|killed=${killed}"
+  echo "STOP_RESULT|purged=${purged}|killed=${killed}|pinned=${pinned}"
   return 0
 }
 

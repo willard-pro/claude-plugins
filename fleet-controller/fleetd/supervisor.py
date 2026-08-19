@@ -40,6 +40,10 @@ FLEET_INSTANCE_ID = os.environ.get('FLEET_INSTANCE_ID', 'default')
 FLEETD_PORT = _env_int('FLEETD_PORT', 21001)
 FLEETD_BIND = os.environ.get('FLEETD_BIND', '127.0.0.1')
 
+# Linear identifier shape — epic ids (INIT-42) and ticket ids (CRE-101).
+# Request-derived ids must match before reaching any file path or shell.
+_ID_RE = re.compile(r'^[A-Z][A-Z0-9-]*-\d+$')
+
 # Fallback workspace — the fleet state dir when FLEET_STATE_DIR is unset.
 # In the container this is the tickets directory.
 DEFAULT_WORKSPACE = os.environ.get('FLEETD_WORKSPACE', '.')
@@ -485,8 +489,12 @@ def _read_confidence_predicted(tid, fleet_lib_dir):
     feedback_script = os.path.join(str(fleet_lib_dir), 'fleet-feedback.sh')
     if not os.path.isfile(feedback_script):
         return None
+    # tid arrives from HTTP paths and state files — pass it via the
+    # environment, never interpolated into shell source (same rule as
+    # reconcile_orphaned_tickets).
     bash_cmd = (
-        f'source "{feedback_script}" && _fleet_confidence_predicted "{tid}"'
+        'source "$FLEET_FEEDBACK_SCRIPT" && '
+        '_fleet_confidence_predicted "$FLEET_TID"'
     )
     try:
         proc = subprocess.run(
@@ -494,6 +502,11 @@ def _read_confidence_predicted(tid, fleet_lib_dir):
             capture_output=True,
             text=True,
             timeout=30,
+            env={
+                **os.environ,
+                'FLEET_FEEDBACK_SCRIPT': feedback_script,
+                'FLEET_TID': tid,
+            },
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
@@ -590,6 +603,10 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
         if data is None or not data.get('epic_id'):
             self._send_json(400, {'error': 'epic_id is required'})
             return None
+        epic_id = str(data.get('epic_id'))
+        if not _ID_RE.match(epic_id):
+            self._send_json(400, {'error': f'invalid epic_id: {epic_id!r}'})
+            return None
         return data
 
     # ── GET handlers ───────────────────────────────────────────────────────
@@ -615,12 +632,18 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
             self._send_json(503, {'error': 'supervisor not attached'})
             return
         tids = sorted(self.supervisor.child_tids())
-        self._send_json(
-            200,
-            [self.supervisor.get_worker_status(tid) for tid in tids],
-        )
+        statuses = []
+        for tid in tids:
+            status = self.supervisor.get_worker_status(tid)
+            if status is not None:
+                statuses.append(status)
+        self._send_json(200, statuses)
 
     def _handle_worker_status(self, tid):
+        tid = tid.split('?', 1)[0]  # strip query string
+        if not _ID_RE.match(tid):
+            self._send_json(400, {'error': f'invalid ticket id: {tid!r}'})
+            return
         if self.supervisor is None:
             self._send_json(503, {'error': 'supervisor not attached'})
             return
@@ -668,7 +691,7 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
             return
         result = self.supervisor.stop_epic(
             str(data.get('epic_id')),
-            reason=str(data.get('reason', '')),
+            reason=str(data.get('reason') or '')[:500],
         )
         self._send_json(200, result)
 
@@ -1754,24 +1777,28 @@ class Supervisor:
 
     # ── on-demand dispatch / stop / status (HTTP control surface) ─────────
 
-    def _bash_dispatch(self, bash_cmd, timeout=300):
+    def _bash_dispatch(self, bash_cmd, timeout=300, extra_env=None):
         """Run a fleet bash action subprocess and return (rc, stdout, stderr).
 
         Passes FLEET_PIPELINE_LOG_DIR / FLEET_STATE_DIR through the
         environment so sourced fleet libs resolve the same state dir the
-        daemon uses, regardless of the caller's cwd.
+        daemon uses, regardless of the caller's cwd. `extra_env` carries
+        request-derived values (epic_id, reason) — never shell-interpolated.
         """
         try:
+            env = {
+                **os.environ,
+                'FLEET_PIPELINE_LOG_DIR': str(self._state_dir),
+                'FLEET_STATE_DIR': str(self._state_dir),
+            }
+            if extra_env:
+                env.update(extra_env)
             proc = subprocess.run(
                 ['bash', '-c', bash_cmd],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                env={
-                    **os.environ,
-                    'FLEET_PIPELINE_LOG_DIR': str(self._state_dir),
-                    'FLEET_STATE_DIR': str(self._state_dir),
-                },
+                env=env,
             )
             return proc.returncode, proc.stdout or '', proc.stderr or ''
         except subprocess.TimeoutExpired:
@@ -1782,57 +1809,71 @@ class Supervisor:
     def dispatch_epic(self, epic_id, dry_run=False, resume=False):
         """Dispatch one epic on demand via fleet_dispatch_initiative.
 
-        Acquires _state_lock, runs the same bash function the skill and the
-        auto-sweep call — behavior (label validation, blocked-by resolution,
-        queue idempotency, stop-file gate) is identical regardless of
-        trigger path — then immediately consumes the resulting spawn-queue
-        entries (unless dry_run) so tickets spawn without waiting for the
-        next poll cycle.
+        Runs the same bash function the skill and the auto-sweep call —
+        behavior (label validation, blocked-by resolution, queue idempotency,
+        stop-file gate) is identical regardless of trigger path — then
+        immediately consumes the resulting spawn-queue entries (unless
+        dry_run) so tickets spawn without waiting for the next poll cycle.
+
+        The bash subprocess runs OUTSIDE _state_lock: it can take minutes
+        (Linear retries, epic-branch git ops across REPOS_ROOT), and holding
+        the lock would freeze the main loop's reaping, kill-requests, and
+        adopted-worker polling. Cross-process serialization is the
+        epic-scoped flock's job; the lock is re-acquired only for the queue
+        consume below.
 
         Returns {'queued': [...], 'spawned': [...], 'message': str}.
         """
-        with self._state_lock:
-            dispatch_script = self._fleet_lib_dir / 'fleet-dispatch.sh'
-            if not dispatch_script.is_file():
-                return {
-                    'queued': [], 'spawned': [],
-                    'message': f'dispatch script not found: {dispatch_script}',
-                }
+        dispatch_script = self._fleet_lib_dir / 'fleet-dispatch.sh'
+        if not dispatch_script.is_file():
+            return {
+                'queued': [], 'spawned': [],
+                'message': f'dispatch script not found: {dispatch_script}',
+            }
 
-            flags = ' --resume' if resume else ''
-            bash_cmd = (
-                f'source "{dispatch_script}" && '
-                f'FLEET_DRY_RUN="{"true" if dry_run else "false"}" '
-                f'fleet_dispatch_initiative "{epic_id}" '
-                f'"{self._state_dir}"{flags}'
-            )
-            rc, stdout, stderr = self._bash_dispatch(bash_cmd)
+        # epic_id comes from the HTTP body — pass it via the environment,
+        # never interpolated into shell source (see reconcile_orphaned_tickets).
+        flags = ' --resume' if resume else ''
+        bash_cmd = (
+            f'source "{dispatch_script}" && '
+            f'FLEET_DRY_RUN="{"true" if dry_run else "false"}" '
+            f'fleet_dispatch_initiative "$FLEET_DISPATCH_EPIC" '
+            f'"$FLEET_DISPATCH_STATE_DIR"{flags}'
+        )
+        rc, stdout, stderr = self._bash_dispatch(
+            bash_cmd,
+            extra_env={
+                'FLEET_DISPATCH_EPIC': str(epic_id),
+                'FLEET_DISPATCH_STATE_DIR': str(self._state_dir),
+            },
+        )
 
-            # Ticket-id shape only — the summary line "enqueued N ticket(s)"
-            # must not be captured as a tid.
-            queued = re.findall(r'enqueued\s+([A-Z]+-\d+)', stdout)
-            if dry_run:
-                # Dry-run lines carry the would-be entry as JSON — parse tids.
-                for match in re.finditer(r'would enqueue: (\{.*?\})', stdout):
-                    try:
-                        entry = json.loads(match.group(1))
-                        if entry.get('tid'):
-                            queued.append(entry['tid'])
-                    except json.JSONDecodeError:
-                        pass
-            queued = list(dict.fromkeys(queued))  # dedupe, preserve order
+        # Ticket-id shape only — the summary line "enqueued N ticket(s)"
+        # must not be captured as a tid.
+        queued = re.findall(r'enqueued\s+([A-Z]+-\d+)', stdout)
+        if dry_run:
+            # Dry-run lines carry the would-be entry as JSON — parse tids.
+            for match in re.finditer(r'would enqueue: (\{.*?\})', stdout):
+                try:
+                    entry = json.loads(match.group(1))
+                    if entry.get('tid'):
+                        queued.append(entry['tid'])
+                except json.JSONDecodeError:
+                    pass
+        queued = list(dict.fromkeys(queued))  # dedupe, preserve order
 
-            lines = stdout.strip().splitlines()
-            message = lines[-1] if lines else ''
-            if rc != 0:
-                err_lines = stderr.strip().splitlines()
-                message = (err_lines or lines or ['dispatch failed'])[-1]
+        lines = stdout.strip().splitlines()
+        message = lines[-1] if lines else ''
+        if rc != 0:
+            err_lines = stderr.strip().splitlines()
+            message = (err_lines or lines or ['dispatch failed'])[-1]
 
-            spawned = []
-            if not dry_run and rc == 0:
-                spawned = sorted(self._consume_queue())
+        spawned = []
+        if not dry_run and rc == 0:
+            with self._state_lock:
+                spawned = sorted(self._consume_queue_locked())
 
-            return {'queued': queued, 'spawned': spawned, 'message': message}
+        return {'queued': queued, 'spawned': spawned, 'message': message}
 
     def stop_epic(self, epic_id, reason=''):
         """Stop one epic per the fleet-epic-stop contract.
@@ -1841,57 +1882,82 @@ class Supervisor:
         implementation, also invoked by the skill's stop subcommand — which
         purges the epic's queue entries, escalate-kills its running workers,
         and writes the stop-file, all under the epic-scoped dispatch lock.
-        Held under _state_lock so the HTTP thread and main loop never mutate
-        state concurrently.
+        The subprocess runs OUTSIDE _state_lock (kill escalations take
+        grace periods and must not freeze the main loop); only the
+        child-table update below is locked.
 
-        Returns {'purged': [...], 'killed': [...], 'message': str}.
+        Returns {'purged': [...], 'killed': [...], 'pinned': [...], 'message': str}.
         """
+        dispatch_script = self._fleet_lib_dir / 'fleet-dispatch.sh'
+        if not dispatch_script.is_file():
+            return {
+                'purged': [], 'killed': [], 'pinned': [],
+                'message': f'dispatch script not found: {dispatch_script}',
+            }
+
+        # epic_id and reason come from the HTTP body — env-passed, never
+        # shell-interpolated (see reconcile_orphaned_tickets).
+        bash_cmd = (
+            f'source "{dispatch_script}" && '
+            f'fleet_stop_initiative "$FLEET_STOP_EPIC" "$FLEET_STOP_REASON" '
+            f'"$FLEET_STOP_STATE_DIR"'
+        )
+        rc, stdout, stderr = self._bash_dispatch(
+            bash_cmd,
+            extra_env={
+                'FLEET_STOP_EPIC': str(epic_id),
+                'FLEET_STOP_REASON': str(reason),
+                'FLEET_STOP_STATE_DIR': str(self._state_dir),
+            },
+        )
+
+        purged, killed, pinned = [], [], []
+        # End-anchored: with lazy groups an unanchored search would stop at
+        # the shortest prefix and truncate the JSON payloads.
+        match = re.search(
+            r'STOP_RESULT\|purged=(.+?)\|killed=(.+?)'
+            r'(?:\|pinned=(.+?))?\s*$',
+            stdout, re.DOTALL)
+        if match:
+            for idx, field in enumerate((purged, killed, pinned)):
+                try:
+                    field.extend(json.loads(match.group(idx + 1)) or [])
+                except (json.JSONDecodeError, TypeError):
+                    pass
+
+        # Drop killed workers from the child table ONLY when their PID is
+        # confirmed dead. The bash side re-verifies liveness before adding
+        # to `killed`, but a misreported kill must never orphan a live
+        # process — the daemon keeps supervising until the pid is gone.
+        # Pinned survivors/refusals stay in the table untouched. Registry
+        # files are cleaned by the normal scan/poll paths on next sight.
         with self._state_lock:
-            dispatch_script = self._fleet_lib_dir / 'fleet-dispatch.sh'
-            if not dispatch_script.is_file():
-                return {
-                    'purged': [], 'killed': [],
-                    'message': f'dispatch script not found: {dispatch_script}',
-                }
-
-            bash_cmd = (
-                f'source "{dispatch_script}" && '
-                f'fleet_stop_initiative "{epic_id}" "{reason}" '
-                f'"{self._state_dir}"'
-            )
-            rc, stdout, stderr = self._bash_dispatch(bash_cmd)
-
-            purged, killed = [], []
-            match = re.search(r'STOP_RESULT\|purged=(.+?)\|killed=(.+)',
-                              stdout, re.DOTALL)
-            if match:
-                try:
-                    purged = json.loads(match.group(1))
-                except json.JSONDecodeError:
-                    pass
-                try:
-                    killed = json.loads(match.group(2))
-                except json.JSONDecodeError:
-                    pass
-
-            # Drop killed workers from the child table — the bash escalation
-            # already verified termination (or it is imminent). The registry
-            # files are cleaned by the normal scan/poll paths on next sight.
             for tid in killed:
-                if self._children.get(tid) is not None:
-                    self._children.remove(tid)
+                child = self._children.get(tid)
+                if child is None:
+                    continue
+                if _pid_is_alive(child['pid']):
+                    continue
+                self._children.remove(tid)
             self._sync_health()
 
-            lines = stdout.strip().splitlines()
-            message = lines[-1] if lines else ''
-            if rc != 0:
-                err_lines = stderr.strip().splitlines()
-                message = (err_lines or lines or ['stop failed'])[-1]
-            return {'purged': purged, 'killed': killed, 'message': message}
+        lines = stdout.strip().splitlines()
+        message = lines[-1] if lines else ''
+        if rc != 0:
+            err_lines = stderr.strip().splitlines()
+            message = (err_lines or lines or ['stop failed'])[-1]
+        return {'purged': purged, 'killed': killed, 'pinned': pinned,
+                'message': message}
 
     def child_tids(self):
-        """TIDs of all workers in the child table."""
-        return list(self._children._workers.keys())
+        """TIDs of all workers in the child table.
+
+        Snapshot under _state_lock — GET handlers run on the HTTP thread
+        while the main loop mutates the table every cycle; iterating a live
+        dict raises RuntimeError on a concurrent size change.
+        """
+        with self._state_lock:
+            return list(self._children._workers.keys())
 
     def get_worker_status(self, tid):
         """Assemble live status for one worker (GET /workers/<tid>).
@@ -1904,33 +1970,39 @@ class Supervisor:
         Context block and cached for the daemon's lifetime.
         """
         log_file = self._state_dir / f'{tid}-pipeline.log'
-        child = self._children.get(tid)
-        if child is None and not log_file.is_file():
-            return None
+        # Child-table snapshot under _state_lock — the table is mutated by
+        # the main loop every cycle; a lock-free read races those mutations.
+        # File reads and the confidence subprocess run OUTSIDE the lock:
+        # _read_confidence_predicted shells out (up to 30s) and must never
+        # hold the state lock.
+        with self._state_lock:
+            child = self._children.get(tid)
+            if child is None and not log_file.is_file():
+                return None
 
-        if child is not None:
-            status = {
-                'tid': tid,
-                'pid': child['pid'],
-                'generation': child['generation'],
-                'started_at': child['started_at'],
-                'reason': child['reason'],
-                'adopted': child['adopted'],
-                'phase': child.get('phase', ''),
-                'anomalies': child.get('anomalies', ''),
-            }
-        else:
-            # Known ticket (pipeline log exists) but no live worker record.
-            status = {
-                'tid': tid,
-                'pid': None,
-                'generation': None,
-                'started_at': None,
-                'reason': '',
-                'adopted': False,
-                'phase': '',
-                'anomalies': '',
-            }
+            if child is not None:
+                status = {
+                    'tid': tid,
+                    'pid': child['pid'],
+                    'generation': child['generation'],
+                    'started_at': child['started_at'],
+                    'reason': child['reason'],
+                    'adopted': child['adopted'],
+                    'phase': child.get('phase', ''),
+                    'anomalies': child.get('anomalies', ''),
+                }
+            else:
+                # Known ticket (pipeline log exists) but no live worker record.
+                status = {
+                    'tid': tid,
+                    'pid': None,
+                    'generation': None,
+                    'started_at': None,
+                    'reason': '',
+                    'adopted': False,
+                    'phase': '',
+                    'anomalies': '',
+                }
 
         status['tokens_used_so_far'] = _sum_tokens(log_file)
 
@@ -1948,7 +2020,9 @@ class Supervisor:
 
     def list_epics(self):
         """Epic view for GET /epics — pure state-dir derivation."""
-        return _list_epics(self._state_dir, self._children.list_workers())
+        with self._state_lock:
+            workers = self._children.list_workers()
+        return _list_epics(self._state_dir, workers)
 
     # ── spawn and reap (group 6) ──────────────────────────────────────────
 
@@ -2001,11 +2075,17 @@ class Supervisor:
             return set()
 
         consumed = set()
+        # A stop-pin survives a fleetd restart through stop-*.json — queue
+        # entries for pinned tickets must never be consumed, or a stop would
+        # be defeated by reconciliation re-enqueues after a daemon restart.
+        pinned_tids = _collect_stop_pinned_tids(self._state_dir)
         for entry in _read_queue_entries(self._state_dir):
             if len(consumed) >= slots:
                 break
 
             tid = entry['tid']
+            if tid in pinned_tids:
+                continue
             # Don't double-spawn a ticket that's already running.
             if self._children.get(tid) is not None:
                 continue
