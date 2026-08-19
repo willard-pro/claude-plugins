@@ -62,7 +62,9 @@ def _write_stub_dispatch(lib_dir):
   echo "fleet_dispatch: validating initiative $1"
   if [ "${FLEET_DRY_RUN:-false}" = "true" ]; then
     echo '[DRY-RUN] would enqueue: {"tid":"CRE-101","reason":"planned-dispatch from '"$1"'"}'
-    echo "[DRY-RUN] would enqueue 1 ticket(s) for $1"
+    echo "[DRY-RUN] would resume CRE-102"
+    echo "  blocked CRE-103"
+    echo "[DRY-RUN] would resume 1 | blocked 1 | would enqueue 1 ticket(s) for $1"
     return 0
   fi
   local queue_file="${FLEET_STATE_DIR}/fleet-default-spawn-queue.jsonl"
@@ -72,7 +74,9 @@ def _write_stub_dispatch(lib_dir):
     echo '{"tid":"CRE-101","reason":"planned-dispatch from '"$1"'","timestamp":"2026-08-18T00:00:00Z","restarts":0,"dispatch_type":"initial","generation":1}' >>"$queue_file"
     echo "  enqueued CRE-101 (priority=1)"
   fi
-  echo "fleet_dispatch: enqueued ticket(s) for $1"
+  echo "  resumed CRE-102"
+  echo "  blocked CRE-103"
+  echo "fleet_dispatch: resumed 1 | blocked 1 | enqueued 1 ticket(s) for $1"
 }
 
 fleet_stop_initiative() {
@@ -330,6 +334,10 @@ class TestDispatchEpic(unittest.TestCase):
             sup = _make_supervisor(self.state, fleet_lib_dir=lib)
             result = sup.dispatch_epic('INIT-42')
             self.assertEqual(result['queued'], ['CRE-101'])
+            self.assertEqual(result['resumed'], ['CRE-102'],
+                             "campaign-resume tids must be reported")
+            self.assertEqual(result['blocked'], ['CRE-103'],
+                             "blocked children must be reported")
             self.assertEqual(result['spawned'], [])  # spawn disabled
             self.assertIn('fleet_dispatch', result['message'])
 
@@ -345,6 +353,9 @@ class TestDispatchEpic(unittest.TestCase):
             sup = _make_supervisor(self.state, fleet_lib_dir=lib)
             result = sup.dispatch_epic('INIT-42', dry_run=True)
             self.assertEqual(result['queued'], ['CRE-101'])
+            self.assertEqual(result['resumed'], ['CRE-102'],
+                             "dry-run would-resume tids must be reported")
+            self.assertEqual(result['blocked'], ['CRE-103'])
             self.assertEqual(result['spawned'], [])
             # Stub only writes the queue file on non-dry paths.
             queue = self.state / 'fleet-default-spawn-queue.jsonl'
@@ -797,20 +808,32 @@ class TestHttpRoutes(unittest.TestCase):
         self.assertEqual(payload['malformed'], [])
 
     def test_epics_endpoint(self):
-        # Stopped epic + queued entry + running worker across two epics.
+        # Stopped epic + queued entry + running worker across two epics,
+        # including campaign-resume-reasoned entries (attributed exactly
+        # like planned-dispatch entries).
         (self.state / 'stop-INIT-42.json').write_text(json.dumps({
             'initiative_id': 'INIT-42', 'stopped_at': '2026-08-18T00:00:00Z',
             'reason': 'operator', 'tickets': ['CRE-101']}))
         _write_queue_entry(self.state, 'CRE-103', 'INIT-43')
+        queue = self.state / 'fleet-default-spawn-queue.jsonl'
+        with open(queue, 'a') as f:
+            f.write(json.dumps({
+                'tid': 'CRE-105',
+                'reason': 'campaign-resume from INIT-43',
+                'timestamp': '2026-08-18T00:00:00Z', 'restarts': 0,
+                'dispatch_type': 'initial', 'generation': 1}) + '\n')
         self.sup._children.add('CRE-104', pid=99999,
                                reason='planned-dispatch from INIT-43')
+        self.sup._children.add('CRE-106', pid=99998,
+                               reason='campaign-resume from INIT-42')
         status, payload = self._get('/epics')
         self.assertEqual(status, 200)
         by_id = {e['epic_id']: e for e in payload}
         self.assertEqual(sorted(by_id), ['INIT-42', 'INIT-43'])
         self.assertTrue(by_id['INIT-42']['stopped'])
         self.assertEqual(by_id['INIT-42']['tickets'], ['CRE-101'])
-        self.assertEqual(by_id['INIT-43']['queued'], ['CRE-103'])
+        self.assertEqual(by_id['INIT-42']['running'], ['CRE-106'])
+        self.assertEqual(by_id['INIT-43']['queued'], ['CRE-103', 'CRE-105'])
         self.assertEqual(by_id['INIT-43']['running'], ['CRE-104'])
 
     def test_epics_endpoint_empty(self):

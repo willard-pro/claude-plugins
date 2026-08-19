@@ -78,6 +78,22 @@ fleet_ticket_terminal_state() {
       echo "gate-held"
       return 0
       ;;
+    *"stopped: fleet-kill"*)
+      # fleet_kill_pipeline (fleet-intervene.sh) writes this outcome after a
+      # verified kill. The pipeline is resumable — kill is a pause, the
+      # stop-file pin is the stop — UNLESS the log carries a gate-stop, a
+      # structural failure that restarting would hit again. The gate-stop
+      # grep must live inside this arm: the one at the bottom of this
+      # function runs after the outcome branch, so a gate-stopped-then-killed
+      # pipeline (log ends with the kill outcome) would otherwise resurrect
+      # into the same gate.
+      if command grep -q '|META|gate-stop|fail|' "$log_file" 2>/dev/null; then
+        echo "done"
+        return 0
+      fi
+      echo "incomplete"
+      return 0
+      ;;
     *)
       echo "done"
       return 0
@@ -154,6 +170,18 @@ _reconcile_entry() {
 # classify the rest, and re-enqueue `incomplete` tickets via the shared
 # queue-append function.
 #
+# Environment controls (all optional — unset = the startup path's behavior):
+#   FLEET_RECONCILE_TIDS     space-separated tid scope; non-empty limits the
+#                            scan to exactly these tids (dispatch sets it to an
+#                            epic's children), empty scans every pipeline log
+#   FLEET_RECONCILE_EPIC     epic id for reason naming — entry reason becomes
+#                            `campaign-resume from {epic}` instead of
+#                            `orphan-reconciliation`
+#   FLEET_RECONCILE_DRY_RUN  non-empty (and not "0"/"false") = dry run: print
+#                            would-resume/would-dead-letter lines, write
+#                            nothing (no queue append, no restart marker, no
+#                            dead-letter entry)
+#
 # The restart cap uses the EXISTING fleet_can_restart/_count_restarts/
 # FLEET_MAX_RESTARTS mechanism — orphan restarts and live-reap restarts share
 # one counter and one cap. At the cap, the ticket is dead-lettered with
@@ -172,11 +200,38 @@ fleet_reconcile_orphans() {
 
   [ -d "$state_dir" ] || return 0
 
+  # Campaign-scope controls — see the header comment. Read once, up front, so
+  # per-ticket evaluation never re-reads the environment. Newlines are
+  # normalized to spaces: dispatch passes jq -r output (newline-separated),
+  # and the word-boundary match below is space-delimited. The trim is
+  # load-bearing: an empty env must stay empty (`echo "" | tr` would turn
+  # the echo's own newline into a space and enable the scope filter with a
+  # blank list, silently filtering everything).
+  local reconcile_tids="${FLEET_RECONCILE_TIDS:-}"
+  reconcile_tids=$(echo "$reconcile_tids" | tr '\n' ' ' | sed 's/^ *//;s/ *$//')
+  local reconcile_epic="${FLEET_RECONCILE_EPIC:-}"
+  local dry_run=0
+  if [ -n "${FLEET_RECONCILE_DRY_RUN:-}" ] && [ "$FLEET_RECONCILE_DRY_RUN" != "0" ] && [ "$FLEET_RECONCILE_DRY_RUN" != "false" ]; then
+    dry_run=1
+  fi
+  local reason="orphan-reconciliation"
+  [ -n "$reconcile_epic" ] && reason="campaign-resume from ${reconcile_epic}"
+
   local log_file tid state
   for log_file in "$state_dir"/*-pipeline.log; do
     [ -f "$log_file" ] || continue
     tid=$(basename "$log_file" | sed 's/-pipeline.log$//')
     [ -z "$tid" ] && continue
+
+    # Campaign-scope filter: when a tid list is given, only those tids are
+    # considered (word-boundary match against the space-padded string). An
+    # empty list keeps the startup path's global scan.
+    if [ -n "$reconcile_tids" ]; then
+      case " $reconcile_tids " in
+      *" $tid "*) ;;
+      *) continue ;;
+      esac
+    fi
 
     # Skip tickets whose worker was adopted live by scan_workers.
     case " $live_tids " in
@@ -219,6 +274,10 @@ fleet_reconcile_orphans() {
       restarts=$(_count_restarts "$log_file")
       max_restarts="${FLEET_MAX_RESTARTS:-2}"
       if [ "${restarts:-0}" -ge "$max_restarts" ]; then
+        if [ "$dry_run" = "1" ]; then
+          echo "[DRY-RUN] would dead-letter ${tid} (restart cap)"
+          continue
+        fi
         local dead_letter_file entry
         dead_letter_file="${queue_file%.jsonl}-dead-letter.jsonl"
         entry=$(_reconcile_entry "$tid" "orphaned-after-max-restarts" "$state_dir")
@@ -234,18 +293,26 @@ fleet_reconcile_orphans() {
       continue
     fi
 
+    # Dry run: report the intent, write nothing — no queue append, no
+    # restart marker, no dead-letter entry. The queue and the restart cap
+    # must be byte-identical after a dry-run pass.
+    if [ "$dry_run" = "1" ]; then
+      echo "[DRY-RUN] would resume ${tid}"
+      continue
+    fi
+
     # Append first, THEN write the restart marker. A crash between the two
     # leaves the entry queued with the marker missing — the restart count
     # under-counts by one (a bounded extra attempt) instead of the old
     # order's over-count: a marker with no entry burned a restart credit on
     # a ticket that was never actually restarted.
     local entry
-    entry=$(_reconcile_entry "$tid" "orphan-reconciliation" "$state_dir")
+    entry=$(_reconcile_entry "$tid" "$reason" "$state_dir")
     if _fleet_queue_append "$entry" "$queue_file"; then
       # Restart marker on the ticket's own pipeline log — same marker the
       # live-reap path writes, so both count toward the same cap.
-      _log_pipeline "$log_file" "META" "fleet-restart" "info" "restart orphan-reconciliation"
-      echo "fleet_reconcile: ${tid} — incomplete, re-enqueued"
+      _log_pipeline "$log_file" "META" "fleet-restart" "info" "restart ${reason}"
+      echo "  resumed ${tid}"
     else
       echo "fleet_reconcile: ${tid} — re-enqueue failed, dead-lettered by queue append"
     fi

@@ -35,6 +35,11 @@ _source_if_missing fleet_kill_pipeline "$_MONITOR_DIR/fleet-intervene.sh"
 _source_if_missing fleet_render_dashboard_from_data "$_MONITOR_DIR/fleet-dashboard.sh"
 # Source registry/fence helpers if available
 [ -f "$_MONITOR_DIR/fleet-registry.sh" ] && source "$_MONITOR_DIR/fleet-registry.sh"
+# Campaign-resume: live-only capacity helper shared with dispatch — the
+# monitor consume path must agree with fleetd on what consumes a slot.
+# (fleet-dispatch.sh sources fleet-reconcile.sh for the classifier; all of
+# its sources are declare -f-guarded, so no re-execution here.)
+_source_if_missing _active_pipeline_count "$_MONITOR_DIR/fleet-dispatch.sh"
 
 # Source worktree.sh for garbage collection of terminal-state worktrees
 _TAP_LIB="$_MONITOR_DIR/../../ticket-auto-pipeline/lib"
@@ -258,9 +263,13 @@ fleet_monitor_cycle() {
 
   fl_write "INFO" "monitor" "Monitor cycle complete"
 
-  # Consume spawn queue (dispatch + restart entries)
+  # Consume spawn queue (dispatch + restart entries). Slot math uses the
+  # live-only pipeline count — the same helper dispatch's Step 4 uses — so
+  # a dead log never consumes a capacity slot here either (fleetd's consume
+  # and the monitor must agree on capacity). The dashboard's `summary.total`
+  # display count is unchanged: it reports logs, not slots.
   local active_count
-  active_count=$(echo "$data" | jq -r '.summary.total // 0' 2>/dev/null)
+  active_count=$(_active_pipeline_count "$workspace" 2>/dev/null || echo "0")
   _spawn_queue_consume "$workspace" "${active_count:-0}" 2>/dev/null || true
 
   # Return the detection data for fleet-summary gating in the loop

@@ -848,6 +848,41 @@ class SpawnAndReapTest(unittest.TestCase):
         finally:
             sup.release_lock()
 
+    def test_killed_pipeline_resumes_not_dropped_as_stale(self):
+        """A log ending with a verified-kill outcome is resumable: the queue
+        entry spawns (the worker self-resumes via ticket-detect-resume), not
+        dropped as stale-terminal. Mirrors the kill arm of
+        fleet_ticket_terminal_state (lib/fleet-reconcile.sh) via
+        _log_reached_terminal."""
+        from fleetd.supervisor import Supervisor
+
+        queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+        queue_file.write_text(
+            json.dumps({'tid': 'TST-K1',
+                        'reason': 'campaign-resume from INIT-42'}) + '\n')
+        log_file = self.workspace / 'TST-K1-pipeline.log'
+        log_file.write_text(
+            '2026-01-01T00:00:00Z|EXEC|exec|start|mid-flight\n'
+            '2026-01-01T00:00:01Z|META|outcome|info|'
+            'stopped: fleet-kill (SIGTERM); auto-kill\n')
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            consumed = sup._consume_queue(
+                cmd_override=_make_worker_cmd(sleep_secs=5))
+            self.assertEqual(consumed, {'TST-K1'},
+                             "killed pipeline must spawn, not be dropped")
+            self.assertIsNotNone(sup._children.get('TST-K1'),
+                                 "killed pipeline must spawn as a worker")
+        finally:
+            sup.release_lock()
+
     def test_poll_adopted_workers_preserves_generation(self):
         """poll_adopted_workers preserves the last-known generation before
         deleting the registry — same contract as scan_registry."""
