@@ -852,6 +852,398 @@ _run "priority_urgent_before_low" test_priority_urgent_before_low
 _run "priority_no_priority_sorts_last" test_priority_no_priority_sorts_last_not_first
 _run "priority_all_five_levels_order" test_priority_all_five_levels_full_order
 
+# ── Epic-scoped dispatch lock + stop-file gate ────────────────────────────────────
+
+test_concurrent_same_epic_dispatch_single_entry() {
+  local ws
+  ws=$(_setup_workspace)
+
+  # Two concurrent dispatches of the same epic — the epic-scoped flock must
+  # serialize them so each ticket is enqueued exactly once.
+  bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_with_children)
+    _mock_epic_query_with_children
+    $(declare -f _mock_get_issue_blocker_done)
+    _mock_get_issue_blocker_done
+    fleet_dispatch_initiative 'INIT-42' '$ws'
+  " 2>/dev/null &
+  local pid1=$!
+  bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_with_children)
+    _mock_epic_query_with_children
+    $(declare -f _mock_get_issue_blocker_done)
+    _mock_get_issue_blocker_done
+    fleet_dispatch_initiative 'INIT-42' '$ws'
+  " 2>/dev/null &
+  local pid2=$!
+  wait "$pid1" "$pid2" 2>/dev/null || true
+
+  local queue_file
+  queue_file="$ws/fleet-default-spawn-queue.jsonl"
+  [ -f "$queue_file" ] || {
+    echo "queue file missing"
+    return 1
+  }
+  local count
+  count=$(grep -c '"tid":"CRE-10' "$queue_file" || true)
+  # CRE-101 and CRE-103 dispatchable (CRE-102 in progress, CRE-103 blocked-by Done)
+  [ "$count" -eq 2 ] || {
+    echo "expected 2 entries, got $count"
+    return 1
+  }
+  local tids
+  tids=$(jq -r '.tid' "$queue_file" 2>/dev/null | sort | uniq -c | awk '$1 > 1' | wc -l)
+  [ "$tids" -eq 0 ] || {
+    echo "duplicate entries found"
+    return 1
+  }
+  return 0
+}
+
+test_dispatch_lock_different_epics_do_not_block() {
+  local ws
+  ws=$(_setup_workspace)
+  local queue_file
+  queue_file="$ws/fleet-default-spawn-queue.jsonl"
+
+  # Hold INIT-43's dispatch lock; dispatching INIT-42 must not block on it.
+  (
+    flock -x 9
+    sleep 2
+  ) 9>"${queue_file}.INIT-43.dispatch.lock" &
+  local holder=$!
+  sleep 0.3
+
+  local output
+  output=$(bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_with_children)
+    _mock_epic_query_with_children
+    $(declare -f _mock_get_issue_blocker_done)
+    _mock_get_issue_blocker_done
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+  wait "$holder" 2>/dev/null || true
+
+  echo "$output" | grep -q "enqueued" || {
+    echo "output: $output"
+    return 1
+  }
+  return 0
+}
+
+test_stopped_epic_enqueues_nothing() {
+  local ws
+  ws=$(_setup_workspace)
+  echo '{"initiative_id":"INIT-42","stopped_at":"2026-08-18T00:00:00Z","reason":"test","tickets":["CRE-101"]}' >"$ws/stop-INIT-42.json"
+
+  local output
+  output=$(bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_with_children)
+    _mock_epic_query_with_children
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  echo "$output" | grep -q "stopped" || {
+    echo "output: $output"
+    return 1
+  }
+  [ ! -f "$ws/fleet-default-spawn-queue.jsonl" ] || {
+    echo "queue should not exist"
+    return 1
+  }
+  return 0
+}
+
+test_resume_clears_and_dispatches() {
+  local ws
+  ws=$(_setup_workspace)
+  echo '{"initiative_id":"INIT-42","stopped_at":"2026-08-18T00:00:00Z","reason":"test","tickets":["CRE-101"]}' >"$ws/stop-INIT-42.json"
+
+  local output
+  output=$(bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_with_children)
+    _mock_epic_query_with_children
+    $(declare -f _mock_get_issue_blocker_done)
+    _mock_get_issue_blocker_done
+    fleet_dispatch_initiative 'INIT-42' '$ws' --resume 2>&1
+  " 2>/dev/null || true)
+
+  echo "$output" | grep -q "stop-file cleared" || {
+    echo "output: $output"
+    return 1
+  }
+  [ ! -f "$ws/stop-INIT-42.json" ] || {
+    echo "stop-file should be cleared"
+    return 1
+  }
+  [ -f "$ws/fleet-default-spawn-queue.jsonl" ] || {
+    echo "queue should exist"
+    return 1
+  }
+  return 0
+}
+
+test_stop_file_inert_to_other_epics() {
+  local ws
+  ws=$(_setup_workspace)
+  echo '{"initiative_id":"INIT-43","stopped_at":"2026-08-18T00:00:00Z","reason":"test","tickets":[]}' >"$ws/stop-INIT-43.json"
+
+  local output
+  output=$(bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_with_children)
+    _mock_epic_query_with_children
+    $(declare -f _mock_get_issue_blocker_done)
+    _mock_get_issue_blocker_done
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  echo "$output" | grep -q "enqueued" || {
+    echo "output: $output"
+    return 1
+  }
+  return 0
+}
+
+test_stop_initiative_purges_and_writes_stop_file() {
+  local ws
+  ws=$(_setup_workspace)
+  echo '{"tid":"CRE-101","reason":"planned-dispatch from INIT-42","timestamp":"2026-08-18T00:00:00Z","restarts":0,"dispatch_type":"initial","generation":1}' >"$ws/fleet-default-spawn-queue.jsonl"
+  echo '{"tid":"CRE-102","reason":"planned-dispatch from INIT-42","timestamp":"2026-08-18T00:00:00Z","restarts":0,"dispatch_type":"initial","generation":1}' >>"$ws/fleet-default-spawn-queue.jsonl"
+  # A run-registry entry with a guaranteed-dead PID — the liveness guard must
+  # skip it without a kill and without pinning.
+  echo '{"tid":"CRE-102","pid":"999999999","generation":1,"started_at":"2026-08-18T00:00:00Z","reason":"planned-dispatch from INIT-42"}' >"$ws/CRE-102-run.json"
+
+  local output
+  output=$(bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    fleet_stop_initiative 'INIT-42' 'test reason' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  echo "$output" | grep -q "STOP_RESULT|purged=\[\"CRE-101\",\"CRE-102\"\]|killed=\[\]" || {
+    echo "output: $output"
+    return 1
+  }
+  [ -f "$ws/stop-INIT-42.json" ] || {
+    echo "stop-file missing"
+    return 1
+  }
+  local tickets
+  tickets=$(jq -c '.tickets' "$ws/stop-INIT-42.json" 2>/dev/null)
+  [ "$tickets" = '["CRE-101","CRE-102"]' ] || {
+    echo "tickets: $tickets"
+    return 1
+  }
+  # Queue purged of both entries.
+  [ ! -f "$ws/fleet-default-spawn-queue.jsonl" ] || {
+    echo "queue should be gone"
+    return 1
+  }
+  return 0
+}
+
+test_stop_initiative_idempotent() {
+  local ws
+  ws=$(_setup_workspace)
+
+  local output2
+  output2=$(bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    fleet_stop_initiative 'INIT-42' 'first' '$ws' 2>&1 >/dev/null
+    fleet_stop_initiative 'INIT-42' 'second' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  echo "$output2" | grep -q "STOP_RESULT|purged=\[\]|killed=\[\]" || {
+    echo "output: $output2"
+    return 1
+  }
+  return 0
+}
+
+# F2: purge flock failure must abort the stop — no silent "success" report,
+# queue untouched, no stop-file.
+test_stop_purge_flock_failure_aborts() {
+  local ws
+  ws=$(_setup_workspace)
+  echo '{"tid":"CRE-101","reason":"planned-dispatch from INIT-42","timestamp":"2026-08-18T00:00:00Z","restarts":0,"dispatch_type":"initial","generation":1}' >"$ws/fleet-default-spawn-queue.jsonl"
+
+  local output rc
+  output=$(bash -c "
+    flock() { return 1; }
+    export -f flock
+    FLEET_QUEUE_LOCK_TIMEOUT=1
+    source '$LIB_DIR/fleet-dispatch.sh'
+    fleet_stop_initiative 'INIT-42' 'test' '$ws' 2>&1
+  " 2>/dev/null)
+  rc=$?
+
+  [ "$rc" -ne 0 ] || {
+    echo "expected non-zero rc on purge flock failure, got $rc; output: $output" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  echo "$output" | grep -q "stop aborted" || {
+    echo "expected abort message; output: $output" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  grep -q "CRE-101" "$ws/fleet-default-spawn-queue.jsonl" || {
+    echo "queue entry lost on failed purge" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  [ ! -f "$ws/stop-INIT-42.json" ] || {
+    echo "stop-file written despite failed purge" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  rm -rf "$ws"
+  return 0
+}
+
+# F2: the purge re-reads the queue UNDER the flock. An append landing when
+# the lock is acquired (another epic's dispatch) must survive the rewrite —
+# the pre-fix code read first and clobbered such appends with stale content.
+test_stop_purge_keeps_entry_appended_at_lock_time() {
+  local ws
+  ws=$(_setup_workspace)
+  echo '{"tid":"CRE-101","reason":"planned-dispatch from INIT-42","timestamp":"2026-08-18T00:00:00Z","restarts":0,"dispatch_type":"initial","generation":1}' >"$ws/fleet-default-spawn-queue.jsonl"
+
+  local output
+  output=$(bash -c "
+    # On lock acquisition, a concurrent dispatcher for INIT-99 appends its
+    # entry — the purge must see it and keep it (it re-reads after flock).
+    flock() {
+      echo '{\"tid\":\"CRE-201\",\"reason\":\"planned-dispatch from INIT-99\",\"timestamp\":\"2026-08-18T00:00:00Z\",\"restarts\":0,\"dispatch_type\":\"initial\",\"generation\":1}' >>'$ws/fleet-default-spawn-queue.jsonl'
+      return 0
+    }
+    export -f flock
+    source '$LIB_DIR/fleet-dispatch.sh'
+    fleet_stop_initiative 'INIT-42' 'test' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  grep -q "CRE-201" "$ws/fleet-default-spawn-queue.jsonl" || {
+    echo "concurrent append clobbered by purge; queue: $(cat "$ws/fleet-default-spawn-queue.jsonl")" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  grep -q "CRE-101" "$ws/fleet-default-spawn-queue.jsonl" && {
+    echo "INIT-42 entry not purged; queue: $(cat "$ws/fleet-default-spawn-queue.jsonl")" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  rm -rf "$ws"
+  return 0
+}
+
+# F3: a refused kill (rc != 0) must pin the tid WITHOUT reporting it killed.
+test_stop_kill_refused_pins_not_killed() {
+  local ws
+  ws=$(_setup_workspace)
+  sleep 30 &
+  local worker_pid=$!
+  echo "{\"tid\":\"CRE-102\",\"pid\":\"${worker_pid}\",\"generation\":1,\"started_at\":\"2026-08-18T00:00:00Z\",\"reason\":\"planned-dispatch from INIT-42\"}" >"$ws/CRE-102-run.json"
+
+  local output
+  output=$(bash -c "
+    fleet_kill_pipeline() { return 1; }
+    export -f fleet_kill_pipeline
+    source '$LIB_DIR/fleet-dispatch.sh'
+    fleet_stop_initiative 'INIT-42' 'test' '$ws' 2>&1
+  " 2>/dev/null || true)
+  kill "$worker_pid" 2>/dev/null || true
+
+  echo "$output" | grep -q 'STOP_RESULT|purged=\[\]|killed=\[\]|pinned=\["CRE-102"\]' || {
+    echo "output: $output" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  jq -e '.tickets == ["CRE-102"]' "$ws/stop-INIT-42.json" >/dev/null 2>&1 || {
+    echo "stop-file tickets: $(cat "$ws/stop-INIT-42.json")" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  rm -rf "$ws"
+  return 0
+}
+
+# F6: a kill that returns success without terminating (kill-unverified
+# survivor) is pinned, never reported killed.
+test_stop_unverified_survivor_pinned_not_killed() {
+  local ws
+  ws=$(_setup_workspace)
+  sleep 30 &
+  local worker_pid=$!
+  echo "{\"tid\":\"CRE-102\",\"pid\":\"${worker_pid}\",\"generation\":1,\"started_at\":\"2026-08-18T00:00:00Z\",\"reason\":\"planned-dispatch from INIT-42\"}" >"$ws/CRE-102-run.json"
+
+  local output
+  output=$(bash -c "
+    fleet_kill_pipeline() { return 0; }
+    export -f fleet_kill_pipeline
+    source '$LIB_DIR/fleet-dispatch.sh'
+    fleet_stop_initiative 'INIT-42' 'test' '$ws' 2>&1
+  " 2>/dev/null || true)
+  kill "$worker_pid" 2>/dev/null || true
+
+  echo "$output" | grep -q 'killed=\[\]|pinned=\["CRE-102"\]' || {
+    echo "output: $output" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  jq -e '.tickets == ["CRE-102"]' "$ws/stop-INIT-42.json" >/dev/null 2>&1 || {
+    echo "stop-file tickets: $(cat "$ws/stop-INIT-42.json")" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  rm -rf "$ws"
+  return 0
+}
+
+# F6: a dead worker with NO queue entry must be pinned on the FIRST stop —
+# otherwise restart reconciliation resurrects the stopped epic's ticket.
+test_stop_dead_worker_without_queue_entry_pinned() {
+  local ws
+  ws=$(_setup_workspace)
+  echo '{"tid":"CRE-102","pid":"999999999","generation":1,"started_at":"2026-08-18T00:00:00Z","reason":"planned-dispatch from INIT-42"}' >"$ws/CRE-102-run.json"
+
+  local output
+  output=$(bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    fleet_stop_initiative 'INIT-42' 'test' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  echo "$output" | grep -q 'purged=\[\]|killed=\[\]|pinned=\["CRE-102"\]' || {
+    echo "output: $output" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  jq -e '.tickets == ["CRE-102"]' "$ws/stop-INIT-42.json" >/dev/null 2>&1 || {
+    echo "stop-file tickets: $(cat "$ws/stop-INIT-42.json")" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  rm -rf "$ws"
+  return 0
+}
+
+_run "stop_purge_flock_failure_aborts" test_stop_purge_flock_failure_aborts
+_run "stop_purge_keeps_entry_appended_at_lock_time" test_stop_purge_keeps_entry_appended_at_lock_time
+_run "stop_kill_refused_pins_not_killed" test_stop_kill_refused_pins_not_killed
+_run "stop_unverified_survivor_pinned_not_killed" test_stop_unverified_survivor_pinned_not_killed
+_run "stop_dead_worker_without_queue_entry_pinned" test_stop_dead_worker_without_queue_entry_pinned
+_run "concurrent_same_epic_dispatch_single_entry" test_concurrent_same_epic_dispatch_single_entry
+_run "dispatch_lock_different_epics_do_not_block" test_dispatch_lock_different_epics_do_not_block
+_run "stopped_epic_enqueues_nothing" test_stopped_epic_enqueues_nothing
+_run "resume_clears_and_dispatches" test_resume_clears_and_dispatches
+_run "stop_file_inert_to_other_epics" test_stop_file_inert_to_other_epics
+_run "stop_initiative_purges_and_writes_stop_file" test_stop_initiative_purges_and_writes_stop_file
+_run "stop_initiative_idempotent" test_stop_initiative_idempotent
+
 echo ""
 echo "=== Results ==="
 echo "PASS: $PASS | FAIL: $FAIL"

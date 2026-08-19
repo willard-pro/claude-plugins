@@ -619,7 +619,11 @@ _fleet_scan_initiative_dispatch() {
 
     if [ "$epic_undispatched" -gt 0 ]; then
       undispatched=$((undispatched + epic_undispatched))
-      initiative_ids="${initiative_ids} ${epic_id}(${epic_undispatched})"
+      local stop_note=""
+      if [ -f "$(_fleet_epic_stop_file "$workspace" "$epic_id")" ]; then
+        stop_note=" (stopped: stop-${epic_id}.json present)"
+      fi
+      initiative_ids="${initiative_ids} ${epic_id}(${epic_undispatched})${stop_note}"
     fi
   done
 
@@ -633,7 +637,7 @@ _fleet_scan_initiative_dispatch() {
     # for each initiative with undispatched planned children.
     # The human approval gate still stops every ticket — this automates dispatch,
     # not approval.
-    if [ "${FLEET_AUTO_DISPATCH:-false}" = "true" ]; then
+    if [ "${FLEET_AUTO_DISPATCH}" = "true" ]; then
       # Source fleet-dispatch.sh if not already available
       if ! declare -f fleet_dispatch_initiative >/dev/null 2>&1; then
         local _dispatch_lib="${_CONFIG_DIR}/fleet-dispatch.sh"

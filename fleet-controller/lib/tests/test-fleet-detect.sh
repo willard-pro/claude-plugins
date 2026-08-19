@@ -777,6 +777,57 @@ test_auto_dispatch_forwards_workspace() {
   }
 }
 
+# ── D-11 stop-file note ──────────────────────────────────────────────────────────
+
+test_initiative_dispatch_notes_stop_file() {
+  local ws
+  ws=$(_setup_workspace)
+  get_issue() { :; }
+  fleet_dispatch_initiative() { :; }
+  curl() {
+    echo '{"data":{"issues":{"nodes":[{"id":"x","identifier":"INIT-42","children":{"nodes":[{"id":"c","identifier":"CRE-900","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"}]}}]}}]}}}'
+  }
+  source "$LIB_DIR/fleet-detect.sh"
+  echo '{"initiative_id":"INIT-42","tickets":["CRE-900"]}' >"$ws/stop-INIT-42.json"
+
+  local r findings
+  r=$(_fleet_scan_initiative_dispatch "$ws" 2>/dev/null)
+  findings=$(echo "$r" | jq -r '.findings')
+  rm -rf "$ws"
+
+  echo "$findings" | grep -q "INIT-42(1)" || {
+    echo "expected INIT-42(1) in findings: $findings" >&2
+    return 1
+  }
+  echo "$findings" | grep -q "stopped: stop-INIT-42.json" || {
+    echo "expected stop-file note in findings: $findings" >&2
+    return 1
+  }
+  return 0
+}
+
+test_initiative_dispatch_no_stop_note_when_unstopped() {
+  local ws
+  ws=$(_setup_workspace)
+  get_issue() { :; }
+  fleet_dispatch_initiative() { :; }
+  curl() {
+    echo '{"data":{"issues":{"nodes":[{"id":"x","identifier":"INIT-42","children":{"nodes":[{"id":"c","identifier":"CRE-900","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"}]}}]}}]}}}'
+  }
+  source "$LIB_DIR/fleet-detect.sh"
+
+  local r findings
+  r=$(_fleet_scan_initiative_dispatch "$ws" 2>/dev/null)
+  findings=$(echo "$r" | jq -r '.findings')
+  rm -rf "$ws"
+
+  echo "$findings" | grep -q "stopped:" && {
+    echo "unexpected stop note when no stop-file exists: $findings" >&2
+    return 1
+  }
+  return 0
+}
+
 # ── Gate-hold lifecycle detection (gate-check.sh compatibility) ───────────────────
 
 test_gate_held_fresh_not_stall() {
@@ -885,7 +936,9 @@ for fn in \
   test_auto_dispatch_forwards_workspace \
   test_gate_held_fresh_not_stall \
   test_gate_held_abandoned_detected \
-  test_gate_stop_from_gate_check_detected; do
+  test_gate_stop_from_gate_check_detected \
+  test_initiative_dispatch_notes_stop_file \
+  test_initiative_dispatch_no_stop_note_when_unstopped; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

@@ -573,6 +573,39 @@ _run "reconcile entry continues fenced generation" test_reconcile_entry_continue
 _run "chained crash-resume reaches cap then dead-letters" test_chained_crash_resume_reaches_cap
 _run "live-reap and reconcile share one cap" test_live_reap_and_reconcile_share_one_cap
 
+# ── Stop-file pins (fleet-epic-stop) ─────────────────────────────────────────────
+
+test_pinned_tid_not_reenqueued() {
+  local ws
+  ws=$(_setup_workspace)
+  _reconcile_env "$ws"
+  local queue_file
+  queue_file=$(_reconcile_queue_file "$ws")
+  rm -f "$queue_file" "${queue_file%.jsonl}-dead-letter.jsonl"
+
+  # Both tickets are incomplete orphans; CRE-14 is pinned by a stop-file.
+  _plog_line "${ws}/CRE-14-pipeline.log" "APPRAISE" "appraise" "start" "investigating"
+  _plog_line "${ws}/CRE-15-pipeline.log" "APPRAISE" "appraise" "start" "investigating"
+  echo '{"initiative_id":"INIT-42","tickets":["CRE-14"]}' >"$ws/stop-INIT-42.json"
+
+  fleet_reconcile_orphans "$ws" "$queue_file" "" "CRE-14" >/dev/null
+
+  if grep -q '"tid":"CRE-14"' "$queue_file" 2>/dev/null; then
+    echo "pinned tid was re-enqueued" >&2
+    rm -rf "$ws"
+    return 1
+  fi
+  grep -q '"tid":"CRE-15"' "$queue_file" 2>/dev/null || {
+    echo "unpinned tid was not re-enqueued" >&2
+    rm -rf "$ws"
+    return 1
+  }
+  rm -rf "$ws"
+  return 0
+}
+
+_run "pinned tid not re-enqueued" test_pinned_tid_not_reenqueued
+
 echo ""
 echo "=== Results ==="
 echo "PASS: $PASS | FAIL: $FAIL"

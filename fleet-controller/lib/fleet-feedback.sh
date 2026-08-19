@@ -300,6 +300,45 @@ fleet_aggregate_feedback() {
   return 0
 }
 
+# ── _fleet_confidence_predicted ──────────────────────────────────────────────────
+# Read the predicted confidence for a ticket from its Linear description's
+# Planner Context block (`- Confidence:` field). Single canonical parser for
+# this value — fleetd's GET /workers/<tid> shells out here rather than
+# re-implementing the block format in Python, and planned-feedback-write.sh
+# uses the same extraction when it emits META|planner-feedback entries.
+#
+# Args: tid
+# Stdout: the numeric value, or the literal "null" when unavailable
+#   (no get_issue, fetch failure, or no Confidence field).
+# Exit: always 0 — a missing value is a normal state, not an error.
+_fleet_confidence_predicted() {
+  local tid="$1"
+  local description=""
+  if declare -f get_issue >/dev/null 2>&1; then
+    description=$(get_issue "$tid" 2>/dev/null | jq -r '.description // empty' 2>/dev/null || true)
+  fi
+  if [ -z "$description" ] || [ "$description" = "null" ]; then
+    echo "null"
+    return 0
+  fi
+
+  local conf_line
+  conf_line=$(echo "$description" | sed -n '/## Planner Context/,/^## /p' | grep -i '^\s*-\s*Confidence:' | head -1)
+  if [ -z "$conf_line" ]; then
+    echo "null"
+    return 0
+  fi
+
+  local val
+  val=$(echo "$conf_line" | grep -oP '[\d.]+' | head -1 || true)
+  if [ -z "$val" ]; then
+    echo "null"
+    return 0
+  fi
+  echo "$val"
+  return 0
+}
+
 # ── Sourceable/executable guard ──────────────────────────────────────────────────
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   fleet_aggregate_feedback "$@"

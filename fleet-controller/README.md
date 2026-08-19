@@ -164,6 +164,65 @@ Health API: `GET http://127.0.0.1:21001/health` → live workers, queue depth, c
 
 Single-instance enforced via `fcntl.flock` on a pidfile. On restart it verifies surviving PIDs against `/proc/<pid>/stat` start time before adopting them, so a recycled PID can't be mistaken for a live worker.
 
+## HTTP API
+
+fleetd serves an on-demand control/query surface on `http://127.0.0.1:21001` (loopback-bound — same trust boundary as `/health`; no auth). Seven endpoints:
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/health` | GET | Daemon health — live workers, queue depth, cycle status |
+| `/workers` | GET | Every active worker with live status enrichment |
+| `/workers/<tid>` | GET | Live status for one worker (404 when unknown) |
+| `/queue` | GET | Spawn queue contents — entries plus malformed lines |
+| `/epics` | GET | Epics fleetd's state dir knows: stopped / queued / running |
+| `/dispatch` | POST | Dispatch one epic on demand, independent of `FLEET_AUTO_DISPATCH` |
+| `/stop` | POST | Epic-scoped stop: purge queue, kill workers, write stop-file |
+
+**GET /health** — documented shape (unchanged): `workers` (array), `worker_count`, `queue_depth`, `last_cycle_at`, `last_cycle_success`, `last_cycle_error`, `cycle_count`, `last_summary`, `pipeline_count`.
+
+**GET /workers/<tid>** — `tid`, `pid`, `generation`, `started_at`, `reason`, `adopted`, `phase` (latest detection cycle), `anomalies` (same cycle), `tokens_used_so_far` (summed from `META|tokens` pipeline-log entries, computed live per request), `confidence_predicted` (parsed once from the ticket's Planner Context block, then cached for the daemon's lifetime), `confidence_actual` (from the `META|planner-feedback` entry — explicit `null` until it exists, never coerced to 0). `GET /workers` returns the same shape for every worker in the child table; an empty table returns `[]`.
+
+```bash
+curl -s http://127.0.0.1:21001/workers/CRE-101
+curl -s http://127.0.0.1:21001/workers
+```
+
+**GET /queue** — `{entries: [...], malformed: [...]}`. The same parse the queue consumer uses at consume time, so a torn line is reported identically in both places. Missing file → empty arrays.
+
+```bash
+curl -s http://127.0.0.1:21001/queue
+```
+
+**GET /epics** — one object per epic, derived purely from state-dir files (no Linear calls): `epic_id`, `stopped`, `stopped_at`, `stop_reason`, `tickets` (stop-file pins), `queued` (queue-entry reasons), `running` (worker/registry reasons). An epic fleetd has no local record of is not listed — that is the detector's job.
+
+```bash
+curl -s http://127.0.0.1:21001/epics
+```
+
+**POST /dispatch** — body `{"epic_id": "...", "dry_run": false, "resume": false}`. Runs the same `fleet_dispatch_initiative` the `/fleet-controller dispatch` skill and the auto-sweep call — label validation, `blocked-by` resolution, and queue idempotency are identical regardless of trigger path. On success it immediately consumes the resulting queue entries (up to `FLEET_MAX_CONCURRENT`) instead of waiting for the next poll cycle, and returns `{"queued": [...], "spawned": [...], "message": "..."}`. `dry_run: true` reports what would be queued without touching the queue. `resume: true` clears the epic's stop-file before scanning — dispatch is the single start/resume/un-stop entry point. A stopped epic without `resume` returns `200` with `queued: []` and a message naming the stop-file.
+
+```bash
+curl -s -X POST http://127.0.0.1:21001/dispatch \
+  -H 'Content-Type: application/json' \
+  -d '{"epic_id": "INIT-42"}'
+
+curl -s -X POST http://127.0.0.1:21001/dispatch \
+  -H 'Content-Type: application/json' \
+  -d '{"epic_id": "INIT-42", "resume": true}'
+```
+
+**POST /stop** — body `{"epic_id": "...", "reason": "optional"}`. Implements the stop contract: purges the epic's spawn-queue entries, escalate-kills its running workers (via `fleet_kill_pipeline`'s verified escalation), and writes `stop-{epic}.json` pinning the stopped tickets against reconciliation resurrection. Returns `{"purged": [...], "killed": [...], "pinned": [...], "message": "..."}` — `killed` lists only workers whose death was verified; every other ticket recorded for the epic (kill refused/deferred, kill-unverified survivor, worker already dead) lands in `pinned` and in the stop-file union, so a stop never lies about a kill and never leaves a ticket unpinned. Idempotent — stopping an already-stopped epic returns empty lists. Works without the daemon too: the skill's `stop` subcommand calls the same bash implementation directly, since workers outlive a dead fleetd.
+
+```bash
+curl -s -X POST http://127.0.0.1:21001/stop \
+  -H 'Content-Type: application/json' \
+  -d '{"epic_id": "INIT-42", "reason": "operator decision"}'
+```
+
+**Dispatch/stop/resume lifecycle:** an epic starts idling (`FLEET_AUTO_DISPATCH=false` is the documented default — detection reports, nothing enqueues). `POST /dispatch` (or the skill) starts it; re-invocation is an idempotent rescan. `POST /stop` stops it; every dispatch trigger path early-exits while the stop-file exists, and fleetd's startup reconciliation skips its pinned tickets. Only an explicit resume (`resume: true` / `--resume`) clears the stop-file.
+
+**Latency note:** POST handlers run on the single background HTTP thread. `POST /dispatch` blocks that thread for the duration of the dispatch scan (a Linear API call, up to 3 retries with exponential backoff) — concurrent GET polls queue behind it. Acceptable for a low-frequency control call; revisit only if it measurably disrupts dashboard polling.
+
 ## Configuration
 
 All settings live in `lib/fleet-config.sh` using `${VAR:-default}` — override via environment. Safe defaults; nothing is required.
@@ -201,6 +260,7 @@ All settings live in `lib/fleet-config.sh` using `${VAR:-default}` — override 
 | `FLEET_QUEUE_LOCK_TIMEOUT` | 5 | Seconds to wait for queue `flock` |
 | `FLEET_EPIC_BRANCH_SYNC` | — | Epic branch sync behaviour |
 | `FLEET_EPIC_AUTO_PR` | — | Auto-open epic integration PRs |
+| `FLEET_AUTO_DISPATCH` | false | `true` = global sweep of `state:execution` epics on each cycle; `false` = idle until explicit dispatch (skill or `POST /dispatch`) |
 | `FLEETD_SPAWN_ENABLED` | unset | `1` enables fleetd worker spawning |
 
 ## Where state lives
