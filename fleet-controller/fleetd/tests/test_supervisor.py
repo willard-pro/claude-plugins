@@ -10,6 +10,11 @@ Run:
     python -m pytest fleet-controller/fleetd/tests/test_supervisor.py -v
     # or directly:
     python fleet-controller/fleetd/tests/test_supervisor.py
+
+NOTE: MUST run from the repo root. The daemon tests shell out to
+`python -m fleet-controller.fleetd`, which needs the repo root on
+sys.path — from inside fleet-controller/ those tests fail with
+ModuleNotFoundError (the Makefile documents the same requirement).
 """
 
 import fcntl
@@ -839,8 +844,8 @@ class SpawnAndReapTest(unittest.TestCase):
                 cmd_override=_make_worker_cmd(sleep_secs=5))
             self.assertEqual(consumed, {'TST-T1'},
                              "stale entry should be consumed (removed)")
-            self.assertNotIn('TST-T1', sup._children,
-                             "terminal ticket must not be spawned")
+            self.assertIsNone(sup._children.get('TST-T1'),
+                              "terminal ticket must not be spawned")
             remaining = (queue_file.read_text()
                          if queue_file.is_file() else '')
             self.assertNotIn('TST-T1', remaining,
@@ -882,6 +887,66 @@ class SpawnAndReapTest(unittest.TestCase):
                                  "killed pipeline must spawn as a worker")
         finally:
             sup.release_lock()
+
+    def _log_terminal(self, content):
+        """Write the given pipeline-log content and classify it.
+
+        Direct-unit wrapper around _log_reached_terminal so the mirror can
+        be pinned against fleet_ticket_terminal_state (bash authority)
+        independently of the consume loop.
+        """
+        from fleetd.supervisor import _log_reached_terminal
+
+        log_file = self.workspace / 'TST-L1-pipeline.log'
+        if content is None:
+            return _log_reached_terminal(str(self.workspace), 'TST-L1')
+        log_file.write_text(content)
+        return _log_reached_terminal(str(self.workspace), 'TST-L1')
+
+    def test_log_reached_terminal_mirrors_bash_classifier(self):
+        """_log_reached_terminal agrees with fleet_ticket_terminal_state
+        on every resume-relevant log shape (the bash classifier is the
+        authority; the mirror must not drift)."""
+        # Finalized completion → terminal.
+        self.assertTrue(self._log_terminal(
+            '2026-01-01T00:00:00Z|META|outcome|info|completed\n'))
+        # Dead-letter last line → terminal (idempotent reconciliation).
+        self.assertTrue(self._log_terminal(
+            '2026-01-01T00:00:00Z|META|dead-letter|warn|reason=restart-cap\n'))
+        # Verified kill → resumable, not terminal.
+        self.assertFalse(self._log_terminal(
+            '2026-01-01T00:00:00Z|EXEC|exec|start|mid-flight\n'
+            '2026-01-01T00:00:01Z|META|outcome|info|'
+            'stopped: fleet-kill (SIGTERM); auto-kill\n'))
+        # Gate-held outcome → waiting on the human, not terminal.
+        self.assertFalse(self._log_terminal(
+            '2026-01-01T00:00:00Z|META|outcome|info|held: gate\n'))
+        # Gate-held marker as last line (crash before finalize) → not terminal.
+        self.assertFalse(self._log_terminal(
+            '2026-01-01T00:00:00Z|META|gate-held|info|waiting approval\n'))
+        # Gate-stop anywhere → terminal (structural stop must never resume).
+        self.assertTrue(self._log_terminal(
+            '2026-01-01T00:00:00Z|GATE|gate|fail|'
+            '2026-01-01T00:00:01Z|META|gate-stop|fail|CRITIQUE_BLOCKED\n'
+            '2026-01-01T00:00:02Z|IMPLEMENT|implement|start|x\n'))
+        # Kill outcome AFTER a gate-stop → terminal (bash kill arm greps
+        # gate-stop and flips back to done).
+        self.assertTrue(self._log_terminal(
+            '2026-01-01T00:00:00Z|META|gate-stop|fail|CRITIQUE_BLOCKED\n'
+            '2026-01-01T00:00:01Z|META|outcome|info|'
+            'stopped: fleet-kill (SIGTERM)\n'))
+        # Gate-held outcome with an earlier gate-stop line → NOT terminal:
+        # bash checks the outcome arm first, so gate-held wins.
+        self.assertFalse(self._log_terminal(
+            '2026-01-01T00:00:00Z|META|gate-stop|fail|CRITIQUE_BLOCKED\n'
+            '2026-01-01T00:00:01Z|META|outcome|info|held: gate\n'))
+        # Mid-flight log with no terminal markers → not terminal.
+        self.assertFalse(self._log_terminal(
+            '2026-01-01T00:00:00Z|EXEC|exec|start|mid-flight\n'))
+        # Missing log → not terminal (bash: incomplete, caller decides).
+        self.assertFalse(self._log_terminal(None))
+        # Empty log → not terminal.
+        self.assertFalse(self._log_terminal(''))
 
     def test_poll_adopted_workers_preserves_generation(self):
         """poll_adopted_workers preserves the last-known generation before

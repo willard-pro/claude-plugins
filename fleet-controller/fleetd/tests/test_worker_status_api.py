@@ -76,7 +76,7 @@ def _write_stub_dispatch(lib_dir):
   fi
   echo "  resumed CRE-102"
   echo "  blocked CRE-103"
-  echo "fleet_dispatch: resumed 1 | blocked 1 | enqueued 1 ticket(s) for $1"
+  echo "fleet_dispatch: resumed 1 | dead-lettered 0 | blocked 1 | enqueued 1 ticket(s) for $1"
 }
 
 fleet_stop_initiative() {

@@ -812,6 +812,34 @@ test_pinned_tid_not_reenqueued() {
 
 _run "pinned tid not re-enqueued" test_pinned_tid_not_reenqueued
 
+# F05: _fleet_tid_live must be anchored at the tid's right edge — a live
+# CRE-70 worker must not satisfy a CRE-7 liveness check (pgrep -f is a
+# substring ERE match otherwise).
+test_tid_live_prefix_anchored() {
+  bash -c 'exec -a "claude -p /ticket-auto CRE-70 --auto" sleep 30' &
+  local wk_pid=$!
+  trap 'kill "$wk_pid" 2>/dev/null || true' EXIT
+  sleep 0.3
+
+  if bash -c "
+    source '$LIB_DIR/fleet-reconcile.sh'
+    _fleet_tid_live 'CRE-7'
+  " 2>/dev/null; then
+    echo "CRE-70 worker matched CRE-7 tid — unanchored pattern" >&2
+    return 1
+  fi
+  if ! bash -c "
+    source '$LIB_DIR/fleet-reconcile.sh'
+    _fleet_tid_live 'CRE-70'
+  " 2>/dev/null; then
+    echo "CRE-70 worker did not match its own tid" >&2
+    return 1
+  fi
+  return 0
+}
+
+_run "tid_live_prefix_anchored" test_tid_live_prefix_anchored
+
 echo ""
 echo "=== Results ==="
 echo "PASS: $PASS | FAIL: $FAIL"

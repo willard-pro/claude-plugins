@@ -130,7 +130,9 @@ _spawn_queue_consume() {
   fi
 
   local slots_available=$((max_concurrent - active_count))
-  [ "$slots_available" -le 0 ] && return 0
+  # No early return at zero slots: stale entries whose logs are terminal
+  # must still be dropped, or they reserve a capacity slot forever via
+  # _fleet_queued_count_for_epic. Zero slots only means nothing spawns.
 
   # Acquire exclusive lock for read+rewrite. On timeout, skip this cycle
   # rather than blocking the monitor loop indefinitely.
@@ -150,6 +152,22 @@ _spawn_queue_consume() {
       local tid reason
       tid=$(echo "$line" | jq -r '.tid // empty' 2>/dev/null)
       [ -z "$tid" ] && remaining_entries="${remaining_entries}${line}"$'\n' && continue
+
+      # Kill-aware terminal skip — same rule as fleetd's consume loop. A
+      # stale entry for a pipeline whose log already reached `done` (the
+      # crash window between spawn and queue removal leaves exactly such
+      # entries behind) must be dropped, never spawned: re-spawning
+      # re-executes a finished ticket. Killed and gate-held logs stay
+      # spawnable — the kill is a pause, the gate is a wait.
+      if declare -f fleet_ticket_terminal_state >/dev/null 2>&1; then
+        local term_state
+        term_state=$(fleet_ticket_terminal_state "$tid" "${state_dir}/${tid}-pipeline.log")
+        if [ "$term_state" = "done" ]; then
+          fl_write "INFO" "queue" "Dropping stale queue entry: ${tid} (log terminal)"
+          consumed=$((consumed + 1))
+          continue
+        fi
+      fi
 
       if [ "$consumed" -lt "$slots_available" ]; then
         reason=$(echo "$line" | jq -r '.reason // "dispatched"' 2>/dev/null)

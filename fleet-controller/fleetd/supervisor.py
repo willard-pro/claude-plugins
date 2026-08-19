@@ -169,6 +169,11 @@ class ChildTable:
     def __len__(self):
         return len(self._workers)
 
+    def __contains__(self, tid):
+        # Container semantics over ticket ids — iteration yields worker
+        # dicts, so without this `tid in table` silently never matches.
+        return tid in self._workers
+
     def list_workers(self):
         """Return worker list suitable for the health payload."""
         return [
@@ -1364,13 +1369,15 @@ def _log_reached_terminal(state_dir, tid):
     keep the two in sync; the bash classifier is the authority and this
     mirror exists so the consume loop does not shell out per queue entry.
 
-    Terminal iff:
-      - the last line's step is `dead-letter`, or
-      - the last line's step is `outcome` and its message contains neither
-        `stopped: fleet-kill` (a verified kill is a pause — resumable) nor
-        `held: gate` (waiting on the human, not terminal), or
+    Terminal iff (mirrors fleet_ticket_terminal_state branch order —
+    the bash classifier is the authority):
+      - the last line's step is `outcome`: `held: gate` and a verified
+        `stopped: fleet-kill` are NOT terminal (the kill arm flips back to
+        terminal only when a `|META|gate-stop|fail|` line also exists);
+        any other outcome message IS terminal, or
+      - the last line's step is `dead-letter` (terminal), or
       - any `|META|gate-stop|fail|` line exists (structural stop — must
-        never resume).
+        never resume), unless an earlier arm already decided.
     A missing/empty log is NOT terminal, same as the bash classifier.
     """
     log_file = Path(state_dir) / f'{tid}-pipeline.log'
@@ -1381,16 +1388,35 @@ def _log_reached_terminal(state_dir, tid):
     if not lines:
         return False
 
+    # Pipeline log schema is ISO|PHASE|STEP|STATUS|MSG — split() is
+    # 0-indexed, so STEP is field 2 and STATUS is field 3. The outcome arm
+    # must run before the gate-stop-anywhere grep: bash classifies a
+    # gate-held outcome as gate-held even when a gate-stop line exists
+    # earlier in the log.
+    last = lines[-1].split('|')
+    if len(last) >= 3 and last[2] == 'outcome':
+        msg = '|'.join(last[4:]) if len(last) > 4 else ''
+        if 'stopped: fleet-kill' in msg:
+            # A verified kill is a pause — resumable — UNLESS the log
+            # carries a gate-stop, a structural failure that restarting
+            # would hit again (bash checks this inside the kill arm).
+            if any('|META|gate-stop|fail|' in ln for ln in lines):
+                return True
+            return False
+        if 'held: gate' in msg:
+            # Waiting on the human, not terminal.
+            return False
+        return True
+
+    # Crash between gate-held write and finalize: the held marker itself
+    # is the last line. Still gate-held — the human gate stands.
+    if len(last) >= 3 and last[2] == 'gate-held':
+        return False
+
     if any('|META|gate-stop|fail|' in ln for ln in lines):
         return True
 
-    last = lines[-1].split('|')
-    if len(last) >= 4 and last[3] == 'dead-letter':
-        return True
-    if len(last) >= 5 and last[3] == 'outcome':
-        msg = '|'.join(last[4:])
-        if 'stopped: fleet-kill' in msg or 'held: gate' in msg:
-            return False
+    if len(last) >= 3 and last[2] == 'dead-letter':
         return True
     return False
 

@@ -28,10 +28,15 @@ if [ -f "$_DISPATCH_DIR/fleet-config.sh" ]; then
 fi
 
 # Source linear-api.sh from canonical path (synced by ticket-auto-pipeline SessionStart hook)
+# linear-api.sh sets `set -eo pipefail` and never restores it; fleet-* libs
+# are sourceable and must not mutate the caller's shell flags (the monitor
+# loop sources this file and relies on no -e). Snapshot + restore around it.
 if ! declare -f get_issue >/dev/null 2>&1; then
+  _fd_saved_opts=$(set +o)
   for _lp in "$HOME/.claude/skills/lib/linear-api.sh" "$_DISPATCH_DIR/../ticket-auto-pipeline/lib/linear-api.sh"; do
     [ -f "$_lp" ] && source "$_lp" && break
   done
+  eval "$_fd_saved_opts" 2>/dev/null || true
 fi
 
 # Source epic-branch.sh and its transitive deps for epic branch lifecycle ops.
@@ -80,16 +85,39 @@ _queue_has_ticket() {
 
 # _registry_pid_alive <tid> <workspace>
 # Returns 0 when the ticket's run-registry entry carries a PID that is
-# actually alive (kill -0). Covers workers the pgrep cmdline pattern misses
+# actually alive. Covers workers the pgrep cmdline pattern misses
 # (pid-reused processes, monitor-spawned workers). Sentinel 0, empty, and
 # missing entries are NOT evidence of a live worker — they are stale state.
+#
+# PID-reuse guard: kill -0 alone trusts that a live PID is the worker the
+# registry recorded. When /proc start-time data is available, compare the
+# process start (btime + starttime/CLK_TCK) against the registry's
+# started_at — a reused PID fails the comparison and reads as dead, which
+# keeps a dead pipeline from consuming a capacity slot forever. Fall back
+# to kill -0 when /proc or the timestamp is unavailable.
 _registry_pid_alive() {
   local tid="$1" workspace="$2"
-  local run_file run_pid
+  local run_file run_pid run_started run_epoch stat_start btime clk proc_epoch delta
   run_file=$(_fleet_run_file "$tid" "$workspace")
   [ -f "$run_file" ] || return 1
   run_pid=$(jq -r '.pid // empty' "$run_file" 2>/dev/null)
   [ -z "$run_pid" ] || [ "$run_pid" = "0" ] && return 1
+  run_started=$(jq -r '.started_at // empty' "$run_file" 2>/dev/null)
+  if [ -n "$run_started" ] && [ -r "/proc/$run_pid/stat" ]; then
+    stat_start=$(awk '{print $22}' "/proc/$run_pid/stat" 2>/dev/null)
+    btime=$(awk '/^btime/ {print $2; exit}' /proc/stat 2>/dev/null)
+    clk=$(getconf CLK_TCK 2>/dev/null || echo 100)
+    if [ -n "$stat_start" ] && [ -n "$btime" ] && [ -n "$clk" ]; then
+      proc_epoch=$((btime + stat_start / clk))
+      run_epoch=$(date -d "$run_started" +%s 2>/dev/null)
+      if [ -n "$run_epoch" ]; then
+        delta=$((proc_epoch - run_epoch))
+        # ±2s tolerance: started_at is second-resolution ISO, ticks truncate.
+        [ "$delta" -ge -2 ] && [ "$delta" -le 2 ] && return 0
+        return 1
+      fi
+    fi
+  fi
   kill -0 "$run_pid" 2>/dev/null
 }
 
@@ -107,8 +135,16 @@ _active_pipeline_count() {
     local log_file tid
     for log_file in "$workspace"/*-pipeline.log; do
       [ -f "$log_file" ] || continue
-      command grep -q '|META|outcome|' "$log_file" 2>/dev/null && continue
       tid=$(basename "$log_file" | sed 's/-pipeline.log$//')
+      # An outcome line means finished — but only when the worker is
+      # actually gone. A kill outcome written before the kill was verified
+      # (FLEET_KILL_VERIFY=false) can precede a surviving worker; counting
+      # it active prevents over-dispatch past the true concurrency.
+      if command grep -q '|META|outcome|' "$log_file" 2>/dev/null &&
+        ! _fleet_tid_live "$tid" &&
+        ! _registry_pid_alive "$tid" "$workspace"; then
+        continue
+      fi
       if _fleet_tid_live "$tid" || _registry_pid_alive "$tid" "$workspace"; then
         count=$((count + 1))
       fi
@@ -214,11 +250,23 @@ _fleet_queue_append() {
   local max_retries="${FLEET_QUEUE_MAX_RETRIES:-3}"
   local backoff_secs="${FLEET_QUEUE_RETRY_BACKOFF_SECS:-2}"
   local attempt=0
+  local _qa_tid
+  _qa_tid=$(echo "$entry" | jq -r '.tid // empty' 2>/dev/null)
 
   while [ "$attempt" -lt "$max_retries" ]; do
     attempt=$((attempt + 1))
     if (
       flock -w "$lock_timeout" 9 2>/dev/null || exit 1
+      # Last line of defense against duplicates: _queue_has_ticket callers
+      # (reconcile Step 1.75, dispatch Step 5) check BEFORE the flock, so
+      # two concurrent appends of one tid can both pass the check. Re-check
+      # by tid while holding the lock; an existing entry is an idempotent
+      # win, not a duplicate (two workers appending one pipeline log is
+      # worse than a skipped append). Valid-JSON scan only — torn lines
+      # must not false-match, same contract as _queue_has_ticket.
+      if [ -n "$_qa_tid" ] && _queue_has_ticket "$_qa_tid" "$queue_file"; then
+        exit 0
+      fi
       echo "$entry" >>"$queue_file"
     ) 9>"$lock_file"; then
       return 0
@@ -291,6 +339,23 @@ _fleet_stop_clear() {
   rm -f "$(_fleet_epic_stop_file "$workspace" "$epic_id")"
 }
 
+# Union of ticket ids pinned by any stop-*.json in the state dir, as a
+# space-delimited list. The bash twin of fleetd's _collect_stop_pinned_tids:
+# fleet_reconcile_orphans has no epic context of its own, so this list is
+# what makes every stop survive across consumers — fleetd startup passes
+# its own derivation, dispatch Step 1.75 passes this one.
+# Usage: _fleet_stop_pinned_tids <workspace>
+_fleet_stop_pinned_tids() {
+  local workspace="$1" state_dir stop_file tids pinned=""
+  state_dir=$(_fleet_state_dir "$workspace")
+  for stop_file in "$state_dir"/stop-*.json; do
+    [ -f "$stop_file" ] || continue
+    tids=$(jq -r '.tickets[]? // empty' "$stop_file" 2>/dev/null)
+    [ -n "$tids" ] && pinned="${pinned}${pinned:+ }${tids}"
+  done
+  printf '%s' "$pinned"
+}
+
 # ── fleet_dispatch_initiative ────────────────────────────────────────────────────
 # Main entry point: dispatch planned child tickets from an initiative epic.
 # Usage: fleet_dispatch_initiative <initiative_id> [workspace] [--resume]
@@ -342,7 +407,7 @@ _fleet_dispatch_initiative_locked() {
   queue_file=$(_fleet_queue_file "$workspace")
   local max_concurrent="${FLEET_MAX_CONCURRENT:-3}"
   local dry_run="${FLEET_DRY_RUN:-false}"
-  local resume_count=0 blocked_count=0 enqueued=0
+  local resume_count=0 blocked_count=0 enqueued=0 dead_letter_count=0
 
   if [ -z "$initiative_id" ]; then
     echo "ERROR: initiative_id required" >&2
@@ -451,13 +516,18 @@ _fleet_dispatch_initiative_locked() {
       FLEET_RECONCILE_TIDS="$child_tids" \
         FLEET_RECONCILE_EPIC="$initiative_id" \
         FLEET_RECONCILE_DRY_RUN="$dry_run" \
-        fleet_reconcile_orphans "$workspace" "$queue_file" ""
+        fleet_reconcile_orphans "$workspace" "$queue_file" "" \
+        "$(_fleet_stop_pinned_tids "$workspace")"
     )
     echo "$reconcile_out"
     if [ "$dry_run" = "true" ]; then
       resume_count=$(echo "$reconcile_out" | grep -c 'would resume' || true)
     else
       resume_count=$(echo "$reconcile_out" | grep -c '^  resumed ' || true)
+      # Reconcile dead-letters at the restart cap — a queue mutation the
+      # summary must surface, or the operator sees "resumed 0" and misses
+      # that a child was permanently parked.
+      dead_letter_count=$(echo "$reconcile_out" | grep -c 'fleet-dead-letter|' || true)
     fi
   elif declare -f fleet_reconcile_orphans >/dev/null 2>&1; then
     echo "fleet_dispatch: no children to reconcile for ${initiative_id}"
@@ -537,11 +607,11 @@ _fleet_dispatch_initiative_locked() {
     # All children were skipped by blocked-by resolution (or filtered out) —
     # the summary makes that visible instead of a silent "no dispatchable
     # tickets" when nothing was actually resumable either.
-    if [ "$blocked_count" -gt 0 ] || [ "$resume_count" -gt 0 ]; then
+    if [ "$blocked_count" -gt 0 ] || [ "$resume_count" -gt 0 ] || [ "$dead_letter_count" -gt 0 ]; then
       if [ "$dry_run" = "true" ]; then
         echo "[DRY-RUN] would resume ${resume_count} | blocked ${blocked_count} | would enqueue 0 ticket(s) for ${initiative_id}"
       else
-        echo "fleet_dispatch: resumed ${resume_count} | blocked ${blocked_count} | enqueued 0 ticket(s) for ${initiative_id}"
+        echo "fleet_dispatch: resumed ${resume_count} | dead-lettered ${dead_letter_count} | blocked ${blocked_count} | enqueued 0 ticket(s) for ${initiative_id}"
       fi
     else
       echo "no dispatchable tickets for ${initiative_id}"
@@ -602,7 +672,7 @@ _fleet_dispatch_initiative_locked() {
   if [ "$dry_run" = "true" ]; then
     echo "[DRY-RUN] would resume ${resume_count} | blocked ${blocked_count} | would enqueue ${enqueued} ticket(s) for ${initiative_id}"
   else
-    echo "fleet_dispatch: resumed ${resume_count} | blocked ${blocked_count} | enqueued ${enqueued} ticket(s) for ${initiative_id}"
+    echo "fleet_dispatch: resumed ${resume_count} | dead-lettered ${dead_letter_count} | blocked ${blocked_count} | enqueued ${enqueued} ticket(s) for ${initiative_id}"
   fi
 
   return 0
@@ -656,8 +726,8 @@ _fleet_stop_initiative_locked() {
   # a Linear outage or a missing API key; the reason/registry-derived tid
   # list still lands in the stop-file. (The API-key guard also keeps stop
   # hermetic in offline/keyless test environments — no curl to Linear.)
-  local child_set="" child_tid
-  local children_query children_resp children_json
+  local child_set="" child_tid _fbf_log
+  local children_query children_resp children_json children_fallback=0
   children_query=$(jq -n --arg id "$epic_id" '{
     query: "query($id: String!) { issue(id: $id) { children { nodes { identifier } } } }",
     variables: {id: $id}
@@ -669,7 +739,22 @@ _fleet_stop_initiative_locked() {
     children_resp=$(_fleet_linear_query "$children_query") || children_resp=""
   fi
   if [ -z "${children_resp:-}" ] || ! echo "${children_resp:-}" | jq -e '.data.issue.children.nodes != null' >/dev/null 2>&1; then
-    echo "fleet_stop: WARNING: cannot fetch children of ${epic_id} — incomplete-pipeline children not pinned" >&2
+    # Fail closed on the pin guarantee: with Linear unreachable, the true
+    # child set is unknowable, and an unpinned incomplete child is exactly
+    # what lets a stopped campaign resurrect on the next restart
+    # (reconciliation re-enqueues it). Fall back to every incomplete
+    # pipeline log in the workspace — the 2b loop below already filters to
+    # incomplete-only, so completed pipelines stay unpinned. Over-pinning
+    # unrelated epics' mid-flight tickets is the cost of the outage; an
+    # explicit stop-file clear unpins them, and their own dispatch cycles
+    # keep working meanwhile.
+    children_fallback=1
+    echo "fleet_stop: WARNING: cannot fetch children of ${epic_id} (Linear unreachable) — falling back to state-dir derivation; every incomplete pipeline log in ${workspace} is pinned" >&2
+    for _fbf_log in "$workspace"/*-pipeline.log; do
+      [ -f "$_fbf_log" ] || continue
+      child_tid=$(basename "$_fbf_log" | sed 's/-pipeline.log$//')
+      child_set="${child_set}${child_tid}"$'\n'
+    done
   else
     children_json=$(echo "$children_resp" | jq -r '.data.issue.children.nodes[]?.identifier // empty' 2>/dev/null)
     while IFS= read -r child_tid; do
@@ -677,6 +762,9 @@ _fleet_stop_initiative_locked() {
       child_set="${child_set}${child_tid}"$'\n'
     done <<<"$children_json"
   fi
+  # Purge-by-tid uses child_set too; in fallback mode that over-purges
+  # unrelated epics' queue entries. They are re-enqueued by their own
+  # dispatch/reconcile cycles — the stop sticking is the higher guarantee.
 
   # 1. Purge queue entries whose reason names this epic. Malformed lines are
   # kept untouched. Read AND rewrite both happen under the queue flock —
@@ -812,11 +900,14 @@ _fleet_stop_initiative_locked() {
     fi
   done <<<"$child_set"
 
+  # sort -u: the same tid can legitimately land in the list twice — a dead
+  # run-registry worker AND an incomplete pipeline log (children fallback) —
+  # and the STOP_RESULT arrays must not carry duplicates.
   if [ -n "$killed_list" ]; then
-    killed=$(echo "$killed_list" | grep -v '^$' | jq -R -s -c 'split("\n") | map(select(length > 0))' 2>/dev/null || echo "[]")
+    killed=$(echo "$killed_list" | grep -v '^$' | sort -u | jq -R -s -c 'split("\n") | map(select(length > 0))' 2>/dev/null || echo "[]")
   fi
   if [ -n "$pinned_list" ]; then
-    pinned=$(echo "$pinned_list" | grep -v '^$' | jq -R -s -c 'split("\n") | map(select(length > 0))' 2>/dev/null || echo "[]")
+    pinned=$(echo "$pinned_list" | grep -v '^$' | sort -u | jq -R -s -c 'split("\n") | map(select(length > 0))' 2>/dev/null || echo "[]")
   fi
 
   # 3. Write the stop-file with the union of purged, killed, pinned, and any

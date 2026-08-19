@@ -38,10 +38,15 @@ fi
 # entries (monitor-spawned workers are invisible to scan_registry adoption)
 # so a ticket that is actually running is never re-enqueued. Two claude
 # processes appending one pipeline log is worse than a missed re-enqueue.
+#
+# The pattern is ANCHORED at the tid's right edge (`[^0-9]|$`): pgrep -f is
+# an ERE substring match, so an unanchored `ticket-auto CRE-7` would also
+# match a live CRE-70/CRE-700 worker and count the dead CRE-7 pipeline as
+# live — permanently consuming a capacity slot and suppressing its resume.
 _fleet_tid_live() {
   local tid="$1"
   command -v pgrep >/dev/null 2>&1 || return 1
-  pgrep -f "ticket-auto ${tid}" >/dev/null 2>&1
+  pgrep -f "ticket-auto ${tid}([^0-9]|$)" >/dev/null 2>&1
 }
 
 # fleet_ticket_terminal_state <TICKET_ID> <pipeline_log_path>

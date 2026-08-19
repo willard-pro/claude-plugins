@@ -184,6 +184,67 @@ test_monitor_cycle_consume_uses_live_only_count() {
   return 0
 }
 
+# F10: a stale queue entry whose log is already terminal is DROPPED, never
+# spawned — the crash window between spawn and queue removal leaves exactly
+# such entries behind.
+test_queue_consume_drops_terminal_entry() {
+  local ws queue_file
+  ws=$(_setup_workspace)
+  queue_file=$(_setup_queue "$ws" "test-termdrop")
+
+  echo '{"tid":"CRE-TERM","reason":"planned-dispatch","timestamp":"2026-07-07T10:00:00Z","restarts":0,"dispatch_type":"initial"}' >"$queue_file"
+  echo "2026-07-07T10:00:00Z|META|outcome|info|completed" >"${ws}/CRE-TERM-pipeline.log"
+
+  local output
+  output=$(bash -c "
+    FLEET_STATE_DIR='$ws' FLEET_INSTANCE_ID=test-termdrop FLEET_MAX_CONCURRENT=3 FLEET_LOG_FILE='$ws/monitor.log' CLAUDE_CODE_SESSION_ID=dummy
+    unset -f _iso_now 2>/dev/null || true
+    unset -f _ensure_dir_for 2>/dev/null || true
+    unset -f hb_fleet_action 2>/dev/null || true
+    _iso_now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+    _ensure_dir_for() { mkdir -p \"\$(dirname \"\$1\")\" 2>/dev/null || true; }
+    hb_fleet_action() { return 0; }
+    source '$LIB_DIR/fleet-monitor.sh' 2>/dev/null
+    _spawn_queue_consume '$ws' 0 2>&1
+  " 2>/dev/null || true)
+
+  if echo "$output" | grep -q "ACTION:spawn-auto tid=CRE-TERM"; then
+    echo "terminal entry was spawned; output: $output" >&2
+    return 1
+  fi
+  # The drop notice is written to FLEET_LOG_FILE, not stdout.
+  grep -q "Dropping stale queue entry: CRE-TERM" "$ws/monitor.log" 2>/dev/null || {
+    echo "expected drop line in monitor log; log: $(cat "$ws/monitor.log" 2>/dev/null)" >&2
+    return 1
+  }
+  [ ! -f "$queue_file" ] || [ ! -s "$queue_file" ] || {
+    echo "terminal entry not removed from queue" >&2
+    return 1
+  }
+  return 0
+}
+
+# F04: sourcing fleet-monitor.sh (and its transitive fleet-dispatch.sh →
+# linear-api.sh) must NOT mutate the caller's shell flags. A fresh shell has
+# errexit off and pipefail off; both must survive the source.
+test_monitor_flags_not_leaked() {
+  bash -c "
+    source '$LIB_DIR/fleet-monitor.sh' 2>/dev/null
+    case \$- in
+      *e*) echo 'errexit leaked after sourcing fleet-monitor.sh' >&2; exit 1 ;;
+    esac
+    case \$(set +o | grep -w pipefail) in
+      'set +o pipefail') ;;
+      *) echo 'pipefail leaked after sourcing fleet-monitor.sh' >&2; exit 1 ;;
+    esac
+    exit 0
+  " 2>/dev/null || {
+    echo "shell flags mutated by sourcing fleet-monitor.sh" >&2
+    return 1
+  }
+  return 0
+}
+
 # ── Run all tests ────────────────────────────────────────────────────────────────
 
 _run "queue_consume_empty" test_queue_consume_empty
@@ -192,6 +253,8 @@ _run "queue_consume_entry" test_queue_consume_entry
 _run "queue_consume_malformed_skipped" test_queue_consume_malformed_skipped
 _run "queue_write_creates_entry" test_queue_write_creates_entry
 _run "monitor_cycle_consume_uses_live_only_count" test_monitor_cycle_consume_uses_live_only_count
+_run "queue_consume_drops_terminal_entry" test_queue_consume_drops_terminal_entry
+_run "monitor_flags_not_leaked" test_monitor_flags_not_leaked
 
 echo ""
 echo "=== Results ==="
