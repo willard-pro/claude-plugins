@@ -55,19 +55,21 @@ Manual kill or restart for a specific ticket. Useful for operator-driven recover
 
 ### Dispatch (`dispatch`)
 
-Enqueue planned child tickets from an initiative epic for execution by the monitor loop.
+The single repeatable campaign command: run it any time, and it figures out what to do — resume dead/incomplete child pipelines, enqueue the newly-unblocked next wave, skip what is queued/running/done, and respect stop-files and concurrency caps. Repeated invocations advance the campaign one wave at a time.
 
 ```
-/fleet-controller dispatch INIT-42            # dispatch all planned child tickets
-/fleet-controller dispatch INIT-42 --dry-run  # preview without enqueuing
-/fleet-controller dispatch INIT-42 --resume   # un-stop: clear stop-file, then dispatch
+/fleet-controller dispatch INIT-42            # reconcile + next wave
+/fleet-controller dispatch INIT-42 --dry-run  # preview: would-resume/blocked/would-enqueue, writes nothing
+/fleet-controller dispatch INIT-42 --resume   # un-stop: clear stop-file, then reconcile + dispatch
 ```
 
 - Validates the epic has `state:execution` label
-- Finds child tickets with `planned` label + `Backlog` state
+- **Campaign reconcile** (before enumeration): re-runs the shared `fleet_reconcile_orphans` scoped to ALL of the epic's children (every child, not just `planned`+`Backlog` — a mid-flight child is not in Backlog) and re-enqueues incomplete pipelines with reason `campaign-resume from {epic}`; a bash-killed pipeline is resumable unless its log carries a gate-stop marker
+- Finds child tickets with `planned` label + `Backlog` state for the next wave
 - Resolves `blocked-by:{ID}` dependencies (skips blocked tickets)
 - Writes to spawn queue at `${state_dir}/fleet-{instance}-spawn-queue.jsonl` (workspace-relative, not `/tmp`)
-- Respects `FLEET_MAX_CONCURRENT` cap
+- **Capacity counts live pipelines only** (worker pgrep-live or run-registry-alive) minus the epic's own pending queue entries — a dead pipeline log never consumes a slot
+- Ends with a summary line: `fleet_dispatch: resumed N | dead-lettered N | blocked N | enqueued N ticket(s) for {epic}` (dry-run: `[DRY-RUN] would resume N | blocked N | would enqueue N ...`); per-tid `  resumed {tid}` / `  blocked {tid}` / `  enqueued {tid}` lines precede it
 - Idempotent — re-running won't duplicate already-queued tickets
 - Serialized per epic via an epic-scoped flock (`{queue}.{epic}.dispatch.lock`) — concurrent invocations (skill, `POST /dispatch`, auto-sweep) never double-enqueue
 - A stopped epic enqueues nothing without `--resume` — dispatch is the single start/resume/un-stop entry point
@@ -83,6 +85,8 @@ Epic-scoped stop: purge that epic's spawn-queue entries, escalate-kill its runni
 
 - Single implementation in `fleet_dispatch_initiative`'s sibling `fleet_stop_initiative` (fleet-dispatch.sh) — `POST /stop` shells out to the same function
 - Kills via `fleet_kill_pipeline`'s verified escalation (stop-files → grace → SIGTERM → SIGKILL, PID-reuse guard)
+- **Purges by reason AND by child**: queue entries matching `planned-dispatch from {epic}` or `campaign-resume from {epic}` (or whose tid is one of the epic's Linear-resolved children) are purged; the same alternation matches running workers for the kill
+- **Pins every child that could otherwise resume**: the stop-file's `tickets` array includes purged entries, killed workers, AND every child whose pipeline log classifies incomplete — a stop with an empty queue and no live workers still pins its mid-flight children (a failed children query degrades with a warning, never aborts the stop)
 - The stop-file pins stopped tickets against fleetd's startup reconciliation
 - Only an explicit resume (`dispatch --resume` or `POST /dispatch {"resume": true}`) clears it
 
@@ -154,6 +158,9 @@ All settings in `lib/fleet-config.sh` with `${VAR:-default}` pattern:
 | `FLEET_KILL_VERIFY` | true | When false, fall back to stop-file-only kill (pre-escalation compat) |
 | `FLEET_FENCE_ENFORCE` | true | When false, disable generation fencing in flow.sh |
 | `FLEET_QUEUE_LOCK_TIMEOUT` | 5 | Seconds to wait for spawn queue flock before skipping cycle |
+| `FLEET_RECONCILE_TIDS` | (unset) | Space-separated tid scope for `fleet_reconcile_orphans`; unset = scan every pipeline log (startup path). Dispatch sets it to the epic's children |
+| `FLEET_RECONCILE_EPIC` | (unset) | When set, re-enqueue reason becomes `campaign-resume from {epic}` instead of `orphan-reconciliation` |
+| `FLEET_RECONCILE_DRY_RUN` | (unset) | Non-empty (not `0`/`false`) = dry run: print would-resume/would-dead-letter lines, write nothing |
 
 ## Implementation
 

@@ -267,7 +267,16 @@ test_dispatch_fleet_max_concurrent_enforced() {
   queue_file="/tmp/fleet-test-cap-spawn-queue.jsonl"
   rm -f "$queue_file"
 
-  # Create 2 active pipeline logs to simulate active pipelines
+  # Create 2 LIVE pipelines: a log without an outcome line does not consume
+  # a slot by itself (live-only capacity) — the run-registry pid must be
+  # actually alive. Use sleep children so kill -0 succeeds.
+  sleep 30 &
+  local act1_pid=$!
+  sleep 30 &
+  local act2_pid=$!
+  # Kill the sleepers on every exit path — a failure inside the dispatch
+  # subshell below must not leak 30-second processes.
+  trap 'kill "$act1_pid" "$act2_pid" 2>/dev/null || true' EXIT
   _plog() {
     local dir="$1" tid="$2" phase="$3" step="$4" status="$5" msg="$6"
     mkdir -p "$dir"
@@ -275,6 +284,8 @@ test_dispatch_fleet_max_concurrent_enforced() {
   }
   _plog "$ws" "ACT-001" "IMPLEMENT" "implement" "done" "active"
   _plog "$ws" "ACT-002" "VERIFY" "verify" "start" "active"
+  echo "{\"tid\":\"ACT-001\",\"pid\":\"${act1_pid}\",\"generation\":1,\"reason\":\"test\"}" >"$ws/ACT-001-run.json"
+  echo "{\"tid\":\"ACT-002\",\"pid\":\"${act2_pid}\",\"generation\":1,\"reason\":\"test\"}" >"$ws/ACT-002-run.json"
 
   local output
   output=$(bash -c "
@@ -286,7 +297,8 @@ test_dispatch_fleet_max_concurrent_enforced() {
     _mock_get_issue_blocker_in_progress
     fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
   " 2>/dev/null || true)
-  # 2 active + max 3 → only 1 slot available
+  kill "$act1_pid" "$act2_pid" 2>/dev/null || true
+  # 2 live + max 3 → only 1 slot available
   echo "$output" | grep -q "can enqueue up to 1" && return 0 || {
     echo "output: $output"
     return 1
@@ -827,6 +839,307 @@ test_priority_all_five_levels_full_order() {
   _test_dispatch_order "fivelevels" "$children" "CRE-URG CRE-HIGH CRE-MED CRE-LOW CRE-NONE" 5
 }
 
+# ── Campaign resume: dispatch reconcile hook + summary ──────────────────────────
+
+# Epic whose child TEST-1 is mid-flight (state Approve, NOT Backlog) with an
+# incomplete pipeline log, plus a normal planned Backlog child TEST-2.
+_mock_epic_query_campaign() {
+  _fleet_linear_query() {
+    echo '{"data":{"issue":{"identifier":"INIT-42","labels":{"nodes":[{"name":"state:execution"}]},"children":{"nodes":[
+        {"identifier":"TEST-1","state":{"name":"Approve"},"labels":{"nodes":[{"name":"planned"}]},"priority":2},
+        {"identifier":"TEST-2","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"planned"}]},"priority":3}
+      ]}}}}'
+  }
+}
+
+# Fake tid (TEST-*) — never matches a real pgrep pattern, keeping the
+# live-worker check hermetic without mocking pgrep.
+_test_plog() {
+  local dir="$1" tid="$2"
+  mkdir -p "$dir"
+  echo "2026-07-07T10:00:00Z|EXEC|exec|start|mid-flight" >"${dir}/${tid}-pipeline.log"
+}
+
+test_dispatch_resumes_incomplete_child() {
+  local ws
+  ws=$(_setup_workspace)
+  _test_plog "$ws" "TEST-1"
+  local queue_file="${ws}/fleet-test-resume-spawn-queue.jsonl"
+
+  local output
+  output=$(bash -c "
+    FLEET_INSTANCE_ID=test-resume
+    FLEET_AUTO_RESTART=true
+    TICKET_FLOW_LOCK_DIR='$ws/no-flow-locks'
+    FLEET_PIPELINE_LOG_DIR='$ws'
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_campaign _mock_epic_no_directive)
+    _mock_epic_query_campaign
+    _mock_epic_no_directive
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  echo "$output" | grep -q '^  resumed TEST-1$' || {
+    echo "expected '  resumed TEST-1' line; output: $output" >&2
+    return 1
+  }
+  echo "$output" | grep -q 'resumed 1 |' || {
+    echo "expected 'resumed 1' in summary; output: $output" >&2
+    return 1
+  }
+  # Queue gains the resume entry with the campaign reason.
+  [ -f "$queue_file" ] && grep -q '"tid":"TEST-1"' "$queue_file" 2>/dev/null && {
+    local reason
+    reason=$(grep '"tid":"TEST-1"' "$queue_file" | head -1 | jq -r '.reason // ""')
+    [ "$reason" = "campaign-resume from INIT-42" ] || {
+      echo "expected campaign-resume reason, got '$reason'" >&2
+      return 1
+    }
+  } || {
+    echo "resume entry missing from queue: $(cat "$queue_file" 2>/dev/null)" >&2
+    return 1
+  }
+  # Summary is the LAST stdout line.
+  local last_line
+  last_line=$(echo "$output" | tail -1)
+  echo "$last_line" | grep -q '^fleet_dispatch: resumed 1 | dead-lettered 0 | blocked 0 | enqueued 1 ticket(s) for INIT-42$' || {
+    echo "expected summary as last line, got '$last_line'" >&2
+    return 1
+  }
+  return 0
+}
+
+test_dispatch_dry_run_resume_leaves_queue_untouched() {
+  local ws
+  ws=$(_setup_workspace)
+  _test_plog "$ws" "TEST-1"
+  local queue_file="${ws}/fleet-test-dryresume-spawn-queue.jsonl"
+
+  local output
+  output=$(bash -c "
+    FLEET_INSTANCE_ID=test-dryresume
+    FLEET_DRY_RUN=true
+    FLEET_AUTO_RESTART=true
+    TICKET_FLOW_LOCK_DIR='$ws/no-flow-locks'
+    FLEET_PIPELINE_LOG_DIR='$ws'
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_campaign _mock_epic_no_directive)
+    _mock_epic_query_campaign
+    _mock_epic_no_directive
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  echo "$output" | grep -q '\[DRY-RUN\] would resume TEST-1' || {
+    echo "expected dry-run would-resume line; output: $output" >&2
+    return 1
+  }
+  [ ! -f "$queue_file" ] || ! grep -q '"tid":"TEST-1"' "$queue_file" 2>/dev/null || {
+    echo "dry-run wrote a resume queue entry" >&2
+    return 1
+  }
+  grep -q '|META|fleet-restart|' "${ws}/TEST-1-pipeline.log" 2>/dev/null && {
+    echo "dry-run wrote a restart marker" >&2
+    return 1
+  }
+  local last_line
+  last_line=$(echo "$output" | tail -1)
+  echo "$last_line" | grep -q '^\[DRY-RUN\] would resume 1 | blocked 0 | would enqueue 1 ticket(s) for INIT-42$' || {
+    echo "expected dry-run summary as last line, got '$last_line'" >&2
+    return 1
+  }
+  return 0
+}
+
+# A dead pipeline log (no outcome, no worker, no registry pid) must NOT
+# consume a capacity slot — the regression this whole change fixes.
+test_dispatch_dead_log_does_not_jam_campaign() {
+  local ws
+  ws=$(_setup_workspace)
+  _test_plog "$ws" "TEST-DEAD"
+  local queue_file="${ws}/fleet-test-deadlog-spawn-queue.jsonl"
+
+  local output
+  output=$(bash -c "
+    FLEET_INSTANCE_ID=test-deadlog FLEET_MAX_CONCURRENT=1
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_campaign _mock_epic_no_directive)
+    _mock_epic_query_campaign
+    _mock_epic_no_directive
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  # TEST-DEAD is not a child of INIT-42, so it was never a candidate for
+  # resume — but under the old count it consumed the single slot and TEST-2
+  # was never enqueued. Live-only: 0 active → full slot for TEST-2.
+  [ -f "$queue_file" ] && grep -q '"tid":"TEST-2"' "$queue_file" 2>/dev/null || {
+    echo "dead log jammed dispatch; output: $output; queue: $(cat "$queue_file" 2>/dev/null)" >&2
+    return 1
+  }
+  return 0
+}
+
+# The epic's own pending queue entries reserve capacity — a re-dispatch with
+# a pending resume entry must not over-enqueue past FLEET_MAX_CONCURRENT.
+test_dispatch_reserves_queued_for_epic_slots() {
+  local ws
+  ws=$(_setup_workspace)
+  local queue_file="${ws}/fleet-test-reserve-spawn-queue.jsonl"
+  echo '{"tid":"TEST-1","reason":"campaign-resume from INIT-42","timestamp":"2026-08-18T00:00:00Z","restarts":0,"dispatch_type":"initial","generation":1}' >"$queue_file"
+
+  local output
+  output=$(bash -c "
+    FLEET_INSTANCE_ID=test-reserve FLEET_MAX_CONCURRENT=1
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_campaign _mock_epic_no_directive)
+    _mock_epic_query_campaign
+    _mock_epic_no_directive
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  # 0 live + 1 queued-for-epic = slot gone → at capacity, TEST-2 not enqueued.
+  echo "$output" | grep -q "at capacity" || {
+    echo "expected at-capacity; output: $output" >&2
+    return 1
+  }
+  [ "$(grep -c '"tid":"TEST-2"' "$queue_file" 2>/dev/null || true)" = "0" ] || {
+    echo "TEST-2 enqueued despite queued-for-epic reservation" >&2
+    return 1
+  }
+  return 0
+}
+
+# Every child skipped by blocked-by resolution → blocked N in the summary,
+# never a silent "no dispatchable tickets".
+test_dispatch_reports_blocked_children() {
+  local ws
+  ws=$(_setup_workspace)
+
+  local output
+  output=$(bash -c "
+    FLEET_DRY_RUN=true FLEET_INSTANCE_ID=test-blocked
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_blocker_done _mock_get_issue_blocker_in_progress _mock_epic_no_directive)
+    _mock_epic_query_blocker_done
+    _mock_get_issue_blocker_in_progress
+    _mock_epic_no_directive
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  echo "$output" | grep -q '^  blocked CRE-103$' || {
+    echo "expected '  blocked CRE-103' line; output: $output" >&2
+    return 1
+  }
+  local last_line
+  last_line=$(echo "$output" | tail -1)
+  echo "$last_line" | grep -q '^\[DRY-RUN\] would resume 0 | blocked 1 | would enqueue 0 ticket(s) for INIT-42$' || {
+    echo "expected blocked summary as last line, got '$last_line'" >&2
+    return 1
+  }
+  return 0
+}
+
+# ── Campaign resume: stop pins incomplete children ──────────────────────────────
+
+# Children query mock for fleet_stop_initiative's step 0.
+# NOTE: _STOP_CHILDREN_JSON is deliberately global (not local) — the mock
+# reads it at call time, after _mock_stop_children_query has returned.
+_mock_stop_children_query() {
+  _STOP_CHILDREN_JSON="$1"
+  _fleet_linear_query() {
+    echo "$_STOP_CHILDREN_JSON"
+  }
+}
+
+# Incomplete-pipeline child, empty queue, no live workers → the child must
+# still land in the stop-file's tickets array (the CRE-9 `tickets: []` gap).
+test_stop_pins_incomplete_child_with_empty_queue() {
+  local ws
+  ws=$(_setup_workspace)
+  _test_plog "$ws" "TEST-9"
+  local children_json='{"data":{"issue":{"children":{"nodes":[{"identifier":"TEST-9"}]}}}}'
+
+  local output
+  output=$(bash -c "
+    LINEAR_API_KEY=dummy
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_stop_children_query)
+    _mock_stop_children_query '$children_json'
+    fleet_stop_initiative 'INIT-42' 'test' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  echo "$output" | grep -q '  pinned TEST-9 (incomplete pipeline)' || {
+    echo "expected incomplete-pipeline pin line; output: $output" >&2
+    return 1
+  }
+  jq -e '.tickets == ["TEST-9"]' "$ws/stop-INIT-42.json" >/dev/null 2>&1 || {
+    echo "stop-file tickets: $(cat "$ws/stop-INIT-42.json" 2>/dev/null)" >&2
+    return 1
+  }
+  return 0
+}
+
+# Stop purges campaign-resume-reasoned entries (reason match) AND child-tid
+# entries with other reasons (tid match); other epics' entries are kept.
+test_stop_purges_campaign_resume_and_child_tid_entries() {
+  local ws
+  ws=$(_setup_workspace)
+  echo '{"tid":"TEST-10","reason":"campaign-resume from INIT-42","timestamp":"2026-08-18T00:00:00Z","restarts":0,"dispatch_type":"initial","generation":1}' >"$ws/fleet-default-spawn-queue.jsonl"
+  echo '{"tid":"TEST-11","reason":"orphan-reconciliation","timestamp":"2026-08-18T00:00:00Z","restarts":0,"dispatch_type":"initial","generation":1}' >>"$ws/fleet-default-spawn-queue.jsonl"
+  echo '{"tid":"TEST-KEEP","reason":"campaign-resume from INIT-43","timestamp":"2026-08-18T00:00:00Z","restarts":0,"dispatch_type":"initial","generation":1}' >>"$ws/fleet-default-spawn-queue.jsonl"
+  local children_json='{"data":{"issue":{"children":{"nodes":[{"identifier":"TEST-11"}]}}}}'
+
+  local output
+  output=$(bash -c "
+    LINEAR_API_KEY=dummy
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_stop_children_query)
+    _mock_stop_children_query '$children_json'
+    fleet_stop_initiative 'INIT-42' 'test' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  echo "$output" | grep -q 'purged=\["TEST-10","TEST-11"\]' || {
+    echo "expected TEST-10 (reason) + TEST-11 (tid) purged; output: $output" >&2
+    return 1
+  }
+  grep -q '"tid":"TEST-KEEP"' "$ws/fleet-default-spawn-queue.jsonl" 2>/dev/null || {
+    echo "INIT-43 entry must be kept; queue: $(cat "$ws/fleet-default-spawn-queue.jsonl" 2>/dev/null)" >&2
+    return 1
+  }
+  grep -q '"tid":"TEST-10"' "$ws/fleet-default-spawn-queue.jsonl" 2>/dev/null && {
+    echo "TEST-10 not purged" >&2
+    return 1
+  }
+  return 0
+}
+
+# Children-query failure degrades: warning on stderr, stop still completes.
+test_stop_children_query_failure_degrades() {
+  local ws
+  ws=$(_setup_workspace)
+
+  local output
+  output=$(bash -c "
+    LINEAR_API_KEY=dummy
+    source '$LIB_DIR/fleet-dispatch.sh'
+    _fleet_linear_query() { return 1; }
+    fleet_stop_initiative 'INIT-42' 'test' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  echo "$output" | grep -q 'cannot fetch children of INIT-42' || {
+    echo "expected children-fetch warning; output: $output" >&2
+    return 1
+  }
+  echo "$output" | grep -q 'STOP_RESULT|purged=\[\]|killed=\[\]' || {
+    echo "stop did not complete after children-query failure; output: $output" >&2
+    return 1
+  }
+  [ -f "$ws/stop-INIT-42.json" ] || {
+    echo "stop-file missing despite degradation" >&2
+    return 1
+  }
+  return 0
+}
+
 # ── Run all tests ────────────────────────────────────────────────────────────────
 
 _run "dispatch_no_linear_api" test_dispatch_no_linear_api
@@ -1231,11 +1544,264 @@ test_stop_dead_worker_without_queue_entry_pinned() {
   return 0
 }
 
+# ── Review fixes: fail-closed stop, dedupe, pinned reconcile, pid-reuse ────────
+
+# F06: children-query failure must FAIL CLOSED on the pin guarantee — every
+# incomplete pipeline log in the workspace is pinned (completed logs are not).
+test_stop_children_query_failure_pins_incomplete_workspace_logs() {
+  local ws
+  ws=$(_setup_workspace)
+  _test_plog "$ws" "TEST-6"
+  echo "2026-07-07T10:00:00Z|META|outcome|info|completed" >"$ws/TEST-7-pipeline.log"
+
+  local output
+  output=$(bash -c "
+    LINEAR_API_KEY=dummy
+    source '$LIB_DIR/fleet-dispatch.sh'
+    _fleet_linear_query() { return 1; }
+    fleet_stop_initiative 'INIT-42' 'test' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  echo "$output" | grep -q 'cannot fetch children of INIT-42' || {
+    echo "expected children-fetch warning; output: $output" >&2
+    return 1
+  }
+  jq -e '.tickets == ["TEST-6"]' "$ws/stop-INIT-42.json" >/dev/null 2>&1 || {
+    echo "expected incomplete TEST-6 pinned, completed TEST-7 not; stop-file: $(cat "$ws/stop-INIT-42.json" 2>/dev/null)" >&2
+    return 1
+  }
+  return 0
+}
+
+# F07: two concurrent appends of the same tid produce exactly one queue entry —
+# the dedupe re-check lives inside the flock.
+test_queue_append_dedupes_under_lock() {
+  local ws queue_file
+  ws=$(_setup_workspace)
+  queue_file="${ws}/fleet-dedupe-spawn-queue.jsonl"
+  local entry='{"tid":"TEST-D1","reason":"campaign-resume from INIT-42","generation":1}'
+
+  bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    _fleet_queue_append '$entry' '$queue_file' &
+    _fleet_queue_append '$entry' '$queue_file' &
+    wait
+  " 2>/dev/null || true
+
+  local count
+  count=$(grep -c '"tid":"TEST-D1"' "$queue_file" 2>/dev/null || echo 0)
+  [ "$count" -eq 1 ] || {
+    echo "expected exactly 1 entry for TEST-D1, got ${count}: $(cat "$queue_file" 2>/dev/null)" >&2
+    return 1
+  }
+  return 0
+}
+
+# F08: dispatch's campaign-resume hook passes the workspace's stop-file pins —
+# a ticket pinned by ANY stop-file must not gain a resume entry.
+test_dispatch_reconcile_respects_stop_pins() {
+  local ws
+  ws=$(_setup_workspace)
+  _test_plog "$ws" "TEST-P"
+  echo '{"initiative_id":"INIT-43","stopped_at":"2026-08-18T00:00:00Z","reason":"test","tickets":["TEST-P"]}' >"$ws/stop-INIT-43.json"
+
+  local output
+  output=$(bash -c "
+    FLEET_INSTANCE_ID=test-pin
+    FLEET_AUTO_RESTART=true
+    TICKET_FLOW_LOCK_DIR='$ws/no-flow-locks'
+    FLEET_PIPELINE_LOG_DIR='$ws'
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_no_directive)
+    _mock_epic_no_directive
+    _fleet_linear_query() {
+      echo '{\"data\":{\"issue\":{\"identifier\":\"INIT-42\",\"labels\":{\"nodes\":[{\"name\":\"state:execution\"}]},\"children\":{\"nodes\":[{\"identifier\":\"TEST-P\",\"state\":{\"name\":\"Approve\"},\"labels\":{\"nodes\":[{\"name\":\"planned\"}]},\"priority\":2}]}}}}'
+    }
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  echo "$output" | grep -q 'TEST-P — pinned by stop-file, left alone' || {
+    echo "expected pinned-skip line; output: $output" >&2
+    return 1
+  }
+  if grep -q '"tid":"TEST-P"' "$ws/fleet-test-pin-spawn-queue.jsonl" 2>/dev/null; then
+    echo "pinned TEST-P gained a resume entry" >&2
+    return 1
+  fi
+  return 0
+}
+
+# F12: a reused PID fails the /proc start-time check — a dead worker whose
+# pid was recycled by an unrelated process must not count as live.
+test_registry_pid_alive_rejects_reused_pid() {
+  local ws other_pid
+  ws=$(_setup_workspace)
+  sleep 30 &
+  other_pid=$!
+  trap 'kill "$other_pid" 2>/dev/null || true' EXIT
+
+  echo "{\"tid\":\"TEST-R1\",\"pid\":\"${other_pid}\",\"generation\":1,\"reason\":\"test\",\"started_at\":\"2020-01-01T00:00:00Z\"}" >"$ws/TEST-R1-run.json"
+  if bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    _registry_pid_alive 'TEST-R1' '$ws'
+  " 2>/dev/null; then
+    echo "reused pid (started_at mismatch) counted as live" >&2
+    return 1
+  fi
+
+  # Positive control: matching started_at → live.
+  echo "{\"tid\":\"TEST-R2\",\"pid\":\"${other_pid}\",\"generation\":1,\"reason\":\"test\",\"started_at\":\"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"}" >"$ws/TEST-R2-run.json"
+  bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    _registry_pid_alive 'TEST-R2' '$ws'
+  " 2>/dev/null || {
+    echo "matching start time not counted as live" >&2
+    return 1
+  }
+  return 0
+}
+
+# F13: a kill-outcome log with a SURVIVING worker still counts as active
+# (the kill was written before verification); once the worker dies it frees
+# the slot.
+test_active_count_kill_outcome_live_worker_counts_active() {
+  local ws wk_pid count
+  ws=$(_setup_workspace)
+  bash -c 'exec -a "claude -p /ticket-auto TEST-K --auto" sleep 30' &
+  wk_pid=$!
+  trap 'kill "$wk_pid" 2>/dev/null || true' EXIT
+  sleep 0.3
+  echo "2026-07-07T10:00:00Z|META|outcome|info|stopped: fleet-kill (SIGTERM)" >"$ws/TEST-K-pipeline.log"
+
+  count=$(bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    _active_pipeline_count '$ws'
+  " 2>/dev/null || echo -1)
+  [ "$count" -eq 1 ] || {
+    echo "expected count 1 (survivor with kill outcome), got ${count}" >&2
+    return 1
+  }
+
+  kill "$wk_pid" 2>/dev/null || true
+  wait "$wk_pid" 2>/dev/null || true
+  count=$(bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    _active_pipeline_count '$ws'
+  " 2>/dev/null || echo -1)
+  [ "$count" -eq 0 ] || {
+    echo "expected count 0 (worker dead), got ${count}" >&2
+    return 1
+  }
+  return 0
+}
+
+# F16: two dispatch runs over the same workspace enqueue each ticket exactly
+# once — the second run is a no-op resume (resumed 0, enqueued 0).
+test_dispatch_twice_single_entry_per_tid() {
+  local ws
+  ws=$(_setup_workspace)
+  _test_plog "$ws" "TEST-1"
+  local queue_file="${ws}/fleet-test-twice-spawn-queue.jsonl"
+
+  local run1 run2
+  run1=$(bash -c "
+    FLEET_INSTANCE_ID=test-twice
+    FLEET_AUTO_RESTART=true
+    TICKET_FLOW_LOCK_DIR='$ws/no-flow-locks'
+    FLEET_PIPELINE_LOG_DIR='$ws'
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_campaign _mock_epic_no_directive)
+    _mock_epic_query_campaign
+    _mock_epic_no_directive
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+  run2=$(bash -c "
+    FLEET_INSTANCE_ID=test-twice
+    FLEET_AUTO_RESTART=true
+    TICKET_FLOW_LOCK_DIR='$ws/no-flow-locks'
+    FLEET_PIPELINE_LOG_DIR='$ws'
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_query_campaign _mock_epic_no_directive)
+    _mock_epic_query_campaign
+    _mock_epic_no_directive
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  for tid in TEST-1 TEST-2; do
+    local n
+    n=$(grep -c "\"tid\":\"${tid}\"" "$queue_file" 2>/dev/null || echo 0)
+    [ "$n" -eq 1 ] || {
+      echo "expected exactly 1 queue entry for ${tid}, got ${n}: $(cat "$queue_file" 2>/dev/null)" >&2
+      return 1
+    }
+  done
+  echo "$run2" | tail -1 | grep -q 'resumed 0 | dead-lettered 0 | blocked 0 | enqueued 0' || {
+    echo "expected no-op second run; got: $(echo "$run2" | tail -1)" >&2
+    return 1
+  }
+  return 0
+}
+
+# F17: a child at the restart cap dead-letters during dispatch's campaign
+# reconcile — the summary surfaces it (no silent "resumed 0").
+test_dispatch_dead_letter_at_restart_cap_reported() {
+  local ws
+  ws=$(_setup_workspace)
+  echo "2026-07-07T10:00:00Z|EXEC|exec|start|mid-flight" >"$ws/TEST-8-pipeline.log"
+  echo "2026-07-07T10:01:00Z|META|fleet-restart|info|restart 1" >>"$ws/TEST-8-pipeline.log"
+  echo "2026-07-07T10:02:00Z|META|fleet-restart|info|restart 2" >>"$ws/TEST-8-pipeline.log"
+
+  local output
+  output=$(bash -c "
+    FLEET_INSTANCE_ID=test-dlc
+    FLEET_AUTO_RESTART=true
+    FLEET_MAX_RESTARTS=2
+    TICKET_FLOW_LOCK_DIR='$ws/no-flow-locks'
+    FLEET_PIPELINE_LOG_DIR='$ws'
+    source '$LIB_DIR/fleet-dispatch.sh'
+    $(declare -f _mock_epic_no_directive)
+    _mock_epic_no_directive
+    _fleet_linear_query() {
+      echo '{\"data\":{\"issue\":{\"identifier\":\"INIT-42\",\"labels\":{\"nodes\":[{\"name\":\"state:execution\"}]},\"children\":{\"nodes\":[{\"identifier\":\"TEST-8\",\"state\":{\"name\":\"Approve\"},\"labels\":{\"nodes\":[{\"name\":\"planned\"}]},\"priority\":2}]}}}}'
+    }
+    fleet_dispatch_initiative 'INIT-42' '$ws' 2>&1
+  " 2>/dev/null || true)
+
+  echo "$output" | grep -q 'fleet-dead-letter|tid=TEST-8|reason=orphaned-after-max-restarts' || {
+    echo "expected dead-letter line; output: $output" >&2
+    return 1
+  }
+  echo "$output" | tail -1 | grep -q 'dead-lettered 1 |' || {
+    echo "expected dead-lettered 1 in summary; got: $(echo "$output" | tail -1)" >&2
+    return 1
+  }
+  grep -q '"tid":"TEST-8"' "$ws/fleet-test-dlc-spawn-queue-dead-letter.jsonl" 2>/dev/null || {
+    echo "dead-letter file entry missing" >&2
+    return 1
+  }
+  return 0
+}
+
+_run "dispatch_resumes_incomplete_child" test_dispatch_resumes_incomplete_child
+_run "dispatch_dry_run_resume_leaves_queue_untouched" test_dispatch_dry_run_resume_leaves_queue_untouched
+_run "dispatch_dead_log_does_not_jam_campaign" test_dispatch_dead_log_does_not_jam_campaign
+_run "dispatch_reserves_queued_for_epic_slots" test_dispatch_reserves_queued_for_epic_slots
+_run "dispatch_reports_blocked_children" test_dispatch_reports_blocked_children
+_run "stop_pins_incomplete_child_with_empty_queue" test_stop_pins_incomplete_child_with_empty_queue
+_run "stop_purges_campaign_resume_and_child_tid_entries" test_stop_purges_campaign_resume_and_child_tid_entries
+_run "stop_children_query_failure_degrades" test_stop_children_query_failure_degrades
 _run "stop_purge_flock_failure_aborts" test_stop_purge_flock_failure_aborts
 _run "stop_purge_keeps_entry_appended_at_lock_time" test_stop_purge_keeps_entry_appended_at_lock_time
 _run "stop_kill_refused_pins_not_killed" test_stop_kill_refused_pins_not_killed
 _run "stop_unverified_survivor_pinned_not_killed" test_stop_unverified_survivor_pinned_not_killed
 _run "stop_dead_worker_without_queue_entry_pinned" test_stop_dead_worker_without_queue_entry_pinned
+_run "stop_children_query_failure_pins_incomplete_workspace_logs" test_stop_children_query_failure_pins_incomplete_workspace_logs
+_run "queue_append_dedupes_under_lock" test_queue_append_dedupes_under_lock
+_run "dispatch_reconcile_respects_stop_pins" test_dispatch_reconcile_respects_stop_pins
+_run "registry_pid_alive_rejects_reused_pid" test_registry_pid_alive_rejects_reused_pid
+_run "active_count_kill_outcome_live_worker_counts_active" test_active_count_kill_outcome_live_worker_counts_active
+_run "dispatch_twice_single_entry_per_tid" test_dispatch_twice_single_entry_per_tid
+_run "dispatch_dead_letter_at_restart_cap_reported" test_dispatch_dead_letter_at_restart_cap_reported
 _run "concurrent_same_epic_dispatch_single_entry" test_concurrent_same_epic_dispatch_single_entry
 _run "dispatch_lock_different_epics_do_not_block" test_dispatch_lock_different_epics_do_not_block
 _run "stopped_epic_enqueues_nothing" test_stopped_epic_enqueues_nothing

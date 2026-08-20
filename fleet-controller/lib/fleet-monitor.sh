@@ -30,11 +30,25 @@ if ! declare -f _plog >/dev/null 2>&1; then
   done
 fi
 
+# _source_if_missing is defined by heartbeat.sh — a stripped environment
+# without the canonical heartbeat source (CI runners, hosts where the
+# ticket-auto-pipeline SessionStart hook never ran) must still get the
+# helper, or every dependency below silently fails to source (undefined
+# function in a no-`set -e` shell is a suppressed error, not a stop).
+if ! declare -f _source_if_missing >/dev/null 2>&1; then
+  _source_if_missing() { declare -f "$1" >/dev/null 2>&1 || source "$2"; }
+fi
+
 _source_if_missing fleet_detect_all "$_MONITOR_DIR/fleet-detect.sh"
 _source_if_missing fleet_kill_pipeline "$_MONITOR_DIR/fleet-intervene.sh"
 _source_if_missing fleet_render_dashboard_from_data "$_MONITOR_DIR/fleet-dashboard.sh"
 # Source registry/fence helpers if available
 [ -f "$_MONITOR_DIR/fleet-registry.sh" ] && source "$_MONITOR_DIR/fleet-registry.sh"
+# Campaign-resume: live-only capacity helper shared with dispatch — the
+# monitor consume path must agree with fleetd on what consumes a slot.
+# (fleet-dispatch.sh sources fleet-reconcile.sh for the classifier; all of
+# its sources are declare -f-guarded, so no re-execution here.)
+_source_if_missing _active_pipeline_count "$_MONITOR_DIR/fleet-dispatch.sh"
 
 # Source worktree.sh for garbage collection of terminal-state worktrees
 _TAP_LIB="$_MONITOR_DIR/../../ticket-auto-pipeline/lib"
@@ -125,7 +139,9 @@ _spawn_queue_consume() {
   fi
 
   local slots_available=$((max_concurrent - active_count))
-  [ "$slots_available" -le 0 ] && return 0
+  # No early return at zero slots: stale entries whose logs are terminal
+  # must still be dropped, or they reserve a capacity slot forever via
+  # _fleet_queued_count_for_epic. Zero slots only means nothing spawns.
 
   # Acquire exclusive lock for read+rewrite. On timeout, skip this cycle
   # rather than blocking the monitor loop indefinitely.
@@ -145,6 +161,22 @@ _spawn_queue_consume() {
       local tid reason
       tid=$(echo "$line" | jq -r '.tid // empty' 2>/dev/null)
       [ -z "$tid" ] && remaining_entries="${remaining_entries}${line}"$'\n' && continue
+
+      # Kill-aware terminal skip — same rule as fleetd's consume loop. A
+      # stale entry for a pipeline whose log already reached `done` (the
+      # crash window between spawn and queue removal leaves exactly such
+      # entries behind) must be dropped, never spawned: re-spawning
+      # re-executes a finished ticket. Killed and gate-held logs stay
+      # spawnable — the kill is a pause, the gate is a wait.
+      if declare -f fleet_ticket_terminal_state >/dev/null 2>&1; then
+        local term_state
+        term_state=$(fleet_ticket_terminal_state "$tid" "${state_dir}/${tid}-pipeline.log")
+        if [ "$term_state" = "done" ]; then
+          fl_write "INFO" "queue" "Dropping stale queue entry: ${tid} (log terminal)"
+          consumed=$((consumed + 1))
+          continue
+        fi
+      fi
 
       if [ "$consumed" -lt "$slots_available" ]; then
         reason=$(echo "$line" | jq -r '.reason // "dispatched"' 2>/dev/null)
@@ -258,9 +290,13 @@ fleet_monitor_cycle() {
 
   fl_write "INFO" "monitor" "Monitor cycle complete"
 
-  # Consume spawn queue (dispatch + restart entries)
+  # Consume spawn queue (dispatch + restart entries). Slot math uses the
+  # live-only pipeline count — the same helper dispatch's Step 4 uses — so
+  # a dead log never consumes a capacity slot here either (fleetd's consume
+  # and the monitor must agree on capacity). The dashboard's `summary.total`
+  # display count is unchanged: it reports logs, not slots.
   local active_count
-  active_count=$(echo "$data" | jq -r '.summary.total // 0' 2>/dev/null)
+  active_count=$(_active_pipeline_count "$workspace" 2>/dev/null || echo "0")
   _spawn_queue_consume "$workspace" "${active_count:-0}" 2>/dev/null || true
 
   # Return the detection data for fleet-summary gating in the loop

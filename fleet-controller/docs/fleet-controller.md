@@ -211,11 +211,18 @@ Gated behind `FLEET_FENCE_ENFORCE=true` (default). Set to `false` for emergency 
 
 ## Dispatch Flow
 
-1. **Initiative validation**: `fleet_dispatch_initiative` queries Linear for the epic, verifies `state:execution` label
-2. **Child enumeration**: Finds child tickets with `planned` label + `Backlog` state
-3. **Dependency resolution**: For each `blocked-by:{ID}` label, checks blocker state via `get_issue`; skips blocked tickets
-4. **Capacity check**: Computes active pipeline count (pipeline logs without `META|outcome`), respects `FLEET_MAX_CONCURRENT`
-5. **Queue write**: Appends JSONL entries to spawn queue under `flock` serialization
+`fleet_dispatch_initiative` is the single repeatable campaign command: run it
+any time, and it resumes dead/incomplete child pipelines, enqueues the
+newly-unblocked next wave, and skips what is queued/running/done. Consecutive
+calls converge (second call enqueues/resumes zero when nothing changed).
+
+1. **Initiative validation**: queries Linear for the epic, verifies `state:execution` label; stop-file gate (only `--resume` clears)
+2. **Campaign reconcile (Step 1.75)**: runs the shared `fleet_reconcile_orphans` scoped to ALL of the epic's children (`FLEET_RECONCILE_TIDS` = every child identifier from the epic query, regardless of label/state — a mid-flight child is not in Backlog), re-enqueueing incomplete pipelines with reason `campaign-resume from {epic}` (`FLEET_RECONCILE_EPIC`). Dry-run propagates via `FLEET_RECONCILE_DRY_RUN`. Killed pipelines are resumable: `fleet_ticket_terminal_state` classifies a `stopped: fleet-kill` outcome as `incomplete` unless the log carries a `|META|gate-stop|fail|` line. The startup path sets none of these envs and stays global.
+3. **Child enumeration**: Finds child tickets with `planned` label + `Backlog` state
+4. **Dependency resolution**: For each `blocked-by:{ID}` label, checks blocker state via `get_issue`; skipped children are reported as `  blocked {tid}` (never silent)
+5. **Capacity check**: **live-only** — `_active_pipeline_count` counts a no-outcome pipeline log only when its worker is pgrep-live or run-registry-alive (registry liveness verifies `/proc/<pid>/stat` start time against the registry's `started_at` — a reused PID reads as dead — falling back to `kill -0` when `/proc` is unavailable); an outcome-bearing log also counts active when the worker survived (a kill outcome written before the kill was verified does not free the slot). Dispatch additionally reserves `_fleet_queued_count_for_epic` slots for the epic's own pending queue entries (`planned-dispatch` or `campaign-resume from {epic}`). A dead log never consumes a slot. The monitor loop's consume path uses the same helper, so fleetd and the monitor agree on capacity — **bounded by their slot sources**: fleetd counts its own child table (`len(self._children)`), the monitor counts pgrep/registry evidence. With both consumers active on one host, fleetd does not count monitor-spawned workers it never adopted, so combined spawns can transiently exceed `FLEET_MAX_CONCURRENT` by the monitor's concurrent count; the helper removes the dead-log jam but does not unify the two slot sources.
+6. **Queue write**: Appends JSONL entries to spawn queue under `flock` serialization; the append itself re-checks the tid under the lock and skips an already-queued entry (idempotent win — the check-then-act `_queue_has_ticket` callers run outside the flock, the append is the last line of defense)
+7. **Summary**: last stdout line is `fleet_dispatch: resumed N | dead-lettered N | blocked N | enqueued N ticket(s) for {epic}` (dry-run: `[DRY-RUN] would resume N | blocked N | would enqueue N ...`); `POST /dispatch` parses the per-tid lines into `resumed`/`blocked` arrays alongside `queued`
 
 ### Spawn Queue Format
 
@@ -321,6 +328,9 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 | `FLEET_QUEUE_LOCK_TIMEOUT` | 5 | Spawn queue flock timeout |
 | `FLEET_INSTANCE_ID` | default | Namespace for multi-instance isolation |
 | `FLEET_SUMMARY_INTERVAL_CYCLES` | 10 | Cycles between forced fleet-summary heartbeats |
+| `FLEET_RECONCILE_TIDS` | (unset) | Space-separated tid scope for `fleet_reconcile_orphans`; unset = global scan (startup path) |
+| `FLEET_RECONCILE_EPIC` | (unset) | Re-enqueue reason `campaign-resume from {epic}` instead of `orphan-reconciliation` |
+| `FLEET_RECONCILE_DRY_RUN` | (unset) | Non-empty (not `0`/`false`) = dry run: report intents, write nothing |
 
 ## Dependency Bridge
 
@@ -356,15 +366,22 @@ lost. Once at startup, immediately after worker adoption and before the first
 detection cycle, fleetd runs `fleet_reconcile_orphans` (bash,
 `fleet-controller/lib/fleet-reconcile.sh`):
 
-1. Glob every `{tid}-pipeline.log` in the state dir.
+1. Glob every `{tid}-pipeline.log` in the state dir (scoped by
+   `FLEET_RECONCILE_TIDS` when set — dispatch passes an epic's children; the
+   startup path leaves it unset and scans globally).
 2. Skip tickets with an adopted-live worker (the just-adopted set is passed
    in) or an unconsumed spawn-queue entry.
 3. Classify the rest read-only (no Linear/gh calls): `done` (terminal outcome
    or gate-stop), `gate-held` (waiting on the human), `incomplete` (mid-flight).
+   A `stopped: fleet-kill` outcome classifies `incomplete` — kill is a pause,
+   the stop-file pin is the stop — unless a gate-stop marker exists.
 4. Re-enqueue `incomplete` tickets via the shared `_fleet_queue_append`
    (same flock/retry/dead-letter logic as normal dispatch). Entries carry no
    branch/epic context — the re-spawned `ticket-auto` resolves or rehydrates
-   its own, exactly as for any other re-invocation.
+   its own, exactly as for any other re-invocation. Entry reason is
+   `orphan-reconciliation` on the startup path, `campaign-resume from {epic}`
+   when `FLEET_RECONCILE_EPIC` is set. `FLEET_RECONCILE_DRY_RUN` prints
+   would-resume/would-dead-letter lines and writes nothing.
 5. Restart counting and the cap use the **existing**
    `fleet_can_restart`/`_count_restarts`/`FLEET_MAX_RESTARTS` mechanism — a
    live-reap restart and an orphan restart are the same event type and share
@@ -372,6 +389,34 @@ detection cycle, fleetd runs `fleet_reconcile_orphans` (bash,
    `orphaned-after-max-restarts` instead of looping forever.
 
 A reconciliation failure logs and continues — it never blocks daemon startup.
+
+### Stop pins every child that could otherwise resume
+
+`fleet_stop_initiative` resolves the epic's children from Linear (light
+`issue(id) { children { nodes { identifier } } }` query) and:
+- **purges** queue entries whose reason matches `planned-dispatch from
+  {epic}` OR `campaign-resume from {epic}` (space-terminated match), or
+  whose tid is one of the resolved children;
+- **kills** running workers whose run-registry reason matches the same
+  alternation;
+- **pins** — the stop-file `tickets` array is the union of purged, killed,
+  and every child whose pipeline log classifies `incomplete` (fallback when
+  the classifier is unavailable: log exists without `|META|outcome|`).
+
+A stop with an empty queue and no live workers therefore still pins its
+mid-flight children — the `tickets: []` gap that once let an orphan be
+re-adopted after a stop. A children-query failure degrades with a warning
+and an empty child set; the stop never aborts on a Linear outage.
+
+### fleetd's consume check mirrors the bash classifier
+
+`_consume_queue_locked` (supervisor.py) evaluates each queue entry's
+pipeline log with `_log_reached_terminal` — the Python mirror of the
+resume-relevant rules in `fleet_ticket_terminal_state` (kill outcomes are
+resumable, gate-stop and dead-letter are terminal, `held: gate` is not).
+The raw `|META|outcome|` grep it replaces would have dropped the
+campaign-resume entries the classification fix produces. Keep the two in
+sync: both sides carry cross-referencing comments.
 
 ### Generation continuity across stale-registry deletion
 

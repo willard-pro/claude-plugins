@@ -97,6 +97,59 @@ test_classify_gate_stop() {
   }
 }
 
+# A verified fleet-kill writes META|outcome|...|stopped: fleet-kill (...) — the
+# pipeline is resumable (kill = pause, stop-file pin = stop), so it classifies
+# incomplete unless a gate-stop marker exists in the log.
+test_classify_fleet_kill_resumable() {
+  local ws
+  ws=$(_setup_workspace)
+  local log_file="${ws}/CRE-9-pipeline.log"
+  _plog_line "$log_file" "EXEC" "exec" "start" "mid-flight"
+  _plog_line "$log_file" "META" "outcome" "info" "stopped: fleet-kill (SIGTERM); auto-kill"
+
+  local state
+  state=$(fleet_ticket_terminal_state "CRE-9" "$log_file")
+  [ "$state" = "incomplete" ] || {
+    echo "expected incomplete (kill is resumable), got $state" >&2
+    return 1
+  }
+}
+
+test_classify_fleet_kill_after_gate_stop_done() {
+  local ws
+  ws=$(_setup_workspace)
+  local log_file="${ws}/CRE-8-pipeline.log"
+  _plog_line "$log_file" "GATE" "gate" "start" "checking"
+  # Gate-stopped, then killed while cleaning up — the gate-stop is structural
+  # and must not be resurrected into the same gate.
+  _plog_line "$log_file" "META" "gate-stop" "fail" "EXEC_NO_ARTIFACT"
+  _plog_line "$log_file" "META" "outcome" "info" "stopped: fleet-kill (SIGKILL); operator-stop"
+
+  local state
+  state=$(fleet_ticket_terminal_state "CRE-8" "$log_file")
+  [ "$state" = "done" ] || {
+    echo "expected done (gate-stop before kill stays terminal), got $state" >&2
+    return 1
+  }
+}
+
+# kill-unverified means the worker may still be running — the kill path itself
+# falls through to incomplete; pin it with a test.
+test_classify_kill_unverified_incomplete() {
+  local ws
+  ws=$(_setup_workspace)
+  local log_file="${ws}/CRE-7-pipeline.log"
+  _plog_line "$log_file" "EXEC" "exec" "start" "mid-flight"
+  _plog_line "$log_file" "META" "kill-unverified" "warn" "still alive after SIGKILL"
+
+  local state
+  state=$(fleet_ticket_terminal_state "CRE-7" "$log_file")
+  [ "$state" = "incomplete" ] || {
+    echo "expected incomplete (kill-unverified), got $state" >&2
+    return 1
+  }
+}
+
 test_classify_gate_held() {
   local ws
   ws=$(_setup_workspace)
@@ -553,10 +606,158 @@ test_live_reap_and_reconcile_share_one_cap() {
   return 0
 }
 
+# ── Campaign-scope reconciliation (FLEET_RECONCILE_TIDS/EPIC/DRY_RUN) ──────────
+
+test_scoped_tids_only_resume_listed() {
+  local ws
+  ws=$(_setup_workspace)
+  _reconcile_env "$ws"
+  local queue_file
+  queue_file=$(_reconcile_queue_file "$ws")
+  rm -f "$queue_file" "${queue_file%.jsonl}-dead-letter.jsonl"
+
+  _plog_line "${ws}/CRE-9-pipeline.log" "APPRAISE" "appraise" "start" "investigating"
+  _plog_line "${ws}/CRE-10-pipeline.log" "APPRAISE" "appraise" "start" "investigating"
+  _plog_line "${ws}/CRE-11-pipeline.log" "APPRAISE" "appraise" "start" "investigating"
+
+  local out
+  out=$(FLEET_RECONCILE_TIDS="CRE-9 CRE-10" fleet_reconcile_orphans "$ws" "$queue_file" "" 2>&1)
+
+  grep -q '"tid":"CRE-9"' "$queue_file" 2>/dev/null &&
+    grep -q '"tid":"CRE-10"' "$queue_file" 2>/dev/null || {
+    echo "scoped tids CRE-9/CRE-10 missing from queue: $(cat "$queue_file" 2>/dev/null)" >&2
+    return 1
+  }
+  [ ! -f "$queue_file" ] || ! grep -q '"tid":"CRE-11"' "$queue_file" 2>/dev/null || {
+    echo "out-of-scope tid CRE-11 was enqueued" >&2
+    return 1
+  }
+  # Real-mode resume lines — the supervisor's dispatch_epic parses these.
+  echo "$out" | grep -q '^  resumed CRE-9$' || {
+    echo "expected '  resumed CRE-9' line, got: $out" >&2
+    return 1
+  }
+  echo "$out" | grep -q '^  resumed CRE-10$' || {
+    echo "expected '  resumed CRE-10' line, got: $out" >&2
+    return 1
+  }
+  return 0
+}
+
+test_dry_run_resume_writes_nothing() {
+  local ws
+  ws=$(_setup_workspace)
+  _reconcile_env "$ws"
+  local queue_file
+  queue_file=$(_reconcile_queue_file "$ws")
+  rm -f "$queue_file" "${queue_file%.jsonl}-dead-letter.jsonl"
+
+  local log_file="${ws}/CRE-25-pipeline.log"
+  _plog_line "$log_file" "APPRAISE" "appraise" "start" "investigating"
+
+  local out
+  out=$(FLEET_RECONCILE_DRY_RUN=1 fleet_reconcile_orphans "$ws" "$queue_file" "" 2>&1)
+
+  echo "$out" | grep -q '\[DRY-RUN\] would resume CRE-25' || {
+    echo "expected dry-run would-resume line, got: $out" >&2
+    return 1
+  }
+  [ ! -f "$queue_file" ] || ! grep -q '"tid":"CRE-25"' "$queue_file" 2>/dev/null || {
+    echo "dry-run wrote a queue entry" >&2
+    return 1
+  }
+  grep -q '|META|fleet-restart|' "$log_file" 2>/dev/null && {
+    echo "dry-run wrote a fleet-restart marker" >&2
+    return 1
+  }
+  return 0
+}
+
+test_dry_run_cap_reports_dead_letter_without_writing() {
+  local ws
+  ws=$(_setup_workspace)
+  _reconcile_env "$ws"
+  FLEET_MAX_RESTARTS=2
+  local queue_file
+  queue_file=$(_reconcile_queue_file "$ws")
+  rm -f "$queue_file" "${queue_file%.jsonl}-dead-letter.jsonl"
+
+  local log_file="${ws}/CRE-26-pipeline.log"
+  _plog_line "$log_file" "APPRAISE" "appraise" "start" "investigating"
+  _plog_line "$log_file" "META" "fleet-restart" "info" "restart stall-kill"
+  _plog_line "$log_file" "META" "fleet-restart" "info" "restart zombie-kill"
+
+  local out
+  out=$(FLEET_RECONCILE_DRY_RUN=1 fleet_reconcile_orphans "$ws" "$queue_file" "" 2>&1)
+
+  echo "$out" | grep -q '\[DRY-RUN\] would dead-letter CRE-26 (restart cap)' || {
+    echo "expected dry-run dead-letter line, got: $out" >&2
+    return 1
+  }
+  local dead_letter_file="${queue_file%.jsonl}-dead-letter.jsonl"
+  if [ -f "$dead_letter_file" ] && grep -q '"tid":"CRE-26"' "$dead_letter_file" 2>/dev/null; then
+    echo "dry-run wrote a dead-letter entry" >&2
+    return 1
+  fi
+  return 0
+}
+
+test_campaign_resume_reason() {
+  local ws
+  ws=$(_setup_workspace)
+  _reconcile_env "$ws"
+  local queue_file
+  queue_file=$(_reconcile_queue_file "$ws")
+  rm -f "$queue_file" "${queue_file%.jsonl}-dead-letter.jsonl"
+
+  _plog_line "${ws}/CRE-27-pipeline.log" "APPRAISE" "appraise" "start" "investigating"
+
+  FLEET_RECONCILE_EPIC=CRE-6 fleet_reconcile_orphans "$ws" "$queue_file" "" >/dev/null
+
+  local reason
+  reason=$(grep '"tid":"CRE-27"' "$queue_file" | head -1 | jq -r '.reason // ""')
+  [ "$reason" = "campaign-resume from CRE-6" ] || {
+    echo "expected reason 'campaign-resume from CRE-6', got '$reason'" >&2
+    return 1
+  }
+  return 0
+}
+
+test_empty_tids_global_behavior_unchanged() {
+  local ws
+  ws=$(_setup_workspace)
+  _reconcile_env "$ws"
+  local queue_file
+  queue_file=$(_reconcile_queue_file "$ws")
+  rm -f "$queue_file" "${queue_file%.jsonl}-dead-letter.jsonl"
+
+  _plog_line "${ws}/CRE-28-pipeline.log" "APPRAISE" "appraise" "start" "investigating"
+  _plog_line "${ws}/CRE-29-pipeline.log" "APPRAISE" "appraise" "start" "investigating"
+
+  # Explicitly unset the scope env — the startup path must stay global.
+  FLEET_RECONCILE_TIDS= fleet_reconcile_orphans "$ws" "$queue_file" "" >/dev/null
+
+  grep -q '"tid":"CRE-28"' "$queue_file" 2>/dev/null &&
+    grep -q '"tid":"CRE-29"' "$queue_file" 2>/dev/null || {
+    echo "global scan missed tickets when TIDS unset" >&2
+    return 1
+  }
+  local reason
+  reason=$(grep '"tid":"CRE-28"' "$queue_file" | head -1 | jq -r '.reason // ""')
+  [ "$reason" = "orphan-reconciliation" ] || {
+    echo "expected startup reason 'orphan-reconciliation', got '$reason'" >&2
+    return 1
+  }
+  return 0
+}
+
 # ── Run all tests ────────────────────────────────────────────────────────────────
 
 _run "classify done" test_classify_done
 _run "classify gate-stop as done" test_classify_gate_stop
+_run "classify fleet-kill as resumable" test_classify_fleet_kill_resumable
+_run "classify fleet-kill after gate-stop as done" test_classify_fleet_kill_after_gate_stop_done
+_run "classify kill-unverified as incomplete" test_classify_kill_unverified_incomplete
 _run "classify gate-held" test_classify_gate_held
 _run "classify gate-held crash before finalize" test_classify_gate_held_crash_before_finalize
 _run "classify incomplete" test_classify_incomplete
@@ -572,6 +773,11 @@ _run "at cap dead-lettered not re-enqueued" test_at_cap_dead_lettered_not_reenqu
 _run "reconcile entry continues fenced generation" test_reconcile_entry_continues_fenced_generation
 _run "chained crash-resume reaches cap then dead-letters" test_chained_crash_resume_reaches_cap
 _run "live-reap and reconcile share one cap" test_live_reap_and_reconcile_share_one_cap
+_run "scoped tids only resume listed" test_scoped_tids_only_resume_listed
+_run "dry-run resume writes nothing" test_dry_run_resume_writes_nothing
+_run "dry-run cap reports dead-letter without writing" test_dry_run_cap_reports_dead_letter_without_writing
+_run "campaign resume reason" test_campaign_resume_reason
+_run "empty tids global behavior unchanged" test_empty_tids_global_behavior_unchanged
 
 # ── Stop-file pins (fleet-epic-stop) ─────────────────────────────────────────────
 
@@ -605,6 +811,34 @@ test_pinned_tid_not_reenqueued() {
 }
 
 _run "pinned tid not re-enqueued" test_pinned_tid_not_reenqueued
+
+# F05: _fleet_tid_live must be anchored at the tid's right edge — a live
+# CRE-70 worker must not satisfy a CRE-7 liveness check (pgrep -f is a
+# substring ERE match otherwise).
+test_tid_live_prefix_anchored() {
+  bash -c 'exec -a "claude -p /ticket-auto CRE-70 --auto" sleep 30' &
+  local wk_pid=$!
+  trap 'kill "$wk_pid" 2>/dev/null || true' EXIT
+  sleep 0.3
+
+  if bash -c "
+    source '$LIB_DIR/fleet-reconcile.sh'
+    _fleet_tid_live 'CRE-7'
+  " 2>/dev/null; then
+    echo "CRE-70 worker matched CRE-7 tid — unanchored pattern" >&2
+    return 1
+  fi
+  if ! bash -c "
+    source '$LIB_DIR/fleet-reconcile.sh'
+    _fleet_tid_live 'CRE-70'
+  " 2>/dev/null; then
+    echo "CRE-70 worker did not match its own tid" >&2
+    return 1
+  fi
+  return 0
+}
+
+_run "tid_live_prefix_anchored" test_tid_live_prefix_anchored
 
 echo ""
 echo "=== Results ==="

@@ -17,6 +17,52 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## fleet-controller 0.7.0 (2026-08-19)
+
+`fleet_dispatch_initiative` becomes the single repeatable campaign command:
+every invocation reconciles the epic's children (resume dead pipelines),
+enqueues the next wave, and reports what it did. Fixes the four root causes
+that made campaigns stall after a killed worker: unreachable reconcile
+(startup-only), kill-poisoned classification, a dead-log capacity jam, and a
+stop-file that pinned nothing.
+
+- New: dispatch runs a campaign reconcile (Step 1.75) before child
+  enumeration — `fleet_reconcile_orphans` scoped to ALL of the epic's
+  children via new `FLEET_RECONCILE_TIDS` (space-separated scope; unset =
+  the startup path's global scan), re-enqueueing incomplete pipelines with
+  reason `campaign-resume from {epic}` (`FLEET_RECONCILE_EPIC`).
+  `FLEET_RECONCILE_DRY_RUN` previews would-resume/would-dead-letter without
+  writing. Generation resolution and the `FLEET_MAX_RESTARTS` cap are the
+  existing mechanisms — no second counting scheme.
+- Changed: `fleet_ticket_terminal_state` classifies a
+  `stopped: fleet-kill` outcome as `incomplete` (kill = pause, stop-file
+  pin = stop) unless the log carries a `|META|gate-stop|fail|` line
+  (structural stop must not resume). Ships together with the stop-pinning
+  fix — the pin is the load-bearing guard.
+- Changed: capacity is live-only. `_active_pipeline_count` counts a
+  no-outcome pipeline log only when its worker is pgrep-live or
+  run-registry-alive; dispatch additionally reserves slots for the epic's
+  own pending queue entries (`_fleet_queued_count_for_epic`). The monitor
+  loop's consume path uses the same helper — fleetd and the monitor agree
+  on capacity. A dead log no longer jams a campaign.
+- Changed: `fleet_stop_initiative` resolves the epic's children from
+  Linear, purges queue entries by reason
+  (`planned-dispatch|campaign-resume from {epic}`) OR child tid, kills
+  workers matching the same alternation, and pins every child whose
+  pipeline log classifies incomplete — a stop with an empty queue and no
+  live workers now pins its mid-flight children (the `tickets: []` gap).
+  A children-query failure degrades with a warning, never aborts the stop.
+- New: dispatch reports per-tid `  resumed {tid}` / `  blocked {tid}` /
+  `  enqueued {tid}` lines and a summary last line
+  (`fleet_dispatch: resumed N | blocked N | enqueued N ticket(s) for
+  {epic}`; dry-run variant). `POST /dispatch` responses gain `resumed` and
+  `blocked` arrays; `GET /epics` attributes `campaign-resume`-reasoned
+  entries to their epic.
+- Changed: fleetd's `_consume_queue_locked` stale-entry check now uses
+  `_log_reached_terminal`, the Python mirror of the resume-relevant bash
+  classification rules — the raw `|META|outcome|` grep would have dropped
+  the campaign-resume entries. Both sides cross-reference each other.
+
 ## fleet-controller 0.6.0 (2026-08-18)
 
 fleetd grows an on-demand HTTP control/query surface, an epic-scoped stop

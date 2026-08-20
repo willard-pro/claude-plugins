@@ -169,6 +169,11 @@ class ChildTable:
     def __len__(self):
         return len(self._workers)
 
+    def __contains__(self, tid):
+        # Container semantics over ticket ids — iteration yields worker
+        # dicts, so without this `tid in table` silently never matches.
+        return tid in self._workers
+
     def list_workers(self):
         """Return worker list suitable for the health payload."""
         return [
@@ -1356,6 +1361,66 @@ def _collect_stop_pinned_tids(state_dir):
     return pinned
 
 
+def _log_reached_terminal(state_dir, tid):
+    """Whether the ticket's pipeline log shows a terminal state.
+
+    Python mirror of the resume-relevant rules in
+    fleet_ticket_terminal_state (fleet-controller/lib/fleet-reconcile.sh) —
+    keep the two in sync; the bash classifier is the authority and this
+    mirror exists so the consume loop does not shell out per queue entry.
+
+    Terminal iff (mirrors fleet_ticket_terminal_state branch order —
+    the bash classifier is the authority):
+      - the last line's step is `outcome`: `held: gate` and a verified
+        `stopped: fleet-kill` are NOT terminal (the kill arm flips back to
+        terminal only when a `|META|gate-stop|fail|` line also exists);
+        any other outcome message IS terminal, or
+      - the last line's step is `dead-letter` (terminal), or
+      - any `|META|gate-stop|fail|` line exists (structural stop — must
+        never resume), unless an earlier arm already decided.
+    A missing/empty log is NOT terminal, same as the bash classifier.
+    """
+    log_file = Path(state_dir) / f'{tid}-pipeline.log'
+    try:
+        lines = [ln for ln in log_file.read_text().splitlines() if ln]
+    except OSError:
+        return False
+    if not lines:
+        return False
+
+    # Pipeline log schema is ISO|PHASE|STEP|STATUS|MSG — split() is
+    # 0-indexed, so STEP is field 2 and STATUS is field 3. The outcome arm
+    # must run before the gate-stop-anywhere grep: bash classifies a
+    # gate-held outcome as gate-held even when a gate-stop line exists
+    # earlier in the log.
+    last = lines[-1].split('|')
+    if len(last) >= 3 and last[2] == 'outcome':
+        msg = '|'.join(last[4:]) if len(last) > 4 else ''
+        if 'stopped: fleet-kill' in msg:
+            # A verified kill is a pause — resumable — UNLESS the log
+            # carries a gate-stop, a structural failure that restarting
+            # would hit again (bash checks this inside the kill arm).
+            if any('|META|gate-stop|fail|' in ln for ln in lines):
+                return True
+            return False
+        if 'held: gate' in msg:
+            # Waiting on the human, not terminal.
+            return False
+        return True
+
+    # Crash between gate-held write and finalize: the held marker itself
+    # is the last line. Still gate-held — the human gate stands.
+    if len(last) >= 3 and last[2] == 'gate-held':
+        return False
+
+    if any('|META|gate-stop|fail|' in ln for ln in lines):
+        return True
+
+    if len(last) >= 3 and last[2] == 'dead-letter':
+        return True
+    return False
+
+
 # ── Epic view (pure state-dir derivation) ─────────────────────────────────
 
 def _list_epics(state_dir, workers):
@@ -1400,10 +1465,11 @@ def _list_epics(state_dir, workers):
     except OSError:
         pass
 
-    # Queue entries: reason = "planned-dispatch from {epic}".
+    # Queue entries: reason = "planned-dispatch from {epic}" or
+    # "campaign-resume from {epic}".
     entries, _malformed = _parse_queue_with_malformed(state_dir)
     for entry in entries:
-        match = re.search(r'planned-dispatch from (\S+)',
+        match = re.search(r'(?:planned-dispatch|campaign-resume) from (\S+)',
                           entry.get('reason', ''))
         if not match:
             continue
@@ -1411,7 +1477,7 @@ def _list_epics(state_dir, workers):
 
     # Running workers: reason carries through spawn → registry → child table.
     for worker in workers:
-        match = re.search(r'planned-dispatch from (\S+)',
+        match = re.search(r'(?:planned-dispatch|campaign-resume) from (\S+)',
                           worker.get('reason', ''))
         if not match:
             continue
@@ -1822,12 +1888,13 @@ class Supervisor:
         epic-scoped flock's job; the lock is re-acquired only for the queue
         consume below.
 
-        Returns {'queued': [...], 'spawned': [...], 'message': str}.
+        Returns {'queued': [...], 'resumed': [...], 'blocked': [...],
+                 'spawned': [...], 'message': str}.
         """
         dispatch_script = self._fleet_lib_dir / 'fleet-dispatch.sh'
         if not dispatch_script.is_file():
             return {
-                'queued': [], 'spawned': [],
+                'queued': [], 'resumed': [], 'blocked': [], 'spawned': [],
                 'message': f'dispatch script not found: {dispatch_script}',
             }
 
@@ -1862,6 +1929,17 @@ class Supervisor:
                     pass
         queued = list(dict.fromkeys(queued))  # dedupe, preserve order
 
+        # Campaign-resume contract: per-tid `  resumed {tid}` (real mode) /
+        # `[DRY-RUN] would resume {tid}` / `  blocked {tid}` lines plus a
+        # summary last line. Additive — the `queued` regex above and the
+        # last-line `message` contract are unchanged. The summary's
+        # "resumed N"/"blocked N" counts do not match the tid shape.
+        resumed = re.findall(r'(?:resumed|would resume)\s+([A-Z]+-\d+)',
+                             stdout)
+        blocked = re.findall(r'blocked\s+([A-Z]+-\d+)', stdout)
+        resumed = list(dict.fromkeys(resumed))
+        blocked = list(dict.fromkeys(blocked))
+
         lines = stdout.strip().splitlines()
         message = lines[-1] if lines else ''
         if rc != 0:
@@ -1873,7 +1951,10 @@ class Supervisor:
             with self._state_lock:
                 spawned = sorted(self._consume_queue_locked())
 
-        return {'queued': queued, 'spawned': spawned, 'message': message}
+        return {
+            'queued': queued, 'resumed': resumed, 'blocked': blocked,
+            'spawned': spawned, 'message': message,
+        }
 
     def stop_epic(self, epic_id, reason=''):
         """Stop one epic per the fleet-epic-stop contract.
@@ -2093,9 +2174,12 @@ class Supervisor:
             # Skip entries whose ticket already reached a terminal state.
             # The crash window between spawn_worker and queue removal leaves
             # a stale entry behind; without this check a restart would
-            # re-spawn a finished pipeline.
-            log_file = self._state_dir / f'{tid}-pipeline.log'
-            if log_file.is_file() and '|META|outcome|' in log_file.read_text():
+            # re-spawn a finished pipeline. The raw `|META|outcome|` grep is
+            # gone: it dropped the campaign-resume entries the classification
+            # fix produces (a killed pipeline ends with a kill outcome but is
+            # resumable — see _log_reached_terminal, the mirror of
+            # fleet_ticket_terminal_state).
+            if _log_reached_terminal(self._state_dir, tid):
                 consumed.add(tid)
                 print(
                     f"fleetd[{os.getpid()}]: skipping {tid} — pipeline log "
