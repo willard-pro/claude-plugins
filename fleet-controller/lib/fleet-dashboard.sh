@@ -12,6 +12,13 @@ if ! declare -f _plog >/dev/null 2>&1; then
     [ -f "$_hp" ] && source "$_hp" && break
   done
 fi
+# _source_if_missing is defined by heartbeat.sh — a stripped environment
+# without the canonical heartbeat source (CI runners, hosts where the
+# ticket-auto-pipeline SessionStart hook never ran) must still get the
+# helper, or the dependency below silently fails to source.
+if ! declare -f _source_if_missing >/dev/null 2>&1; then
+  _source_if_missing() { declare -f "$1" >/dev/null 2>&1 || source "$2"; }
+fi
 # Source fleet-detect.sh for fleet_detect_all if not already loaded
 _source_if_missing fleet_detect_all "$_DASH_DIR/fleet-detect.sh"
 

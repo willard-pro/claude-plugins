@@ -33,7 +33,7 @@ fi
 # loop sources this file and relies on no -e). Snapshot + restore around it.
 if ! declare -f get_issue >/dev/null 2>&1; then
   _fd_saved_opts=$(set +o)
-  for _lp in "$HOME/.claude/skills/lib/linear-api.sh" "$_DISPATCH_DIR/../ticket-auto-pipeline/lib/linear-api.sh"; do
+  for _lp in "$HOME/.claude/skills/lib/linear-api.sh" "$_DISPATCH_DIR/../../ticket-auto-pipeline/lib/linear-api.sh"; do
     [ -f "$_lp" ] && source "$_lp" && break
   done
   eval "$_fd_saved_opts" 2>/dev/null || true
