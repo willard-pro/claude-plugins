@@ -1371,14 +1371,29 @@ def _log_reached_terminal(state_dir, tid):
 
     Terminal iff (mirrors fleet_ticket_terminal_state branch order —
     the bash classifier is the authority):
-      - the last line's step is `outcome`: `held: gate` and a verified
-        `stopped: fleet-kill` are NOT terminal (the kill arm flips back to
-        terminal only when a `|META|gate-stop|fail|` line also exists);
-        any other outcome message IS terminal, or
-      - the last line's step is `dead-letter` (terminal), or
-      - any `|META|gate-stop|fail|` line exists (structural stop — must
-        never resume), unless an earlier arm already decided.
+      - the last line's step is `outcome`: `held: gate`, `stopped:
+        gate-stop` and `stopped: fleet-kill` are NOT terminal; any other
+        outcome message IS terminal, or
+      - the last line's step is `dead-letter` (terminal).
     A missing/empty log is NOT terminal, same as the bash classifier.
+
+    NO gate-stop-derived verdict is terminal any more. Bash classifies all
+    three of its gate-stop routes as `gate-stopped` — a distinct value from
+    `done` — because the condition behind a gate-stop (missing acceptance
+    criteria, a revoked approval, an absent template) lives outside the
+    pipeline and may since have been fixed by a human. The three routes,
+    all returning False here:
+      1. a `stopped: gate-stop <CODE>` outcome message — pipeline-finalize.sh
+         writes this on essentially every gate-stop exit, so it, not route 3,
+         is what fires for real traffic;
+      2. a `stopped: fleet-kill` outcome over a log that also carries a
+         gate-stop marker (gate-stopped first, killed after);
+      3. a bare `|META|gate-stop|fail|` marker with no outcome line at all —
+         the process died before finalize could run.
+    Treating any of them as terminal here would make the consume path drop
+    the `campaign-resume` queue entry that a scoped reconcile just wrote,
+    silently defeating campaign resume at the last step. Only a true `done`
+    — genuine completion or a dead-letter — is terminal.
     """
     log_file = Path(state_dir) / f'{tid}-pipeline.log'
     try:
@@ -1397,11 +1412,15 @@ def _log_reached_terminal(state_dir, tid):
     if len(last) >= 3 and last[2] == 'outcome':
         msg = '|'.join(last[4:]) if len(last) > 4 else ''
         if 'stopped: fleet-kill' in msg:
-            # A verified kill is a pause — resumable — UNLESS the log
-            # carries a gate-stop, a structural failure that restarting
-            # would hit again (bash checks this inside the kill arm).
-            if any('|META|gate-stop|fail|' in ln for ln in lines):
-                return True
+            # A verified kill is a pause — resumable. Bash classifies a
+            # kill over a gate-stopped log as `gate-stopped` (not `done`),
+            # which is likewise not terminal, so this arm returns False
+            # either way and no marker grep is needed.
+            return False
+        if 'stopped: gate-stop' in msg:
+            # bash: gate-stopped. The condition may since have been fixed;
+            # a scoped campaign resume is entitled to retry it, so this
+            # entry must not be dropped as stale. See the docstring.
             return False
         if 'held: gate' in msg:
             # Waiting on the human, not terminal.
@@ -1412,9 +1431,6 @@ def _log_reached_terminal(state_dir, tid):
     # is the last line. Still gate-held — the human gate stands.
     if len(last) >= 3 and last[2] == 'gate-held':
         return False
-
-    if any('|META|gate-stop|fail|' in ln for ln in lines):
-        return True
 
     if len(last) >= 3 and last[2] == 'dead-letter':
         return True
