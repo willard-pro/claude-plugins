@@ -54,12 +54,33 @@ _fleet_tid_live() {
 # read-only: no Linear, no gh, no log mutation.
 #
 # Emits exactly one of:
-#   done       — a terminal completion or failure marker is present
-#   gate-held  — held for human approval with no later resolving event
-#   incomplete — neither: the pipeline was interrupted mid-flight
+#   done         — genuine completion, or a dead-letter (retries exhausted).
+#                  Never reconsidered by any caller, in any scope.
+#   gate-held    — held for human approval with no later resolving event
+#   gate-stopped — halted by a structural gate whose underlying condition
+#                  (acceptance criteria, Linear labels/state, a missing
+#                  template, ...) may since have been fixed by a human.
+#                  Distinct from done precisely so the caller can offer it
+#                  another chance; whether it actually gets one is the
+#                  caller's decision (see fleet_reconcile_orphans, which
+#                  retries it only under an explicit epic scope).
+#   incomplete   — none of the above: the pipeline was interrupted mid-flight
+#
+# Three independent routes reach gate-stopped, and they must agree:
+#   1. An outcome message containing "stopped: gate-stop" — pipeline-finalize.sh
+#      writes this as the log's last line on essentially every gate-stop exit,
+#      so this is the PRIMARY real-world trigger, not the grep in route 3.
+#   2. A "stopped: fleet-kill" outcome over a log that also carries a
+#      gate-stop marker (gate-stopped first, killed after).
+#   3. A bare |META|gate-stop|fail| marker anywhere, when no outcome line was
+#      ever written — i.e. the process died before pipeline-finalize.sh ran.
+#      Narrower than it looks: only crashed/killed runs land here.
 #
 # Exit code is always 0 (classification is a value, not a failure signal);
 # a missing/empty log classifies as incomplete so the caller decides.
+#
+# The Python mirror _log_reached_terminal (fleetd/supervisor.py) must agree
+# with this function; it has the same three routes. Change both together.
 fleet_ticket_terminal_state() {
   local tid="$1"
   local log_file="$2"
@@ -85,18 +106,32 @@ fleet_ticket_terminal_state() {
       ;;
     *"stopped: fleet-kill"*)
       # fleet_kill_pipeline (fleet-intervene.sh) writes this outcome after a
-      # verified kill. The pipeline is resumable — kill is a pause, the
-      # stop-file pin is the stop — UNLESS the log carries a gate-stop, a
-      # structural failure that restarting would hit again. The gate-stop
-      # grep must live inside this arm: the one at the bottom of this
-      # function runs after the outcome branch, so a gate-stopped-then-killed
-      # pipeline (log ends with the kill outcome) would otherwise resurrect
-      # into the same gate.
+      # verified kill. A plain kill is a pause — kill is the pause, the
+      # stop-file pin is the stop — so it classifies incomplete and resumes
+      # freely. A kill over a log that ALSO carries a gate-stop is a
+      # different animal: the gate is real and an unscoped resume would walk
+      # straight back into it, so it classifies gate-stopped instead —
+      # retriable, but only under an explicit epic scope.
+      # The grep must live inside this arm: the one below runs after the
+      # whole outcome branch, so a gate-stopped-then-killed pipeline (log
+      # ends with the kill outcome) would otherwise never reach it and would
+      # resume as if nothing structural had happened.
       if command grep -q '|META|gate-stop|fail|' "$log_file" 2>/dev/null; then
-        echo "done"
+        echo "gate-stopped"
         return 0
       fi
       echo "incomplete"
+      return 0
+      ;;
+    *"stopped: gate-stop"*)
+      # The normal, clean exit from any of the 14 gate-stop codes:
+      # pipeline-finalize.sh derives this message from the gate-stop marker
+      # and writes it as the log's last line. This arm — not the marker grep
+      # below — is what fires for essentially all real gate-stop traffic,
+      # because this outcome branch returns before that grep is reached.
+      # The condition behind the code may since have been fixed, so this is
+      # gate-stopped, not done.
+      echo "gate-stopped"
       return 0
       ;;
     *)
@@ -113,19 +148,28 @@ fleet_ticket_terminal_state() {
     return 0
   fi
 
-  # A gate-stop anywhere in the log is a terminal structural failure
-  # (pipeline halts, no fallback) — restarting would hit the same gate.
-  if command grep -q '|META|gate-stop|fail|' "$log_file" 2>/dev/null; then
-    echo "done"
-    return 0
-  fi
-
   # A dead-letter marker as the last line is terminal: the ticket was
   # surfaced for a human rather than lost. Classifying it done keeps
   # reconciliation idempotent across restarts (no duplicate dead-letter
   # entries, no re-enqueue of a permanently-stuck ticket).
+  #
+  # This MUST be checked before the gate-stop marker grep below. A ticket
+  # that gate-stopped, was retried to the restart cap and then dead-lettered
+  # carries BOTH markers; if the grep won, it would classify gate-stopped,
+  # become retry-eligible again under scope, and loop past its own cap —
+  # re-dead-lettering on every scoped resume. Dead-letter is the later,
+  # stronger fact: retries are already exhausted.
   if [ "$last_step" = "dead-letter" ]; then
     echo "done"
+    return 0
+  fi
+
+  # A gate-stop marker with no outcome line above it: the process died
+  # before pipeline-finalize.sh could finalize (killed/crashed mid-run).
+  # The gate is structural, but its condition may since have been fixed —
+  # gate-stopped, not done, so an explicitly-scoped resume can retry it.
+  if command grep -q '|META|gate-stop|fail|' "$log_file" 2>/dev/null; then
+    echo "gate-stopped"
     return 0
   fi
 
@@ -265,10 +309,34 @@ fleet_reconcile_orphans() {
     fi
 
     state=$(fleet_ticket_terminal_state "$tid" "$log_file")
-    if [ "$state" != "incomplete" ]; then
+    # Retry eligibility. `incomplete` (crashed/interrupted mid-flight) is
+    # always eligible. `gate-stopped` and `gate-held` are eligible only
+    # under an explicit epic scope — i.e. a human ran
+    # `fleet-dispatch.sh <EPIC> --resume` — because their conditions are
+    # fixed OUTSIDE the pipeline (acceptance criteria edited, the `approved`
+    # label added) and only a human knows when that has happened. The
+    # passive startup scan must never spend restart credits or kick off
+    # implementation on its own initiative, so it keeps leaving both alone.
+    #
+    # `done` is never eligible in either scope: it means genuine completion
+    # or an already-exhausted dead-letter. Both are permanent.
+    #
+    # No live re-verification happens here by design — a re-enqueued ticket
+    # runs `ticket-auto`, whose own gate-check/detect-resume re-reads the
+    # live condition. Fleet only decides whether to grant another attempt.
+    case "$state" in
+    incomplete) ;;
+    gate-stopped | gate-held)
+      if [ -z "$reconcile_epic" ]; then
+        echo "fleet_reconcile: ${tid} — ${state}, left alone (no epic scope)"
+        continue
+      fi
+      ;;
+    *)
       echo "fleet_reconcile: ${tid} — ${state}, left alone"
       continue
-    fi
+      ;;
+    esac
 
     # Cap via the existing restart mechanism — no second counting scheme.
     # The reason string is captured and surfaced: a silent skip is how a

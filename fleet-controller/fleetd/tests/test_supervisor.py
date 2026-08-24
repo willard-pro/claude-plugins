@@ -888,6 +888,45 @@ class SpawnAndReapTest(unittest.TestCase):
         finally:
             sup.release_lock()
 
+    def test_gate_stopped_pipeline_resumes_not_dropped_as_stale(self):
+        """A scoped campaign resume enqueues a gate-stopped ticket; the
+        consume path must spawn it rather than drop it as stale-terminal.
+
+        This is the end-to-end guard for the whole change: reconcile can
+        enqueue correctly and the fix still be a no-op if the consume-path
+        staleness check drops the entry a moment later. Uses the clean-exit
+        outcome shape pipeline-finalize.sh actually writes."""
+        from fleetd.supervisor import Supervisor
+
+        queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+        queue_file.write_text(
+            json.dumps({'tid': 'TST-G1',
+                        'reason': 'campaign-resume from INIT-42'}) + '\n')
+        log_file = self.workspace / 'TST-G1-pipeline.log'
+        log_file.write_text(
+            '2026-01-01T00:00:00Z|GATE|gate|start|checking\n'
+            '2026-01-01T00:00:01Z|META|gate-stop|fail|ZERO_AC\n'
+            '2026-01-01T00:00:02Z|META|outcome|info|'
+            'stopped: gate-stop ZERO_AC — no acceptance criteria\n')
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            consumed = sup._consume_queue(
+                cmd_override=_make_worker_cmd(sleep_secs=5))
+            self.assertEqual(consumed, {'TST-G1'},
+                             "gate-stopped pipeline must spawn on a scoped "
+                             "resume, not be dropped as stale")
+            self.assertIsNotNone(sup._children.get('TST-G1'),
+                                 "gate-stopped pipeline must spawn a worker")
+        finally:
+            sup.release_lock()
+
     def _log_terminal(self, content):
         """Write the given pipeline-log content and classify it.
 
@@ -924,17 +963,44 @@ class SpawnAndReapTest(unittest.TestCase):
         # Gate-held marker as last line (crash before finalize) → not terminal.
         self.assertFalse(self._log_terminal(
             '2026-01-01T00:00:00Z|META|gate-held|info|waiting approval\n'))
-        # Gate-stop anywhere → terminal (structural stop must never resume).
-        self.assertTrue(self._log_terminal(
+        # Route 3 — bare gate-stop marker, no outcome line (the process died
+        # before pipeline-finalize.sh ran) → bash gate-stopped, not terminal:
+        # the condition may since have been fixed, so a scoped campaign
+        # resume is entitled to retry it.
+        self.assertFalse(self._log_terminal(
             '2026-01-01T00:00:00Z|GATE|gate|fail|'
             '2026-01-01T00:00:01Z|META|gate-stop|fail|CRITIQUE_BLOCKED\n'
             '2026-01-01T00:00:02Z|IMPLEMENT|implement|start|x\n'))
-        # Kill outcome AFTER a gate-stop → terminal (bash kill arm greps
-        # gate-stop and flips back to done).
-        self.assertTrue(self._log_terminal(
+        # Route 2 — kill outcome AFTER a gate-stop → bash gate-stopped,
+        # not terminal.
+        self.assertFalse(self._log_terminal(
             '2026-01-01T00:00:00Z|META|gate-stop|fail|CRITIQUE_BLOCKED\n'
             '2026-01-01T00:00:01Z|META|outcome|info|'
             'stopped: fleet-kill (SIGTERM)\n'))
+        # Route 1 — the clean-exit shape pipeline-finalize.sh writes at
+        # essentially every gate-stop exit, and so the one that matters for
+        # real traffic. It lands in the outcome branch, which returns before
+        # any marker grep: a fix targeting only the bare-marker route above
+        # would leave THIS case reporting terminal and silently drop the
+        # campaign-resume queue entry that a scoped reconcile just wrote.
+        self.assertFalse(self._log_terminal(
+            '2026-01-01T00:00:00Z|META|gate-stop|fail|ZERO_AC\n'
+            '2026-01-01T00:00:01Z|META|outcome|info|'
+            'stopped: gate-stop ZERO_AC — ticket has zero acceptance '
+            'criteria; nothing verifiable exists\n'))
+        # VERIFY_EXHAUSTED is classified like any other gate-stop code — no
+        # per-code special-casing, even though retrying it cannot succeed.
+        self.assertFalse(self._log_terminal(
+            '2026-01-01T00:00:00Z|META|gate-stop|fail|VERIFY_EXHAUSTED\n'
+            '2026-01-01T00:00:01Z|META|outcome|info|'
+            'stopped: gate-stop VERIFY_EXHAUSTED\n'))
+        # Dead-letter last line OVER an earlier gate-stop marker → terminal.
+        # Retries are already exhausted; if the gate-stop won here the ticket
+        # would become retry-eligible again and loop past its own restart cap.
+        self.assertTrue(self._log_terminal(
+            '2026-01-01T00:00:00Z|META|gate-stop|fail|ZERO_AC\n'
+            '2026-01-01T00:00:01Z|META|dead-letter|warn|'
+            'reason=orphaned-after-max-restarts\n'))
         # Gate-held outcome with an earlier gate-stop line → NOT terminal:
         # bash checks the outcome arm first, so gate-held wins.
         self.assertFalse(self._log_terminal(

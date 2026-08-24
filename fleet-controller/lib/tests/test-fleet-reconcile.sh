@@ -82,6 +82,10 @@ test_classify_done() {
   }
 }
 
+# A bare gate-stop marker with no outcome line: the process died before
+# pipeline-finalize.sh could finalize (the CRE-9 incident shape). The gate is
+# structural, but its condition may since have been fixed by a human — so it
+# classifies gate-stopped, distinct from done, and a scoped resume may retry it.
 test_classify_gate_stop() {
   local ws
   ws=$(_setup_workspace)
@@ -91,8 +95,71 @@ test_classify_gate_stop() {
 
   local state
   state=$(fleet_ticket_terminal_state "CRE-8" "$log_file")
+  [ "$state" = "gate-stopped" ] || {
+    echo "expected gate-stopped (condition may be fixable), got $state" >&2
+    return 1
+  }
+}
+
+# The NORMAL gate-stop shape, and the one that matters for real traffic:
+# pipeline-finalize.sh runs at every gate-stop exit and writes the log's last
+# line as META|outcome|info|stopped: gate-stop <CODE>. That lands in the
+# outcome branch, which returns before the bare-marker grep above is ever
+# reached — so this case is NOT covered by test_classify_gate_stop, and a fix
+# to the grep alone would leave it silently classifying done.
+test_classify_gate_stop_clean_exit_outcome_message() {
+  local ws
+  ws=$(_setup_workspace)
+  local log_file="${ws}/CRE-9-pipeline.log"
+  _plog_line "$log_file" "GATE" "gate" "start" "checking"
+  _plog_line "$log_file" "META" "gate-stop" "fail" "ZERO_AC"
+  _plog_line "$log_file" "META" "outcome" "info" \
+    "stopped: gate-stop ZERO_AC — ticket has zero acceptance criteria; nothing verifiable exists"
+
+  local state
+  state=$(fleet_ticket_terminal_state "CRE-9" "$log_file")
+  [ "$state" = "gate-stopped" ] || {
+    echo "expected gate-stopped (clean-exit outcome message), got $state" >&2
+    return 1
+  }
+}
+
+# VERIFY_EXHAUSTED is a gate-stop code like any other and classifies the same
+# way. Retrying it can never actually succeed (its attempt counter is derived
+# from append-only log history), but that is a resume-eligibility concern —
+# classification deliberately does not special-case it (design Decision 4).
+test_classify_verify_exhausted_is_gate_stopped() {
+  local ws
+  ws=$(_setup_workspace)
+  local log_file="${ws}/CRE-12-pipeline.log"
+  _plog_line "$log_file" "VERIFY" "verify" "fail" "attempt 2"
+  _plog_line "$log_file" "META" "gate-stop" "fail" "VERIFY_EXHAUSTED"
+  _plog_line "$log_file" "META" "outcome" "info" "stopped: gate-stop VERIFY_EXHAUSTED"
+
+  local state
+  state=$(fleet_ticket_terminal_state "CRE-12" "$log_file")
+  [ "$state" = "gate-stopped" ] || {
+    echo "expected gate-stopped (no per-code special-casing), got $state" >&2
+    return 1
+  }
+}
+
+# A dead-letter last line wins over a gate-stop marker earlier in the log.
+# A ticket that gate-stopped, was retried to the cap and then dead-lettered
+# carries BOTH markers; if the gate-stop grep won, the ticket would become
+# retry-eligible again under scope and loop past its own restart cap.
+test_classify_dead_letter_beats_gate_stop_marker() {
+  local ws
+  ws=$(_setup_workspace)
+  local log_file="${ws}/CRE-13-pipeline.log"
+  _plog_line "$log_file" "GATE" "gate" "start" "checking"
+  _plog_line "$log_file" "META" "gate-stop" "fail" "ZERO_AC"
+  _plog_line "$log_file" "META" "dead-letter" "warn" "reason=orphaned-after-max-restarts"
+
+  local state
+  state=$(fleet_ticket_terminal_state "CRE-13" "$log_file")
   [ "$state" = "done" ] || {
-    echo "expected done (gate-stop is terminal), got $state" >&2
+    echo "expected done (dead-letter is terminal even with a gate-stop), got $state" >&2
     return 1
   }
 }
@@ -120,15 +187,16 @@ test_classify_fleet_kill_after_gate_stop_done() {
   ws=$(_setup_workspace)
   local log_file="${ws}/CRE-8-pipeline.log"
   _plog_line "$log_file" "GATE" "gate" "start" "checking"
-  # Gate-stopped, then killed while cleaning up — the gate-stop is structural
-  # and must not be resurrected into the same gate.
+  # Gate-stopped, then killed while cleaning up. Not incomplete (the gate is
+  # real and a plain resume would hit it again) and not done (the condition
+  # may since have been fixed) — the third route to gate-stopped.
   _plog_line "$log_file" "META" "gate-stop" "fail" "EXEC_NO_ARTIFACT"
   _plog_line "$log_file" "META" "outcome" "info" "stopped: fleet-kill (SIGKILL); operator-stop"
 
   local state
   state=$(fleet_ticket_terminal_state "CRE-8" "$log_file")
-  [ "$state" = "done" ] || {
-    echo "expected done (gate-stop before kill stays terminal), got $state" >&2
+  [ "$state" = "gate-stopped" ] || {
+    echo "expected gate-stopped (kill over a gate-stopped log), got $state" >&2
     return 1
   }
 }
@@ -723,6 +791,152 @@ test_campaign_resume_reason() {
   return 0
 }
 
+# The CRE-9 case this change exists for: a gate-stop whose condition a human
+# has since fixed. Under an explicit epic scope it is re-enqueued; the worker's
+# own gate-check re-verifies live (fleet performs no per-code re-verification).
+test_scoped_resume_reenqueues_gate_stopped() {
+  local ws
+  ws=$(_setup_workspace)
+  _reconcile_env "$ws"
+  local queue_file
+  queue_file=$(_reconcile_queue_file "$ws")
+  rm -f "$queue_file" "${queue_file%.jsonl}-dead-letter.jsonl"
+
+  local log_file="${ws}/CRE-9-pipeline.log"
+  _plog_line "$log_file" "GATE" "gate" "start" "checking"
+  _plog_line "$log_file" "META" "gate-stop" "fail" "ZERO_AC"
+  _plog_line "$log_file" "META" "outcome" "info" "stopped: gate-stop ZERO_AC — no acceptance criteria"
+
+  FLEET_RECONCILE_EPIC=CRE-6 fleet_reconcile_orphans "$ws" "$queue_file" "" >/dev/null
+
+  local reason
+  reason=$(grep '"tid":"CRE-9"' "$queue_file" 2>/dev/null | head -1 | jq -r '.reason // ""')
+  [ "$reason" = "campaign-resume from CRE-6" ] || {
+    echo "expected gate-stopped CRE-9 re-enqueued as campaign-resume, got '$reason'" >&2
+    return 1
+  }
+  return 0
+}
+
+# A gate-held ticket that has since been approved. Reconcile does NOT check the
+# label itself — it re-enqueues speculatively and lets detect-resume.sh make the
+# live call, which is the single place that check lives.
+test_scoped_resume_reenqueues_gate_held() {
+  local ws
+  ws=$(_setup_workspace)
+  _reconcile_env "$ws"
+  local queue_file
+  queue_file=$(_reconcile_queue_file "$ws")
+  rm -f "$queue_file" "${queue_file%.jsonl}-dead-letter.jsonl"
+
+  local log_file="${ws}/CRE-11-pipeline.log"
+  _plog_line "$log_file" "META" "gate-held" "info" "held"
+  _plog_line "$log_file" "META" "outcome" "info" "held: gate"
+
+  FLEET_RECONCILE_EPIC=CRE-6 fleet_reconcile_orphans "$ws" "$queue_file" "" >/dev/null
+
+  local reason
+  reason=$(grep '"tid":"CRE-11"' "$queue_file" 2>/dev/null | head -1 | jq -r '.reason // ""')
+  [ "$reason" = "campaign-resume from CRE-6" ] || {
+    echo "expected gate-held CRE-11 re-enqueued as campaign-resume, got '$reason'" >&2
+    return 1
+  }
+  return 0
+}
+
+# Guards the scoped/unscoped split: an idle fleetd's passive startup scan must
+# never spend restart credits or kick off implementation on a freshly-approved
+# or freshly-fixed ticket. Only an explicit human --resume may do that.
+test_unscoped_leaves_gate_stopped_and_gate_held_alone() {
+  local ws
+  ws=$(_setup_workspace)
+  _reconcile_env "$ws"
+  local queue_file
+  queue_file=$(_reconcile_queue_file "$ws")
+  rm -f "$queue_file" "${queue_file%.jsonl}-dead-letter.jsonl"
+
+  _plog_line "${ws}/CRE-9-pipeline.log" "META" "gate-stop" "fail" "ZERO_AC"
+  _plog_line "${ws}/CRE-9-pipeline.log" "META" "outcome" "info" "stopped: gate-stop ZERO_AC"
+  _plog_line "${ws}/CRE-11-pipeline.log" "META" "gate-held" "info" "held"
+  _plog_line "${ws}/CRE-11-pipeline.log" "META" "outcome" "info" "held: gate"
+
+  local out
+  out=$(fleet_reconcile_orphans "$ws" "$queue_file" "" 2>&1)
+
+  if [ -f "$queue_file" ]; then
+    ! grep -q '"tid":"CRE-9"' "$queue_file" 2>/dev/null || {
+      echo "gate-stopped CRE-9 re-enqueued without epic scope" >&2
+      return 1
+    }
+    ! grep -q '"tid":"CRE-11"' "$queue_file" 2>/dev/null || {
+      echo "gate-held CRE-11 re-enqueued without epic scope" >&2
+      return 1
+    }
+  fi
+  # The skip line must name the scope reason, not read like a genuine done —
+  # this is exactly how the original CRE-9 stall was diagnosed from fleetd.log.
+  echo "$out" | grep -q "CRE-9 — gate-stopped, left alone (no epic scope)" || {
+    echo "expected scope-qualified skip line, got: $out" >&2
+    return 1
+  }
+  return 0
+}
+
+# A still-broken gate-stop is bounded by the existing restart cap: it retries,
+# then dead-letters, and further scoped resumes leave it alone. No new counter,
+# no infinite-retry surface. Also covers VERIFY_EXHAUSTED, whose retry can never
+# succeed — it simply burns the same cap and dead-letters like any other.
+test_scoped_resume_gate_stopped_caps_then_dead_letters() {
+  local ws
+  ws=$(_setup_workspace)
+  _reconcile_env "$ws"
+  FLEET_MAX_RESTARTS=2
+  local queue_file
+  queue_file=$(_reconcile_queue_file "$ws")
+  rm -f "$queue_file" "${queue_file%.jsonl}-dead-letter.jsonl"
+
+  local log_file="${ws}/CRE-17-pipeline.log"
+  _plog_line "$log_file" "GATE" "gate" "start" "checking"
+  _plog_line "$log_file" "META" "gate-stop" "fail" "ZERO_AC"
+  _plog_line "$log_file" "META" "outcome" "info" "stopped: gate-stop ZERO_AC"
+  # Already at the cap — two prior restarts.
+  _plog_line "$log_file" "META" "fleet-restart" "info" "restart campaign-resume from CRE-6"
+  _plog_line "$log_file" "META" "fleet-restart" "info" "restart campaign-resume from CRE-6"
+
+  local out
+  out=$(FLEET_RECONCILE_EPIC=CRE-6 fleet_reconcile_orphans "$ws" "$queue_file" "" 2>&1)
+
+  [ ! -f "$queue_file" ] || ! grep -q '"tid":"CRE-17"' "$queue_file" 2>/dev/null || {
+    echo "capped gate-stopped CRE-17 was re-enqueued" >&2
+    return 1
+  }
+  local dead_letter_file="${queue_file%.jsonl}-dead-letter.jsonl"
+  grep -q '"tid":"CRE-17"' "$dead_letter_file" 2>/dev/null || {
+    echo "capped gate-stopped CRE-17 missing from dead-letter file" >&2
+    return 1
+  }
+
+  # Once dead-lettered, the log's last line is the dead-letter marker — which
+  # must outrank the gate-stop marker still sitting earlier in the same log.
+  # If it did not, the ticket would classify gate-stopped again and loop past
+  # its own cap, re-dead-lettering on every scoped resume.
+  local state
+  state=$(fleet_ticket_terminal_state "CRE-17" "$log_file")
+  [ "$state" = "done" ] || {
+    echo "expected done after dead-letter, got $state (cap would be defeated)" >&2
+    return 1
+  }
+  local dl_before dl_after
+  dl_before=$(grep -c '"tid":"CRE-17"' "$dead_letter_file" 2>/dev/null || true)
+  FLEET_RECONCILE_EPIC=CRE-6 fleet_reconcile_orphans "$ws" "$queue_file" "" >/dev/null
+  dl_after=$(grep -c '"tid":"CRE-17"' "$dead_letter_file" 2>/dev/null || true)
+  [ "$dl_before" = "$dl_after" ] || {
+    echo "scoped resume duplicated dead-letter: before=${dl_before} after=${dl_after}" >&2
+    return 1
+  }
+  return 0
+}
+
 test_empty_tids_global_behavior_unchanged() {
   local ws
   ws=$(_setup_workspace)
@@ -754,9 +968,12 @@ test_empty_tids_global_behavior_unchanged() {
 # ── Run all tests ────────────────────────────────────────────────────────────────
 
 _run "classify done" test_classify_done
-_run "classify gate-stop as done" test_classify_gate_stop
+_run "classify bare gate-stop marker as gate-stopped" test_classify_gate_stop
+_run "classify clean-exit gate-stop outcome as gate-stopped" test_classify_gate_stop_clean_exit_outcome_message
+_run "classify VERIFY_EXHAUSTED as gate-stopped" test_classify_verify_exhausted_is_gate_stopped
+_run "classify dead-letter over gate-stop marker as done" test_classify_dead_letter_beats_gate_stop_marker
 _run "classify fleet-kill as resumable" test_classify_fleet_kill_resumable
-_run "classify fleet-kill after gate-stop as done" test_classify_fleet_kill_after_gate_stop_done
+_run "classify fleet-kill after gate-stop as gate-stopped" test_classify_fleet_kill_after_gate_stop_done
 _run "classify kill-unverified as incomplete" test_classify_kill_unverified_incomplete
 _run "classify gate-held" test_classify_gate_held
 _run "classify gate-held crash before finalize" test_classify_gate_held_crash_before_finalize
@@ -777,6 +994,10 @@ _run "scoped tids only resume listed" test_scoped_tids_only_resume_listed
 _run "dry-run resume writes nothing" test_dry_run_resume_writes_nothing
 _run "dry-run cap reports dead-letter without writing" test_dry_run_cap_reports_dead_letter_without_writing
 _run "campaign resume reason" test_campaign_resume_reason
+_run "scoped resume re-enqueues gate-stopped" test_scoped_resume_reenqueues_gate_stopped
+_run "scoped resume re-enqueues gate-held" test_scoped_resume_reenqueues_gate_held
+_run "unscoped leaves gate-stopped and gate-held alone" test_unscoped_leaves_gate_stopped_and_gate_held_alone
+_run "scoped resume gate-stopped caps then dead-letters" test_scoped_resume_gate_stopped_caps_then_dead_letters
 _run "empty tids global behavior unchanged" test_empty_tids_global_behavior_unchanged
 
 # ── Stop-file pins (fleet-epic-stop) ─────────────────────────────────────────────

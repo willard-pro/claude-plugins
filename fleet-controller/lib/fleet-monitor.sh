@@ -162,12 +162,17 @@ _spawn_queue_consume() {
       tid=$(echo "$line" | jq -r '.tid // empty' 2>/dev/null)
       [ -z "$tid" ] && remaining_entries="${remaining_entries}${line}"$'\n' && continue
 
-      # Kill-aware terminal skip — same rule as fleetd's consume loop. A
+      # Kill-aware terminal skip — same rule as fleetd's consume loop (the
+      # Python twin is _log_reached_terminal + _consume_queue_locked). A
       # stale entry for a pipeline whose log already reached `done` (the
       # crash window between spawn and queue removal leaves exactly such
       # entries behind) must be dropped, never spawned: re-spawning
-      # re-executes a finished ticket. Killed and gate-held logs stay
-      # spawnable — the kill is a pause, the gate is a wait.
+      # re-executes a finished ticket. Only a true `done` — genuine
+      # completion or a dead-letter — is dropped. Killed, gate-held and
+      # gate-stopped logs stay spawnable: the kill is a pause, the gate is
+      # a wait, and a gate-stop's condition may since have been fixed (a
+      # scoped campaign resume enqueues exactly such entries, so dropping
+      # them here would silently defeat it).
       if declare -f fleet_ticket_terminal_state >/dev/null 2>&1; then
         local term_state
         term_state=$(fleet_ticket_terminal_state "$tid" "${state_dir}/${tid}-pipeline.log")
