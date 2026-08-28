@@ -194,16 +194,24 @@ _fleet_dispatch_rank() {
 
 # _fleet_repos_under_root [root]
 # Emits one path per line: REPOS_ROOT itself when it is a git repo (single-repo
-# workspace), plus every direct child directory that is a working git repo.
-# Bare repositories are excluded — children build in working clones, and
-# running branch creation against a stray bare repo (no origin remote, no
-# working tree) would fail and gate-stop dispatch for unrelated layouts.
+# workspace), plus every git working-tree repo found under it, descending into
+# non-repo directories up to FLEET_EPIC_REPOS_DEPTH levels (default 3) — this
+# covers nested layouts (microservices/<svc>, endpoints/<adapter>) where
+# service repos are not direct children of REPOS_ROOT. A directory is never
+# descended into once it is itself identified as a repo (no scanning inside a
+# repo's own working tree). Bare repositories are excluded — children build in
+# working clones, and running branch creation against a stray bare repo (no
+# origin remote, no working tree) would fail and gate-stop dispatch for
+# unrelated layouts.
+# FLEET_EPIC_REPOS, if set, bypasses enumeration entirely: a comma- or
+# colon-separated list of explicit repo paths, for operators who want to pin
+# the exact set rather than rely on directory discovery.
 # Shared by dispatch's epic-branch precondition and the epic-branch-readiness
 # detector so both cover the same repository set — the detector must not
 # re-guess a different set than dispatch created branches in.
 _fleet_repos_under_root() {
   local root="${1:-${EPIC_REPO_PATH:-${REPOS_ROOT:-.}}}"
-  local _erd
+  local depth_limit="${FLEET_EPIC_REPOS_DEPTH:-3}"
 
   _fleet_is_worktree_repo() {
     local d="$1"
@@ -211,13 +219,38 @@ _fleet_repos_under_root() {
       [ "$(git -C "$d" rev-parse --is-bare-repository 2>/dev/null)" = "false" ]
   }
 
+  if [ -n "${FLEET_EPIC_REPOS:-}" ]; then
+    local _fer_saved_ifs="$IFS"
+    local _fer_p
+    IFS=$',:'
+    for _fer_p in $FLEET_EPIC_REPOS; do
+      [ -n "$_fer_p" ] && echo "$_fer_p"
+    done
+    IFS="$_fer_saved_ifs"
+    return 0
+  fi
+
   if _fleet_is_worktree_repo "$root"; then
     echo "$root"
   fi
-  for _erd in "$root"/*/; do
-    [ -d "$_erd" ] || continue
-    if _fleet_is_worktree_repo "$_erd"; then
-      echo "$_erd"
+  _fleet_walk_repo_children "$root" 1 "$depth_limit"
+}
+
+# _fleet_walk_repo_children <dir> <depth> <limit>
+# Recursion helper for _fleet_repos_under_root: emits every git working-tree
+# repo found among <dir>'s descendants, stopping at a repo boundary (no
+# descent into a found repo's own tree) or at <limit> levels of non-repo
+# directories, whichever comes first.
+_fleet_walk_repo_children() {
+  local dir="${1%/}" depth="$2" limit="$3"
+  [ "$depth" -gt "$limit" ] && return 0
+  local child
+  for child in "$dir"/*/; do
+    [ -d "$child" ] || continue
+    if _fleet_is_worktree_repo "$child"; then
+      echo "$child"
+    else
+      _fleet_walk_repo_children "$child" $((depth + 1)) "$limit"
     fi
   done
 }
