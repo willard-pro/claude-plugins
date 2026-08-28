@@ -44,10 +44,22 @@ if [ ! -f "$LOG_FILE" ]; then
   exit "${EXIT_CODE}"
 fi
 
-# Derive outcome summary from log evidence, not exit code alone (F07 fix)
+# Derive outcome summary from log evidence, not exit code alone (F07 fix).
+# EXIT_CODE==0 is checked before any grep-based failure derivation: this
+# function is called at every router exit point, and on a long-lived,
+# multi-generation pipeline log a ticket that failed early (gate-stop,
+# gate-held, VERIFY_EXHAUSTED, ...) in a superseded earlier generation but
+# went on to genuinely complete would otherwise have its final "completed:
+# STEP_6" outcome permanently overwritten by that stale historical marker —
+# the grep checks below have no notion of "was this later resolved," same
+# class of bug as the zombie-detection fix in detect-resume.sh. A clean
+# exit code from the STEP_6 completion call site is unambiguous: it can only
+# mean the run succeeded just now, so it must win over any log history.
 _outcome_summary=""
 if [ -n "$OUTCOME_OVERRIDE" ]; then
   _outcome_summary="$OUTCOME_OVERRIDE"
+elif [ "$EXIT_CODE" -eq 0 ]; then
+  _outcome_summary="completed: STEP_6"
 elif grep -q '|META|gate-held|' "$LOG_FILE" 2>/dev/null; then
   _outcome_summary="held: gate"
 elif grep -q '|META|gate-stop|fail|' "$LOG_FILE" 2>/dev/null; then
@@ -57,8 +69,6 @@ elif grep -q 'VERIFY_EXHAUSTED' "$LOG_FILE" 2>/dev/null; then
   _outcome_summary="stopped: VERIFY_EXHAUSTED"
 elif grep -q 'PR_FEEDBACK_EXHAUSTED' "$LOG_FILE" 2>/dev/null; then
   _outcome_summary="stopped: PR_FEEDBACK_EXHAUSTED"
-elif [ "$EXIT_CODE" -eq 0 ]; then
-  _outcome_summary="completed: STEP_6"
 else
   _outcome_summary="stopped: exit ${EXIT_CODE}"
 fi

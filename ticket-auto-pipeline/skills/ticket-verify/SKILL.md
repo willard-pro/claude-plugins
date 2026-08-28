@@ -1,6 +1,6 @@
 ---
 name: ticket-verify
-description: Verifies a Linear ticket fix by loading its requirements, navigating the live app via Playwright, reproducing the original issue steps, and confirming the fix works. Produces a structured pass/fail report. On failure, emits a REMEDIATION_BRIEF that can be fed directly to ticket-implement or a fix skill. Use when the user says "/ticket-verify <ID>", "verify ticket <ID>", "test ticket <ID>", or "check if <ID> is fixed". Accepts optional --user, --password, and --env flags.
+description: Verifies a Linear ticket fix by loading its requirements, then either navigating the live app via Playwright (browser tickets) or running the project's build tooling (build-only tickets — e.g. parent-POM/dependency-management changes with no UI or API surface), reproducing the original issue steps, and confirming the fix works. Produces a structured pass/fail report. On failure, emits a REMEDIATION_BRIEF that can be fed directly to ticket-implement or a fix skill. Use when the user says "/ticket-verify <ID>", "verify ticket <ID>", "test ticket <ID>", or "check if <ID> is fixed". Accepts optional --user, --password, and --env flags.
 ---
 
 # Ticket Verify
@@ -34,7 +34,7 @@ Follow the pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with pa
 - **Verdict**: after the final pass/fail determination, write `hb-wrap.sh decision "verification-verdict" "fired" "PASS|FAIL" '{"verdict":"PASS|FAIL","criteria_met":"N","criteria_total":"M"}'`
 
 ### Step dispatch
-**Important:** Steps `browser-session`, `navigate`, and `execute-steps` depend on a live Playwright session that is lost when the server crashes. If `--from-step` is one of these values, fall back to `build-plan` instead — always re-run browser steps from scratch.
+**Important:** Steps `browser-session`, `navigate`, and `execute-steps` depend on a live Playwright session that is lost when the server crashes. If `--from-step` is one of these values, fall back to `build-plan` instead — always re-run browser steps from scratch. This does not apply in build-only mode: there is no browser session to lose, so an `execute-steps` resume in build-only mode re-enters Step 4c directly at the next unchecked criterion (per-criterion checkpoint), not `build-plan`.
 
 | `--from-step` value | Effective skip to | Restore from |
 |---------------------|-------------------|--------------|
@@ -120,7 +120,28 @@ ls "$TICKETS_ROOT/openspec/changes/" | grep -i "{ticket-id-lowercase}"
 
 If found, read `tasks.md` to understand what was implemented and any "Manually verify" tasks — these become your verification checklist.
 
-[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|load-context|done|Context loaded" >> "$LOG_FILE"
+### 1e — Detect verification mode (browser vs. build-only)
+
+Some tickets have no UI or API surface to exercise — e.g. a root parent-POM introduction, a dependency-version bump, a build-plugin config change. These are verified by running the project's build tooling and checking exit codes/output, not by driving a browser. Classify the ticket using the same signal-based approach as `gate-check.sh`'s Check 2.6, so the two phases agree on ticket shape:
+
+```bash
+_plan_file=$(find "$TICKETS_ROOT" -name "simple-fix.md" -path "*{TICKET-ID}*" 2>/dev/null | head -1)
+[ -z "$_plan_file" ] && _plan_file="{ticket-dir}/notes.md"
+_signal_text="$(cat "$_plan_file" {ticket-dir}/context.md 2>/dev/null)"
+
+_browser_signals=$(echo "$_signal_text" | grep -ciE '\b(navigate|click|button|dropdown|screen|browser|playwright|snapshot|login|nav[- ]?bar)\b|\bopen(s|ed|ing)? (the |a |modal|dialog|page)\b' || true)
+_build_signals=$(echo "$_signal_text" | grep -ciE '\b(mvn|maven|gradle|pom\.xml|build\.gradle|clean install|clean compile|clean package|mvn test|BUILD SUCCESS)\b' || true)
+
+if [ "${_browser_signals:-0}" -eq 0 ] && [ "${_build_signals:-0}" -gt 0 ]; then
+  VERIFY_MODE="build-only"
+else
+  VERIFY_MODE="browser"
+fi
+```
+
+Record `VERIFY_MODE` for the rest of this skill. `browser` is the default and behaves exactly as documented below (Steps 1.6, 1.7a/1.7b, 3, 4, 4b all apply unchanged). `build-only` skips every browser-specific step — see the "build-only" callouts inline in Steps 1.6, 1.7, 2, 3–4b, 6, and 7.
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|load-context|done|Context loaded, mode=${VERIFY_MODE}" >> "$LOG_FILE"
 
 ---
 
@@ -152,7 +173,7 @@ TRACE
 
 ## Step 1.6 — Ensure local environment is ready (local only)
 
-Skip entirely if `--env=uat` or `--no-env-start` is set.
+Skip entirely if `--env=uat`, `--no-env-start`, or `VERIFY_MODE=build-only` is set — build-only verification runs `mvn`/`gradle` directly against the worktree and never touches a running service.
 
 ### 1.6a — Detect affected backend services
 
@@ -190,6 +211,8 @@ Block until the script exits. If it exits non-zero, abort ticket-verify with the
 Before building the verification plan, resolve the test user, navigation target, and expected behavior. This ensures the verify agent has everything needed before launching the browser.
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|pre-flight|start|Resolving verification prerequisites" >> "$LOG_FILE"
+
+**If `VERIFY_MODE=build-only`**: skip 1.7a (test user) and 1.7b (navigation target) entirely — there is no login and no page to reach. Go directly to 1.7c.
 
 ### 1.7a — Resolve test user
 
@@ -248,6 +271,52 @@ If found in notes.md, use it as the basis for verification criteria in Step 2. I
 ---
 
 ## Step 2 — Build the verification plan
+
+**If `VERIFY_MODE=build-only`, skip 2a–2c below and use this variant instead:**
+
+### 2 (build-only variant)
+
+**Derive the module list and build commands.** Read the plan artifact's Completion Checklist / task list and `notes.md` for the affected repos/modules (e.g. from a "pre-implementation checkpoint" or worktree list). For each affected module, determine the appropriate build command from the project's `CLAUDE.md` `BE_TEST_CMD` and standard Maven/Gradle conventions:
+
+- Root/parent POM changes → `mvn -N install` (or `mvn -N validate` if install would pollute the local repo unnecessarily) run first, since downstream modules resolve against it.
+- Each affected service/module → `mvn clean compile` (confirms the POM resolves and the module builds against the new parent/dependency set) and, if the ticket's acceptance criteria call for it, `mvn test` (or `{BE_TEST_CMD}`).
+
+**Expand acceptance criteria into atomic items** exactly as in 2b — each criterion should map to one build command + one pass condition (e.g. "parent POM installs cleanly" → `mvn -N install` exits 0; "bom module still builds against parent" → `mvn clean compile` in `bom/` exits 0 with no version override left unintentionally).
+
+Construct and print the **Verification Plan**:
+
+```
+## Verification Plan — {TICKET-ID}: {title} (build-only)
+
+**Environment:** build (no browser/API surface)
+**Modules under test:** {list of affected repos/modules}
+
+**What was broken:** {one sentence from Actual Behaviour}
+**What should be true now:** {one sentence from Expected Behaviour / AC}
+
+### Acceptance criteria (expanded — each item verified independently)
+1. {atomic criterion — one observable build fact, e.g. "mvn -N install succeeds for parent"}
+2. {atomic criterion}
+...
+
+### Build commands
+1. `cd {repo} && mvn -N install` — {why}
+2. `cd {module} && mvn clean compile` — {why}
+...
+
+### Pass criteria
+- [ ] {criterion 1 — command exits 0, no unexpected version diffs}
+- [ ] {criterion 2}
+...
+```
+
+If `--from-auto` is NOT set: pause and ask "Does this plan look right? (yes / adjust: ...)". If `--from-auto` IS set: print the plan and proceed directly to Step 4c (skip Steps 3, 4, 4b entirely — there is no browser session to establish).
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|build-plan|done|{N} criteria (build-only)" >> "$LOG_FILE"
+
+Proceed to **Step 4c** below, skipping Steps 3, 4, and 4b.
+
+---
 
 ### 2a — Derive the navigation path
 
@@ -325,6 +394,8 @@ If `--from-auto` IS set:
 ---
 
 ## Step 3 — Establish browser session
+
+**If `VERIFY_MODE=build-only`: skip Steps 3, 4, and 4b entirely — go to Step 4c.**
 
 ### 3a — Navigate to the app
 
@@ -448,6 +519,39 @@ At any point, if the observed result contradicts a pass criterion, mark that cri
 Continue executing remaining steps unless the page is in a broken state (crash, blank page, unexpected auth redirect).
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|execute-steps|done|{N} steps executed" >> "$LOG_FILE"
+
+---
+
+## Step 4c — Execute build verification (build-only mode only)
+
+**Phase timeout:** same 30-minute wall-clock limit as Step 4b — checkpoint progress, don't crash on timeout.
+
+Run each build command from the Step 2 (build-only variant) plan sequentially, in the worktree for its repo/module. For **every command**:
+
+1. Run the command, capturing stdout+stderr and the exit code:
+   ```bash
+   cd "{worktree path}" && { {build command} ; } > /tmp/ticket-verify-{TICKET-ID}-{step}.log 2>&1
+   _rc=$?
+   ```
+2. Record the **observed result** — exit code, and (if relevant to the criterion) whether the expected artifact/version/output string appears in the captured log (e.g. `BUILD SUCCESS`, a specific dependency version resolved, absence of a removed property).
+3. If the criterion also requires checking that something did NOT regress (e.g. "module-specific plugin pins were preserved"), diff the relevant POM/build file section against the pre-implementation state noted in `notes.md`, or `grep` for the expected value in the file directly.
+
+**Per-criterion checkpointing:** After EACH criterion passes, write a checkpoint entry exactly as in Step 4b, so a crash resumes from the next criterion:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|checkpoint|done|criterion-{N}-pass" >> "$LOG_FILE"
+```
+
+At any point, if a command exits non-zero or the expected output/state is absent, mark that criterion **FAIL** and record:
+- The command that was run and its exit code
+- What was expected (from the pass criterion)
+- What was observed — quote the relevant lines of build output verbatim (last 20–30 lines, or the specific error block)
+
+Continue executing remaining commands unless the failure makes downstream commands meaningless (e.g. `mvn -N install` failing means every dependent module's `mvn clean compile` will fail for the same reason — note this and skip re-running them individually rather than spamming identical failures).
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|execute-steps|done|{N} build commands executed" >> "$LOG_FILE"
+
+Proceed to Step 5.
 
 ---
 
@@ -584,16 +688,28 @@ write_verifier_result verifier=playwright_uat verdict=<PASS|FAIL> criteria_met=<
 ```
 On PASS: criteria_met=criteria_total=total passing criteria. On FAIL: criteria_met=passed count, criteria_total=total.
 
+**If `VERIFY_MODE=build-only`**, use `verifier=build_only` instead of `playwright_uat`:
+```bash
+write_verifier_result verifier=build_only verdict=<PASS|FAIL> criteria_met=<N> criteria_total=<M> attempt=<A> phase=VERIFY
+```
+
 ---
 
 ## Step 7 — Failure report
 
 ### 7a — Collect diagnostics
 
+**Browser mode:**
 1. **Console errors** — `mcp__plugin_playwright_playwright__browser_console_messages` (errors only, not warnings)
 2. **Current URL** — from the last snapshot
 3. **Last snapshot YAML** — accessibility tree at the point of failure
 4. **Failed step** — step number, expected vs. observed
+
+**Build-only mode:** substitute build diagnostics for the browser ones above — these map onto the same REMEDIATION_BRIEF fields (7c) so downstream skills don't need mode-specific parsing:
+1. **Failed command + exit code** — maps to `CONSOLE_ERRORS` field
+2. **Repo/module + branch** — maps to `CURRENT_URL` field (use `{repo}@{branch}` in place of a URL)
+3. **Last 20–30 lines of captured build output** (`/tmp/ticket-verify-{TICKET-ID}-{step}.log`) — maps to `SNAPSHOT_EXCERPT` field
+4. **Failed step** — step number, expected vs. observed (command + exit code)
 
 ### 7b — Write the failure report
 
@@ -832,3 +948,4 @@ The REMEDIATION_BRIEF above feeds `ticket-implement` for the fix round.
 - **Multiple failing criteria:** If more than one criterion fails, report all of them in 7b and 7c. The WHAT_FAILED and SNAPSHOT_EXCERPT should cover the first failure point; list subsequent failures under a `ADDITIONAL_FAILURES:` key in the brief.
 - **Scope:** This skill does not modify source code. It posts a verification comment to Linear on both pass and fail. On UAT fail it also triggers `uat-fail` (state → `Ready`, label `rejected`). Local pass triggers `implement-complete` (state → `Review`). The business partner handles the final UAT → Done transition manually.
 - **REMEDIATION_BRIEF format is canonical** — do not reformat the delimiter lines or key names.
+- **Build-only mode:** tickets with no UI/API surface (root parent-POM changes, dependency-version bumps, build-plugin config) skip every browser step (1.6, 1.7a/1.7b, 3, 4, 4b) and instead run the affected modules' build commands directly, evaluating pass/fail on exit codes and output rather than snapshots. Detection mirrors `gate-check.sh`'s Check 2.6 classification so both phases agree on ticket shape. The REMEDIATION_BRIEF and pass/fail report keep their canonical field names — `CONSOLE_ERRORS`/`SNAPSHOT_EXCERPT`/`CURRENT_URL` just carry build diagnostics instead of browser ones (see Step 7a).

@@ -13,6 +13,14 @@
 #
 # Usage:
 #   source lib/branch-resolve.sh
+
+# Source dependencies (main path — previously only self-test mode did this,
+# leaving check_branch_directive_description undefined during real resolution).
+_BR_LIB_DIR="$(dirname "${BASH_SOURCE[0]}")"
+source "$_BR_LIB_DIR/config.sh" 2>/dev/null || true
+source "$_BR_LIB_DIR/linear-api.sh" 2>/dev/null || true
+source "$_BR_LIB_DIR/branch-directive-check.sh" 2>/dev/null || true
+
 #   resolve_branch_context "CRE-123"
 #   resolve_branch_context "CRE-123" --branch "epic/test-x"
 #   resolve_branch_context "CRE-123" --title "Fix auth" --parent-json '{"id":"CRE-100","description":"..."}'
@@ -66,14 +74,14 @@ resolve_branch_context() {
     }
 
     # Type guard
-    if ! echo "$issue_json" | jq -e '.data.issue' >/dev/null 2>&1; then
+    if ! echo "$issue_json" | jq -e '.id and .title' >/dev/null 2>&1; then
       echo "branch-resolve: unexpected response shape for $ticket_id" >&2
       return 1
     fi
 
-    title=$(echo "$issue_json" | jq -r '.data.issue.title // ""')
-    parent_id=$(echo "$issue_json" | jq -r '.data.issue.parent.id // ""')
-    parent_description=$(echo "$issue_json" | jq -r '.data.issue.parent.description // ""')
+    title=$(echo "$issue_json" | jq -r '.title // ""')
+    parent_id=$(echo "$issue_json" | jq -r '.parent.id // ""')
+    parent_description=$(echo "$issue_json" | jq -r '.parent.description // ""')
   else
     # Extract parent info from inline JSON
     if [ -n "$inline_parent_json" ]; then

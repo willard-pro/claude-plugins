@@ -168,7 +168,7 @@ fi
 if [ -s "$LOG_FILE" ]; then
   _zombie_cutoff=$(date -d "5 minutes ago" +%s 2>/dev/null || echo 0)
   if [ "$_zombie_cutoff" -gt 0 ]; then
-    while IFS= read -r _zline; do
+    while IFS=: read -r _z_lineno _zline; do
       _z_iso=$(echo "$_zline" | awk -F'|' '{print $1}')
       _z_phase=$(echo "$_zline" | awk -F'|' '{print $2}')
       _z_step=$(echo "$_zline" | awk -F'|' '{print $3}')
@@ -178,6 +178,27 @@ if [ -s "$LOG_FILE" ]; then
       # trigger phase re-runs (RLVR Phase 1 — F4 fix).
       case "$_z_step" in phase-inspector-*) continue ;; esac
       case "$_z_phase" in APPRAISE | REPRODUCE | EXEC | GATE | IMPLEMENT | VERIFY | PR-REVIEW | MAINTENANCE) ;; *) continue ;; esac
+
+      # Skip if a later done/fail entry for the same phase+step already
+      # resolved this waiting marker. Long-lived, multi-generation pipeline
+      # logs accumulate old waiting lines from crashed/superseded attempts
+      # that a subsequent run went on to complete; without this check every
+      # resume re-flags them as zombies and clobbers forward progress that
+      # already happened (discovered live 2026-08-27 debugging CRE-9 — a
+      # fresh GATE pass was immediately overwritten back to STEP_3 by a
+      # week-old resolved GATE/reconcile waiting line).
+      # Captured via command substitution, then matched with a herestring
+      # (not a live pipe into grep -q): under `set -o pipefail` (active in
+      # this script), `tail | grep -q` would have `tail` killed by SIGPIPE
+      # the instant grep -q's first match closes its stdin, and pipefail
+      # reports that SIGPIPE exit (141) as pipeline failure even though grep
+      # truly matched — silently defeating this whole check on any phase+step
+      # with more than one later resolution line (e.g. MAINTENANCE/prescan,
+      # which accumulates one per repo).
+      _z_rest="$(tail -n "+$((_z_lineno + 1))" "$LOG_FILE" 2>/dev/null)"
+      if grep -q "^[^|]*|${_z_phase}|${_z_step}|\(done\|fail\)|" <<<"$_z_rest"; then
+        continue
+      fi
 
       _z_epoch=$(date -d "$_z_iso" +%s 2>/dev/null || echo 0)
       if [ "$_z_epoch" -gt 0 ] && [ "$_z_epoch" -lt "$_zombie_cutoff" ]; then
@@ -199,7 +220,7 @@ if [ -s "$LOG_FILE" ]; then
           esac
         fi
       fi
-    done < <(grep '|waiting|' "$LOG_FILE" 2>/dev/null || true)
+    done < <(grep -n '|waiting|' "$LOG_FILE" 2>/dev/null || true)
   fi
 fi
 

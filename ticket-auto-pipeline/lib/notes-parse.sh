@@ -104,11 +104,29 @@ get_ac_count() {
   fi
 
   local count
-  # Count numbered (1., 2.) and checkbox (- [ ] and - [x]) criteria lines.
-  # CRITICAL: stop counting at repro section headings — reproduction steps
+  # Prefer an explicit "## Acceptance Criteria" section: count AC lines only
+  # within that section (heading to the next heading of any level). This
+  # avoids the prefix heuristic below misfiring on templates where a heading
+  # like Background/Context/Environment appears BEFORE Acceptance Criteria —
+  # the prefix would otherwise get truncated before the real AC section is
+  # ever reached, undercounting a ticket that has ACs as zero.
+  local ac_section
+  ac_section=$(awk '
+    { low = tolower($0) }
+    low ~ /^#+[ \t]*acceptance criteria[ \t]*$/ { flag=1; next }
+    /^#+[ \t]/ { if (flag) exit }
+    flag { print }
+  ' "$ctx" 2>/dev/null || true)
+  if [ -n "$ac_section" ]; then
+    count=$(echo "$ac_section" | grep -cP '^\s*(\d+\.\s|\- \[[ xX]\]\s)' 2>/dev/null || true)
+    echo "${count//[^0-9]/}"
+    return 0
+  fi
+
+  # Fallback: no explicit "## Acceptance Criteria" heading found — original
+  # heuristic. Count numbered (1., 2.) and checkbox (- [ ] and - [x]) criteria
+  # lines, stopping at the first repro section heading — reproduction steps
   # are numbered but are NOT acceptance criteria.
-  # Strategy: extract everything before the first repro/non-AC section heading,
-  # then count AC lines within that prefix only.
   local prefix
   prefix=$(sed -E '/^#*\s*(Steps to Repro|Reproduct|How to Repro|Reproduction Steps|To Reproduce|Background|Context|Environment|Notes|Setup|Prerequisites)/Iq' "$ctx" 2>/dev/null || true)
   if [ -z "$prefix" ]; then
@@ -300,7 +318,12 @@ get_critique_has_finding() {
     error_return 12 "notes-parse: file not found"
   fi
 
-  sed -n '/## Readiness Critique/,/^## /p' "$notes" 2>/dev/null | grep -q "$pattern" 2>/dev/null
+  # A line matching the pattern but explicitly qualified N/A (e.g. "No
+  # navigation path, but N/A — build-validation ticket with no UI") is a
+  # disposition, not a live finding: the critique is documenting that the
+  # check doesn't apply to this ticket, not flagging a gap. Only count
+  # matches that aren't qualified N/A on the same line.
+  sed -n '/## Readiness Critique/,/^## /p' "$notes" 2>/dev/null | grep "$pattern" 2>/dev/null | grep -qvi 'N/A'
 }
 
 # get_test_users_by_role <role> [catalog_path]

@@ -1,6 +1,6 @@
 {
   "name": "ticket-auto-pipeline",
-  "version": "0.26.0",
+  "version": "0.26.1",
   "description": "Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. Includes 20+ slash commands, state-machine-driven flow control, safety gates, and retrospective analysis. Supports shared epic branches with per-ticket git worktree isolation.",
   "author": {
     "name": "John Willard"

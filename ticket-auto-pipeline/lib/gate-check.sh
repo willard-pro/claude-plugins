@@ -335,48 +335,76 @@ _gate_entry() {
     # Count missing prerequisites, adjusted for ticket type.
     # API-only tickets (no browser nav patterns in artifact, no test user refs)
     # only require expected_behavior + env_prereqs. Browser tickets require all 4.
-    # Detection: artifact contains no browser navigation patterns AND no test user
-    # references → treat as API-only.
-    local _is_api_only=false _required_count
+    # Build-only tickets (no UI, no API — pure compile/build verification, e.g.
+    # parent-POM/dependency-management changes) only require a concrete build/
+    # verify command + a stated success outcome — the browser/API prerequisites
+    # (test user, nav path) are meaningless for them and would always false-hold.
+    # Detection precedence: browser signals present → browser; else build-tool
+    # signals present → build-only; else → api-only (existing fallback).
+    local _ticket_mode="browser" _required_count has_build_command has_build_outcome
+    has_build_command=0
+    has_build_outcome=0
     if [ "${has_nav_path:-0}" = "0" ] && [ "${has_test_user:-0}" = "0" ]; then
-      # Neither nav paths nor test users found in artifact — check if it's
-      # a structural API-only plan (has expected behavior + env prereqs but
-      # zero browser signals across all grep patterns).
-      local _browser_signals
-      _browser_signals=$(grep -ciP '(navigate|go to|open|visit|click|browser|playwright|page\.|selector|screenshot|viewport)' "$artifact_path" 2>/dev/null || echo "0")
+      # Neither nav paths nor test users found in artifact — check for browser
+      # signals. "open" alone is too weak (matches "open question", "open a PR")
+      # so it's scoped to an actual UI object.
+      local _browser_signals _build_signals
+      _browser_signals=$(grep -ciP '(navigate|go to|open(s|ed|ing)?\s+(the\s+)?(page|browser|url|dialog|modal|menu|tab|app)\b|visit|click|browser|playwright|page\.|selector|screenshot|viewport)' "$artifact_path" 2>/dev/null || true)
       if [ "${_browser_signals//[^0-9]/}" = "0" ] 2>/dev/null; then
-        _is_api_only=true
+        _build_signals=$(grep -ciP '(\bmvn\b|\bgradle\b|\bnpm run\b|\bmake\b|pom\.xml|build\.gradle|clean compile|clean install|clean package|BUILD SUCCESS)' "$artifact_path" 2>/dev/null || true)
+        if [ "${_build_signals//[^0-9]/}" != "0" ] 2>/dev/null; then
+          _ticket_mode="build-only"
+        else
+          _ticket_mode="api-only"
+        fi
       fi
     fi
 
     missing_count=0
-    _required_count=4
-    if $_is_api_only; then
+    case "$_ticket_mode" in
+    build-only)
+      # Build-only: require a concrete build/verify command plus a stated
+      # success outcome, in place of browser/API-shaped prerequisites that
+      # don't apply to a no-UI, no-API ticket.
+      _required_count=2
+      has_build_command=$(grep -ciP '(\bmvn\b\s|\bgradle\b|\bnpm run\b|\bmake\b\s|clean compile|clean install|clean package|clean test)' "$artifact_path" 2>/dev/null || true)
+      has_build_outcome=$(grep -ciP '(BUILD SUCCESS|succeeds?\b|compiles?\s+(successfully|cleanly)|passes?\b|no (compile|build) error|exit code 0|green build)' "$artifact_path" 2>/dev/null || true)
+      [ "${has_build_command:-0}" = "0" ] && missing_count=$((missing_count + 1))
+      [ "${has_build_outcome:-0}" = "0" ] && missing_count=$((missing_count + 1))
+      ;;
+    api-only)
       # API-only: skip browser-specific prerequisites
       _required_count=2
       [ "$has_expected_behavior" = "0" ] && missing_count=$((missing_count + 1))
       [ "$has_env_prereqs" = "0" ] && missing_count=$((missing_count + 1))
-    else
+      ;;
+    *)
       # Browser: all 4 required
+      _required_count=4
       [ "$has_test_user" = "0" ] && missing_count=$((missing_count + 1))
       [ "$has_nav_path" = "0" ] && missing_count=$((missing_count + 1))
       [ "$has_expected_behavior" = "0" ] && missing_count=$((missing_count + 1))
       [ "$has_env_prereqs" = "0" ] && missing_count=$((missing_count + 1))
-    fi
+      ;;
+    esac
 
-    # Hold if 2+ missing for browser tickets, or any missing for API-only
-    # (INCOMPLETE threshold from appraise-exec Step 3.8).
+    # Hold if 2+ missing for browser tickets, or any missing for API-only/
+    # build-only (INCOMPLETE threshold from appraise-exec Step 3.8).
     # Only enforce when a verification plan was attempted (plan section exists)
     # or a critique has been run (indicating the plan SHOULD exist). Tickets
     # without either are pre-verification-plan and the hold would be a false
     # positive — skip enforcement for them.
     if [ -n "$vplan_section" ] || [ -n "$critique_score" ]; then
-      if { $_is_api_only && [ "$missing_count" -ge 1 ] 2>/dev/null; } ||
-        { ! $_is_api_only && [ "$missing_count" -ge 2 ] 2>/dev/null; }; then
-        local _ticket_mode="browser"
-        $_is_api_only && _ticket_mode="api-only"
-        _plog "$LOG_FILE" "GATE" "gate" "fail" "held: plan missing $missing_count/${_required_count} verification prerequisites (mode=$_ticket_mode test_user=$has_test_user nav=$has_nav_path expected=$has_expected_behavior env=$has_env_prereqs)"
-        hb_gate "entry-gate" "fail" "held: plan missing verification prerequisites" "{\"artifact\":\"$artifact_path\",\"missing\":\"$missing_count\",\"required\":\"$_required_count\",\"mode\":\"$_ticket_mode\",\"test_user\":\"$has_test_user\",\"nav\":\"$has_nav_path\",\"expected\":\"$has_expected_behavior\",\"env\":\"$has_env_prereqs\"}"
+      local _hold_threshold=2
+      [ "$_ticket_mode" != "browser" ] && _hold_threshold=1
+      if [ "$missing_count" -ge "$_hold_threshold" ] 2>/dev/null; then
+        if [ "$_ticket_mode" = "build-only" ]; then
+          _plog "$LOG_FILE" "GATE" "gate" "fail" "held: plan missing $missing_count/${_required_count} verification prerequisites (mode=$_ticket_mode build_command=$has_build_command build_outcome=$has_build_outcome)"
+          hb_gate "entry-gate" "fail" "held: plan missing verification prerequisites" "{\"artifact\":\"$artifact_path\",\"missing\":\"$missing_count\",\"required\":\"$_required_count\",\"mode\":\"$_ticket_mode\",\"build_command\":\"$has_build_command\",\"build_outcome\":\"$has_build_outcome\"}"
+        else
+          _plog "$LOG_FILE" "GATE" "gate" "fail" "held: plan missing $missing_count/${_required_count} verification prerequisites (mode=$_ticket_mode test_user=$has_test_user nav=$has_nav_path expected=$has_expected_behavior env=$has_env_prereqs)"
+          hb_gate "entry-gate" "fail" "held: plan missing verification prerequisites" "{\"artifact\":\"$artifact_path\",\"missing\":\"$missing_count\",\"required\":\"$_required_count\",\"mode\":\"$_ticket_mode\",\"test_user\":\"$has_test_user\",\"nav\":\"$has_nav_path\",\"expected\":\"$has_expected_behavior\",\"env\":\"$has_env_prereqs\"}"
+        fi
         return 1
       fi
     fi # vplan_section || critique_score guard
