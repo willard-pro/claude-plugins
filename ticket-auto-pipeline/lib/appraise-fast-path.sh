@@ -183,7 +183,7 @@ generate_fast_path_notes() {
   # Build regenerate warning (if applicable)
   local regenerate_warning=""
   if [ "${FAST_PATH_REGENERATE:-false}" = "true" ]; then
-    regenerate_warning="- ⚠️ Planner recommends regenerating this ticket's plan — plan may be stale."
+    regenerate_warning="- [needs-human] ⚠️ Planner recommends regenerating this ticket's plan — plan may be stale."
   fi
 
   {
@@ -215,7 +215,7 @@ generate_fast_path_notes() {
     printf '**Generated:** %s\n' "${FAST_PATH_GENERATED:-unknown}"
     printf '**Regenerate:** %s\n\n' "${FAST_PATH_REGENERATE:-false}"
     printf '## Open Questions\n\n'
-    printf -- '- Verify target symbols against live source (fast-path skips codebase investigation).\n'
+    printf -- '- [agent-resolvable] Verify target symbols against live source (fast-path skips codebase investigation).\n'
     if [ -n "$regenerate_warning" ]; then
       printf '%s\n' "$regenerate_warning"
     fi

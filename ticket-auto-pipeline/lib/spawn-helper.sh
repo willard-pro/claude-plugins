@@ -699,6 +699,8 @@ spawn_watchdog_start() {
   local phase_label="${2:-unknown}"
   local sleep_secs="${3:-60}"
   local ticket_id="${4:-}"
+  local stop_dir
+  stop_dir=$(dirname "$stop_file")
 
   rm -f "$stop_file"
 
@@ -707,6 +709,10 @@ spawn_watchdog_start() {
     while true; do
       sleep "$sleep_secs"
       [ -f "$stop_file" ] && break
+      # The stop file's directory is gone (workspace torn down) — nothing
+      # left to watch, and no stop file will ever appear here again. Exit
+      # rather than spin until the process table fills up.
+      [ -d "$stop_dir" ] || break
       hb_heartbeat "watchdog" "alive" "waiting for ${phase_label} agent" || true
       # Read agent progress file — if non-empty, emit as agent-progress heartbeat
       if [ -n "$ticket_id" ]; then

@@ -8,13 +8,38 @@ set -eo pipefail
 
 # Reap all child processes on exit. Tests that background pingers and
 # watchdogs use disown, but any residual children from test setup/teardown
-# would otherwise accumulate as zombies.
+# would otherwise accumulate as zombies. jobs -p cannot see disowned jobs —
+# tests that background a watchdog/pinger must capture and kill its PID
+# directly (see test_watchdog_emits_heartbeats).
 _cleanup_test_children() {
   local _pids
   _pids=$(jobs -p 2>/dev/null || true)
   [ -n "$_pids" ] && kill $_pids 2>/dev/null || true
 }
-trap _cleanup_test_children EXIT
+
+# Every mktemp -d in this file must go through this helper so its directory
+# is swept on exit even if the test fails, errors out, or forgets its own
+# rm -rf — otherwise stale dirs accumulate under /tmp across runs.
+_TEST_TMPDIRS=()
+_mktemp_test_dir() {
+  local d
+  d=$(mktemp -d)
+  _TEST_TMPDIRS+=("$d")
+  echo "$d"
+}
+
+_cleanup_test_tmpdirs() {
+  local d
+  for d in "${_TEST_TMPDIRS[@]}"; do
+    rm -rf "$d" 2>/dev/null || true
+  done
+}
+
+_cleanup_test_exit() {
+  _cleanup_test_children
+  _cleanup_test_tmpdirs
+}
+trap _cleanup_test_exit EXIT
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -53,7 +78,7 @@ capture_agent_result() { return 0; }
 
 test_write_env_creates_file() {
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   source "$LIB_DIR/spawn-helper.sh"
   spawn_write_env TICKET_ID=TEST-42 REPOS_ROOT=/tmp/test ISSUE_PREFIX=TEST BE_SERVICES=svc1 WIKI_ROOT=/tmp/wiki BE_TEST_CMD="make test" FE_TEST_CMD="npm test" LOCAL_URL=http://localhost:3000 UAT_URL=http://localhost:8080 SLACK_CHANNEL="#test" >/dev/null 2>&1
   local rc=$?
@@ -230,16 +255,25 @@ test_pre_metadata_contains_correct_phase() {
 test_pre_printf_q_escapes_shell_metachars() {
   # Values containing ; or " must be printf '%q' escaped in the env_prefix
   source "$LIB_DIR/spawn-helper.sh"
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
   local output
-  output=$(spawn_agent_pre PHASE=TEST STEP=test TICKET_ID=TEST-42 SKILL=/ticket-test \
+  # HB_LOG_FILE is real (non-empty), so this starts a genuine disowned
+  # watchdog. FLEET_STATE_DIR pins its stop-file under our own tmpdir so it
+  # self-terminates (spawn-helper.sh's stop_dir check) once we rm -rf below,
+  # instead of spinning forever against a stop file it can never see.
+  output=$(FLEET_STATE_DIR="$tmpdir" spawn_agent_pre PHASE=TEST STEP=test TICKET_ID=TEST-42 SKILL=/ticket-test \
     LOG_FILE='/tmp/foo"; echo pwned; true".log' \
     HB_LOG_FILE='/tmp/foo".log' \
     2>/dev/null)
+  local rc=0
   # The escaped values should appear in single quotes (printf '%q' output)
   # and NOT contain unescaped double-quote-shell-break patterns
-  echo "$output" | grep -q "AGENT_PROMPT="
+  echo "$output" | grep -q "AGENT_PROMPT=" || rc=1
   # The unescaped injection string should be absent from the final prompt
-  ! echo "$output" | grep -q 'echo pwned'
+  echo "$output" | grep -q 'echo pwned' && rc=1
+  rm -rf "$tmpdir"
+  return $rc
 }
 
 test_pre_writes_context_file() {
@@ -355,7 +389,7 @@ test_token_tracker_resolves_phase_from_spawn_meta() {
   # Creates a spawn-meta with PHASE=APPRAISE and a minimal agent transcript,
   # then pipes hook JSON to the tracker and checks the log output.
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   local log_file="$tmpdir/test-tk.log"
   local transcript="$tmpdir/transcript.jsonl"
   local meta_file="/tmp/ticket-auto-TEST-TK01-spawn-meta.txt"
@@ -409,7 +443,7 @@ test_token_tracker_fallback_to_ctx_file() {
   # Verify token-tracker.sh falls back to ctx file when spawn-meta is absent.
   # We must move aside ALL spawn-meta files so the fallback path is exercised.
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   local log_file="$tmpdir/test-tk2.log"
   local transcript="$tmpdir/transcript2.jsonl"
   local ctx_file="/tmp/ticket-auto-TEST-TK02-ctx.txt"
@@ -466,7 +500,7 @@ test_token_tracker_defaults_to_unknown_when_no_files() {
   # Verify token-tracker.sh defaults to UNKNOWN when meta file has empty PHASE
   # and no ctx file exists. Must isolate from leftover ctx files from other tests.
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   local log_file="$tmpdir/test-tk3.log"
   local transcript="$tmpdir/transcript3.jsonl"
   local meta_file="/tmp/ticket-auto-TEST-TK03-spawn-meta.txt"
@@ -529,7 +563,7 @@ JSONL
 test_pre_duplicate_waiting_suppressed() {
   # Calling spawn_agent_pre twice with same PHASE/STEP must NOT write two waiting entries
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   local log_file="$tmpdir/test.log"
   # First call: writes waiting
   source "$LIB_DIR/spawn-helper.sh"
@@ -547,7 +581,7 @@ test_pre_duplicate_waiting_suppressed() {
 test_post_duplicate_done_suppressed() {
   # Calling spawn_agent_post done twice with same PHASE/STEP must NOT write two done entries
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   local log_file="$tmpdir/test.log"
   cat >/tmp/ticket-auto-TEST-DUP2-spawn-meta.txt <<'META'
 PHASE=TEST
@@ -572,7 +606,7 @@ test_post_phase_uppercase_in_log() {
   # detect-resume.sh compares against uppercase phase constants (APPRAISE, IMPLEMENT, etc.)
   # and will silently fall through to STEP_1 if the phase is lowercase.
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   local log_file="$tmpdir/test.log"
   local hb_file="$tmpdir/test.hb"
   cat >/tmp/ticket-auto-TEST-CASE-spawn-meta.txt <<'META'
@@ -603,7 +637,7 @@ test_post_loop_phase_two_brackets_produce_two_done_lines() {
   # already matches. The post-guard must be tail-scoped like the pre-guard so
   # each bracket's own done line lands.
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   local log_file="$tmpdir/test.log"
   source "$LIB_DIR/spawn-helper.sh"
   # Bracket 1: waiting -> done
@@ -624,7 +658,7 @@ test_post_retry_after_fail_writes_new_bracket() {
   # After a fail entry, calling pre again MUST write a new waiting bracket
   # (last line is fail, not waiting — guard must allow the retry)
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   local log_file="$tmpdir/test.log"
   # Set up metadata for post
   cat >/tmp/ticket-auto-TEST-RETRY-spawn-meta.txt <<'META'
@@ -659,7 +693,7 @@ test_post_rejects_bad_verdict_value() {
 
 test_post_done_verdict_prepended_to_log_msg() {
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   local log_file="$tmpdir/test.log"
   cat >/tmp/ticket-auto-TEST-VERDICT1-spawn-meta.txt <<META
 PHASE=VERIFY
@@ -678,7 +712,7 @@ META
 
 test_post_fail_verdict_prepended_to_log_msg() {
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   local log_file="$tmpdir/test.log"
   cat >/tmp/ticket-auto-TEST-VERDICT2-spawn-meta.txt <<META
 PHASE=VERIFY
@@ -697,7 +731,7 @@ META
 test_post_no_verdict_leaves_msg_unprefixed() {
   # Non-verdict phases (e.g. document/maintenance) must not gain a stray prefix.
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   local log_file="$tmpdir/test.log"
   cat >/tmp/ticket-auto-TEST-VERDICT3-spawn-meta.txt <<META
 PHASE=MAINTENANCE
@@ -732,11 +766,19 @@ test_env_prefix_survives_shell_special_chars_in_paths() {
   # a quote or command substitution, the sub-agent would execute it. This test
   # asserts that printf '%q' neutralises those characters.
   source "$LIB_DIR/spawn-helper.sh"
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
   local try_tid='TEST-42"; echo BAD; true"'
   local try_log='/tmp/log"; $(id); true".log'
   local output
-  output=$(spawn_agent_pre PHASE=TEST STEP=test TICKET_ID="$try_tid" SKILL=/ticket-test \
+  # HB_LOG_FILE is real (non-empty), so this starts a genuine disowned
+  # watchdog. FLEET_STATE_DIR pins its stop-file under our own tmpdir so it
+  # self-terminates once we rm -rf below, rather than leaking indefinitely
+  # against the shared ./logs default (which also gets the malicious
+  # TICKET_ID baked into a filename otherwise — see GH #129).
+  output=$(FLEET_STATE_DIR="$tmpdir" spawn_agent_pre PHASE=TEST STEP=test TICKET_ID="$try_tid" SKILL=/ticket-test \
     LOG_FILE="$try_log" HB_LOG_FILE="$try_log" CLAUDE_LOG_FILE="$try_log" 2>/dev/null || true)
+  rm -rf "$tmpdir"
   # The output must not contain an unquoted command injection site
   ! echo "$output" | grep -qF 'echo BAD'
   ! echo "$output" | grep -qF '$(id)'
@@ -770,7 +812,7 @@ test_watchdog_start_creates_background_process() {
   # Verify spawn_watchdog_start launches a background process that can be stopped
   source "$LIB_DIR/spawn-helper.sh"
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   local stop_file="$tmpdir/watchdog-stop"
   # Use a short sleep (1s) to test the stop mechanism; watchdog_start uses a
   # sub-process that loops on sleep 60, but we only need to verify start/stop.
@@ -795,7 +837,7 @@ test_watchdog_stop_kills_background_process() {
   # Verify spawn_watchdog_stop creates the stop file to terminate the watchdog
   source "$LIB_DIR/spawn-helper.sh"
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   local stop_file="$tmpdir/watchdog-stop"
   export HB_LOG_FILE="$tmpdir/test-hb.log"
   # Test that stop creates the stop file (watchdog loop checks for this file)
@@ -892,7 +934,7 @@ test_watchdog_emits_heartbeats() {
   # Verify spawn_watchdog_start actually writes heartbeat entries when
   # HB_LOG_FILE is set. Uses sleep_secs=1 to avoid 60s delay.
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   local stop_file="$tmpdir/watchdog-stop"
   local hb_log="$tmpdir/hb.log"
   # Run in a clean subshell — unset global mocks so spawn-helper.sh loads real heartbeat.sh
@@ -904,6 +946,9 @@ test_watchdog_emits_heartbeats() {
     hb_init
     # Start watchdog with 1s interval (instead of default 60s)
     spawn_watchdog_start "$stop_file" "TEST" 1
+    # $! immediately after start captures the disowned background PID —
+    # jobs -p cannot see it once disowned, so this is the only handle we get.
+    local watchdog_pid=$!
     # Wait up to 3s for at least one heartbeat entry
     waited=0
     while [ $waited -lt 6 ]; do
@@ -911,14 +956,52 @@ test_watchdog_emits_heartbeats() {
       waited=$((waited + 1))
       [ -f "$hb_log" ] && grep -q 'watchdog' "$hb_log" 2>/dev/null && break
     done
-    # Stop the watchdog
+    # Stop the watchdog and verify at least one heartbeat was written before
+    # killing it directly — don't rely on the stop-file race against the
+    # caller's rm -rf below (that's exactly the leak this test used to cause).
     spawn_watchdog_stop "$stop_file"
-    # Verify at least one watchdog heartbeat was written
-    grep -q 'watchdog' "$hb_log"
+    local result=0
+    grep -q 'watchdog' "$hb_log" || result=1
+    kill "$watchdog_pid" 2>/dev/null || true
+    exit "$result"
   )
   local rc=$?
   rm -rf "$tmpdir"
   return $rc
+}
+
+# Regression test for GH #129: a watchdog whose workspace directory is
+# deleted out from under it (the test's own rm -rf, or a crashed caller in
+# production) must exit on its own instead of spinning on a stop file that
+# can never appear again.
+test_watchdog_exits_when_workspace_removed() {
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local stop_file="$tmpdir/watchdog-stop"
+  local watchdog_pid
+  (
+    export HB_LOG_FILE="$tmpdir/hb.log"
+    unset -f hb_heartbeat hb_pinger_start hb_pinger_stop cl_write _plog _iso_now 2>/dev/null || true
+    source "$LIB_DIR/spawn-helper.sh"
+    hb_init
+    spawn_watchdog_start "$stop_file" "TEST" 1
+    echo "$!"
+  ) >"$tmpdir/pid.txt"
+  watchdog_pid=$(cat "$tmpdir/pid.txt")
+  # Remove the workspace without ever touching the stop file — this is the
+  # exact race from the bug report (rm -rf wins before the watchdog wakes).
+  rm -rf "$tmpdir"
+  local waited=0
+  while kill -0 "$watchdog_pid" 2>/dev/null; do
+    if [ "$waited" -ge 30 ]; then
+      kill "$watchdog_pid" 2>/dev/null || true
+      echo "watchdog still alive after 3s of workspace removal"
+      return 1
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  return 0
 }
 
 # ── spawn_agent_post wait/reaping (Bug #4 fix) ─────────────────────────────────
@@ -927,7 +1010,7 @@ test_spawn_agent_post_waits_for_captured_pids() {
   # Verify spawn_agent_post reads PINGER_PID/WATCHDOG_PID from spawn-meta
   # and attempts to wait for them after writing stop files.
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   local meta_file="/tmp/ticket-auto-TEST-WAIT-spawn-meta.txt"
   # Start a long-running subshell to simulate a background pinger
   sleep 10 &
@@ -966,7 +1049,7 @@ METAEOF
 
 test_f10_guard_clears_stale_stop_files_from_prior_phase() {
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   (
     export FLEET_STATE_DIR="$tmpdir"
     source "$LIB_DIR/spawn-helper.sh"
@@ -982,6 +1065,10 @@ test_f10_guard_clears_stale_stop_files_from_prior_phase() {
     # The guard should rm -f both stale files and succeed
     spawn_agent_pre PHASE=TEST STEP=f10-clear TICKET_ID=TEST-F10A \
       SKILL=/ticket-test HB_LOG_FILE="$tmpdir/hb.log" >/dev/null 2>&1
+    # $! right after the call still refers to the disowned watchdog job
+    # backgrounded inside spawn_agent_pre — kill it now instead of waiting
+    # out its sleep_secs against the FLEET_STATE_DIR teardown below.
+    kill "$!" 2>/dev/null || true
     # Verify stale files were removed
     [ ! -f "$pinger_stop" ] || exit 1
     [ ! -f "$watchdog_stop" ] || exit 1
@@ -993,7 +1080,7 @@ test_f10_guard_clears_stale_stop_files_from_prior_phase() {
 
 test_f10_guard_still_blocks_external_kill() {
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   (
     # Pin FLEET_STATE_DIR to the temp dir so path resolution is deterministic
     # regardless of CWD. Without this, _worker_stop_file resolves to ./logs/
@@ -1007,6 +1094,9 @@ test_f10_guard_still_blocks_external_kill() {
     # First call: clean state, should succeed (and clear any stale files)
     spawn_agent_pre PHASE=TEST STEP=f10-kill-1 TICKET_ID=TEST-F10B \
       SKILL=/ticket-test HB_LOG_FILE="$tmpdir/hb.log" >/dev/null 2>&1 || exit 1
+    # Kill the watchdog this call started — the second call below aborts
+    # before reaching spawn_watchdog_start, so this is the only one.
+    kill "$!" 2>/dev/null || true
     # Race: background loop touches the stop file to simulate fleet
     # controller creating it between rm -f and [ -f ] inside the guard.
     (while true; do touch "$pinger_stop" 2>/dev/null; done) &
@@ -1029,17 +1119,22 @@ test_f10_guard_still_blocks_external_kill() {
 
 test_f10_guard_succeeds_when_no_stop_files_exist() {
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   (
+    # Pin FLEET_STATE_DIR so the watchdog this starts is torn down with our
+    # own tmpdir instead of leaking against the shared ./logs default.
+    export FLEET_STATE_DIR="$tmpdir"
     source "$LIB_DIR/spawn-helper.sh"
     TICKET_ID=TEST-F10C
     # Ensure clean state at the resolved paths
     local pinger_stop watchdog_stop
     pinger_stop=$(_worker_stop_file "pinger")
     watchdog_stop=$(_worker_stop_file "watchdog")
+    mkdir -p "$(dirname "$pinger_stop")"
     rm -f "$pinger_stop" "$watchdog_stop"
     spawn_agent_pre PHASE=TEST STEP=f10-clean TICKET_ID=TEST-F10C \
       SKILL=/ticket-test HB_LOG_FILE="$tmpdir/hb.log" >/dev/null 2>&1
+    kill "$!" 2>/dev/null || true
   )
   local rc=$?
   rm -rf "$tmpdir"
@@ -1048,14 +1143,19 @@ test_f10_guard_succeeds_when_no_stop_files_exist() {
 
 test_f10_guard_idempotent_across_multiple_spawns() {
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   (
+    # Pin FLEET_STATE_DIR so both watchdogs started below are torn down with
+    # our own tmpdir instead of leaking against the shared ./logs default.
+    export FLEET_STATE_DIR="$tmpdir"
     source "$LIB_DIR/spawn-helper.sh"
     # Two sequential spawn_agent_pre calls with same TICKET_ID, both should succeed
     spawn_agent_pre PHASE=TEST STEP=f10-idem-1 TICKET_ID=TEST-F10D \
       SKILL=/ticket-test HB_LOG_FILE="$tmpdir/hb.log" >/dev/null 2>&1 || exit 1
+    kill "$!" 2>/dev/null || true
     spawn_agent_pre PHASE=TEST STEP=f10-idem-2 TICKET_ID=TEST-F10D \
       SKILL=/ticket-test HB_LOG_FILE="$tmpdir/hb.log" >/dev/null 2>&1 || exit 1
+    kill "$!" 2>/dev/null || true
   )
   local rc=$?
   rm -rf "$tmpdir"
@@ -1064,7 +1164,7 @@ test_f10_guard_idempotent_across_multiple_spawns() {
 
 test_f10_guard_handles_hb_log_file_unset_path() {
   local tmpdir
-  tmpdir=$(mktemp -d)
+  tmpdir=$(_mktemp_test_dir)
   # HB_LOG_FILE="" path: the guard should still clear stale files and succeed
   # (no heartbeat pinger/watchdog launched, but the guard check runs regardless)
   (
@@ -1137,6 +1237,7 @@ for fn in \
   test_watchdog_integrated_into_spawn_agent_pre \
   test_watchdog_integrated_into_spawn_agent_post \
   test_watchdog_emits_heartbeats \
+  test_watchdog_exits_when_workspace_removed \
   test_spawn_agent_post_waits_for_captured_pids \
   test_f10_guard_clears_stale_stop_files_from_prior_phase \
   test_f10_guard_still_blocks_external_kill \
