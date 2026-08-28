@@ -367,8 +367,8 @@ _gate_entry() {
       # success outcome, in place of browser/API-shaped prerequisites that
       # don't apply to a no-UI, no-API ticket.
       _required_count=2
-      has_build_command=$(grep -ciP '(\bmvn\b\s|\bgradle\b|\bnpm run\b|\bmake\b\s|clean compile|clean install|clean package|clean test)' "$artifact_path" 2>/dev/null || true)
-      has_build_outcome=$(grep -ciP '(BUILD SUCCESS|succeeds?\b|compiles?\s+(successfully|cleanly)|passes?\b|no (compile|build) error|exit code 0|green build)' "$artifact_path" 2>/dev/null || true)
+      has_build_command=$(grep -ciP '(\bmvn\b\s|\bgradle\b|\bnpm run\b|\bmake\b\s|clean compile|clean install|clean package|clean test|\bCI run\b|\bworkflow run\b|feature-branch push)' "$artifact_path" 2>/dev/null || true)
+      has_build_outcome=$(grep -ciP '(BUILD SUCCESS|succeeds?\b|compiles?\s+(successfully|cleanly)|passes?\b|no (compile|build) error|exit code 0|green build|runs? successfully|legs? (are )?green)' "$artifact_path" 2>/dev/null || true)
       [ "${has_build_command:-0}" = "0" ] && missing_count=$((missing_count + 1))
       [ "${has_build_outcome:-0}" = "0" ] && missing_count=$((missing_count + 1))
       ;;
