@@ -109,6 +109,7 @@ fi
 #          [WIKI_ROOT=<path>] [BE_TEST_CMD=<cmd>] [BE_TEST_RUNNER=<cmd>] [FE_TEST_CMD=<cmd>] \
 #          [LOCAL_URL=<url>] [UAT_URL=<url>] [SLACK_CHANNEL=<channel>]
 #          [BASE_BRANCH=<branch>] [INTEGRATION_BRANCH=<branch>] [TICKET_BRANCH=<branch>]
+#          [UAT_POLICY=<per-ticket|epic>]
 #          [WORKTREE_ROOT=<path>]
 #
 # Uses single-quote heredoc — no shell expansion, no injection risk.
@@ -127,6 +128,7 @@ spawn_write_env() {
   local BASE_BRANCH=""
   local INTEGRATION_BRANCH=""
   local TICKET_BRANCH=""
+  local UAT_POLICY=""
   local WORKTREE_ROOT=""
   local FROM_PLANNED=""
 
@@ -147,6 +149,7 @@ spawn_write_env() {
     BASE_BRANCH=*) BASE_BRANCH="${arg#BASE_BRANCH=}" ;;
     INTEGRATION_BRANCH=*) INTEGRATION_BRANCH="${arg#INTEGRATION_BRANCH=}" ;;
     TICKET_BRANCH=*) TICKET_BRANCH="${arg#TICKET_BRANCH=}" ;;
+    UAT_POLICY=*) UAT_POLICY="${arg#UAT_POLICY=}" ;;
     WORKTREE_ROOT=*) WORKTREE_ROOT="${arg#WORKTREE_ROOT=}" ;;
     FROM_PLANNED=*) FROM_PLANNED="${arg#FROM_PLANNED=}" ;;
     *)
@@ -184,6 +187,7 @@ export SLACK_CHANNEL="SLACK_CHANNEL_PLACEHOLDER"
 export BASE_BRANCH="BASE_BRANCH_PLACEHOLDER"
 export INTEGRATION_BRANCH="INTEGRATION_BRANCH_PLACEHOLDER"
 export TICKET_BRANCH="TICKET_BRANCH_PLACEHOLDER"
+export UAT_POLICY="UAT_POLICY_PLACEHOLDER"
 export WORKTREE_ROOT="WORKTREE_ROOT_PLACEHOLDER"
 export FROM_PLANNED="FROM_PLANNED_PLACEHOLDER"
 ENVEOF
@@ -207,6 +211,7 @@ ENVEOF
     -e "s|BASE_BRANCH_PLACEHOLDER|$(_sed_escape "$BASE_BRANCH")|" \
     -e "s|INTEGRATION_BRANCH_PLACEHOLDER|$(_sed_escape "$INTEGRATION_BRANCH")|" \
     -e "s|TICKET_BRANCH_PLACEHOLDER|$(_sed_escape "$TICKET_BRANCH")|" \
+    -e "s|UAT_POLICY_PLACEHOLDER|$(_sed_escape "${UAT_POLICY:-per-ticket}")|" \
     -e "s|WORKTREE_ROOT_PLACEHOLDER|$(_sed_escape "$WORKTREE_ROOT")|" \
     -e "s|FROM_PLANNED_PLACEHOLDER|$(_sed_escape "$FROM_PLANNED")|" \
     "$env_file"

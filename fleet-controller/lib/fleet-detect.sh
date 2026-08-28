@@ -671,6 +671,53 @@ detect_epic_branch_ready() {
   echo "0"
 }
 
+# _fleet_advance_epic_state <EPIC_ID> [children_json]
+# Fires epic-integration-open once for the epic, moving it to Review.
+#
+# Called only when at least one integration PR has been observed open. Readiness
+# is re-confirmed first: the readiness that admitted this epic was computed from
+# a snapshot taken before a repo loop that may run for a long time, during which
+# a child must be assumed capable of regressing out of Done.
+#
+# All output is redirected. This runs inside the detector, whose stdout is
+# captured by command substitution to build its JSON result.
+_fleet_advance_epic_state() {
+  local epic_id="$1"
+  local children_json="${2:-}"
+
+  # 1. Re-confirm readiness against fresh data (no cached children here — the
+  #    whole point is to catch a child that regressed during the loop).
+  if declare -f epic_branch_children_done >/dev/null 2>&1; then
+    if ! epic_branch_children_done "$epic_id" >/dev/null 2>&1; then
+      return 0
+    fi
+  fi
+
+  # 2. Locate the flow executor — monorepo checkout first, then the installed
+  #    plugin layout.
+  local _flow_sh=""
+  local _cand
+  for _cand in \
+    "${_CONFIG_DIR}/../../ticket-auto-pipeline/skills/ticket-flow/flow.sh" \
+    "$HOME/.claude/skills/ticket-flow/flow.sh"; do
+    if [ -f "$_cand" ]; then
+      _flow_sh="$_cand"
+      break
+    fi
+  done
+  [ -n "$_flow_sh" ] || return 0
+
+  # 3. Fire once. Exit 42 is flow.sh's in-flight lock: an operator or another
+  #    process is mid-mutation on this same epic. That is contention, not
+  #    failure — treat it as benign and let the next cycle settle it.
+  local _rc=0
+  bash "$_flow_sh" "$epic_id" epic-integration-open >/dev/null 2>&1 || _rc=$?
+  case "$_rc" in
+  0 | 42) return 0 ;;
+  *) return 0 ;;
+  esac
+}
+
 # Fleet-wide epic branch readiness scan. Runs once per fleet_detect_all call.
 # Checks state:execution epics with Branch Directives: are all children Done?
 # Usage: _fleet_scan_epic_branch_ready <workspace>
@@ -722,7 +769,9 @@ _fleet_scan_epic_branch_ready() {
   # Query epics with state:execution label — include description and children.
   # No epic Linear-state filter: the label is the gate, matching the dispatch
   # population (see the same note on the D-11 query).
-  local query='{"query":"{issues(filter:{labels:{name:{eq:\\\"state:execution\\\"}}}){nodes{id identifier title description children{nodes{id identifier state{name} labels{nodes{name}}}}}}}"}'
+  # The epic's own state{name} is added to the query the detector already
+  # issues, so the idempotency short-circuit below costs no extra request.
+  local query='{"query":"{issues(filter:{labels:{name:{eq:\\\"state:execution\\\"}}}){nodes{id identifier title description state{name} children{nodes{id identifier state{name} labels{nodes{name}}}}}}}"}'
 
   local epics_json attempt=1 max_attempts=3 delay=1
   while [ "$attempt" -le "$max_attempts" ]; do
@@ -747,10 +796,25 @@ _fleet_scan_epic_branch_ready() {
   [ "${epic_count:-0}" -eq 0 ] && echo '{"severity":0,"findings":""}' && return
 
   for i in $(seq 0 $((epic_count - 1))); do
-    local epic_id epic_description
+    local epic_id epic_description epic_state
     epic_id=$(echo "$epics_json" | jq -r ".data.issues.nodes[$i].identifier // empty" 2>/dev/null)
     epic_description=$(echo "$epics_json" | jq -r ".data.issues.nodes[$i].description // \"\"" 2>/dev/null)
+    epic_state=$(echo "$epics_json" | jq -r ".data.issues.nodes[$i].state.name // \"\"" 2>/dev/null)
     [ -z "$epic_id" ] && continue
+
+    # Idempotency short-circuit — BEFORE any per-repository work.
+    #
+    # Two jobs in one guard. It stops the detector dragging an epic that an
+    # operator (or a previous cycle) already advanced back to an earlier state,
+    # which on a short cycle would otherwise repeat indefinitely. And because
+    # the state:execution label that admits an epic to this population is never
+    # removed, it is also what stops a finished epic being rescanned — including
+    # its whole repo loop — on every cycle forever.
+    case "$epic_state" in
+    Review | UAT | Done)
+      continue
+      ;;
+    esac
 
     # Check for Branch Directive — skip epics without one
     if ! echo "$epic_description" | grep -q "Branch Directive" 2>/dev/null; then
@@ -783,10 +847,31 @@ _fleet_scan_epic_branch_ready() {
       # FLEET_EPIC_AUTO_PR is enabled, matching the detector's opt-in convention.
       if [ "${FLEET_EPIC_AUTO_PR:-false}" = "true" ] && declare -f epic_branch_open_pr >/dev/null 2>&1; then
         local _ebr_repo
+        local _ebr_pr_open=false
         while IFS= read -r _ebr_repo; do
           [ -z "$_ebr_repo" ] && continue
-          epic_branch_open_pr "$epic_id" "$_ebr_repo" 2>/dev/null || true
+          # stdout MUST be redirected as well as stderr: this function's
+          # stdout is captured by command substitution to build the detector's
+          # JSON result, so any prose the PR helper prints would corrupt it.
+          #
+          # children_nodes and epic_description are passed in: both were fetched
+          # once for this scan, and re-fetching them per repository multiplies
+          # Linear requests by the repo count on every cycle.
+          epic_branch_open_pr "$epic_id" "$_ebr_repo" "$children_nodes" "$epic_description" >/dev/null 2>&1 || true
+          # Loop completion proves nothing — the helper returns success when it
+          # is disabled, when no directive exists, when the repo has no epic
+          # commits, and when it actually opened something. Only the observed
+          # per-repo state distinguishes them.
+          if [ "${EPIC_BRANCH_PR_STATE:-none}" = "open" ]; then
+            _ebr_pr_open=true
+          fi
         done < <(_fleet_repos_under_root)
+
+        # Advance the epic's own acceptance state — once per epic, not once per
+        # repository, and only on an observed open PR.
+        if $_ebr_pr_open; then
+          _fleet_advance_epic_state "$epic_id" "$children_nodes"
+        fi
       fi
     fi
   done

@@ -44,6 +44,10 @@ bash "$_flow_sh" "<TICKET-ID>" "<TRIGGER>" [--data key=value] [--dry-run]
 | `UAT` | Code reviewed, awaiting business partner acceptance testing |
 | `Done` | Verified — all acceptance criteria confirmed |
 
+Epic issues reuse these same states for their own acceptance (see the epic triggers below):
+`Backlog` while children execute → `Review` when integration PRs are open → `UAT` when the
+integration is merged and deployed → `Done` on acceptance.
+
 ### Labels
 
 | Label | Meaning |
@@ -51,7 +55,7 @@ bash "$_flow_sh" "<TICKET-ID>" "<TRIGGER>" [--data key=value] [--dry-run]
 | `claimed` | Actively being worked (set at appraisal start, cleared at Done) |
 | `approved` | Human approved the appraisal — gates implementation |
 | `rejected` | PR review found gaps OR UAT verification failed — ticket needs rework |
-| `reviewed` | PR review passed — ready for QA verification |
+| `reviewed` | PR review passed. Under `per-ticket` UAT policy this means "awaiting QA" and is cleared by `uat-pass`. **Under `UAT Policy: epic` it does not mean that** — the child goes straight to `Done` and retains the label, because there is no per-ticket QA step. Do not key an "in flight" heuristic on it. |
 | `simple` | Predicted simple (set by appraise) |
 | `complex` | Predicted complex (set by appraise) |
 | `Smooth` | Implementation went smoothly |
@@ -72,8 +76,8 @@ bash "$_flow_sh" "<TICKET-ID>" "<TRIGGER>" [--data key=value] [--dry-run]
 | `human-reject` | `Todo` | — | — | |
 | `implement-outcome` | — | `{Smooth\|Rough\|Hard}` | — | No state change |
 | `implement-complete` | `Review` | — | `approved` | |
-| `pr-review-pass-done` | `Done` | `reviewed` | `rejected`, `claimed` | Use when no UAT_URL |
-| `pr-review-pass-uat` | `UAT` | `reviewed` | `rejected` | Use when UAT_URL present |
+| `pr-review-pass-done` | `Done` | `reviewed` | `rejected`, `claimed` | Chosen by `uat_decide_trigger` — fires under `UAT Policy: epic`, or under `per-ticket` with no UAT target |
+| `pr-review-pass-uat` | `UAT` | `reviewed` | `rejected` | Chosen by `uat_decide_trigger` — fires under `per-ticket` policy with a UAT target |
 | `pr-review-fail` | — | `rejected` | — | No state change |
 | `pr-iterate` | `Ready` | `approved` | `reviewed`, `rejected` | |
 | `uat-pass` | `Done` | — | `claimed`, `reviewed` | |
@@ -81,6 +85,48 @@ bash "$_flow_sh" "<TICKET-ID>" "<TRIGGER>" [--data key=value] [--dry-run]
 | `needs-info` | — | `needs-info` | — | No state change |
 | `needs-info-resolved` | — | — | `needs-info` | No state change |
 | `re-claim` | — | — | `approved` | No state change; restarts gate hold cycle |
+
+**Which of the two pass triggers fires is not decided here.** It is computed by
+`uat_decide_trigger` in `lib/branch-resolve.sh`, which evaluates the epic's UAT policy *before*
+the UAT target. That ordering is load-bearing: `UAT_URL` is exported into every pipeline agent's
+environment unconditionally, so a policy check placed after a "is UAT configured?" test would
+never be reached. The decision is recorded in the pipeline log as `META|uat-policy|info|<policy>`.
+
+### Epic acceptance transitions
+
+These act on the **epic issue itself**, not on child tickets. They add and remove no labels, so no
+new workspace label is required, and each declares a single-valued source state so log and
+telemetry records stay on one line.
+
+| Trigger | From | To | Labels | Notes |
+|---------|------|----|--------|-------|
+| `epic-integration-open` | `Backlog` | `Review` | — | Fired by the fleet controller's epic-readiness detector once at least one integration PR is observed open |
+| `epic-uat-start` | `Review` | `UAT` | — | Operator signals the integration has been merged and deployed |
+| `epic-uat-pass` | `UAT` | `Done` | — | Epic UAT accepted |
+
+There is deliberately **no epic-rejection trigger**. `Ready` means "approved, implementation in
+progress" — a child-workflow state nothing acts on for an epic whose children are all `Done`. At
+the moment a business partner rejects, a human is already in Linear and can move the card.
+
+### Preconditions
+
+A precondition may be declared on a **trigger** as well as on a label, and the epic guard is
+**bidirectional**:
+
+| Precondition | Effect |
+|---|---|
+| `must_be_epic` | The trigger or label is rejected (exit 8) on a non-epic issue. Carried by the three epic triggers and by the `state:execution` label. |
+| `must_not_be_epic` | The trigger is rejected (exit 8) on an epic issue. Carried by every child lifecycle trigger. |
+
+The inverse direction matters because the router does not branch on which trigger fired: without
+it, an epic accidentally pushed through the ticket pipeline would take a child's pass-to-`Done`
+trigger and close itself.
+
+An issue counts as an epic when it carries the epic marker label (`EPIC_MARKER_LABEL`, default
+`epic`) **or** a valid `## Branch Directive` in its description — both already present in the
+payload `flow.sh` fetches, so neither costs an extra request. The evaluator lives in
+`lib/epic-precondition.sh` and `flow.sh` sources it, so tests exercise the same code path the
+executor runs.
 
 ## Preflight Sentinel
 

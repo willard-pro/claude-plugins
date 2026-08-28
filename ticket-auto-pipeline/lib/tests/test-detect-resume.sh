@@ -299,6 +299,43 @@ test_branch_context_survives_resume() {
   }
 }
 
+test_branch_context_carries_uat_policy() {
+  local out
+  out=$(_detect_resume_with_log "TEST-UP" \
+    "2026-07-25T10:00:00Z|META|schema|info|1" \
+    "2026-07-25T10:00:01Z|META|title|info|TEST-UP: Fix auth" \
+    "2026-07-25T10:00:02Z|META|branch-context|info|base=epic/test-x;integration=epic/test-x;source=epic-directive;ticket=feat/TEST-UP-fix-auth;uat-policy=epic" \
+    "2026-07-25T10:00:03Z|APPRAISE|setup-workspace|start|")
+  [ "$(_field "$out" UAT_POLICY)" = "epic" ] || {
+    echo "UAT_POLICY mismatch: $(_field "$out" UAT_POLICY)" >&2
+    return 1
+  }
+  # Appending the field must not disturb the keys parsed before it.
+  [ "$(_field "$out" BRANCH_SOURCE)" = "epic-directive" ] || {
+    echo "BRANCH_SOURCE broken by uat-policy suffix: $(_field "$out" BRANCH_SOURCE)" >&2
+    return 1
+  }
+  [ "$(_field "$out" INTEGRATION_BRANCH)" = "epic/test-x" ] || {
+    echo "INTEGRATION_BRANCH broken by uat-policy suffix: $(_field "$out" INTEGRATION_BRANCH)" >&2
+    return 1
+  }
+}
+
+test_uat_policy_defaults_on_log_without_field() {
+  # A branch-context line written before the field existed. The default must be
+  # materialised here, not left empty for a consumer to re-derive.
+  local out
+  out=$(_detect_resume_with_log "TEST-UPOLD" \
+    "2026-07-25T10:00:00Z|META|schema|info|1" \
+    "2026-07-25T10:00:01Z|META|title|info|TEST-UPOLD: Fix auth" \
+    "2026-07-25T10:00:02Z|META|branch-context|info|base=develop;integration=;source=default;ticket=feat/TEST-UPOLD-fix" \
+    "2026-07-25T10:00:03Z|APPRAISE|setup-workspace|start|")
+  [ "$(_field "$out" UAT_POLICY)" = "per-ticket" ] || {
+    echo "expected per-ticket default, got: $(_field "$out" UAT_POLICY)" >&2
+    return 1
+  }
+}
+
 test_branch_context_empty_on_legacy_log() {
   local out
   out=$(_detect_resume_with_log "TEST-LEGACY" \
@@ -341,6 +378,8 @@ for fn in \
   test_schema_v1_accepted_with_warning \
   test_schema_v2_accepted \
   test_branch_context_survives_resume \
+  test_branch_context_carries_uat_policy \
+  test_uat_policy_defaults_on_log_without_field \
   test_branch_context_empty_on_legacy_log; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"

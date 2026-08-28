@@ -88,6 +88,7 @@ test_write_env_exports_all_fields() {
     BASE_BRANCH=develop \
     INTEGRATION_BRANCH=epic/test-x \
     TICKET_BRANCH=feat/TEST-42-fix-auth \
+    UAT_POLICY=epic \
     WORKTREE_ROOT=/home/user/worktrees/TEST-42 >/dev/null 2>&1
   local f=/tmp/ticket-auto-TEST-42-env.sh
   grep -q 'export TICKET_ID="TEST-42"' "$f" &&
@@ -98,7 +99,18 @@ test_write_env_exports_all_fields() {
     grep -q 'export BASE_BRANCH="develop"' "$f" &&
     grep -q 'export INTEGRATION_BRANCH="epic/test-x"' "$f" &&
     grep -q 'export TICKET_BRANCH="feat/TEST-42-fix-auth"' "$f" &&
+    grep -q 'export UAT_POLICY="epic"' "$f" &&
     grep -q 'export WORKTREE_ROOT="/home/user/worktrees/TEST-42"' "$f"
+}
+
+test_write_env_uat_policy_defaults_to_per_ticket() {
+  # Omitting the parameter must materialise the default, not an empty string:
+  # an empty UAT_POLICY would make uat_decide_trigger fall through to the
+  # UAT-target check, which is exactly the routing this field overrides.
+  source "$LIB_DIR/spawn-helper.sh"
+  spawn_write_env TICKET_ID=TEST-UP-DEF \
+    REPOS_ROOT=/repos ISSUE_PREFIX=TEST BE_SERVICES=svc1 >/dev/null 2>&1
+  grep -q 'export UAT_POLICY="per-ticket"' /tmp/ticket-auto-TEST-UP-DEF-env.sh
 }
 
 test_write_env_appends_linear_key_when_set() {
@@ -1079,6 +1091,7 @@ for fn in \
   test_write_env_exports_all_fields \
   test_write_env_empty_integration_branch \
   test_write_env_empty_worktree_root \
+  test_write_env_uat_policy_defaults_to_per_ticket \
   test_write_env_appends_linear_key_when_set \
   test_write_env_does_not_append_linear_key_when_unset \
   test_write_env_rejects_empty_ticket_id \

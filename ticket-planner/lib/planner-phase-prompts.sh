@@ -685,7 +685,9 @@ if [ "\$EMIT_DIRECTIVE" = "true" ]; then
       --arg base "\${PLANNER_BASE_BRANCH:-develop}" \
       --arg merge "\${PLANNER_MERGE_POLICY:-manual}" \
       --arg sync "\${PLANNER_SYNC_POLICY:-rebase-on-base-change}" \
-      '{initiative_id: \$iid, title_slug: \$slug, base_branch: \$base, merge_policy: \$merge, sync_policy: \$sync}')
+      --arg uat "\${PLANNER_UAT_POLICY:-}" \
+      '{initiative_id: \$iid, title_slug: \$slug, base_branch: \$base, merge_policy: \$merge, sync_policy: \$sync}
+       + (if \$uat == "" then {} else {uat_policy: \$uat} end)')
 
     DIRECTIVE_BLOCK=\$(branch_directive_generate "\$DIRECTIVE_JSON")
 
@@ -733,6 +735,7 @@ independently of the \`create\` step so status and replan can read it.
 | \`PLANNER_BASE_BRANCH\` | \`develop\` | Base branch for the directive |
 | \`PLANNER_MERGE_POLICY\` | \`manual\` | Merge policy enum |
 | \`PLANNER_SYNC_POLICY\` | \`rebase-on-base-change\` | Sync policy enum |
+| \`PLANNER_UAT_POLICY\` | *(unset)* | UAT policy enum (\`per-ticket\`\|\`epic\`). Unset omits the field entirely, and the validator resolves \`per-ticket\`. Set \`epic\` for an initiative whose children are only observable once the whole epic integrates — their PR-review pass then routes to \`Done\` instead of \`UAT\`, keeping the \`blocked-by\` chain moving. |
 
 ## Constraints
 - The idempotency check is mandatory — do not skip it.

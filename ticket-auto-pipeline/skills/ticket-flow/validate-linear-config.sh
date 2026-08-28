@@ -31,7 +31,8 @@ fi
 # States: union of from/to values + well_known_states
 mapfile -t EXPECTED_STATES < <(jq -r '
   [
-    (.triggers | to_entries[] | .value | (.from, .to) | select(. != null)),
+    (.triggers | to_entries[] | .value | (.from, .to) | select(. != null)
+      | if type == "array" then .[] else . end),
     (.well_known_states[]? // empty)
   ] | unique | sort[]' "$SM")
 

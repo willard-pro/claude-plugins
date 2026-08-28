@@ -1,6 +1,13 @@
 {
-  "well_known_states": ["Backlog", "Blocked"],
-  "well_known_labels": ["bug", "feature", "repro-failed"],
+  "well_known_states": [
+    "Backlog",
+    "Blocked"
+  ],
+  "well_known_labels": [
+    "bug",
+    "feature",
+    "repro-failed"
+  ],
   "planner_labels": {
     "planned": {
       "pattern": "planned",
@@ -17,7 +24,10 @@
     "pre-approved": {
       "pattern": "pre-approved",
       "set_by": "planner",
-      "removed_by": ["human-reject", "re-claim"],
+      "removed_by": [
+        "human-reject",
+        "re-claim"
+      ],
       "conditions": {
         "confidence_min": 0.85
       },
@@ -34,7 +44,7 @@
       "pattern": "state:execution",
       "set_by": "planner",
       "removed_by": [],
-      "precondition": "issue_type_must_be_epic",
+      "precondition": "must_be_epic",
       "description": "Marks an initiative Epic as ready for fleet controller dispatch. Epic-only — flow.sh rejects if added to non-Epic issues."
     },
     "bug": {
@@ -70,110 +80,196 @@
   },
   "triggers": {
     "appraise-start": {
-      "from": ["Backlog", "Todo"],
+      "from": [
+        "Backlog",
+        "Todo"
+      ],
       "to": "Todo",
-      "adds": ["claimed", "{complexity}"],
+      "adds": [
+        "claimed",
+        "{complexity}"
+      ],
       "removes": [],
       "set_assignee": "me",
-      "description": "Claim a ticket and begin appraisal"
+      "description": "Claim a ticket and begin appraisal",
+      "precondition": "must_not_be_epic"
     },
     "appraise-complete": {
       "from": "Todo",
       "to": "Approve",
       "adds": [],
       "removes": [],
-      "description": "Appraisal done — awaiting human review"
+      "description": "Appraisal done — awaiting human review",
+      "precondition": "must_not_be_epic"
     },
     "human-approve": {
       "from": "Approve",
       "to": "Ready",
-      "adds": ["approved"],
-      "removes": ["rejected", "claimed"],
-      "description": "Human approved the plan"
+      "adds": [
+        "approved"
+      ],
+      "removes": [
+        "rejected",
+        "claimed"
+      ],
+      "description": "Human approved the plan",
+      "precondition": "must_not_be_epic"
     },
     "human-reject": {
       "from": "Approve",
       "to": "Todo",
       "adds": [],
-      "removes": ["pre-approved"],
-      "description": "Human rejected the plan — return to Todo for re-appraisal"
+      "removes": [
+        "pre-approved"
+      ],
+      "description": "Human rejected the plan — return to Todo for re-appraisal",
+      "precondition": "must_not_be_epic"
     },
     "implement-outcome": {
       "from": null,
       "to": null,
-      "adds": ["{outcome}"],
+      "adds": [
+        "{outcome}"
+      ],
       "removes": [],
-      "description": "Record implementation difficulty label (Smooth/Rough/Hard)"
+      "description": "Record implementation difficulty label (Smooth/Rough/Hard)",
+      "precondition": "must_not_be_epic"
     },
     "implement-complete": {
       "from": "Ready",
       "to": "Review",
       "adds": [],
-      "removes": ["approved"],
-      "description": "Implementation pushed — enter code review"
+      "removes": [
+        "approved"
+      ],
+      "description": "Implementation pushed — enter code review",
+      "precondition": "must_not_be_epic"
     },
     "pr-review-pass-done": {
       "from": "Review",
       "to": "Done",
-      "adds": ["reviewed"],
-      "removes": ["rejected", "claimed"],
-      "description": "PR approved with no UAT required — close to Done"
+      "adds": [
+        "reviewed"
+      ],
+      "removes": [
+        "rejected",
+        "claimed"
+      ],
+      "description": "PR approved with no UAT required — close to Done",
+      "precondition": "must_not_be_epic"
     },
     "pr-review-pass-uat": {
       "from": "Review",
       "to": "UAT",
-      "adds": ["reviewed"],
-      "removes": ["rejected"],
-      "description": "PR approved with UAT required — move to UAT"
+      "adds": [
+        "reviewed"
+      ],
+      "removes": [
+        "rejected"
+      ],
+      "description": "PR approved with UAT required — move to UAT",
+      "precondition": "must_not_be_epic"
     },
     "pr-review-fail": {
       "from": null,
       "to": null,
-      "adds": ["rejected"],
+      "adds": [
+        "rejected"
+      ],
       "removes": [],
-      "description": "PR review found issues — mark rejected (no state change)"
+      "description": "PR review found issues — mark rejected (no state change)",
+      "precondition": "must_not_be_epic"
     },
     "pr-iterate": {
       "from": "Review",
       "to": "Ready",
-      "adds": ["approved"],
-      "removes": ["reviewed", "rejected"],
-      "description": "Iterating on PR feedback — return to Ready"
+      "adds": [
+        "approved"
+      ],
+      "removes": [
+        "reviewed",
+        "rejected"
+      ],
+      "description": "Iterating on PR feedback — return to Ready",
+      "precondition": "must_not_be_epic"
     },
     "uat-pass": {
       "from": "UAT",
       "to": "Done",
       "adds": [],
-      "removes": ["claimed", "reviewed"],
-      "description": "UAT passed — close ticket"
+      "removes": [
+        "claimed",
+        "reviewed"
+      ],
+      "description": "UAT passed — close ticket",
+      "precondition": "must_not_be_epic"
     },
     "uat-fail": {
       "from": "UAT",
       "to": "Ready",
-      "adds": ["rejected"],
-      "removes": ["reviewed"],
-      "description": "UAT failed — return to Ready for another pass"
+      "adds": [
+        "rejected"
+      ],
+      "removes": [
+        "reviewed"
+      ],
+      "description": "UAT failed — return to Ready for another pass",
+      "precondition": "must_not_be_epic"
     },
     "needs-info": {
       "from": null,
       "to": null,
-      "adds": ["needs-info"],
+      "adds": [
+        "needs-info"
+      ],
       "removes": [],
-      "description": "Block ticket — waiting for external information"
+      "description": "Block ticket — waiting for external information",
+      "precondition": "must_not_be_epic"
     },
     "needs-info-resolved": {
       "from": null,
       "to": null,
       "adds": [],
-      "removes": ["needs-info"],
-      "description": "Unblock ticket — information received"
+      "removes": [
+        "needs-info"
+      ],
+      "description": "Unblock ticket — information received",
+      "precondition": "must_not_be_epic"
     },
     "re-claim": {
       "from": null,
       "to": null,
       "adds": [],
-      "removes": ["approved", "pre-approved"],
-      "description": "Remove approval label to restart gate hold cycle"
+      "removes": [
+        "approved",
+        "pre-approved"
+      ],
+      "description": "Remove approval label to restart gate hold cycle",
+      "precondition": "must_not_be_epic"
+    },
+    "epic-integration-open": {
+      "from": "Backlog",
+      "to": "Review",
+      "adds": [],
+      "removes": [],
+      "precondition": "must_be_epic",
+      "description": "Epic integration PRs are open — epic moves to Review."
+    },
+    "epic-uat-start": {
+      "from": "Review",
+      "to": "UAT",
+      "adds": [],
+      "removes": [],
+      "precondition": "must_be_epic",
+      "description": "Epic integration merged and deployed — epic moves to UAT."
+    },
+    "epic-uat-pass": {
+      "from": "UAT",
+      "to": "Done",
+      "adds": [],
+      "removes": [],
+      "precondition": "must_be_epic",
+      "description": "Epic UAT accepted — epic moves to Done."
     }
   }
 }

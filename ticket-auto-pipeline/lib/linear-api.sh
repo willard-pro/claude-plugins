@@ -382,6 +382,40 @@ get_parent_with_children() {
   echo "$resp" | jq '{parent: {id: .data.issue.id, identifier: .data.issue.identifier, title: .data.issue.title, description: .data.issue.description}, children: (.data.issue.children.nodes // [])}'
 }
 
+# resolve_uat_url [project_dir]
+# Echoes the configured UAT environment URL. Resolution order:
+#   1. UAT_URL environment variable
+#   2. a UAT_URL line in project_dir/CLAUDE.md (default: current directory)
+# Exit 0 when a URL was resolved (echoed on stdout), 1 when none is configured.
+#
+# Factored out of env-check.sh, which is a reporting script with top-level
+# argument parsing and therefore cannot be sourced. This is the resolver that
+# replaces get_project_config — a function that no longer exists in this file,
+# but which the UAT-vs-Done routing step still called.
+resolve_uat_url() {
+  local project_dir="${1:-.}"
+
+  if [ -n "${UAT_URL:-}" ]; then
+    echo "$UAT_URL"
+    return 0
+  fi
+
+  local claude_md="$project_dir/CLAUDE.md"
+  [ -f "$claude_md" ] || return 1
+
+  local val=""
+  # Anchored form first (the authoritative extraction env-check.sh uses),
+  # then the looser inline form it also accepts.
+  val=$(grep -oP '^`?UAT_URL`?\s*[=:]\s*`?\K[^`\s]+' "$claude_md" 2>/dev/null | head -1 | tr -d ' ' || true)
+  if [ -z "$val" ]; then
+    val=$(grep -oP 'UAT_URL[=:]\s*\K\S+' "$claude_md" 2>/dev/null | head -1 | tr -d '`' | tr -d ' ' || true)
+  fi
+
+  [ -n "$val" ] || return 1
+  echo "$val"
+  return 0
+}
+
 # Post a comment to an issue. Returns comment JSON: {id, body}
 save_comment() {
   local issue_id="$1"

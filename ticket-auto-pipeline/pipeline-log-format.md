@@ -126,14 +126,34 @@ spawn. Records the branch decisions for this run so crash-resume can recover the
 re-resolving.
 
 ```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|branch-context|info|base=develop;integration=;source=default;ticket=feat/CRE-123-fix-auth" >> "$LOG_FILE"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|branch-context|info|base=develop;integration=;source=default;ticket=feat/CRE-123-fix-auth;uat-policy=per-ticket" >> "$LOG_FILE"
 ```
 
 `MSG` grammar: semicolon-delimited key=value pairs. Keys: `base` (always present),
 `integration` (empty when base=integration), `source` (flag|epic-directive|default),
-`ticket` (always present). Values MUST NOT contain `|` per the pipe-delimited format
-constraint. Branch names are already validated to exclude `;` and `|` by
+`ticket` (always present), `uat-policy` (per-ticket|epic). Values MUST NOT contain `|` per the
+pipe-delimited format constraint. Branch names are already validated to exclude `;` and `|` by
 `_validate_branch_name`, so the semicolon grammar is safe.
+
+`uat-policy` is appended **last**, so a log written before the key existed remains a valid
+prefix and still parses. `detect-resume.sh` resolves the absent key to `per-ticket` rather than
+leaving it empty, so no consumer re-derives the default.
+
+### UAT policy decision entry
+
+Written at the UAT-vs-Done routing decision (`ticket-pr-review` Step 6a), and by
+`ticket-verify` when it refuses a UAT run under `epic` policy. It records which policy was in
+force so that any ticket reaching `Done` without an individual UAT step is explainable from the
+log alone.
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|uat-policy|info|epic" >> "$LOG_FILE"
+```
+
+`MSG` is the resolved policy: `per-ticket` or `epic`. Under `epic` the child transitions
+`Review → Done` via `pr-review-pass-done`; under `per-ticket` with a UAT target it transitions
+`Review → UAT` via `pr-review-pass-uat`. The decision itself is computed by `uat_decide_trigger`
+in `lib/branch-resolve.sh`, never inferred from ambient environment.
 
 `mode-change` is written to Step 0.6's `META|autonomy` guard instead of a silent re-append
 when a resume's `--mode` flag differs from the autonomy already recorded for this run —

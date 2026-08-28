@@ -261,17 +261,20 @@ TICKET_BRANCH=$(echo "$BRANCH_OUTPUT" | sed -n 's/^[[:space:]]*TICKET_BRANCH:[[:
 BASE_BRANCH=$(echo "$BRANCH_OUTPUT" | sed -n 's/^[[:space:]]*BASE_BRANCH:[[:space:]]*//p')
 INTEGRATION_BRANCH=$(echo "$BRANCH_OUTPUT" | sed -n 's/^[[:space:]]*INTEGRATION_BRANCH:[[:space:]]*//p')
 BRANCH_SOURCE=$(echo "$BRANCH_OUTPUT" | sed -n 's/^[[:space:]]*BRANCH_SOURCE:[[:space:]]*//p')
+UAT_POLICY=$(echo "$BRANCH_OUTPUT" | sed -n 's/^[[:space:]]*UAT_POLICY:[[:space:]]*//p')
 ```
 
 ### 0.5b — Write branch-context to pipeline log
 
 Write immediately after resolution, before any agent spawn. The semicolon grammar
-(`base=<>;integration=<>;source=<>;ticket=<>`) is parsed by `detect-resume.sh` on crash-resume.
+(`base=<>;integration=<>;source=<>;ticket=<>;uat-policy=<>`) is parsed by `detect-resume.sh`
+on crash-resume. `uat-policy` is appended last so logs written before this field existed still
+parse — the older four-key form remains a valid prefix.
 
 ```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|branch-context|info|base=${BASE_BRANCH};integration=${INTEGRATION_BRANCH};source=${BRANCH_SOURCE};ticket=${TICKET_BRANCH}" >> {LOG_FILE}
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|branch-context|info|base=${BASE_BRANCH};integration=${INTEGRATION_BRANCH};source=${BRANCH_SOURCE};ticket=${TICKET_BRANCH};uat-policy=${UAT_POLICY}" >> {LOG_FILE}
 hb_gate "branch-context" "ok" "branch decision recorded" \
-  "{\"base\":\"${BASE_BRANCH}\",\"integration\":\"${INTEGRATION_BRANCH}\",\"source\":\"${BRANCH_SOURCE}\",\"ticket\":\"${TICKET_BRANCH}\"}"
+  "{\"base\":\"${BASE_BRANCH}\",\"integration\":\"${INTEGRATION_BRANCH}\",\"source\":\"${BRANCH_SOURCE}\",\"ticket\":\"${TICKET_BRANCH}\",\"uat_policy\":\"${UAT_POLICY}\"}"
 ```
 
 ### 0.5c — Detect project context
@@ -298,7 +301,8 @@ spawn_write_env \
   FROM_PLANNED="{FROM_PLANNED}" \
   BASE_BRANCH="${BASE_BRANCH}" \
   INTEGRATION_BRANCH="${INTEGRATION_BRANCH}" \
-  TICKET_BRANCH="${TICKET_BRANCH}"
+  TICKET_BRANCH="${TICKET_BRANCH}" \
+  UAT_POLICY="${UAT_POLICY}"
 ```
 
 This MUST run before Step 0.6 (pipeline log init) and before Step 1 (first agent spawn). The env file is needed by every `spawn_agent_pre` call — sub-agents source it via `source /tmp/ticket-auto-{TICKET_ID}-env.sh`.
@@ -460,7 +464,8 @@ Report that the ticket is still held and requires the `approved` label. Stop her
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|recovery|info|Resuming from {RESUME_STEP}" >> {LOG_FILE}
 ```
 
-**Before the recovery log entry, rehydrate the branch env vars from `detect-resume.sh` output** — on a crash-recovery the router does not re-run `resolve_branch_context`. The branch decisions were written to `META|branch-context` at Step 0.5b and are now in the `DETECT_RESUME_RESULT` block as `BASE_BRANCH`, `INTEGRATION_BRANCH`, `BRANCH_SOURCE`. Write them back to the env file so sub-agents see branch vars even on resume:
+**Before the recovery log entry, rehydrate the branch env vars from `detect-resume.sh` output** — on a crash-recovery the router does not re-run `resolve_branch_context`. The branch decisions were written to `META|branch-context` at Step 0.5b and are now in the `DETECT_RESUME_RESULT` block as `BASE_BRANCH`, `INTEGRATION_BRANCH`, `BRANCH_SOURCE`,
+`UAT_POLICY`. Write them back to the env file so sub-agents see branch vars even on resume:
 
 ```bash
 if [ -n "{BASE_BRANCH}" ] || [ -n "{TICKET_BRANCH}" ]; then
@@ -480,7 +485,8 @@ if [ -n "{BASE_BRANCH}" ] || [ -n "{TICKET_BRANCH}" ]; then
     FROM_PLANNED="{FROM_PLANNED}" \
     BASE_BRANCH="{BASE_BRANCH}" \
     INTEGRATION_BRANCH="{INTEGRATION_BRANCH}" \
-    TICKET_BRANCH="{TICKET_BRANCH}"
+    TICKET_BRANCH="{TICKET_BRANCH}" \
+    UAT_POLICY="{UAT_POLICY}"
 fi
 ```
 

@@ -94,6 +94,11 @@ VALID_DIRECTIVE_PARENT='{
   "description": "## Branch Directive\n**Schema-Version:** 1\n**Branch:** epic/debt-collection-v2\n**Base:** develop\n**Merge Policy:** manual\n**Sync Policy:** rebase-on-base-change\n**Created:** 2026-07-25T10:00:00Z"
 }'
 
+EPIC_UAT_PARENT='{
+  "id": "CRE-100",
+  "description": "## Branch Directive\n**Schema-Version:** 2\n**Branch:** epic/debt-collection-v2\n**Base:** develop\n**Merge Policy:** manual\n**Sync Policy:** rebase-on-base-change\n**UAT Policy:** epic\n**Created:** 2026-07-25T10:00:00Z"
+}'
+
 MALFORMED_DIRECTIVE_PARENT='{
   "id": "CRE-100",
   "description": "## Branch Directive\n**Schema-Version:** 1\n**Branch:** epic/bad\n**Merge Policy:** manual"
@@ -417,6 +422,149 @@ test_directive_different_base() {
   return 0
 }
 _run "directive Branch beats declared Base" test_directive_different_base
+
+# ── UAT policy on the branch-context rail ────────────────────────────────────
+
+test_uat_policy_from_directive() {
+  local output parsed
+  output=$(resolve_branch_context "CRE-123" \
+    --title "Fix auth bug" \
+    --parent-json "$EPIC_UAT_PARENT" 2>/dev/null) || return 1
+  parsed=$(echo "$output" | _parse_result)
+  eval "$parsed"
+
+  [ "$UAT_POLICY" = "epic" ] || {
+    echo "  expected UAT_POLICY=epic, got '$UAT_POLICY'" >&2
+    return 1
+  }
+  return 0
+}
+_run "UAT_POLICY resolved from parent directive" test_uat_policy_from_directive
+
+test_uat_policy_default_materialised() {
+  # Directive present but declaring no UAT Policy — the normalised default must
+  # be emitted so no consumer re-derives it.
+  local output parsed
+  output=$(resolve_branch_context "CRE-123" \
+    --title "Fix auth bug" \
+    --parent-json "$VALID_DIRECTIVE_PARENT" 2>/dev/null) || return 1
+  parsed=$(echo "$output" | _parse_result)
+  eval "$parsed"
+
+  [ "$UAT_POLICY" = "per-ticket" ] || {
+    echo "  expected UAT_POLICY=per-ticket, got '$UAT_POLICY'" >&2
+    return 1
+  }
+  return 0
+}
+_run "UAT_POLICY defaults to per-ticket when directive omits it" test_uat_policy_default_materialised
+
+test_uat_policy_no_parent_is_per_ticket() {
+  local output parsed
+  output=$(resolve_branch_context "CRE-123" --title "Fix auth bug" 2>/dev/null) || return 1
+  parsed=$(echo "$output" | _parse_result)
+  eval "$parsed"
+
+  [ "$UAT_POLICY" = "per-ticket" ] || {
+    echo "  expected UAT_POLICY=per-ticket for a ticket with no parent, got '$UAT_POLICY'" >&2
+    return 1
+  }
+  return 0
+}
+_run "ticket outside a shared-branch epic resolves per-ticket" test_uat_policy_no_parent_is_per_ticket
+
+test_uat_policy_survives_branch_override() {
+  # --branch retargets the branch; it does not detach the ticket from its
+  # epic's acceptance model. Regressing this silently re-stalls the chain.
+  local output parsed
+  output=$(resolve_branch_context "CRE-123" \
+    --branch "epic/override-x" \
+    --title "Fix auth bug" \
+    --parent-json "$EPIC_UAT_PARENT" 2>/dev/null) || return 1
+  parsed=$(echo "$output" | _parse_result)
+  eval "$parsed"
+
+  [ "$BRANCH_SOURCE" = "flag" ] || {
+    echo "  expected BRANCH_SOURCE=flag, got '$BRANCH_SOURCE'" >&2
+    return 1
+  }
+  [ "$UAT_POLICY" = "epic" ] || {
+    echo "  --branch override dropped the epic UAT policy, got '$UAT_POLICY'" >&2
+    return 1
+  }
+  return 0
+}
+_run "UAT_POLICY survives an explicit --branch override" test_uat_policy_survives_branch_override
+
+test_result_block_has_uat_policy() {
+  local output
+  output=$(resolve_branch_context "CRE-123" --title "Fix auth" 2>/dev/null) || return 1
+  echo "$output" | grep -q "UAT_POLICY:" || {
+    echo "  result block is missing the UAT_POLICY field" >&2
+    return 1
+  }
+  return 0
+}
+_run "result block carries UAT_POLICY" test_result_block_has_uat_policy
+
+# ── uat_decide_trigger ───────────────────────────────────────────────────────
+
+test_trigger_epic_policy_goes_done() {
+  local got
+  got=$(uat_decide_trigger --policy epic --uat-url "https://uat.example.com")
+  [ "$got" = "pr-review-pass-done" ] || {
+    echo "  expected pr-review-pass-done under epic policy, got '$got'" >&2
+    return 1
+  }
+  return 0
+}
+_run "uat_decide_trigger: epic policy routes to Done even with a UAT target" test_trigger_epic_policy_goes_done
+
+test_trigger_per_ticket_with_url_goes_uat() {
+  local got
+  got=$(uat_decide_trigger --policy per-ticket --uat-url "https://uat.example.com")
+  [ "$got" = "pr-review-pass-uat" ] || {
+    echo "  expected pr-review-pass-uat, got '$got'" >&2
+    return 1
+  }
+  return 0
+}
+_run "uat_decide_trigger: per-ticket with UAT target routes to UAT" test_trigger_per_ticket_with_url_goes_uat
+
+test_trigger_per_ticket_without_url_goes_done() {
+  local got
+  got=$(uat_decide_trigger --policy per-ticket --uat-url "")
+  [ "$got" = "pr-review-pass-done" ] || {
+    echo "  expected pr-review-pass-done with no UAT target, got '$got'" >&2
+    return 1
+  }
+  return 0
+}
+_run "uat_decide_trigger: per-ticket without UAT target routes to Done" test_trigger_per_ticket_without_url_goes_done
+
+test_trigger_reads_policy_from_environment() {
+  # This is how a phase agent gets it — exported by the agent env file.
+  local got
+  got=$(UAT_POLICY=epic uat_decide_trigger --uat-url "https://uat.example.com")
+  [ "$got" = "pr-review-pass-done" ] || {
+    echo "  expected env UAT_POLICY to be honoured, got '$got'" >&2
+    return 1
+  }
+  return 0
+}
+_run "uat_decide_trigger: reads UAT_POLICY from the environment" test_trigger_reads_policy_from_environment
+
+test_trigger_is_deterministic() {
+  local a b
+  a=$(uat_decide_trigger --policy per-ticket --uat-url "https://uat.example.com")
+  b=$(uat_decide_trigger --policy per-ticket --uat-url "https://uat.example.com")
+  [ "$a" = "$b" ] || {
+    echo "  same inputs produced '$a' then '$b'" >&2
+    return 1
+  }
+  return 0
+}
+_run "uat_decide_trigger: same inputs yield the same transition" test_trigger_is_deterministic
 
 echo ""
 echo "=== Results: $((PASS + FAIL)) tests, $PASS passed, $FAIL failed ==="

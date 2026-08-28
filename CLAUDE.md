@@ -32,6 +32,8 @@ Business idea → [/grill-me] → sealed intent → [ticket-planner] → initiat
 
 **Shared epic branches**: The ticket-planner may attach a `## Branch Directive` block to epic descriptions (via deterministic heuristic or operator override). ticket-auto resolves branch targets via a deterministic precedence chain: `--branch` CLI flag → parent epic directive → `BASE_BRANCH` default (`develop`). fleet-controller manages epic branch lifecycle (create, sync, GC). A malformed directive gate-stops the pipeline — no fallback. The directive lives only on the epic; it is never copied into child tickets. See [Branch Directive schema](ticket-auto-pipeline/docs/branch-directive-schema.md).
 
+**Epic-level UAT**: an epic may additionally declare `**UAT Policy:** epic` in its Branch Directive. Its children then route `Review → Done` on a passing PR review instead of `Review → UAT`, because a shared epic branch is not observable in UAT until the whole epic integrates — and parking children in `UAT` deadlocks the `blocked-by` chain, which resolves strictly on `Done`. Acceptance moves to the epic issue itself via `epic-integration-open` / `epic-uat-start` / `epic-uat-pass`. The field is optional and defaults to `per-ticket`, so no existing epic changes behaviour.
+
 ## Plugin anatomy
 
 ```

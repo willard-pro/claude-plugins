@@ -147,6 +147,14 @@ resolve_branch_context() {
     branch_source="default"
   fi
 
+  # ── Resolve UAT policy ────────────────────────────────────────────────────
+  # The policy is a property of the epic, not of the branch target, so it is
+  # read from the parent directive regardless of which precedence rule chose
+  # the branch — an explicit --branch override retargets the branch, it does
+  # not detach the ticket from its epic's acceptance model.
+  local uat_policy
+  uat_policy=$(_uat_policy_from_description "$parent_description")
+
   # ── Emit result block ─────────────────────────────────────────────────────
   cat <<EOF
 BRANCH_CONTEXT_RESULT
@@ -155,13 +163,136 @@ BRANCH_CONTEXT_RESULT
   INTEGRATION_BRANCH:   ${integration_branch:-}
   EPIC_ID:              ${parent_id:-}
   BRANCH_SOURCE:        ${branch_source}
+  UAT_POLICY:           ${uat_policy}
 END_BRANCH_CONTEXT_RESULT
 EOF
 
   return 0
 }
 
+# resolve_uat_policy <TICKET_ID>
+# Standalone resolution of a ticket's UAT policy, for skills invoked outside a
+# pipeline run and therefore without an agent environment file. Echoes
+# 'per-ticket' or 'epic'.
+#
+# Reuses the parent-description read and the directive parser the pipeline path
+# already uses, so the standalone and pipeline answers cannot diverge. No new
+# component fetches parent descriptions.
+#
+# On fetch failure it echoes the 'per-ticket' default AND returns 1: a caller
+# that checks the status can react, while one that does not still gets the
+# pre-change behaviour rather than an empty string.
+resolve_uat_policy() {
+  local ticket_id="$1"
+
+  local issue_json
+  issue_json=$(get_issue "$ticket_id" 2>/dev/null) || {
+    echo "branch-resolve: failed to fetch ticket $ticket_id for UAT policy" >&2
+    echo "per-ticket"
+    return 1
+  }
+
+  local parent_description
+  parent_description=$(echo "$issue_json" | jq -r '.parent.description // ""' 2>/dev/null)
+
+  _uat_policy_from_description "$parent_description"
+}
+
+# uat_decide_trigger [--policy <policy>] [--uat-url <url>] [--ticket <TICKET_ID>]
+#                    [--project-dir <dir>]
+# Echoes the ticket-flow trigger to fire after a passing PR review:
+#   pr-review-pass-done  (Review → Done)
+#   pr-review-pass-uat   (Review → UAT)
+#
+# This is the single UAT-vs-Done decision site. It is a function that echoes a
+# trigger name rather than prose in a SKILL file, so the decision cannot vary
+# between runs with the same inputs.
+#
+# Policy resolution order: --policy → UAT_POLICY in the environment (delivered
+# by the agent env file) → standalone resolution from --ticket → 'per-ticket'.
+#
+# Policy is evaluated BEFORE the UAT URL, and that ordering is load-bearing:
+# the UAT URL is exported into every pipeline agent's environment
+# unconditionally, so it is effectively always set. An epic-policy check placed
+# after a "is a UAT target configured?" check would never be reached.
+uat_decide_trigger() {
+  local policy=""
+  local uat_url=""
+  local uat_url_given=false
+  local ticket_id=""
+  local project_dir="."
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+    --policy)
+      policy="$2"
+      shift 2
+      ;;
+    --uat-url)
+      uat_url="$2"
+      uat_url_given=true
+      shift 2
+      ;;
+    --ticket)
+      ticket_id="$2"
+      shift 2
+      ;;
+    --project-dir)
+      project_dir="$2"
+      shift 2
+      ;;
+    *)
+      echo "uat_decide_trigger: unknown option: $1" >&2
+      shift
+      ;;
+    esac
+  done
+
+  [ -z "$policy" ] && policy="${UAT_POLICY:-}"
+  if [ -z "$policy" ] && [ -n "$ticket_id" ]; then
+    policy=$(resolve_uat_policy "$ticket_id" 2>/dev/null) || true
+  fi
+  policy="${policy:-per-ticket}"
+
+  # Epic policy wins outright — there is no environment in which one child of a
+  # shared epic branch can be observed, so a UAT target is irrelevant.
+  if [ "$policy" = "epic" ]; then
+    echo "pr-review-pass-done"
+    return 0
+  fi
+
+  if ! $uat_url_given; then
+    uat_url=$(resolve_uat_url "$project_dir" 2>/dev/null) || uat_url=""
+  fi
+
+  if [ -n "$uat_url" ]; then
+    echo "pr-review-pass-uat"
+  else
+    echo "pr-review-pass-done"
+  fi
+  return 0
+}
+
 # ── Internal helpers ────────────────────────────────────────────────────────
+
+# _uat_policy_from_description <description>
+# Echoes the normalised UAT policy declared by an epic description's Branch
+# Directive, or the 'per-ticket' default when no directive is present.
+#
+# A malformed directive is not diagnosed here: when the directive is
+# load-bearing for branch selection, resolve_branch_context already gate-stops
+# on it before reaching this point.
+_uat_policy_from_description() {
+  local description="$1"
+  local directive_output="" policy=""
+
+  if [ -n "$description" ]; then
+    directive_output=$(check_branch_directive_description "$description" 2>/dev/null) || directive_output=""
+    policy=$(echo "$directive_output" | sed -n "s/^BRANCH_DIRECTIVE_UAT_POLICY='\\(.*\\)'$/\\1/p")
+  fi
+
+  echo "${policy:-per-ticket}"
+}
 
 # _generate_branch_name <ticket-id> <title>
 # Deterministically generates a branch name: {BRANCH_PREFIX}{ID}-{slug}
