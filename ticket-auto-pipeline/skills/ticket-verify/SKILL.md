@@ -1,6 +1,6 @@
 ---
 name: ticket-verify
-description: Verifies a Linear ticket fix by loading its requirements, then either navigating the live app via Playwright (browser tickets) or running the project's build tooling (build-only tickets — e.g. parent-POM/dependency-management changes with no UI or API surface), reproducing the original issue steps, and confirming the fix works. Produces a structured pass/fail report. On failure, emits a REMEDIATION_BRIEF that can be fed directly to ticket-implement or a fix skill. Use when the user says "/ticket-verify <ID>", "verify ticket <ID>", "test ticket <ID>", or "check if <ID> is fixed". Accepts optional --user, --password, and --env flags.
+description: Verifies a Linear ticket fix by loading its requirements, then navigating the live app via Playwright (browser tickets), running the project's build tooling (build-only tickets — e.g. parent-POM/dependency-management changes with no UI or API surface), or checking a running backend directly via health/API calls (live-backend tickets — e.g. service registration, circuit breaker behaviour — a live system with no UI to click), reproducing the original issue steps, and confirming the fix works. Produces a structured pass/fail report. On failure, emits a REMEDIATION_BRIEF that can be fed directly to ticket-implement or a fix skill. Use when the user says "/ticket-verify <ID>", "verify ticket <ID>", "test ticket <ID>", or "check if <ID> is fixed". Accepts optional --user, --password, and --env flags.
 ---
 
 # Ticket Verify
@@ -34,7 +34,7 @@ Follow the pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with pa
 - **Verdict**: after the final pass/fail determination, write `hb-wrap.sh decision "verification-verdict" "fired" "PASS|FAIL" '{"verdict":"PASS|FAIL","criteria_met":"N","criteria_total":"M"}'`
 
 ### Step dispatch
-**Important:** Steps `browser-session`, `navigate`, and `execute-steps` depend on a live Playwright session that is lost when the server crashes. If `--from-step` is one of these values, fall back to `build-plan` instead — always re-run browser steps from scratch. This does not apply in build-only mode: there is no browser session to lose, so an `execute-steps` resume in build-only mode re-enters Step 4c directly at the next unchecked criterion (per-criterion checkpoint), not `build-plan`.
+**Important:** Steps `browser-session`, `navigate`, and `execute-steps` depend on a live Playwright session that is lost when the server crashes. If `--from-step` is one of these values, fall back to `build-plan` instead — always re-run browser steps from scratch. This does not apply in build-only or live-backend mode: neither has a browser session to lose, so an `execute-steps` resume in either mode re-enters its Step 4c variant (Step 4c for build-only, Step 4c-live for live-backend) directly at the next unchecked criterion (per-criterion checkpoint), not `build-plan`.
 
 | `--from-step` value | Effective skip to | Restore from |
 |---------------------|-------------------|--------------|
@@ -154,26 +154,35 @@ ls "$TICKETS_ROOT/openspec/changes/" | grep -i "{ticket-id-lowercase}"
 
 If found, read `tasks.md` to understand what was implemented and any "Manually verify" tasks — these become your verification checklist.
 
-### 1e — Detect verification mode (browser vs. build-only)
+### 1e — Detect verification mode (browser vs. build-only vs. live-backend)
 
-Some tickets have no UI or API surface to exercise — e.g. a root parent-POM introduction, a dependency-version bump, a build-plugin config change. These are verified by running the project's build tooling and checking exit codes/output, not by driving a browser. Classify the ticket using the same signal-based approach as `gate-check.sh`'s Check 2.6, so the two phases agree on ticket shape:
+Some tickets have no UI or API surface to exercise — e.g. a root parent-POM introduction, a dependency-version bump, a build-plugin config change. These are verified by running the project's build tooling and checking exit codes/output, not by driving a browser. Others need a **running backend checked via API/health-check, with no UI in the loop** — e.g. service-to-service calls, Eureka registration, circuit-breaker behaviour under simulated failure. A build command can't verify these (nothing to compile), and driving a browser is wrong too (no login, no page in the AC) — treating them as either bucket produces a silent false-pass (the real check never runs) or a stall (browser mode tries to resolve a test user that doesn't exist for an infra ticket). Classify the ticket using the same signal-based approach as `gate-check.sh`'s Check 2.6, so the two phases agree on ticket shape, with an added live-backend trigger evaluated ahead of the build-only test — a ticket can mention a build tool (`mvn`, `pom.xml`) in passing while its actual AC is a live runtime check, and live-backend must win that case:
 
 ```bash
 _plan_file=$(find "$TICKETS_ROOT" -name "simple-fix.md" -path "*{TICKET-ID}*" 2>/dev/null | head -1)
 [ -z "$_plan_file" ] && _plan_file="{ticket-dir}/notes.md"
-_signal_text="$(cat "$_plan_file" {ticket-dir}/context.md 2>/dev/null)"
+_signal_text="$(cat "$_plan_file" {ticket-dir}/context.md 2>/dev/null)"$'\n'"${description:-}"
 
 _browser_signals=$(echo "$_signal_text" | grep -ciE '\b(navigate|click|button|dropdown|screen|browser|playwright|snapshot|login|nav[- ]?bar)\b|\bopen(s|ed|ing)? (the |a |modal|dialog|page)\b' || true)
 _build_signals=$(echo "$_signal_text" | grep -ciE '\b(mvn|maven|gradle|pom\.xml|build\.gradle|clean install|clean compile|clean package|mvn test|BUILD SUCCESS)\b' || true)
+# Live-backend trigger: either an explicit infra/runtime-check keyword, or the
+# combination of an explicitly-absent test user ("N/A" — not merely unmentioned)
+# with an environment that names a running full stack. That combination is the
+# real signal: no login needed, but a live system must be up.
+_live_backend_signals=$(echo "$_signal_text" | grep -ciE '\b(docker compose|eureka|circuit breaker|service.to.service|downstream failure|register(s|ed)? with)\b' || true)
+_test_user_na=$(echo "$_signal_text" | grep -ciE '\*\*?Test User\*?\*?:?\s*N/A' || true)
+_env_full_stack=$(echo "$_signal_text" | grep -ciE '\b(docker compose|full stack)\b' || true)
 
-if [ "${_browser_signals:-0}" -eq 0 ] && [ "${_build_signals:-0}" -gt 0 ]; then
+if [ "${_browser_signals:-0}" -eq 0 ] && { [ "${_live_backend_signals:-0}" -gt 0 ] || { [ "${_test_user_na:-0}" -gt 0 ] && [ "${_env_full_stack:-0}" -gt 0 ]; }; }; then
+  VERIFY_MODE="live-backend"
+elif [ "${_browser_signals:-0}" -eq 0 ] && [ "${_build_signals:-0}" -gt 0 ]; then
   VERIFY_MODE="build-only"
 else
   VERIFY_MODE="browser"
 fi
 ```
 
-Record `VERIFY_MODE` for the rest of this skill. `browser` is the default and behaves exactly as documented below (Steps 1.6, 1.7a/1.7b, 3, 4, 4b all apply unchanged). `build-only` skips every browser-specific step — see the "build-only" callouts inline in Steps 1.6, 1.7, 2, 3–4b, 6, and 7.
+Record `VERIFY_MODE` for the rest of this skill. `browser` is the default and behaves exactly as documented below (Steps 1.6, 1.7a/1.7b, 3, 4, 4b all apply unchanged). `build-only` skips every browser-specific step — see the "build-only" callouts inline in Steps 1.6, 1.7, 2, 3–4b, 6, and 7. `live-backend` runs Step 1.6 (env-start.sh — a real system genuinely needs to be up) but skips 1.7a/1.7b/3/4/4b same as build-only, since there is no login and no page to reach — see the "live-backend" callouts alongside the "build-only" ones in the same steps.
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|load-context|done|Context loaded, mode=${VERIFY_MODE}" >> "$LOG_FILE"
 
@@ -207,7 +216,7 @@ TRACE
 
 ## Step 1.6 — Ensure local environment is ready (local only)
 
-Skip entirely if `--env=uat`, `--no-env-start`, or `VERIFY_MODE=build-only` is set — build-only verification runs `mvn`/`gradle` directly against the worktree and never touches a running service.
+Skip entirely if `--env=uat`, `--no-env-start`, or `VERIFY_MODE=build-only` is set — build-only verification runs `mvn`/`gradle` directly against the worktree and never touches a running service. Do **not** skip for `VERIFY_MODE=live-backend` — a live-backend ticket's whole point is that a running service must be checked, so `env-start.sh` still needs to run.
 
 ### 1.6a — Detect affected backend services
 
@@ -246,7 +255,7 @@ Before building the verification plan, resolve the test user, navigation target,
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|pre-flight|start|Resolving verification prerequisites" >> "$LOG_FILE"
 
-**If `VERIFY_MODE=build-only`**: skip 1.7a (test user) and 1.7b (navigation target) entirely — there is no login and no page to reach. Go directly to 1.7c.
+**If `VERIFY_MODE=build-only` or `VERIFY_MODE=live-backend`**: skip 1.7a (test user) and 1.7b (navigation target) entirely — there is no login and no page to reach. Go directly to 1.7c.
 
 ### 1.7a — Resolve test user
 
@@ -308,6 +317,8 @@ If found in notes.md, use it as the basis for verification criteria in Step 2. I
 
 **If `VERIFY_MODE=build-only`, skip 2a–2c below and use this variant instead:**
 
+**If `VERIFY_MODE=live-backend`, skip 2a–2c and the build-only variant below and use the live-backend variant instead (after it).**
+
 ### 2 (build-only variant)
 
 **Derive the module list and build commands.** Read the plan artifact's Completion Checklist / task list and `notes.md` for the affected repos/modules (e.g. from a "pre-implementation checkpoint" or worktree list). For each affected module, determine the appropriate build command from the project's `CLAUDE.md` `BE_TEST_CMD` and standard Maven/Gradle conventions:
@@ -349,6 +360,51 @@ If `--from-auto` is NOT set: pause and ask "Does this plan look right? (yes / ad
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|build-plan|done|{N} criteria (build-only)" >> "$LOG_FILE"
 
 Proceed to **Step 4c** below, skipping Steps 3, 4, and 4b.
+
+---
+
+### 2 (live-backend variant)
+
+**Derive the running-system checks.** Read the plan artifact and `notes.md`/`context.md` for the affected services and the specific runtime behaviour the acceptance criteria describe (e.g. "all services register with Eureka", "circuit breaker opens after N downstream failures", "service-to-service call succeeds"). Unlike build-only, there is no build command that can confirm these — the check has to run against the live services `env-start.sh` (Step 1.6b) brought up. Determine, per criterion, the concrete check:
+
+- **Registration/discovery claims** (e.g. "registers with Eureka") → an `env-status.sh` read and/or a `curl` against the discovery service's registry endpoint (e.g. `/eureka/apps`), confirming the expected service names appear.
+- **Service-to-service call claims** → a `curl` (or the project's documented API-check invocation) that exercises the call path directly and inspects the response status/body.
+- **Failure/resilience claims** (e.g. circuit breaker) → simulate the stated downstream failure (stop/block the dependency `env-start.sh` manages, or use the project's documented fault-injection method) and confirm the expected behaviour (breaker opens, fallback response, recovery on restore).
+
+**Expand acceptance criteria into atomic items** exactly as in 2b — each criterion maps to one live check + one pass condition.
+
+Construct and print the **Verification Plan**:
+
+```
+## Verification Plan — {TICKET-ID}: {title} (live-backend)
+
+**Environment:** {env} (live backend, no UI)
+**Services under test:** {list of affected services}
+
+**What was broken:** {one sentence from Actual Behaviour}
+**What should be true now:** {one sentence from Expected Behaviour / AC}
+
+### Acceptance criteria (expanded — each item verified independently)
+1. {atomic criterion — one observable runtime fact, e.g. "gateway registers with Eureka"}
+2. {atomic criterion}
+...
+
+### Live checks
+1. `{env-status.sh invocation or curl command}` — {why, what it confirms}
+2. `{env-status.sh invocation or curl command}` — {why, what it confirms}
+...
+
+### Pass criteria
+- [ ] {criterion 1 — expected response/state observed}
+- [ ] {criterion 2}
+...
+```
+
+If `--from-auto` is NOT set: pause and ask "Does this plan look right? (yes / adjust: ...)". If `--from-auto` IS set: print the plan and proceed directly to Step 4c-live (skip Steps 3, 4, 4b entirely — there is no browser session to establish).
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|build-plan|done|{N} criteria (live-backend)" >> "$LOG_FILE"
+
+Proceed to **Step 4c-live** below, skipping Steps 3, 4, and 4b.
 
 ---
 
@@ -430,6 +486,8 @@ If `--from-auto` IS set:
 ## Step 3 — Establish browser session
 
 **If `VERIFY_MODE=build-only`: skip Steps 3, 4, and 4b entirely — go to Step 4c.**
+
+**If `VERIFY_MODE=live-backend`: skip Steps 3, 4, and 4b entirely — go to Step 4c-live.**
 
 ### 3a — Navigate to the app
 
@@ -589,6 +647,42 @@ Proceed to Step 5.
 
 ---
 
+## Step 4c-live — Execute live-backend verification (live-backend mode only)
+
+**Phase timeout:** same 30-minute wall-clock limit as Step 4b — checkpoint progress, don't crash on timeout.
+
+The environment is already up (Step 1.6b ran `env-start.sh` for `live-backend` mode same as browser mode — see Step 1.6). Run each live check from the Step 2 (live-backend variant) plan sequentially. For **every check**:
+
+1. Run the check, capturing output:
+   ```bash
+   { {env-status.sh invocation or curl command} ; } > /tmp/ticket-verify-{TICKET-ID}-{step}.log 2>&1
+   _rc=$?
+   ```
+   Use `bash {TICKETS_ROOT}/env-status.sh` for service-health/registration reads. Use `curl -sS -w '\n%{http_code}\n'` (or the project's documented API-check invocation) for direct service-to-service or endpoint checks. For failure-simulation criteria (e.g. circuit breaker), use the project's documented fault-injection method — typically stopping a dependency via `env-start.sh`/`env-stop.sh` — then re-run the check to confirm the expected degraded/recovered behaviour.
+2. Record the **observed result** — exit code / HTTP status, and whether the expected state appears in the captured output (e.g. the service name present in `/eureka/apps`, the expected HTTP status and body shape, the breaker's fallback response).
+3. If the criterion requires checking a state transition (e.g. breaker opens then recovers), run the check at each stage explicitly — before the fault, during, and after clearing it — and record all three observations, not just the final one.
+
+**Per-criterion checkpointing:** After EACH criterion passes, write a checkpoint entry exactly as in Step 4b, so a crash resumes from the next criterion:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|checkpoint|done|criterion-{N}-pass" >> "$LOG_FILE"
+```
+
+At any point, if a check's exit code/HTTP status is unexpected or the expected state is absent, mark that criterion **FAIL** and record:
+- The check that was run and its result (exit code / HTTP status)
+- What was expected (from the pass criterion)
+- What was observed — quote the relevant lines of captured output verbatim
+
+Continue executing remaining checks unless the failure makes downstream checks meaningless (e.g. a service failing to start means every check against it will fail for the same reason — note this and skip re-running them individually).
+
+**Leave the environment as found:** if a fault-injection step stopped a dependency, restore it (`env-start.sh`) before finishing this step, even on FAIL — a left-down dependency would cause spurious failures in the next verification run.
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|VERIFY|execute-steps|done|{N} live checks executed" >> "$LOG_FILE"
+
+Proceed to Step 5.
+
+---
+
 ## Step 5 — Evaluate pass/fail
 
 ### Pass
@@ -727,6 +821,11 @@ On PASS: criteria_met=criteria_total=total passing criteria. On FAIL: criteria_m
 write_verifier_result verifier=build_only verdict=<PASS|FAIL> criteria_met=<N> criteria_total=<M> attempt=<A> phase=VERIFY
 ```
 
+**If `VERIFY_MODE=live-backend`**, use `verifier=live_backend` instead of `playwright_uat`:
+```bash
+write_verifier_result verifier=live_backend verdict=<PASS|FAIL> criteria_met=<N> criteria_total=<M> attempt=<A> phase=VERIFY
+```
+
 ---
 
 ## Step 7 — Failure report
@@ -744,6 +843,12 @@ write_verifier_result verifier=build_only verdict=<PASS|FAIL> criteria_met=<N> c
 2. **Repo/module + branch** — maps to `CURRENT_URL` field (use `{repo}@{branch}` in place of a URL)
 3. **Last 20–30 lines of captured build output** (`/tmp/ticket-verify-{TICKET-ID}-{step}.log`) — maps to `SNAPSHOT_EXCERPT` field
 4. **Failed step** — step number, expected vs. observed (command + exit code)
+
+**Live-backend mode:** substitute live-check diagnostics for the browser ones above — same field mapping convention as build-only:
+1. **Failed check + exit code/HTTP status** — maps to `CONSOLE_ERRORS` field
+2. **Service/environment + endpoint checked** — maps to `CURRENT_URL` field (use `{service}@{env}` or the endpoint URL)
+3. **Last 20–30 lines of captured check output** (`/tmp/ticket-verify-{TICKET-ID}-{step}.log`), plus `env-status.sh` output at the point of failure — maps to `SNAPSHOT_EXCERPT` field
+4. **Failed step** — step number, expected vs. observed (check + result)
 
 ### 7b — Write the failure report
 
@@ -983,3 +1088,4 @@ The REMEDIATION_BRIEF above feeds `ticket-implement` for the fix round.
 - **Scope:** This skill does not modify source code. It posts a verification comment to Linear on both pass and fail. On UAT fail it also triggers `uat-fail` (state → `Ready`, label `rejected`). Local pass triggers `implement-complete` (state → `Review`). The business partner handles the final UAT → Done transition manually.
 - **REMEDIATION_BRIEF format is canonical** — do not reformat the delimiter lines or key names.
 - **Build-only mode:** tickets with no UI/API surface (root parent-POM changes, dependency-version bumps, build-plugin config) skip every browser step (1.6, 1.7a/1.7b, 3, 4, 4b) and instead run the affected modules' build commands directly, evaluating pass/fail on exit codes and output rather than snapshots. Detection mirrors `gate-check.sh`'s Check 2.6 classification so both phases agree on ticket shape. The REMEDIATION_BRIEF and pass/fail report keep their canonical field names — `CONSOLE_ERRORS`/`SNAPSHOT_EXCERPT`/`CURRENT_URL` just carry build diagnostics instead of browser ones (see Step 7a).
+- **Live-backend mode:** tickets with no UI but a genuine live-system requirement (service registration, downstream-failure/circuit-breaker behaviour, inter-service calls) skip the login/navigation-specific steps (1.7a/1.7b, 3, 4, 4b) but — unlike build-only — do **not** skip Step 1.6: `env-start.sh` must bring the real services up, because the check is against a running system, not a compiled artifact. Verification runs via `env-status.sh` reads and direct `curl`/API calls (Step 4c-live) rather than a browser session or a build command. Exists because the browser/build-only split has no bucket for "running backend, no UI" — misclassifying these as build-only silently skips the actual check (nothing to compile), and misclassifying them as browser (the zero-signal default) sends the agent looking for a login page that isn't part of the AC.

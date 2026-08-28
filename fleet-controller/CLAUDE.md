@@ -139,6 +139,8 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 | `FLEET_AUTO_DISPATCH` | false | When `false` (the documented default) fleetd sits idle — detection reports, dispatch happens only when explicitly triggered (skill or `POST /dispatch`). When `true`, the global sweep of `state:execution` epics runs unchanged. |
 | `FLEET_DISPATCH_LOCK_TIMEOUT` | 5 | Seconds to wait for the epic-scoped dispatch flock (`{queue}.{epic}.dispatch.lock`) per attempt — serializes dispatch/stop per epic across processes |
 | `FLEET_MAX_CONCURRENT` | 3 | Max concurrent pipelines for dispatch |
+| `FLEET_EPIC_REPOS_DEPTH` | 3 | Levels of non-repo directories `_fleet_repos_under_root` descends into looking for nested service repos (e.g. `microservices/<svc>`) before giving up |
+| `FLEET_EPIC_REPOS` | (unset) | Comma- or colon-separated list of explicit repo paths — when set, bypasses `_fleet_repos_under_root` directory discovery entirely; for operators pinning the exact repo set |
 | `FLEET_POSTMORTEM_ON_KILL` | false | Run pipeline post-mortem analysis on fleet-killed pipelines (RLVR Phase 3). Opt-in — kills can be mass interventions; network cost and gh rate limits argue for per-kill opt-in. |
 | `FLEET_INSTANCE_ID` | default | Namespace for stop files and spawn queues |
 | `FLEET_SUMMARY_INTERVAL_CYCLES` | 10 | Cycles between forced fleet-summary heartbeat emissions |

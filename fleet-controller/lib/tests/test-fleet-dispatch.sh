@@ -764,6 +764,104 @@ test_multi_repo_sync_failure_does_not_block() {
   return 0
 }
 
+# ── Nested-repo discovery tests (_fleet_repos_under_root) ──────────────────────
+
+# Fixture: REPOS_ROOT with top-level repos plus repos nested two levels deep
+# under non-repo grouping directories (microservices/<svc>, endpoints/<svc>) —
+# the credit-network.biz-style layout from issue #125.
+_make_nested_repo_root() {
+  local root="$1"
+  mkdir -p "$root/top-repo" "$root/microservices/gateway" "$root/microservices/bom" \
+    "$root/endpoints/transunion" "$root/not-a-repo"
+  git -C "$root/top-repo" init -q -b main 2>/dev/null || git -C "$root/top-repo" init -q
+  git -C "$root/microservices/gateway" init -q -b main 2>/dev/null || git -C "$root/microservices/gateway" init -q
+  git -C "$root/microservices/bom" init -q -b main 2>/dev/null || git -C "$root/microservices/bom" init -q
+  git -C "$root/endpoints/transunion" init -q -b main 2>/dev/null || git -C "$root/endpoints/transunion" init -q
+}
+
+test_repos_under_root_finds_nested_repos() {
+  local ws
+  ws=$(_setup_workspace)
+  local repos_root="${ws}/repos"
+  _make_nested_repo_root "$repos_root"
+
+  local output
+  output=$(bash -c "
+    source '$LIB_DIR/fleet-dispatch.sh'
+    _fleet_repos_under_root '$repos_root'
+  ")
+
+  for expect in top-repo microservices/gateway microservices/bom endpoints/transunion; do
+    echo "$output" | grep -q "$expect" || {
+      echo "expected '$expect' in enumeration; got: $output" >&2
+      return 1
+    }
+  done
+  echo "$output" | grep -q "not-a-repo" && {
+    echo "non-git directory enumerated: $output" >&2
+    return 1
+  }
+  return 0
+}
+
+test_repos_under_root_respects_depth_limit() {
+  local ws
+  ws=$(_setup_workspace)
+  local repos_root="${ws}/repos"
+  _make_nested_repo_root "$repos_root"
+
+  local output
+  output=$(bash -c "
+    FLEET_EPIC_REPOS_DEPTH=1
+    source '$LIB_DIR/fleet-dispatch.sh'
+    _fleet_repos_under_root '$repos_root'
+  ")
+
+  echo "$output" | grep -q "top-repo" || {
+    echo "expected top-repo at depth 1; got: $output" >&2
+    return 1
+  }
+  echo "$output" | grep -q "microservices/gateway" && {
+    echo "depth limit not respected — nested repo found at depth 1: $output" >&2
+    return 1
+  }
+  return 0
+}
+
+test_repos_under_root_explicit_override() {
+  local ws
+  ws=$(_setup_workspace)
+  local repos_root="${ws}/repos"
+  _make_nested_repo_root "$repos_root"
+
+  local output
+  output=$(bash -c "
+    FLEET_EPIC_REPOS='${repos_root}/microservices/gateway,${repos_root}/endpoints/transunion'
+    source '$LIB_DIR/fleet-dispatch.sh'
+    _fleet_repos_under_root '$repos_root'
+  ")
+
+  local count
+  count=$(echo "$output" | grep -c .)
+  [ "$count" -eq 2 ] || {
+    echo "expected exactly 2 repos from override; got: $output" >&2
+    return 1
+  }
+  echo "$output" | grep -q "microservices/gateway" || {
+    echo "override missing gateway; got: $output" >&2
+    return 1
+  }
+  echo "$output" | grep -q "endpoints/transunion" || {
+    echo "override missing transunion; got: $output" >&2
+    return 1
+  }
+  echo "$output" | grep -q "top-repo" && {
+    echo "override should bypass discovery entirely — top-repo leaked in: $output" >&2
+    return 1
+  }
+  return 0
+}
+
 # ── Priority ordering tests ─────────────────────────────────────────────────────
 
 # Mock epic with dispatchable children at given priorities. Prio values are
@@ -1809,6 +1907,9 @@ _run "resume_clears_and_dispatches" test_resume_clears_and_dispatches
 _run "stop_file_inert_to_other_epics" test_stop_file_inert_to_other_epics
 _run "stop_initiative_purges_and_writes_stop_file" test_stop_initiative_purges_and_writes_stop_file
 _run "stop_initiative_idempotent" test_stop_initiative_idempotent
+_run "repos_under_root_finds_nested_repos" test_repos_under_root_finds_nested_repos
+_run "repos_under_root_respects_depth_limit" test_repos_under_root_respects_depth_limit
+_run "repos_under_root_explicit_override" test_repos_under_root_explicit_override
 
 echo ""
 echo "=== Results ==="
