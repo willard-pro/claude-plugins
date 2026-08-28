@@ -19,6 +19,7 @@
 _BR_LIB_DIR="$(dirname "${BASH_SOURCE[0]}")"
 source "$_BR_LIB_DIR/config.sh" 2>/dev/null || true
 source "$_BR_LIB_DIR/linear-api.sh" 2>/dev/null || true
+source "$_BR_LIB_DIR/planned-ticket-check.sh" 2>/dev/null || true
 source "$_BR_LIB_DIR/branch-directive-check.sh" 2>/dev/null || true
 
 #   resolve_branch_context "CRE-123"

@@ -39,6 +39,7 @@ assemble_inspector_context() {
   # Per-line jq for corruption tolerance — a broken JSON line is dropped while
   # its neighbors survive. jq failure count tracked for diagnostics (P2-2).
   local _vr_entries=""
+  local _vr_entries_ts=""
   local _vr_skipped_lines=0
   local _vr_total_lines=0
   if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
@@ -47,18 +48,26 @@ assemble_inspector_context() {
     # Build target phase list for multi-phase context (P1-1/P1-2)
     local _target_phases="$PHASE"
     [ -n "$EXTRA_PHASES" ] && _target_phases="$_target_phases $EXTRA_PHASES"
-    _vr_entries=$(grep '^[^|]*|META|verifier-result|info|' "$LOG_FILE" 2>/dev/null |
-      awk -F'|' '{s=$5; for(i=6;i<=NF;i++) s=s"|"$i; print s}' |
-      while IFS= read -r json_line; do
+    # Carry the source line's timestamp alongside its JSON (tab-separated) so
+    # the gate-warn window below can be scoped to matched entries only, not
+    # every verifier-result in the whole log (P1-6 regression: a stale
+    # gate-warn from an earlier phase kept reappearing in every later
+    # phase's inspection context because the window was unscoped).
+    _vr_entries_ts=$(grep '^[^|]*|META|verifier-result|info|' "$LOG_FILE" 2>/dev/null |
+      awk -F'|' '{ts=$1; s=$5; for(i=6;i<=NF;i++) s=s"|"$i; print ts "\t" s}' |
+      while IFS=$'\t' read -r _ts json_line; do
         _phase=$(echo "$json_line" | jq -r '.phase // empty' 2>/dev/null || true)
         if [ -z "$_phase" ]; then
           continue
         fi
         # Match against primary phase + any extra phases (space-delimited)
         case " $_target_phases " in
-        *" $_phase "*) echo "$json_line" ;;
+        *" $_phase "*) printf '%s\t%s\n' "$_ts" "$json_line" ;;
         esac
       done || true)
+    if [ -n "$_vr_entries_ts" ]; then
+      _vr_entries=$(printf '%s\n' "$_vr_entries_ts" | cut -f2-)
+    fi
     # Compute skipped_lines: total verifier-result lines minus matched entries.
     # Handles both torn JSON (jq returns empty phase) and non-matching phases.
     local _vr_entry_count=0
@@ -113,9 +122,9 @@ assemble_inspector_context() {
   if [ -n "$LOG_FILE" ] && [ -f "$LOG_FILE" ]; then
     # Find first/last verifier-result timestamps for the target phases
     local _vr_ts_first="" _vr_ts_last=""
-    if [ -n "$_vr_entries" ]; then
-      _vr_ts_first=$(grep '^[^|]*|META|verifier-result|info|' "$LOG_FILE" 2>/dev/null | head -1 | cut -d'|' -f1 || true)
-      _vr_ts_last=$(grep '^[^|]*|META|verifier-result|info|' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'|' -f1 || true)
+    if [ -n "$_vr_entries_ts" ]; then
+      _vr_ts_first=$(printf '%s\n' "$_vr_entries_ts" | head -1 | cut -f1 || true)
+      _vr_ts_last=$(printf '%s\n' "$_vr_entries_ts" | tail -1 | cut -f1 || true)
     fi
     if [ -n "$_vr_ts_first" ] && [ -n "$_vr_ts_last" ]; then
       _gate_warns=$(grep '^[^|]*|META|gate-warn|' "$LOG_FILE" 2>/dev/null |
