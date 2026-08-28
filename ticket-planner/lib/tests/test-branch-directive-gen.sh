@@ -272,6 +272,100 @@ else
   FAIL=$((FAIL + 1))
 fi
 
+# ── UAT Policy (optional field) ───────────────────────────────────────────────
+
+echo ""
+echo "=== UAT Policy tests ==="
+
+UAT_EPIC_JSON='{"initiative_id":"INIT-42","title_slug":"debt-collection","base_branch":"develop","merge_policy":"manual","sync_policy":"none","uat_policy":"epic"}'
+UAT_PER_TICKET_JSON='{"initiative_id":"INIT-42","title_slug":"debt-collection","base_branch":"develop","merge_policy":"manual","sync_policy":"none","uat_policy":"per-ticket"}'
+UAT_BAD_JSON='{"initiative_id":"INIT-42","title_slug":"debt-collection","base_branch":"develop","merge_policy":"manual","sync_policy":"none","uat_policy":"team"}'
+UAT_ABSENT_JSON='{"initiative_id":"INIT-42","title_slug":"debt-collection","base_branch":"develop","merge_policy":"manual","sync_policy":"none"}'
+
+echo "--- U1: uat_policy emitted when supplied ---"
+OUT=$(branch_directive_generate "$UAT_EPIC_JSON")
+if echo "$OUT" | grep -q '^\*\*UAT Policy:\*\* epic$'; then
+  echo "PASS: UAT Policy line emitted"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL: UAT Policy line missing from output"
+  echo "$OUT"
+  FAIL=$((FAIL + 1))
+fi
+
+echo "--- U2: field omitted entirely when not supplied ---"
+OUT=$(branch_directive_generate "$UAT_ABSENT_JSON")
+if echo "$OUT" | grep -q 'UAT Policy'; then
+  echo "FAIL: UAT Policy emitted although not requested — pre-existing epics must be byte-identical"
+  FAIL=$((FAIL + 1))
+else
+  echo "PASS: no UAT Policy line when unset"
+  PASS=$((PASS + 1))
+fi
+
+echo "--- U3: invalid value rejected with no output ---"
+OUT=$(branch_directive_generate "$UAT_BAD_JSON" 2>/dev/null) && rc=0 || rc=$?
+if [ "$rc" -ne 0 ] && [ -z "$OUT" ]; then
+  echo "PASS: invalid uat_policy rejected (rc=$rc, no output)"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL: invalid uat_policy accepted (rc=$rc, output='$OUT')"
+  FAIL=$((FAIL + 1))
+fi
+
+echo "--- U4: generated epic-policy block round-trips through the validator ---"
+if declare -f check_branch_directive_description >/dev/null 2>&1; then
+  UAT_OUTPUT=$(branch_directive_generate "$UAT_EPIC_JSON")
+  FULL_DESC="# Epic: Debt Collection
+
+Some description text.
+
+${UAT_OUTPUT}"
+  PARSED=$(check_branch_directive_description "$FULL_DESC" 2>/dev/null) && rc=0 || rc=$?
+  RESOLVED=$(echo "$PARSED" | sed -n "s/^BRANCH_DIRECTIVE_UAT_POLICY='\\(.*\\)'$/\\1/p")
+  if [ "$rc" -eq 0 ] && [ "$RESOLVED" = "epic" ]; then
+    echo "PASS: round-trip resolves UAT_POLICY=epic"
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL: round-trip rc=$rc resolved='$RESOLVED'"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "SKIP: validator not available"
+fi
+
+echo "--- U5: per-ticket round-trips as per-ticket ---"
+if declare -f check_branch_directive_description >/dev/null 2>&1; then
+  UAT_OUTPUT=$(branch_directive_generate "$UAT_PER_TICKET_JSON")
+  PARSED=$(check_branch_directive_description "$UAT_OUTPUT" 2>/dev/null) && rc=0 || rc=$?
+  RESOLVED=$(echo "$PARSED" | sed -n "s/^BRANCH_DIRECTIVE_UAT_POLICY='\\(.*\\)'$/\\1/p")
+  if [ "$rc" -eq 0 ] && [ "$RESOLVED" = "per-ticket" ]; then
+    echo "PASS: round-trip resolves UAT_POLICY=per-ticket"
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL: round-trip rc=$rc resolved='$RESOLVED'"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "SKIP: validator not available"
+fi
+
+echo "--- U6: omitted field round-trips to the per-ticket default ---"
+if declare -f check_branch_directive_description >/dev/null 2>&1; then
+  UAT_OUTPUT=$(branch_directive_generate "$UAT_ABSENT_JSON")
+  PARSED=$(check_branch_directive_description "$UAT_OUTPUT" 2>/dev/null) && rc=0 || rc=$?
+  RESOLVED=$(echo "$PARSED" | sed -n "s/^BRANCH_DIRECTIVE_UAT_POLICY='\\(.*\\)'$/\\1/p")
+  if [ "$rc" -eq 0 ] && [ "$RESOLVED" = "per-ticket" ]; then
+    echo "PASS: absent field resolves to per-ticket"
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL: rc=$rc resolved='$RESOLVED'"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "SKIP: validator not available"
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

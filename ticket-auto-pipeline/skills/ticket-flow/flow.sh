@@ -9,6 +9,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LIB_DIR="${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}"
 source "$LIB_DIR/heartbeat.sh"
 source "$LIB_DIR/linear-api.sh"
+# planned-ticket-check.sh provides _extract_md_section/_extract_field, which
+# branch-directive-check.sh needs. Both are sourced for the epic discriminator
+# in the precondition checks below.
+source "$LIB_DIR/planned-ticket-check.sh" 2>/dev/null || true
+source "$LIB_DIR/branch-directive-check.sh" 2>/dev/null || true
+source "$LIB_DIR/epic-precondition.sh"
 
 SM="$SCRIPT_DIR/state-machine.json"
 
@@ -166,20 +172,43 @@ if [ -n "$EXPECTED_FROM" ] && [ "$EXPECTED_FROM" != "null" ]; then
 fi
 
 CURRENT_LABEL_NAMES=$(echo "$ISSUE_JSON" | jq -r '[.labels.nodes[].name] | join(",")')
-ISSUE_TYPE=$(echo "$ISSUE_JSON" | jq -r '.issueType.name // empty')
 PROJECT_NAME=$(echo "$ISSUE_JSON" | jq -r '.project.name // empty')
 
+# ── Preconditions ────────────────────────────────────────────────────────────
+# The discriminator and evaluator live in lib/epic-precondition.sh so that tests
+# exercise this exact code path instead of re-implementing the condition.
+#
+# A precondition may be declared on a trigger, not only on a label, and the
+# guard is bidirectional: epic acceptance triggers refuse non-epic issues, and
+# child lifecycle triggers refuse epics. The router does not branch on which
+# trigger fired, so without the inverse an epic pushed through the ticket
+# pipeline would take a child's pass-to-Done trigger and close itself.
+_precondition_reject() {
+  local _subject="$1"
+  local _rc="$2"
+  if [ "$_rc" -eq 9 ]; then
+    echo "flow.sh: refusing to proceed — unknown precondition declared for '${_subject}'" >&2
+    _log "META|precondition|fail|unknown precondition for ${_subject}"
+  else
+    echo "flow.sh: precondition failed for '${_subject}' on ${TICKET_ID}" >&2
+    _log "META|precondition|fail|${_subject} rejected on ${TICKET_ID}"
+    hb_gate "precondition" "fail" "${_subject} precondition rejected" "{\"ticket\":\"$TICKET_ID\",\"subject\":\"${_subject}\"}"
+  fi
+  exit 8
+}
+
+_trigger_precondition=$(echo "$def" | jq -r '.precondition // empty')
+_pre_rc=0
+check_precondition "$_trigger_precondition" "$TRIGGER" "$ISSUE_JSON" || _pre_rc=$?
+[ "$_pre_rc" -eq 0 ] || _precondition_reject "$TRIGGER" "$_pre_rc"
+
 # ── Planner label preconditions ──────────────────────────────────────────────
-# state:execution is an Epic-only label. Reject if added to a non-Epic issue.
 # Read precondition rules from state-machine.json planner_labels section.
 for label_name in "${ADD_LABEL_NAMES[@]}"; do
   _precondition=$(jq -r --arg l "$label_name" '.planner_labels[$l].precondition // empty' "$SM" 2>/dev/null)
-  if [ "$_precondition" = "issue_type_must_be_epic" ] && [ "$ISSUE_TYPE" != "Epic" ]; then
-    echo "flow.sh: precondition failed — 'state:execution' label can only be applied to Epic issues (current type: ${ISSUE_TYPE:-unknown})" >&2
-    _log "META|precondition|fail|state:execution requires Epic, got ${ISSUE_TYPE:-unknown}"
-    hb_gate "precondition" "fail" "state:execution non-Epic rejected" "{\"ticket\":\"$TICKET_ID\",\"type\":\"${ISSUE_TYPE:-unknown}\"}"
-    exit 8
-  fi
+  _pre_rc=0
+  check_precondition "$_precondition" "$label_name" "$ISSUE_JSON" || _pre_rc=$?
+  [ "$_pre_rc" -eq 0 ] || _precondition_reject "$label_name" "$_pre_rc"
 done
 
 TEAM_JSON=$(get_team "$TEAM_ID")

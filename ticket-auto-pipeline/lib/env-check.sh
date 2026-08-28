@@ -17,6 +17,10 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -f "$SCRIPT_DIR/error-handler.sh" ] && source "$SCRIPT_DIR/error-handler.sh"
+# resolve_uat_url lives in linear-api.sh (function definitions only — safe to
+# source here). Both UAT_URL sites below delegate to it so there is one
+# resolution order, not three.
+[ -f "$SCRIPT_DIR/linear-api.sh" ] && source "$SCRIPT_DIR/linear-api.sh"
 
 SUMMARY_FILE=""
 SHOW=""
@@ -216,12 +220,13 @@ if [ "${_MODE:-full}" = "validate" ]; then
     failures=$((failures + 1))
   fi
 
-  # UAT_URL
-  if [ -n "${UAT_URL:-}" ]; then
-    pass "UAT_URL ($UAT_URL via env)"
-  elif grep -qi 'UAT_URL.*https\?://' "$CLAUDE_MD" 2>/dev/null; then
-    val=$(grep -oP 'UAT_URL[=:]\s*\K.*' "$CLAUDE_MD" | head -1 | tr -d ' ')
-    pass "UAT_URL ($val)"
+  # UAT_URL — resolution delegated to resolve_uat_url (lib/linear-api.sh)
+  if val=$(resolve_uat_url "$(dirname "$CLAUDE_MD")" 2>/dev/null); then
+    if [ -n "${UAT_URL:-}" ]; then
+      pass "UAT_URL ($val via env)"
+    else
+      pass "UAT_URL ($val)"
+    fi
   else
     fail "UAT_URL" "required by ticket-verify — add to env or CLAUDE.md"
     failures=$((failures + 1))
@@ -452,8 +457,7 @@ else
   fi
 fi
 
-if grep -qiE '`?UAT_URL`?\s*[=:]\s*`?https?://' "$PROJECT_DIR/CLAUDE.md" 2>/dev/null; then
-  UAT_CLAUDE=$(grep -oP '^`?UAT_URL`?\s*[=:]\s*`?\K[^`\s]+' "$PROJECT_DIR/CLAUDE.md" | head -1 | tr -d ' ' || true)
+if UAT_CLAUDE=$(resolve_uat_url "$PROJECT_DIR" 2>/dev/null); then
   _var "UAT_URL" "ok" "$UAT_CLAUDE" "CLAUDE.md" ""
 else
   _var "UAT_URL" "missing" "" "CLAUDE.md" "UAT environment URL (e.g. https://uat.example.com)"

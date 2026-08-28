@@ -21,6 +21,7 @@ The directive is **advisory by absence, binding by presence**. A parent without 
 **Base:** <branch-name>
 **Merge Policy:** manual | on-all-children-done
 **Sync Policy:** rebase-on-base-change | none
+**UAT Policy:** per-ticket | epic        # optional
 **Created:** <ISO 8601 timestamp>
 ```
 
@@ -33,7 +34,47 @@ The directive is **advisory by absence, binding by presence**. A parent without 
 | `Base` | string | Yes | The base branch the integration branch was created from. Must match the same branch-name charset rule. Example: `develop`. |
 | `Merge Policy` | enum | Yes | `manual` — PRs must be merged by a human. `on-all-children-done` — integration PR is created when all child tickets reach Done; merge is still manual (auto-merge is never permitted for integration branches). |
 | `Sync Policy` | enum | Yes | `rebase-on-base-change` — the integration branch is rebased onto Base when Base advances. `none` — no automatic sync; conflicts surface at PR time. |
+| `UAT Policy` | enum | **No** | Where acceptance happens. `per-ticket` (default when the field is absent) — each child is accepted individually, so a passing PR review routes `Review → UAT`. `epic` — acceptance happens once, on the epic itself, so a passing PR review routes `Review → Done`. See below. |
 | `Created` | ISO 8601 | Yes | When the directive was created. Example: `2026-07-25T10:00:00Z`. |
+
+## UAT Policy
+
+An epic that accumulates all its children's commits on one shared branch is not observable in a
+UAT environment until that branch integrates into its Base and deploys. For such an epic,
+per-ticket acceptance is not merely inconvenient — it is undefined, because there is no
+environment in which a single child can be seen.
+
+Worse, it deadlocks. `blocked-by:{ID}` resolves strictly on the blocker reaching `Done`, so a
+child parked in `UAT` never releases its dependents, the dependents never complete, the epic
+never integrates, and the epic-level UAT that would release the original child never happens.
+
+Declaring `**UAT Policy:** epic` moves acceptance to the epic issue:
+
+- A child whose PR review passes transitions `Review → Done` rather than `Review → UAT`, so the
+  dependency chain keeps moving. `Done` here means *code-complete, reviewed, merged to the epic
+  branch* — which is precisely everything that can be verified about one child of such an epic.
+- `ticket-verify --env uat` **refuses** for such a child: the epic branch is not deployed to that
+  environment, so any result would be meaningless. `--env local` is unaffected.
+- The epic itself carries acceptance via `epic-integration-open` (→ `Review`), `epic-uat-start`
+  (`Review` → `UAT`), and `epic-uat-pass` (`UAT` → `Done`).
+
+**Parsing rules:**
+
+- The field is **optional**. When absent, the resolved policy is `per-ticket` and behaviour is
+  exactly as it was before the field existed. No existing epic changes behaviour.
+- The field is parsed and enum-validated **at any declared Schema-Version**. It is deliberately
+  *not* version-gated: an operator who hand-adds the line without also bumping `Schema-Version`
+  must still get the behaviour, otherwise the field is a silent no-op — the precise failure this
+  field exists to fix.
+- An unrecognised value is **malformed** (exit 2), not a silent fallback to the default.
+
+**Behavioural divergence worth knowing:** a child reaching `Done` under `epic` policy keeps its
+`reviewed` label, whereas a `per-ticket` child sheds it via `uat-pass`. Nothing consumes this
+today, but a future "is this in flight?" heuristic keyed on `reviewed` would be wrong for
+epic-policy tickets.
+
+**Rollback** is a description edit: removing the `UAT Policy` line restores `per-ticket` routing
+for that epic's children immediately, with no code change.
 
 ## Branch Name Rules
 

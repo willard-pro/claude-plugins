@@ -52,7 +52,9 @@ get_issue() {
   # Escape the description for JSON embedding
   local escaped
   escaped=$(echo "$desc" | jq -Rs .)
-  echo "{\"data\":{\"issue\":{\"description\":$escaped}}}"
+  # get_issue in lib/linear-api.sh returns the unwrapped .data.issue object,
+  # not the full GraphQL envelope. The stub must match that shape.
+  echo "{\"description\":$escaped}"
 }
 
 # Mock get_parent_with_children — returns children in Done state by default.
@@ -127,6 +129,26 @@ _setup_fixture() {
 
   # Set origin/main ref to match pushed main
   git -C "$FIXTURE_REPO" fetch origin >/dev/null 2>&1
+}
+
+# _commit_on_epic_branch <repo_path> [branch]
+# Puts a commit on the epic branch so it carries work beyond base.
+#
+# epic_branch_open_pr deliberately skips a repo whose epic branch has no
+# commits beyond base, so a PR fixture built only from ensure_epic_branch —
+# which creates the branch AT base — exercises the skip path, not the PR path.
+# Every open_pr test must therefore look like a real epic branch.
+_commit_on_epic_branch() {
+  local repo="$1"
+  local branch="${2:-epic/test-branch}"
+  local prev
+  prev=$(git -C "$repo" rev-parse --abbrev-ref HEAD 2>/dev/null)
+  git -C "$repo" checkout -q "$branch" 2>/dev/null || return 1
+  echo "child work" >>"$repo/CHILD.md"
+  git -C "$repo" add -A
+  git -C "$repo" commit -q -m "child ticket work" --no-gpg-sign || return 1
+  git -C "$repo" checkout -q "$prev" 2>/dev/null || true
+  return 0
 }
 
 echo "=== Create tests ==="
@@ -601,6 +623,7 @@ test_pr_opens_when_ready() {
 
   # Create the epic branch first
   ensure_epic_branch "CRE-100" "$FIXTURE_REPO" 2>&1 || return 1
+  _commit_on_epic_branch "$FIXTURE_REPO" || return 1
 
   # Override gh as a function (more reliable than PATH-based mock)
   GH_PR_CREATE_CALLED=false
@@ -643,6 +666,7 @@ test_pr_not_opened_when_auto_pr_false() {
   _setup_fixture
 
   ensure_epic_branch "CRE-100" "$FIXTURE_REPO" 2>&1 || return 1
+  _commit_on_epic_branch "$FIXTURE_REPO" || return 1
   git -C "$FIXTURE_REPO" remote set-url origin "git@github.com:test-org/test-repo.git"
 
   # Track if gh pr create was called
@@ -682,6 +706,7 @@ test_pr_idempotent() {
   _setup_fixture
 
   ensure_epic_branch "CRE-100" "$FIXTURE_REPO" 2>&1 || return 1
+  _commit_on_epic_branch "$FIXTURE_REPO" || return 1
 
   # gh mock records its calls so the "no duplicate PR" invariant is asserted,
   # not assumed: pr create must NEVER be called while a PR already exists.
@@ -726,6 +751,72 @@ test_pr_idempotent() {
   return 0
 }
 _run "idempotent PR open — second call is no-op" test_pr_idempotent
+
+test_pr_skipped_when_no_commits_on_epic_branch() {
+  _setup_fixture
+
+  # Branch created AT base and left there — this repo is one the epic never
+  # touched. Note the absence of _commit_on_epic_branch.
+  ensure_epic_branch "CRE-100" "$FIXTURE_REPO" 2>&1 || return 1
+  git -C "$FIXTURE_REPO" remote set-url origin "git@github.com:test-org/test-repo.git"
+
+  local gh_log="${FIXTURE_DIR}/gh.log"
+  : >"$gh_log"
+  gh() {
+    echo "gh $*" >>"$gh_log"
+    case "$2" in
+    list) echo "" ;;
+    esac
+    return 0
+  }
+  export -f gh
+
+  FLEET_EPIC_AUTO_PR=true epic_branch_open_pr "CRE-100" "$FIXTURE_REPO" 2>&1 || {
+    echo "  open_pr should exit 0 when there is nothing to integrate" >&2
+    return 1
+  }
+
+  # Skipped before any GitHub interaction at all — not merely before create.
+  if [ -s "$gh_log" ]; then
+    echo "  gh invoked for a repo with no epic commits: $(cat "$gh_log")" >&2
+    return 1
+  fi
+  return 0
+}
+_run "PR skipped when epic branch has no commits beyond base" test_pr_skipped_when_no_commits_on_epic_branch
+
+test_pr_proceeds_when_epic_branch_has_commits() {
+  _setup_fixture
+
+  ensure_epic_branch "CRE-100" "$FIXTURE_REPO" 2>&1 || return 1
+  _commit_on_epic_branch "$FIXTURE_REPO" || return 1
+  git -C "$FIXTURE_REPO" remote set-url origin "git@github.com:test-org/test-repo.git"
+
+  GH_PR_CREATE_CALLED=false
+  gh() {
+    case "$1" in
+    pr)
+      case "$2" in
+      list) echo "" ;;
+      create)
+        GH_PR_CREATE_CALLED=true
+        echo "https://github.com/test/repo/pull/99"
+        ;;
+      esac
+      ;;
+    esac
+  }
+  export -f gh
+
+  FLEET_EPIC_AUTO_PR=true epic_branch_open_pr "CRE-100" "$FIXTURE_REPO" 2>&1 || return 1
+
+  [ "$GH_PR_CREATE_CALLED" = "true" ] || {
+    echo "  PR not opened despite commits on the epic branch" >&2
+    return 1
+  }
+  return 0
+}
+_run "PR proceeds when epic branch has commits beyond base" test_pr_proceeds_when_epic_branch_has_commits
 
 echo ""
 echo "=== Dry-run tests ==="
@@ -783,6 +874,7 @@ test_dry_run_pr() {
   _setup_fixture
 
   ensure_epic_branch "CRE-100" "$FIXTURE_REPO" 2>&1 || return 1
+  _commit_on_epic_branch "$FIXTURE_REPO" || return 1
   git -C "$FIXTURE_REPO" remote set-url origin "git@github.com:test-org/test-repo.git"
 
   GH_CREATE_CALLED=false

@@ -38,6 +38,12 @@ BRANCH_DIRECTIVE_GEN_REQUIRED_FIELDS=(
 VALID_MERGE_POLICIES_GEN=("manual" "on-all-children-done")
 VALID_SYNC_POLICIES_GEN=("rebase-on-base-change" "none")
 
+# Optional field. Absent from BRANCH_DIRECTIVE_GEN_REQUIRED_FIELDS on purpose:
+# omitting it must remain valid, and the validator resolves the absent case to
+# 'per-ticket'. Emitted only when explicitly requested, so directives generated
+# before this field existed are byte-identical.
+VALID_UAT_POLICIES_GEN=("per-ticket" "epic")
+
 # ── Branch name derivation ───────────────────────────────────────────────────
 
 # Derive a deterministic epic integration branch name from initiative identity.
@@ -168,6 +174,10 @@ branch_directive_generate() {
   sync_policy=$(echo "$directive_json" | jq -r '.sync_policy')
   created=$(echo "$directive_json" | jq -r '.created // ""')
 
+  local uat_policy
+  uat_policy=$(echo "$directive_json" | jq -r '.uat_policy // ""')
+  [ "$uat_policy" = "null" ] && uat_policy=''
+
   # Validate Merge Policy enum
   local valid=false
   for v in "${VALID_MERGE_POLICIES_GEN[@]}"; do
@@ -188,6 +198,18 @@ branch_directive_generate() {
     return 1
   fi
 
+  # Validate UAT Policy enum — only when supplied, since the field is optional.
+  if [ -n "$uat_policy" ]; then
+    valid=false
+    for v in "${VALID_UAT_POLICIES_GEN[@]}"; do
+      [ "$uat_policy" = "$v" ] && valid=true && break
+    done
+    if [ "$valid" != "true" ]; then
+      echo "branch-directive-gen: invalid UAT Policy '$uat_policy' (must be per-ticket|epic)" >&2
+      return 1
+    fi
+  fi
+
   # Derive branch name deterministically
   local branch_name
   branch_name=$(branch_directive_name_derive "$initiative_id" "$title_slug") || {
@@ -203,13 +225,19 @@ branch_directive_generate() {
   # ── Emit the formatted block (exact field order the validator expects) ──────
   local schema_version="${BRANCH_DIRECTIVE_GEN_SCHEMA_VERSION}"
 
+  # The UAT Policy line is emitted only when requested. Absent, the validator
+  # resolves 'per-ticket', so this keeps output identical to pre-change runs.
+  local uat_policy_line=""
+  [ -n "$uat_policy" ] && uat_policy_line="**UAT Policy:** ${uat_policy}"
+
   cat <<BRANCH_DIRECTIVE
 ## Branch Directive
 **Schema-Version:** ${schema_version}
 **Branch:** ${branch_name}
 **Base:** ${base_branch}
 **Merge Policy:** ${merge_policy}
-**Sync Policy:** ${sync_policy}
+**Sync Policy:** ${sync_policy}${uat_policy_line:+
+${uat_policy_line}}
 **Created:** ${created}
 BRANCH_DIRECTIVE
 

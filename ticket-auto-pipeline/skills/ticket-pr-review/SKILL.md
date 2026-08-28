@@ -217,32 +217,42 @@ Delegate to the flow executor:
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: pr-review-fail" >> {LOG_FILE}
   fi
   ```
-- **Verdict ✅** → check UAT_URL, then pick the right variant:
+- **Verdict ✅** → the transition is chosen by `uat_decide_trigger`, not here:
   ```bash
-  config=$(bash -c "source ~/.claude/skills/lib/linear-api.sh; get_project_config")
-  uat_url=$(echo "$config" | jq -r '.UAT_URL // empty')
-  if [ $? -ne 0 ]; then
-    hb-wrap.sh retry "jq-parse" "fail" "jq extraction failed for UAT_URL" \
-      "{\"error_type\":\"jq_parse\",\"field\":\"UAT_URL\"}"
-  fi
-  if [ -n "$uat_url" ]; then
-    /ticket-flow {TICKET-ID} pr-review-pass-uat
-    _rc=$?
-    if [ "$_rc" -ne 0 ]; then
-      hb-wrap.sh retry "flow-sh" "fail" "flow.sh pr-review-pass-uat failed (exit ${_rc})" \
-        "{\"trigger\":\"pr-review-pass-uat\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
-      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: pr-review-pass-uat" >> {LOG_FILE}
-    fi
-  else
-    /ticket-flow {TICKET-ID} pr-review-pass-done
-    _rc=$?
-    if [ "$_rc" -ne 0 ]; then
-      hb-wrap.sh retry "flow-sh" "fail" "flow.sh pr-review-pass-done failed (exit ${_rc})" \
-        "{\"trigger\":\"pr-review-pass-done\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
-      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: pr-review-pass-done" >> {LOG_FILE}
-    fi
+  # Single UAT-vs-Done decision site. The helper echoes the trigger to fire and
+  # evaluates the epic's UAT policy BEFORE the UAT target — the URL is exported
+  # into every pipeline agent's environment unconditionally, so a policy check
+  # placed after it would never be reached.
+  #
+  # Do NOT reintroduce a UAT_URL test here, and do not call get_project_config:
+  # that function no longer exists, and the branch that depended on it has been
+  # removed rather than left beside this path.
+  source ~/.claude/skills/lib/branch-resolve.sh
+
+  # UAT_POLICY is exported by the agent env file; --ticket is the standalone
+  # fallback for an invocation outside a pipeline run.
+  policy="${UAT_POLICY:-}"
+  [ -z "$policy" ] && policy=$(resolve_uat_policy "{TICKET-ID}" 2>/dev/null)
+  policy="${policy:-per-ticket}"
+
+  trigger=$(uat_decide_trigger --policy "$policy")
+
+  # Record the decision so any Done reached without an individual UAT step is
+  # explainable from the log alone.
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|uat-policy|info|${policy}" >> {LOG_FILE}
+
+  /ticket-flow {TICKET-ID} "$trigger"
+  _rc=$?
+  if [ "$_rc" -ne 0 ]; then
+    hb-wrap.sh retry "flow-sh" "fail" "flow.sh ${trigger} failed (exit ${_rc})" \
+      "{\"trigger\":\"${trigger}\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: ${trigger}" >> {LOG_FILE}
   fi
   ```
+
+Under `UAT Policy: epic` the trigger is `pr-review-pass-done`, so the child closes on
+code-level verification and its `blocked-by` dependents are released. Under `per-ticket`
+(the default) behaviour is unchanged.
 
 This adds `reviewed` or `rejected`, keeping all other labels.
 

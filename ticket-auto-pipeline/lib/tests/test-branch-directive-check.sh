@@ -110,6 +110,46 @@ NON_INTEGER_VERSION_DESC='## Branch Directive
 **Sync Policy:** rebase-on-base-change
 **Created:** 2026-07-25T10:00:00Z'
 
+# ── UAT Policy fixtures (optional field) ─────────────────────────────────────
+
+UAT_EPIC_DESC='## Branch Directive
+**Schema-Version:** 2
+**Branch:** epic/debt-collection-v2
+**Base:** develop
+**Merge Policy:** manual
+**Sync Policy:** rebase-on-base-change
+**UAT Policy:** epic
+**Created:** 2026-07-25T10:00:00Z'
+
+UAT_PER_TICKET_DESC='## Branch Directive
+**Schema-Version:** 2
+**Branch:** epic/debt-collection-v2
+**Base:** develop
+**Merge Policy:** manual
+**Sync Policy:** rebase-on-base-change
+**UAT Policy:** per-ticket
+**Created:** 2026-07-25T10:00:00Z'
+
+UAT_BAD_VALUE_DESC='## Branch Directive
+**Schema-Version:** 2
+**Branch:** epic/debt-collection-v2
+**Base:** develop
+**Merge Policy:** manual
+**Sync Policy:** rebase-on-base-change
+**UAT Policy:** team
+**Created:** 2026-07-25T10:00:00Z'
+
+# The migration case: the field hand-added to a directive still declaring the
+# schema version that predates it. Presence must bind; version must not gate.
+UAT_OLD_SCHEMA_DESC='## Branch Directive
+**Schema-Version:** 1
+**Branch:** epic/debt-collection-v2
+**Base:** develop
+**Merge Policy:** manual
+**Sync Policy:** rebase-on-base-change
+**UAT Policy:** epic
+**Created:** 2026-07-25T10:00:00Z'
+
 BAD_BRANCH_DESC='## Branch Directive
 **Schema-Version:** 1
 **Branch:** ../escape/develop
@@ -357,6 +397,84 @@ test_check_result_malformed() {
   return 0
 }
 _run "CHECK_RESULT set to malformed" test_check_result_malformed
+
+# ── UAT Policy tests ─────────────────────────────────────────────────────────
+
+echo ""
+echo "=== UAT Policy tests ==="
+echo ""
+
+# _uat_policy_of <description> — echoes the emitted BRANCH_DIRECTIVE_UAT_POLICY.
+_uat_policy_of() {
+  check_branch_directive_description "$1" 2>/dev/null |
+    sed -n "s/^BRANCH_DIRECTIVE_UAT_POLICY='\\(.*\\)'$/\\1/p"
+}
+
+test_uat_policy_absent_defaults_to_per_ticket() {
+  local got
+  got=$(_uat_policy_of "$VALID_BLOCK_DESC")
+  [ "$got" = "per-ticket" ] || {
+    echo "  expected per-ticket, got '$got'" >&2
+    return 1
+  }
+  return 0
+}
+_run "UAT Policy absent defaults to per-ticket" test_uat_policy_absent_defaults_to_per_ticket
+
+test_uat_policy_absent_still_valid() {
+  check_branch_directive_description "$VALID_BLOCK_DESC" >/dev/null 2>&1 || {
+    echo "  directive without UAT Policy must remain valid" >&2
+    return 1
+  }
+  return 0
+}
+_run "UAT Policy is optional — pre-existing directive still validates" test_uat_policy_absent_still_valid
+
+test_uat_policy_epic_parsed() {
+  local got
+  got=$(_uat_policy_of "$UAT_EPIC_DESC")
+  [ "$got" = "epic" ] || {
+    echo "  expected epic, got '$got'" >&2
+    return 1
+  }
+  return 0
+}
+_run "UAT Policy: epic is parsed" test_uat_policy_epic_parsed
+
+test_uat_policy_per_ticket_parsed() {
+  local got
+  got=$(_uat_policy_of "$UAT_PER_TICKET_DESC")
+  [ "$got" = "per-ticket" ] || {
+    echo "  expected per-ticket, got '$got'" >&2
+    return 1
+  }
+  return 0
+}
+_run "UAT Policy: per-ticket is parsed" test_uat_policy_per_ticket_parsed
+
+test_uat_policy_invalid_is_malformed() {
+  local rc=0
+  check_branch_directive_description "$UAT_BAD_VALUE_DESC" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 2 ] || {
+    echo "  expected exit 2 (malformed) for invalid value, got $rc" >&2
+    return 1
+  }
+  return 0
+}
+_run "UAT Policy invalid value exits malformed" test_uat_policy_invalid_is_malformed
+
+test_uat_policy_takes_effect_under_older_schema_version() {
+  # Presence binds, version does not gate. If this regresses, an operator who
+  # hand-adds the field without bumping Schema-Version gets silence.
+  local got
+  got=$(_uat_policy_of "$UAT_OLD_SCHEMA_DESC")
+  [ "$got" = "epic" ] || {
+    echo "  field ignored under older declared schema version, got '$got'" >&2
+    return 1
+  }
+  return 0
+}
+_run "UAT Policy takes effect under an older declared schema version" test_uat_policy_takes_effect_under_older_schema_version
 
 # ── Results ──────────────────────────────────────────────────────────────────
 

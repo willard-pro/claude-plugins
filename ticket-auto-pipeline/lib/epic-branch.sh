@@ -32,7 +32,8 @@ _resolve_repo() {
 
 # _parse_directive <description>
 # Parses the Branch Directive from an epic description and sets:
-#   _DIRECTIVE_BRANCH, _DIRECTIVE_BASE, _DIRECTIVE_MERGE_POLICY, _DIRECTIVE_SYNC_POLICY
+#   _DIRECTIVE_BRANCH, _DIRECTIVE_BASE, _DIRECTIVE_MERGE_POLICY, _DIRECTIVE_SYNC_POLICY,
+#   _DIRECTIVE_UAT_POLICY (normalised — 'per-ticket' when the field is absent)
 # Returns 0 when a valid directive is present, 1 when absent, 2 when malformed.
 _parse_directive() {
   local description="$1"
@@ -41,6 +42,7 @@ _parse_directive() {
   _DIRECTIVE_BASE=""
   _DIRECTIVE_MERGE_POLICY=""
   _DIRECTIVE_SYNC_POLICY=""
+  _DIRECTIVE_UAT_POLICY=""
 
   local directive_output
   directive_output=$(check_branch_directive_description "$description" 2>/dev/null) || {
@@ -54,6 +56,7 @@ _parse_directive() {
   _DIRECTIVE_BASE=$(echo "$directive_output" | sed -n "s/^BRANCH_DIRECTIVE_BASE='\\(.*\\)'$/\\1/p")
   _DIRECTIVE_MERGE_POLICY=$(echo "$directive_output" | sed -n "s/^BRANCH_DIRECTIVE_MERGE_POLICY='\\(.*\\)'$/\\1/p")
   _DIRECTIVE_SYNC_POLICY=$(echo "$directive_output" | sed -n "s/^BRANCH_DIRECTIVE_SYNC_POLICY='\\(.*\\)'$/\\1/p")
+  _DIRECTIVE_UAT_POLICY=$(echo "$directive_output" | sed -n "s/^BRANCH_DIRECTIVE_UAT_POLICY='\\(.*\\)'$/\\1/p")
 
   return 0
 }
@@ -67,7 +70,47 @@ _get_epic_description() {
     echo "epic-branch: failed to fetch epic $epic_id" >&2
     return 1
   }
-  echo "$issue_json" | jq -r '.data.issue.description // ""'
+  # get_issue already unwraps .data.issue — read the description directly.
+  echo "$issue_json" | jq -r '.description // ""'
+}
+
+# _resolve_ref <repo_path> <branch>
+# Echoes a resolvable ref for a branch — the local ref when present, otherwise
+# the origin-tracking ref. Returns 1 when neither exists.
+_resolve_ref() {
+  local repo_path="$1"
+  local branch="$2"
+
+  if git -C "$repo_path" rev-parse --verify --quiet "refs/heads/$branch" >/dev/null 2>&1; then
+    echo "$branch"
+    return 0
+  fi
+  if git -C "$repo_path" rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null 2>&1; then
+    echo "origin/$branch"
+    return 0
+  fi
+  return 1
+}
+
+# _epic_branch_has_commits <repo_path> <branch> <base>
+# Returns 0 when the epic branch carries at least one commit beyond base.
+#
+# Returns 1 when it carries none, and also when either ref cannot be resolved.
+# The repo set enumerated for an epic is every repo under REPOS_ROOT, which
+# includes repos the epic never touched; attempting a PR for those fails on
+# every detector cycle, forever. "Nothing to integrate" is the correct reading
+# of both cases, so both skip rather than error.
+_epic_branch_has_commits() {
+  local repo_path="$1"
+  local branch="$2"
+  local base="$3"
+
+  local branch_ref base_ref count
+  branch_ref=$(_resolve_ref "$repo_path" "$branch") || return 1
+  base_ref=$(_resolve_ref "$repo_path" "$base") || return 1
+
+  count=$(git -C "$repo_path" rev-list --count "$base_ref..$branch_ref" 2>/dev/null) || return 1
+  [ "${count:-0}" -gt 0 ]
 }
 
 # _branch_exists <repo_path> <branch_name>
@@ -381,7 +424,7 @@ epic_branch_children_done() {
   [ "$done_count" -eq "$child_count" ]
 }
 
-# epic_branch_open_pr <EPIC_ID> [repo_path]
+# epic_branch_open_pr <EPIC_ID> [repo_path] [children_json] [epic_description]
 # Opens a pull request from the epic branch to its declared base when the epic
 # is ready (all children Done) and no integration PR already exists.
 #
@@ -389,27 +432,59 @@ epic_branch_children_done() {
 # NEVER merges the PR, regardless of FLEET_EPIC_AUTO_PR or any other setting.
 # FLEET_EPIC_AUTO_PR (default false) gates whether the PR is opened automatically.
 #
+# children_json and epic_description are optional. When a caller has already
+# fetched them for the epic (a scan iterating many repositories, for instance),
+# passing them in avoids re-fetching per repository — otherwise Linear requests
+# multiply by the repo count on every cycle.
+#
 # Exit codes:
-#   0 — PR exists or was opened, OR not ready (no action needed)
+#   0 — PR exists or was opened, OR nothing to do (not ready, disabled, skipped)
 #   1 — error
+#
+# Because exit 0 covers both "a PR is open" and "nothing was opened", loop
+# completion is NOT evidence that any PR exists. Callers that need to know read
+# EPIC_BRANCH_PR_STATE, set on every return path:
+#   open — an integration PR exists for this repo (pre-existing or just opened)
+#   none — no PR was opened and none exists
+EPIC_BRANCH_PR_STATE="none"
+
 epic_branch_open_pr() {
   local epic_id="$1"
   local repo_path="${2:-.}"
+  local children_json="${3:-}"
+  local cached_description="${4:-}"
   local dry_run="${FLEET_DRY_RUN:-false}"
   local auto_pr="${FLEET_EPIC_AUTO_PR:-false}"
+
+  EPIC_BRANCH_PR_STATE="none"
 
   # Resolve repo
   repo_path=$(_resolve_repo "$repo_path") || return 1
 
-  # Check readiness
-  if ! epic_branch_children_done "$epic_id"; then
+  # Check readiness — reuse the caller's children when supplied.
+  #
+  # Forward by arity, not by value: epic_branch_children_done treats "no second
+  # argument" as "fetch them" and "second argument present but empty" as "this
+  # epic has zero children". Passing "$children_json" unconditionally would turn
+  # an empty cache into the latter.
+  local _ready=0
+  if [ -n "$children_json" ]; then
+    epic_branch_children_done "$epic_id" "$children_json" || _ready=$?
+  else
+    epic_branch_children_done "$epic_id" || _ready=$?
+  fi
+  if [ "$_ready" -ne 0 ]; then
     # Not ready — nothing to do
     return 0
   fi
 
-  # Fetch epic description and parse directive
+  # Epic description — reuse the caller's when supplied.
   local description
-  description=$(_get_epic_description "$epic_id") || return 1
+  if [ -n "$cached_description" ]; then
+    description="$cached_description"
+  else
+    description=$(_get_epic_description "$epic_id") || return 1
+  fi
 
   _parse_directive "$description" || {
     local parse_exit=$?
@@ -425,6 +500,12 @@ epic_branch_open_pr() {
   local branch="$_DIRECTIVE_BRANCH"
   local base="$_DIRECTIVE_BASE"
 
+  # Skip repos the epic never touched. They are enumerated alongside the ones
+  # it did, and without this every cycle attempts — and fails — a PR for each.
+  if ! _epic_branch_has_commits "$repo_path" "$branch" "$base"; then
+    return 0
+  fi
+
   # Check if a PR already exists for this branch→base pair
   local remote_url repo_slug existing_pr
   remote_url=$(git -C "$repo_path" remote get-url origin 2>/dev/null || echo "")
@@ -434,6 +515,7 @@ epic_branch_open_pr() {
 
   if [ -n "$existing_pr" ]; then
     # PR already exists — idempotent, never merge
+    EPIC_BRANCH_PR_STATE="open"
     return 0
   fi
 
@@ -474,6 +556,7 @@ EOF
     return 1
   fi
 
+  EPIC_BRANCH_PR_STATE="open"
   echo "epic-branch: opened integration PR from '$branch' to '$base' for epic $epic_id"
   return 0
 }

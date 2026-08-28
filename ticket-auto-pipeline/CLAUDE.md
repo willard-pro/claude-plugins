@@ -77,7 +77,7 @@ REPOS_ROOT/.ticket-auto/
 
 | File | Exports |
 |------|---------|
-| `linear-api.sh` | `get_issue`, `get_comments`, `get_team`, `update_issue`, `get_me`, `get_project_milestones`, `save_comment`. Retry logic (3 attempts, exponential backoff). Resolves `UAT_URL` from env → CLAUDE.md → git root ancestor walk. |
+| `linear-api.sh` | `get_issue`, `get_comments`, `get_team`, `update_issue`, `get_me`, `get_project_milestones`, `save_comment`, `resolve_uat_url`. Retry logic (3 attempts, exponential backoff). `resolve_uat_url` resolves the UAT target from env → CLAUDE.md. |
 | `flow.sh` (in skills/ticket-flow/) | State machine executor. Reads `skills/ticket-flow/state-machine.json`. Handles state transitions, label add/remove, assignee changes. Idempotency: computes desired end state, skips if no change. Post-trigger assertions: re-fetches issue, exits 7 on mismatch. |
 | `heartbeat.sh` | 7 helpers: `hb_init`, `hb_decision`, `hb_fallback`, `hb_heartbeat`, `hb_api`, `hb_gate`, `hb_retry`, `hb_source`. All are no-ops when `HB_LOG_FILE` is unset. |
 | `ticket-dir.sh` | `resolve_ticket_dir <ID>` — finds workspace directories matching `{ID}--slug`. |
@@ -113,10 +113,11 @@ REPOS_ROOT/.ticket-auto/
 | `corrections-parse.sh` | `append_correction`, `get_corrections`, `get_corrections_by_source`. Atomic `.tmp`→`mv` append of CORRECTIONS blocks to notes.md. Parse with last-match-wins dedup. Torn-block tolerant. |
 | `guidance-store.sh` | `guidance_upsert`, `guidance_query`, `guidance_confirm`, `guidance_deprecate`, `guidance_stats`, `_compute_guidance_id`. JSONL-per-component guidance store at `~/.claude/state/ticket-auto/guidance/`. `flock`-guarded concurrent writes, fail-soft on all operations. Three-state lifecycle (`proposed` → `confirmed` → `deprecated`) with transition audit trail. Lazy GC of deprecated entries older than 90 days. Phase 2 RLVR — accumulates inspector verdicts and post-mortem findings into durable, queryable guidance. |
 | `planned-ticket-check.sh` | `check_planned_ticket`, `check_planned_ticket_description`. Deterministic bash validator for `## Planner Context` blocks in planned tickets. Exit 0 (valid), 1 (missing/malformed), 2 (low confidence + not pre-approved). Schema-Version tolerance for forward compatibility. Also exports `_extract_planner_context_block` — canonical shared block parser. |
-| `branch-directive-check.sh` | `check_branch_directive <EPIC_ID>`, `check_branch_directive_description <description>`. Deterministic bash validator for `## Branch Directive` blocks on epic parents. Exit 0 (valid + emits parsed values), 1 (absent), 2 (malformed). Validates branch names, closed enums, Schema-Version tolerance. Shares `_extract_md_section` and `_extract_field` from planned-ticket-check.sh. |
-| `branch-resolve.sh` | `resolve_branch_context <TICKET_ID> [--branch <override>] [--title <title>] [--parent-json <json>]`. Deterministic branch decision point. Precedence: `--branch` flag → parent epic directive → config default. Under a valid directive, both `BASE_BRANCH` and `INTEGRATION_BRANCH` are the directive's `Branch` (not its `Base`) — children branch off and PR into the shared epic branch. `BRANCH_SOURCE` is `flag`, `epic-directive`, or `default`. Emits `BRANCH_CONTEXT_RESULT` block. Depends on config.sh, linear-api.sh, branch-directive-check.sh. |
+| `branch-directive-check.sh` | `check_branch_directive <EPIC_ID>`, `check_branch_directive_description <description>`. Deterministic bash validator for `## Branch Directive` blocks on epic parents. Exit 0 (valid + emits parsed values), 1 (absent), 2 (malformed). Validates branch names, closed enums, Schema-Version tolerance. The optional `UAT Policy` field (`per-ticket`|`epic`) is parsed and enum-validated at **any** Schema-Version — deliberately not version-gated, so a hand-added field is never a silent no-op — and `BRANCH_DIRECTIVE_UAT_POLICY` is emitted normalised to `per-ticket` when absent. Shares `_extract_md_section` and `_extract_field` from planned-ticket-check.sh. |
+| `branch-resolve.sh` | `resolve_branch_context <TICKET_ID> [--branch <override>] [--title <title>] [--parent-json <json>]`, `resolve_uat_policy <TICKET_ID>`, `uat_decide_trigger [--policy] [--uat-url] [--ticket]`. Deterministic branch decision point. Precedence: `--branch` flag → parent epic directive → config default. Under a valid directive, both `BASE_BRANCH` and `INTEGRATION_BRANCH` are the directive's `Branch` (not its `Base`) — children branch off and PR into the shared epic branch. `BRANCH_SOURCE` is `flag`, `epic-directive`, or `default`. Emits `BRANCH_CONTEXT_RESULT` block, including `UAT_POLICY` (`per-ticket`|`epic`) resolved from the parent directive — a `--branch` override retargets the branch but does NOT detach the ticket from its epic's acceptance model. `uat_decide_trigger` is the single UAT-vs-Done decision site: it echoes `pr-review-pass-done` or `pr-review-pass-uat`, evaluating policy **before** the UAT URL (the URL is exported into every agent's env unconditionally, so a later policy check would be unreachable). Depends on config.sh, linear-api.sh, branch-directive-check.sh. |
 | `worktree.sh` | `worktree_path <TICKET_ID> <repo_slug>`, `ensure_worktree <TICKET_ID> <repo_path> <branch> <base>`, `release_worktree <TICKET_ID>`, `worktree_gc`. Per-ticket git worktree isolation. `ensure_worktree` is idempotent with identity guard (refuses re-checkout on branch mismatch). `release_worktree` is safe to repeat. `worktree_gc` removes terminal-state trees. |
-| `epic-branch.sh` | `ensure_epic_branch <EPIC_ID> [repo_path]`, `epic_branch_sync <EPIC_ID> [repo_path]`, `epic_branch_children_done <EPIC_ID> [children_json]`, `epic_branch_open_pr <EPIC_ID> [repo_path]`. Epic branch lifecycle management. `ensure_epic_branch` creates from declared base as a plain ref (`git branch`, no checkout — worktree-safe, idempotent). `epic_branch_sync` merges base into epic (never rebases; conflict → report, no force-push). `epic_branch_children_done` pure bash readiness check — the single canonical "all children Done" implementation (the fleet-controller D-12 detector calls it too). `epic_branch_open_pr` opens integration PR (never merges). All mutating paths gate behind `FLEET_DRY_RUN`. |
+| `epic-precondition.sh` | `is_epic_issue <issue_json>`, `check_precondition <precondition> <subject> <issue_json>`. The epic discriminator and precondition evaluator, sourced by `flow.sh` so tests exercise the executor's real path. Discriminates on the epic marker label (`EPIC_MARKER_LABEL`, default `epic`) or a valid Branch Directive — never on `.issueType.name`, which this workspace does not define. Preconditions are bidirectional: `must_be_epic` and `must_not_be_epic`, both exit 8 on rejection, 9 on an unknown precondition. |
+| `epic-branch.sh` | `ensure_epic_branch <EPIC_ID> [repo_path]`, `epic_branch_sync <EPIC_ID> [repo_path]`, `epic_branch_children_done <EPIC_ID> [children_json]`, `epic_branch_open_pr <EPIC_ID> [repo_path] [children_json] [epic_description]`. Epic branch lifecycle management. `ensure_epic_branch` creates from declared base as a plain ref (`git branch`, no checkout — worktree-safe, idempotent). `epic_branch_sync` merges base into epic (never rebases; conflict → report, no force-push). `epic_branch_children_done` pure bash readiness check — the single canonical "all children Done" implementation (the fleet-controller D-12 detector calls it too). `epic_branch_open_pr` opens integration PR (never merges); it skips repos with no commits between base and the epic branch, accepts cached children/description to avoid per-repo re-fetching, and sets `EPIC_BRANCH_PR_STATE` (`open`|`none`) because its exit 0 covers both "a PR is open" and "nothing was opened". All mutating paths gate behind `FLEET_DRY_RUN`. |
 | `template-select.sh` | `resolve_template <type>`. Deterministic type-to-template resolver. Maps `bug`/`feature`/`improvement`/`security`/`chore`/`refactor` (alias → improvement). Exit 3 on unknown/empty type — no silent fallback. Pure bash, zero LLM. |
 | `planner-artifacts.sh` | `resolve_planner_dir <TID>`, `has_planner_body <TID>`, `has_planner_proposal <TID>`. Resolves `$REPOS_ROOT/.ticket-auto/initiatives/{INIT}/tickets/{TID}/planner/` from the Planner Context block's Initiative field. Exit 0 present, 1 dir missing, 2 no Initiative. |
 | `planned-ticket-body-check.sh` | `check_planned_body <TID> <type>`. Validates ticket body has all required sections per type (universal: AC, Test User, Scope; bug: +Repro Steps, Test Data; feature/improvement: +Nav Path). Sets `BODY_CHECK_MISSING` and `BODY_CHECK_EXIT_CODE`. Plane body.md preferred over Linear description. |
@@ -137,7 +138,7 @@ The `personas/` directory provides in-house role guidance as plain markdown refe
 
 ## State machine
 
-Defined in `skills/ticket-flow/state-machine.json`. 15 triggers across 8 states:
+Defined in `skills/ticket-flow/state-machine.json`. 18 triggers across 8 states:
 
 ```
 Backlog → Todo (appraise-start)
@@ -151,6 +152,19 @@ Review → Ready (pr-iterate)
 UAT → Done (uat-pass)
 UAT → Ready (uat-fail)
 ```
+
+Epic acceptance (acts on the epic issue itself, adds/removes no labels):
+
+```
+Backlog → Review (epic-integration-open)
+Review → UAT     (epic-uat-start)
+UAT → Done       (epic-uat-pass)
+```
+
+Preconditions are bidirectional. Epic triggers carry `must_be_epic`; every child lifecycle
+trigger carries `must_not_be_epic`, so an epic pushed through the ticket pipeline cannot take a
+child's pass-to-`Done` trigger and close itself. Evaluated by `lib/epic-precondition.sh`, which
+`flow.sh` sources. Rejection is exit 8.
 
 `Blocked` is orthogonal — tickets enter it when waiting on external dependencies.
 

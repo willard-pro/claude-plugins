@@ -27,7 +27,8 @@ _run() {
 # ── Stubs (CI-safe, before sourcing the library) ───────────────────────────────
 
 if ! declare -f get_issue >/dev/null 2>&1; then
-  get_issue() { echo '{"data":{"issue":{"identifier":"STUB","description":""}}}'; }
+  # Unwrapped shape — get_issue in linear-api.sh returns .data.issue itself.
+  get_issue() { echo '{"identifier":"STUB","description":""}'; }
 fi
 
 source "$TAP_LIB_DIR/planned-ticket-check.sh" 2>/dev/null || true
@@ -55,11 +56,12 @@ _mock_linear_curl() {
 }
 
 _make_epics_json() {
-  local children="$1" description="$2"
+  local children="$1" description="$2" epic_state="${3:-Backlog}"
   jq -nc \
     --argjson children "$children" \
     --arg description "$description" \
-    '{data:{issues:{nodes:[{id:"e1",identifier:"INIT-42",description:$description,children:{nodes:$children}}]}}}'
+    --arg state "$epic_state" \
+    '{data:{issues:{nodes:[{id:"e1",identifier:"INIT-42",description:$description,state:{name:$state},children:{nodes:$children}}]}}}'
 }
 
 # JSONL children streams (one child object per line) — the format
@@ -91,6 +93,34 @@ _mock_open_pr_recorder() {
   _OPEN_PR_CALLS="$1"
   epic_branch_open_pr() {
     echo "$2" >>"$_OPEN_PR_CALLS"
+    EPIC_BRANCH_PR_STATE="open"
+    return 0
+  }
+}
+
+# Recorder that returns success WITHOUT any PR existing — the shape the real
+# helper takes when the repo has no epic commits, or nothing was opened. Exit 0
+# here must NOT be read as evidence that a PR is open.
+_mock_open_pr_no_pr() {
+  _OPEN_PR_CALLS="$1"
+  epic_branch_open_pr() {
+    echo "$2" >>"$_OPEN_PR_CALLS"
+    EPIC_BRANCH_PR_STATE="none"
+    return 0
+  }
+}
+
+# Like _mock_open_pr_recorder, but also writes prose to stdout — this is what
+# the real epic_branch_open_pr does (progress lines, the created PR URL). The
+# detector's own stdout is captured by command substitution, so any leak here
+# corrupts its JSON result.
+_mock_open_pr_noisy() {
+  _OPEN_PR_CALLS="$1"
+  epic_branch_open_pr() {
+    echo "$2" >>"$_OPEN_PR_CALLS"
+    echo "epic-branch: opening integration PR for $1 in $2"
+    echo "https://github.com/example/repo/pull/42"
+    EPIC_BRANCH_PR_STATE="open"
     return 0
   }
 }
@@ -101,8 +131,11 @@ _mock_open_pr_recorder() {
 # epic_branch_children_done` source is skipped and the mock survives.
 _run_detector() {
   local ws="$1" repos_root="$2" auto_pr="$3" calls_file="$4" fixture="$5"
+  local children_arr="${6:-$ALL_DONE_CHILDREN_ARR}"
   bash -c "
-    get_issue() { echo '{\"data\":{\"issue\":{\"identifier\":\"STUB\",\"description\":\"\"}}}'; }
+    get_issue() { echo '{\"identifier\":\"STUB\",\"description\":\"\"}'; }
+    _STUB_CHILDREN='$children_arr'
+    get_parent_with_children() { echo '{\"children\":'\"\$_STUB_CHILDREN\"'}'; }
     source '$TAP_LIB_DIR/planned-ticket-check.sh' 2>/dev/null || true
     source '$TAP_LIB_DIR/branch-directive-check.sh' 2>/dev/null || true
     source '$TAP_LIB_DIR/epic-branch.sh' 2>/dev/null || true
@@ -114,6 +147,30 @@ _run_detector() {
     FLEET_EPIC_AUTO_PR='$auto_pr'
     FLEET_PIPELINE_LOG_DIR='$ws'
     source '$LIB_DIR/fleet-detect.sh'
+    _fleet_scan_epic_branch_ready '$ws' 2>/dev/null
+  " 2>/dev/null || true
+}
+
+# Run the detector with a recording stub for the state-advancement helper, so
+# tests can assert how many times (and whether) the epic was advanced.
+_run_detector_recording_advance() {
+  local ws="$1" repos_root="$2" calls_file="$3" fixture="$4" advance_file="$5" mock_fn="${6:-_mock_open_pr_recorder}"
+  bash -c "
+    get_issue() { echo '{\"identifier\":\"STUB\",\"description\":\"\"}'; }
+    _STUB_CHILDREN='$ALL_DONE_CHILDREN_ARR'
+    get_parent_with_children() { echo '{\"children\":'\"\$_STUB_CHILDREN\"'}'; }
+    source '$TAP_LIB_DIR/planned-ticket-check.sh' 2>/dev/null || true
+    source '$TAP_LIB_DIR/branch-directive-check.sh' 2>/dev/null || true
+    source '$TAP_LIB_DIR/epic-branch.sh' 2>/dev/null || true
+    _FIXTURE_EPICS_JSON='$fixture'
+    $(declare -f _mock_linear_curl _mock_open_pr_recorder _mock_open_pr_noisy _mock_open_pr_no_pr)
+    _mock_linear_curl
+    $mock_fn '$calls_file'
+    REPOS_ROOT='$repos_root'
+    FLEET_EPIC_AUTO_PR='true'
+    FLEET_PIPELINE_LOG_DIR='$ws'
+    source '$LIB_DIR/fleet-detect.sh'
+    _fleet_advance_epic_state() { echo \"\$1\" >> '$advance_file'; return 0; }
     _fleet_scan_epic_branch_ready '$ws' 2>/dev/null
   " 2>/dev/null || true
 }
@@ -188,7 +245,7 @@ test_no_pr_when_auto_pr_disabled_but_finding_reported() {
   # Unset FLEET_EPIC_AUTO_PR (default false)
   local out
   out=$(bash -c "
-    get_issue() { echo '{\"data\":{\"issue\":{\"identifier\":\"STUB\",\"description\":\"\"}}}'; }
+    get_issue() { echo '{\"identifier\":\"STUB\",\"description\":\"\"}'; }
     source '$TAP_LIB_DIR/planned-ticket-check.sh' 2>/dev/null || true
     source '$TAP_LIB_DIR/branch-directive-check.sh' 2>/dev/null || true
     source '$TAP_LIB_DIR/epic-branch.sh' 2>/dev/null || true
@@ -259,7 +316,7 @@ test_never_merges_regardless_of_config() {
   bash -c "
     gh() { echo \"gh \$*\" >> '$gh_log'; return 0; }
     export -f gh
-    get_issue() { echo '{\"data\":{\"issue\":{\"identifier\":\"STUB\",\"description\":\"\"}}}'; }
+    get_issue() { echo '{\"identifier\":\"STUB\",\"description\":\"\"}'; }
     source '$TAP_LIB_DIR/planned-ticket-check.sh' 2>/dev/null || true
     source '$TAP_LIB_DIR/branch-directive-check.sh' 2>/dev/null || true
     source '$TAP_LIB_DIR/epic-branch.sh' 2>/dev/null || true
@@ -296,7 +353,7 @@ test_readiness_matches_children_done_helper() {
   epic_branch_children_done "INIT-42" "$ONE_IN_PROGRESS_CHILDREN" 2>/dev/null || helper_notready=$?
 
   ready_out=$(bash -c "
-    get_issue() { echo '{\"data\":{\"issue\":{\"identifier\":\"STUB\",\"description\":\"\"}}}'; }
+    get_issue() { echo '{\"identifier\":\"STUB\",\"description\":\"\"}'; }
     _FIXTURE_EPICS_JSON='$(_make_epics_json "$ALL_DONE_CHILDREN_ARR" "$VALID_DIRECTIVE")'
     $(declare -f _mock_linear_curl)
     _mock_linear_curl
@@ -306,7 +363,7 @@ test_readiness_matches_children_done_helper() {
   " 2>/dev/null || true)
 
   notready_out=$(bash -c "
-    get_issue() { echo '{\"data\":{\"issue\":{\"identifier\":\"STUB\",\"description\":\"\"}}}'; }
+    get_issue() { echo '{\"identifier\":\"STUB\",\"description\":\"\"}'; }
     _FIXTURE_EPICS_JSON='$(_make_epics_json "$ONE_IN_PROGRESS_CHILDREN_ARR" "$VALID_DIRECTIVE")'
     $(declare -f _mock_linear_curl)
     _mock_linear_curl
@@ -382,6 +439,203 @@ test_no_directive_never_reaches_actuation() {
   return 0
 }
 
+test_actuation_stdout_does_not_contaminate_result() {
+  local ws
+  ws=$(mktemp -d)
+  local repos_root="${ws}/repos"
+  _make_repos_root "$repos_root"
+  local calls_file="${ws}/calls.log"
+  rm -f "$calls_file"
+
+  local fixture
+  fixture=$(_make_epics_json "$ALL_DONE_CHILDREN_ARR" "$VALID_DIRECTIVE")
+
+  local out
+  out=$(bash -c "
+    get_issue() { echo '{\"identifier\":\"STUB\",\"description\":\"\"}'; }
+    source '$TAP_LIB_DIR/planned-ticket-check.sh' 2>/dev/null || true
+    source '$TAP_LIB_DIR/branch-directive-check.sh' 2>/dev/null || true
+    source '$TAP_LIB_DIR/epic-branch.sh' 2>/dev/null || true
+    _FIXTURE_EPICS_JSON='$fixture'
+    $(declare -f _mock_linear_curl _mock_open_pr_noisy)
+    _mock_linear_curl
+    _mock_open_pr_noisy '$calls_file'
+    REPOS_ROOT='$repos_root'
+    FLEET_EPIC_AUTO_PR='true'
+    FLEET_PIPELINE_LOG_DIR='$ws'
+    source '$LIB_DIR/fleet-detect.sh'
+    _fleet_scan_epic_branch_ready '$ws' 2>/dev/null
+  " 2>/dev/null || true)
+
+  # Guard against a vacuous assertion: the PR path must actually have run,
+  # otherwise there was no output to contaminate with.
+  [ -s "$calls_file" ] || {
+    echo "open_pr never invoked — purity assertion would be vacuous" >&2
+    return 1
+  }
+
+  echo "$out" | jq -e . >/dev/null 2>&1 || {
+    echo "detector stdout is not parseable JSON: $out" >&2
+    return 1
+  }
+  [ "$(echo "$out" | jq -r '.severity')" = "1" ] || {
+    echo "expected severity 1, got: $out" >&2
+    return 1
+  }
+  if echo "$out" | command grep -q "pull/42"; then
+    echo "actuation stdout leaked into detector result: $out" >&2
+    return 1
+  fi
+  return 0
+}
+
+test_epic_already_advanced_is_skipped_before_repo_work() {
+  local ws
+  ws=$(mktemp -d)
+  local repos_root="${ws}/repos"
+  _make_repos_root "$repos_root"
+  local calls_file="${ws}/calls.log"
+  local advance_file="${ws}/advance.log"
+  rm -f "$calls_file" "$advance_file"
+
+  # Epic already at Review — an operator (or an earlier cycle) advanced it.
+  local fixture
+  fixture=$(_make_epics_json "$ALL_DONE_CHILDREN_ARR" "$VALID_DIRECTIVE" "Review")
+  local out
+  out=$(_run_detector_recording_advance "$ws" "$repos_root" "$calls_file" "$fixture" "$advance_file")
+
+  # Skipped before ANY per-repository work.
+  [ ! -s "$calls_file" ] || {
+    echo "  per-repo work performed for an already-advanced epic: $(cat "$calls_file")" >&2
+    return 1
+  }
+  [ ! -s "$advance_file" ] || {
+    echo "  epic state advanced again — this is the regression loop: $(cat "$advance_file")" >&2
+    return 1
+  }
+  [ "$(echo "$out" | jq -r '.severity')" = "0" ] || {
+    echo "  expected severity 0 for a skipped epic, got: $out" >&2
+    return 1
+  }
+  return 0
+}
+
+test_completed_epic_is_not_rescanned() {
+  # state:execution is never removed, so without the guard a Done epic is
+  # rescanned — repo loop included — on every cycle forever.
+  local ws
+  ws=$(mktemp -d)
+  local repos_root="${ws}/repos"
+  _make_repos_root "$repos_root"
+  local calls_file="${ws}/calls.log"
+  local advance_file="${ws}/advance.log"
+  rm -f "$calls_file" "$advance_file"
+
+  local fixture
+  fixture=$(_make_epics_json "$ALL_DONE_CHILDREN_ARR" "$VALID_DIRECTIVE" "Done")
+  _run_detector_recording_advance "$ws" "$repos_root" "$calls_file" "$fixture" "$advance_file" >/dev/null
+
+  [ ! -s "$calls_file" ] || {
+    echo "  completed epic was rescanned: $(cat "$calls_file")" >&2
+    return 1
+  }
+  return 0
+}
+
+test_epic_not_regressed_across_repeated_cycles() {
+  local ws
+  ws=$(mktemp -d)
+  local repos_root="${ws}/repos"
+  _make_repos_root "$repos_root"
+  local calls_file="${ws}/calls.log"
+  local advance_file="${ws}/advance.log"
+  rm -f "$calls_file" "$advance_file"
+
+  # Cycle 1: epic still in Backlog — advancement expected exactly once.
+  local fixture_before
+  fixture_before=$(_make_epics_json "$ALL_DONE_CHILDREN_ARR" "$VALID_DIRECTIVE" "Backlog")
+  _run_detector_recording_advance "$ws" "$repos_root" "$calls_file" "$fixture_before" "$advance_file" >/dev/null
+
+  local first_count
+  first_count=$(grep -c "INIT-42" "$advance_file" 2>/dev/null || true)
+  [ "$first_count" = "1" ] || {
+    echo "  expected exactly 1 advancement on the first cycle, got $first_count" >&2
+    return 1
+  }
+
+  # Cycles 2 and 3: the epic is now at Review — no further advancement, ever.
+  local fixture_after
+  fixture_after=$(_make_epics_json "$ALL_DONE_CHILDREN_ARR" "$VALID_DIRECTIVE" "Review")
+  _run_detector_recording_advance "$ws" "$repos_root" "$calls_file" "$fixture_after" "$advance_file" >/dev/null
+  _run_detector_recording_advance "$ws" "$repos_root" "$calls_file" "$fixture_after" "$advance_file" >/dev/null
+
+  local total
+  total=$(grep -c "INIT-42" "$advance_file" 2>/dev/null || true)
+  [ "$total" = "1" ] || {
+    echo "  epic advanced $total times across 3 cycles — expected 1" >&2
+    return 1
+  }
+  return 0
+}
+
+test_advance_once_per_epic_not_per_repo() {
+  local ws
+  ws=$(mktemp -d)
+  local repos_root="${ws}/repos"
+  _make_repos_root "$repos_root"
+  local calls_file="${ws}/calls.log"
+  local advance_file="${ws}/advance.log"
+  rm -f "$calls_file" "$advance_file"
+
+  local fixture
+  fixture=$(_make_epics_json "$ALL_DONE_CHILDREN_ARR" "$VALID_DIRECTIVE" "Backlog")
+  _run_detector_recording_advance "$ws" "$repos_root" "$calls_file" "$fixture" "$advance_file" >/dev/null
+
+  # Two tracked repos were visited...
+  local repo_calls
+  repo_calls=$(grep -c "repo-" "$calls_file" 2>/dev/null || true)
+  [ "$repo_calls" = "2" ] || {
+    echo "  expected 2 per-repo calls, got $repo_calls" >&2
+    return 1
+  }
+  # ...but the epic advanced exactly once.
+  local advances
+  advances=$(grep -c "INIT-42" "$advance_file" 2>/dev/null || true)
+  [ "$advances" = "1" ] || {
+    echo "  expected 1 advancement across 2 repos, got $advances" >&2
+    return 1
+  }
+  return 0
+}
+
+test_no_advance_when_no_pr_observed() {
+  # The PR helper returns success while opening nothing. Loop completion must
+  # not be mistaken for evidence that an integration PR exists.
+  local ws
+  ws=$(mktemp -d)
+  local repos_root="${ws}/repos"
+  _make_repos_root "$repos_root"
+  local calls_file="${ws}/calls.log"
+  local advance_file="${ws}/advance.log"
+  rm -f "$calls_file" "$advance_file"
+
+  local fixture
+  fixture=$(_make_epics_json "$ALL_DONE_CHILDREN_ARR" "$VALID_DIRECTIVE" "Backlog")
+  _run_detector_recording_advance "$ws" "$repos_root" "$calls_file" "$fixture" "$advance_file" "_mock_open_pr_no_pr" >/dev/null
+
+  # The loop ran over both repos and returned success...
+  [ -s "$calls_file" ] || {
+    echo "  PR routine never invoked — assertion would be vacuous" >&2
+    return 1
+  }
+  # ...and the epic was NOT advanced.
+  [ ! -s "$advance_file" ] || {
+    echo "  epic advanced with zero PRs open: $(cat "$advance_file")" >&2
+    return 1
+  }
+  return 0
+}
+
 # ── Run all tests ────────────────────────────────────────────────────────────────
 
 _run "opens_pr_once_per_tracked_repo_when_ready" test_opens_pr_once_per_tracked_repo_when_ready
@@ -392,6 +646,12 @@ _run "never_merges_regardless_of_config" test_never_merges_regardless_of_config
 _run "readiness_matches_children_done_helper" test_readiness_matches_children_done_helper
 _run "non-planned child does not block ready" test_non_planned_child_does_not_block_ready
 _run "no_directive_never_reaches_actuation" test_no_directive_never_reaches_actuation
+_run "actuation_stdout_does_not_contaminate_result" test_actuation_stdout_does_not_contaminate_result
+_run "epic already advanced is skipped before repo work" test_epic_already_advanced_is_skipped_before_repo_work
+_run "completed epic is not rescanned" test_completed_epic_is_not_rescanned
+_run "epic is not regressed across repeated cycles" test_epic_not_regressed_across_repeated_cycles
+_run "advancement is once per epic, not per repo" test_advance_once_per_epic_not_per_repo
+_run "no advancement when no PR is observed open" test_no_advance_when_no_pr_observed
 
 echo ""
 echo "=== Results ==="

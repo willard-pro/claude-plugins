@@ -221,6 +221,9 @@ stateDiagram-v2
     Review --> Ready : pr-iterate
     UAT --> Done : uat-pass
     UAT --> Ready : uat-fail
+    Backlog --> Review : epic-integration-open
+    Review --> UAT : epic-uat-start
+    UAT --> Done : epic-uat-pass
     Done --> [*]
 ```
 
@@ -245,7 +248,7 @@ Skills plan, reason, and navigate code. `flow.sh` executes mutations with idempo
 
 | File | Purpose |
 |------|---------|
-| `linear-api.sh` | GraphQL API with retry logic (3 attempts, backoff). `get_issue`, `get_comments`, `get_team`, `update_issue`, `get_me`, `get_project_config`. Also resolves `UAT_URL` from env → REPOS_ROOT CLAUDE.md files → git root → ancestor walk. |
+| `linear-api.sh` | GraphQL API with retry logic (3 attempts, backoff). `get_issue`, `get_comments`, `get_team`, `update_issue`, `get_me`, `save_comment`. `resolve_uat_url` resolves the UAT target from env → CLAUDE.md (`get_project_config` no longer exists; it was removed and its last caller deleted). |
 | `ticket-dir.sh` | `resolve_ticket_dir <ID>` finds workspace directories matching `{ID}--slug` pattern. |
 | `validate-env.sh` | Validates env vars and CLAUDE.md fields required for the pipeline. |
 | `notes-parse.sh` | Extracts complexity score from `notes.md`. |

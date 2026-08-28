@@ -19,7 +19,7 @@
 
 # ── Configuration ───────────────────────────────────────────────────────────
 
-BRANCH_DIRECTIVE_SCHEMA_KNOWN_MAX="${BRANCH_DIRECTIVE_SCHEMA_KNOWN_MAX:-1}"
+BRANCH_DIRECTIVE_SCHEMA_KNOWN_MAX="${BRANCH_DIRECTIVE_SCHEMA_KNOWN_MAX:-2}"
 
 # ── Required fields ─────────────────────────────────────────────────────────
 
@@ -35,6 +35,11 @@ BRANCH_DIRECTIVE_REQUIRED_FIELDS=(
 # Valid enum values
 VALID_MERGE_POLICIES=("manual" "on-all-children-done")
 VALID_SYNC_POLICIES=("rebase-on-base-change" "none")
+
+# Optional fields — validated when present, defaulted when absent. NOT listed in
+# BRANCH_DIRECTIVE_REQUIRED_FIELDS: absence must not be reported as missing.
+VALID_UAT_POLICIES=("per-ticket" "epic")
+BRANCH_DIRECTIVE_UAT_POLICY_DEFAULT="per-ticket"
 
 # ── Branch name validation ──────────────────────────────────────────────────
 
@@ -171,6 +176,18 @@ check_branch_directive_description() {
     esac
   done
 
+  # ── Optional field: UAT Policy ────────────────────────────────────────────
+  # Parsed and validated UNCONDITIONALLY, at any declared Schema-Version.
+  # Deliberately not version-gated: an operator who hand-adds this line without
+  # also bumping Schema-Version must still get the behaviour, otherwise the
+  # field is a silent no-op — the exact failure this field exists to fix.
+  local uat_policy
+  uat_policy=$(echo "$block" | _extract_field "UAT Policy")
+
+  if [ -n "$uat_policy" ] && ! _validate_enum "$uat_policy" "${VALID_UAT_POLICIES[@]}"; then
+    invalid_fields+=("UAT Policy: expected per-ticket|epic, got '$uat_policy'")
+  fi
+
   # ── Report missing/invalid fields ─────────────────────────────────────────
   if [ ${#missing_fields[@]} -gt 0 ] || [ ${#invalid_fields[@]} -gt 0 ]; then
     local msg=""
@@ -192,11 +209,16 @@ check_branch_directive_description() {
   sync_policy=$(echo "$block" | _extract_field "Sync Policy")
   created=$(echo "$block" | _extract_field "Created")
 
+  # Materialise the default here rather than leaving it to consumers, so that
+  # every caller reads one normalised value and none re-derives the fallback.
+  [ -z "$uat_policy" ] && uat_policy="$BRANCH_DIRECTIVE_UAT_POLICY_DEFAULT"
+
   cat <<EOF
 BRANCH_DIRECTIVE_BRANCH='$branch'
 BRANCH_DIRECTIVE_BASE='$base'
 BRANCH_DIRECTIVE_MERGE_POLICY='$merge_policy'
 BRANCH_DIRECTIVE_SYNC_POLICY='$sync_policy'
+BRANCH_DIRECTIVE_UAT_POLICY='$uat_policy'
 BRANCH_DIRECTIVE_CREATED='$created'
 EOF
 
@@ -233,6 +255,10 @@ if [ "${1:-}" = "--self-test" ]; then
   _validate_enum "rebase-on-base-change" "${VALID_SYNC_POLICIES[@]}" && echo "✓ rebase-on-base-change valid" || echo "✗ should be valid"
   _validate_enum "none" "${VALID_SYNC_POLICIES[@]}" && echo "✓ none valid" || echo "✗ none should be valid"
   ! _validate_enum "force-push" "${VALID_SYNC_POLICIES[@]}" && echo "✓ force-push invalid" || echo "✗ force-push should be invalid"
+
+  _validate_enum "per-ticket" "${VALID_UAT_POLICIES[@]}" && echo "✓ per-ticket valid" || echo "✗ per-ticket should be valid"
+  _validate_enum "epic" "${VALID_UAT_POLICIES[@]}" && echo "✓ epic valid" || echo "✗ epic should be valid"
+  ! _validate_enum "team" "${VALID_UAT_POLICIES[@]}" && echo "✓ team invalid" || echo "✗ team should be invalid"
 
   # ISO 8601 validation
   _validate_iso8601 "2026-07-25T10:00:00Z" && echo "✓ ISO 8601 valid" || echo "✗ ISO 8601 should be valid"
