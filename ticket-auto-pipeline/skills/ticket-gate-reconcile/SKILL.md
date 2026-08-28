@@ -91,7 +91,14 @@ RAW_SECTION=$(sed -n '/^## Open Questions/,/^## /p' "$NOTES_PATH")
 if echo "$RAW_SECTION" | grep -q '^## '; then
   RAW_SECTION=$(echo "$RAW_SECTION" | sed '/^## Open Questions$/!{/^## /q}')
 fi
-OPEN_QUESTIONS_LIST=$(echo "$RAW_SECTION" | grep '^\-' || true)
+# Only [needs-human] bullets reach the gate. [agent-resolvable] questions are
+# resolved inline by ticket-appraise Step 3.5 (with a mandatory path:line
+# citation, verified by the claim-verifier agent) and never left open — the
+# gate has no business re-litigating a self-closed factual lookup. This also
+# retires strikethrough as a signal here: it was never a reliable one, since
+# ticket-appraise's own inline resolutions use the same `~~...~~` marker this
+# gate writes at Step 6, with no way to tell which producer wrote which.
+OPEN_QUESTIONS_LIST=$(echo "$RAW_SECTION" | grep '^\- \[needs-human\]' || true)
 ```
 
 If `{OPEN_QUESTIONS_LIST}` is empty or contains only placeholder text ("None", "—"), skip the unanswered-questions check in Step 5.
@@ -123,8 +130,8 @@ Read the current plan artifact from `$ARTIFACT_PATH`. Append an `## Amendment #N
 3. Notes any design decisions made during reconciliation
 
 Update `## Open Questions` in notes.md:
-- Mark resolved questions with `~~strikethrough~~` (do NOT delete them — preserve history)
-- If new unresolvable questions arise from amendment, append them as new bullets
+- Mark resolved `[needs-human]` questions with `~~strikethrough~~`, tag included inside the strike (do NOT delete them — preserve history). Strikethrough is presentation only now — provenance and gate-relevance both live in the `[needs-human]`/`[agent-resolvable]` tag (Step 4), not in whether a bullet is struck.
+- If new unresolvable questions arise from amendment, append them as new `- [needs-human]` bullets
 
 ## Step 7 — Post amendment, re-claim, hold
 

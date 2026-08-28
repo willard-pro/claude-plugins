@@ -33,7 +33,7 @@ Never use `>>` without a trailing newline on the echo string. Always quote `$LOG
 ## Phases & Steps
 
 ### APPRAISE
-`setup-workspace` `complexity-sweep` `prior-art` `codebase-investigation` `handoff`
+`setup-workspace` `complexity-sweep` `prior-art` `codebase-investigation` `claim-verify` `handoff`
 
 ### REPRODUCE
 `reproduce` `setup` `plan` `execute`
@@ -270,6 +270,26 @@ Detection patterns (Phase 1, all WARN severity):
 **Skip entries**: when no verifier-result entries exist for a phase (e.g., Phase 0 not yet shipped), `phase-inspector.sh` writes a skip entry with `verdict: "WARN"`, `signals: 0`, `verifiers_consulted: []`, and skips agent spawn — zero token burn on empty phases.
 
 **Consumers**: Phase 2 Guidance Store (accumulate and classify), Phase 3 Post-Mortem (cross-run pattern analysis), Phase 4 Reward Shaping (prompt adjustment).
+
+### Claim-verifier entries (ticket-appraise Step 3.5)
+
+One entry per claim independently re-checked by the claim-verifier agent — negative-existential
+assertions in `## Initial Investigation`/`## Blast Radius`, and `[agent-resolvable]` open
+questions being closed inline. `MSG` carries the verdict and claim text (kept under 60 chars
+where possible; longer claims are truncated — the full text and evidence live in notes.md, not
+the log):
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|claim-verify|info|Claim 1: REFUTED — nothing reads JAVA_OPTS" >> "$LOG_FILE"
+```
+
+The step's overall result is a normal `META|gate-result` entry (see above), not a new gate-stop
+code — a REFUTED verdict is a self-correcting loop within appraise (fix notes.md, re-verify),
+not a structural failure requiring human intervention:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-result|pass|claim-verify: 3 confirmed, 0 refuted, 1 unverifiable" >> "$LOG_FILE"
+```
 
 ### Post-mortem entries (Phase 3 RLVR)
 

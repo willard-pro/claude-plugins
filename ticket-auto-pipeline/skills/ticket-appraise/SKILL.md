@@ -31,7 +31,8 @@ Also: if `--from-step` is set, **suppress Resume Mode** in Step 1 — the worksp
 | `blast-radius` | Step 3 or 4 (codebase/ticket update) | Blast radius already completed |
 | `complexity-sweep` | Step 2.6 (prior art) | `## Complexity` in notes.md |
 | `prior-art` | Step 3 (codebase investigation) | `## Prior Art` in notes.md |
-| `codebase-investigation` | Step 5 (report/handoff) | `## Initial Investigation` in notes.md |
+| `codebase-investigation` | Step 3.5 (claim verification) | `## Initial Investigation` in notes.md |
+| `claim-verify` | Step 4 (ticket update) | Claim verification already completed |
 | `handoff` | End — skill already complete | — |
 
 ---
@@ -194,7 +195,7 @@ ticket-setup writes a minimal notes.md stub. Replace it with the full appraisal 
 
 ## Open Questions
 
-- {List anything unclear from the ticket description}
+- {List anything unclear from the ticket description, each tagged per the scheme below}
 
 ## Next Steps
 
@@ -205,6 +206,13 @@ ticket-setup writes a minimal notes.md stub. Replace it with the full appraisal 
 ### {today's date}
 - Ticket appraised and local workspace created.
 ```
+
+**Open Questions tagging.** Every bullet appended to `## Open Questions` — here or in any later step (2.6, 2.8, 3, 3-Agent) — MUST start with one of two tags:
+
+- **`[needs-human]`** — a judgment call, business decision, or trade-off with no single correct answer. Left open for a human to answer via Linear comment; `ticket-gate-reconcile` holds on these.
+- **`[agent-resolvable]`** — a factual lookup with a determinate answer in the codebase (e.g. "does anything read X?", "does this file exist?"). Step 3.5 below resolves these inline before the ticket ever reaches Linear — they must never be tagged and left open.
+
+An untagged bullet is a defect in whichever step wrote it — fix it there, don't let it reach Step 3.5.
 
 ---
 
@@ -612,6 +620,84 @@ Answer each question below with specific file paths and line numbers. If you can
 - Do NOT re-interpret or summarise — use the raw evidence as-is
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|codebase-investigation|done|{N} files traced" >> "$LOG_FILE"
+
+---
+
+## Step 3.5 — Verify factual claims and resolve agent-resolvable questions
+
+Runs after both Step 3 and Step 3-Agent — codebase investigation always produces this step's input regardless of which path ran. Nothing here reasons about the ticket itself; it only checks whether things already written in notes.md are actually true.
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|claim-verify|start|Verifying negative-existential claims" >> "$LOG_FILE"
+
+### 3.5a — Enforce Open Questions tagging
+
+Read `## Open Questions`. Every bullet must already carry `[needs-human]` or `[agent-resolvable]` (see the tagging rule in Step 2). If any bullet is untagged, tag it now based on its content — do not proceed with an untagged bullet.
+
+### 3.5b — Collect claims to verify
+
+Build one combined list of claims needing independent verification:
+
+1. **Negative existentials** from `## Initial Investigation` and `## Blast Radius` — any claim that something does NOT exist or is NOT referenced. Match patterns like "does not exist", "no ... anywhere", "nothing reads/references/consumes", "there are no", "not referenced", "not found", "no callers". A single grep can confirm presence but never absence, so these are the one claim class where the original author's confidence is structurally unjustified.
+2. **`[agent-resolvable]` open questions** — each one is itself a claim to be settled with evidence before it can be closed.
+
+If both are empty, skip straight to 3.5d (nothing to verify) and log `done|0 claims to verify`.
+
+### 3.5c — Spawn the claim-verifier agent
+
+Spawn a read-only `Explore` subagent — no code changes, no branches, no Linear mutations:
+
+```
+You are an independent fact-checker. Verify ONLY the claims below — do not evaluate anything else about the ticket, and do not propose fixes.
+
+Ticket: {ISSUE-ID} — {title}
+Repos: {REPOS_ROOT}
+
+Claims to verify (each is either a negative existential — something claimed to NOT exist or NOT be referenced — or an open question needing a factual answer):
+{numbered list: claim text, plus its original citation if any}
+
+For each claim, run a genuinely BROADER search than a single grep would give the original claim: try multiple spellings/casings, search both {REPOS_ROOT} and any path the ticket itself names, and do NOT narrow with --include filters. Then classify:
+
+- CONFIRMED — your broader search still found nothing (negative existential) or produced a definite answer (open question). State the exact command(s) you ran.
+- REFUTED — you found a hit that contradicts the claim. Give the file:line and the exact matching text.
+- UNVERIFIABLE — you could not search exhaustively (e.g. repo unavailable, question has no determinate codebase answer). Explain why.
+
+Report one verdict block per claim, in this exact format:
+### Claim N: {claim text}
+Verdict: CONFIRMED|REFUTED|UNVERIFIABLE
+Command: {command(s) run}
+Evidence: {output, or file:line and matching text}
+```
+
+### 3.5d — Apply verdicts
+
+For each claim verdict, write one log entry:
+
+```bash
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|claim-verify|info|Claim ${N}: ${VERDICT} — ${claim_text}" >> "$LOG_FILE"
+```
+
+Then act on it:
+
+- **Negative existential, CONFIRMED** — leave the claim in Initial Investigation/Blast Radius as-is.
+- **Negative existential, REFUTED** — correct the claim in place using the agent's evidence, citing the refuting `file:line`. Do not just delete it — a wrong premise that's silently removed can resurface unexamined later.
+- **Negative existential, UNVERIFIABLE** — demote it: remove the assertion from Initial Investigation/Blast Radius and add it as a new `- [needs-human]` bullet in Open Questions instead. An unconfirmed negative existential must never stand as fact.
+- **`[agent-resolvable]` question, CONFIRMED** — close it now: `- ~~[agent-resolvable] {question}~~ **Resolved:** {answer} ({file:line citation(s) from the agent's evidence})`. A citation is mandatory — a resolution without one is a validation error (see 3.5e).
+- **`[agent-resolvable]` question, REFUTED or UNVERIFIABLE** — it cannot be safely self-closed. Re-tag it `[needs-human]` and leave it open; do not strike it through.
+
+### 3.5e — Validation gate
+
+Before continuing to Step 4, re-scan `## Open Questions`:
+
+- Every bullet has a `[needs-human]` or `[agent-resolvable]` tag → if not, this is a hard validation error. Fix it and re-check.
+- No `[agent-resolvable]` bullet remains both open (not struck through) — every one was either closed with a citation in 3.5d or re-tagged `[needs-human]`. An open, uncited `[agent-resolvable]` bullet reaching Step 4 is a hard validation error.
+
+If any REFUTED negative existential required a correction, re-run 3.5c against just the corrected text to confirm the fix holds before moving on.
+
+```bash
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-result|{pass|fail}|claim-verify: {N} confirmed, {M} refuted, {K} unverifiable" >> "$LOG_FILE"
+```
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|APPRAISE|claim-verify|done|{N} confirmed, {M} refuted, {K} unverifiable" >> "$LOG_FILE"
 
 ---
 
