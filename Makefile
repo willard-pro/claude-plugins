@@ -91,6 +91,7 @@ test-planner:
 	bash ticket-planner/lib/tests/test-planner-lib-root.sh
 	bash ticket-planner/lib/tests/test-planner-linear-api.sh
 	bash ticket-planner/lib/tests/test-planner-stop-conditions.sh
+	bash ticket-planner/lib/tests/test-planner-config-durability.sh
 	bash ticket-planner/lib/tests/test-planner-transitions.sh
 	bash ticket-planner/lib/tests/test-planner-generation.sh
 	bash ticket-planner/lib/tests/test-planner-replan.sh

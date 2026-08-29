@@ -77,7 +77,32 @@ Each phase has one primary step. Agents may write additional `start`/`done` pair
 | `schema` | Schema version declaration (must be first line: `META|schema|start|1`) |
 | `initiative-id` | Initiative identifier |
 | `idea` | The original business idea (pipes/newlines sanitized) |
+| `intent` | Accepted grill-me intent: readiness, recommendation, seal hash |
 | `replan` | Re-planning event: trigger, feedback runs, drift summary, counts |
+
+### Invocation config
+
+A second group of `META` steps records what the operator asked for at invocation
+time. These are written with status `done` by `planner_config_set` and read back by
+`planner_config_get`:
+
+| Step | Description |
+|------|-------------|
+| `create-authorized` | The operator passed `--create`. Until this entry exists, no phase may write to Linear |
+| `stop-after` | Phase to stop after (`--until`). The literal `none` clears one an earlier invocation set |
+| `linear-project` / `linear-milestone` | Project and milestone as given on the command line |
+| `linear-project-id` / `linear-milestone-id` | The UUIDs Epic Gen resolved them to, reused verbatim by Ticket Gen |
+| `branch-override` | `shared` or `no-shared`, from the branch flags |
+
+Config exists as log entries rather than shell variables because the dispatch loop
+spans one process per phase — an `export` at argument-parsing time is gone by the next
+iteration. Persisting the decision is what makes it survive both that boundary and a
+crashed router.
+
+Config steps are **last-write-wins** and are the one exception to duplicate-`done`
+suppression: `resume --create` has to be able to override the stop point `plan`
+recorded, and a suppressed re-write would leave the stale value in force. Read them
+with `planner_config_get`, which takes the last matching entry.
 
 ## Schema
 
@@ -91,7 +116,7 @@ Schema version `1`. Declared as the first line of every state log:
 
 ## Integrity
 
-- **Duplicate detection:** `planner_state_write` rejects `done`→`done` for the same phase+step. Allows `fail`→`done` (retry pattern).
+- **Duplicate detection:** `planner_state_write` rejects `done`→`done` for the same phase+step. Allows `fail`→`done` (retry pattern), and exempts the `META` invocation-config steps, which are last-write-wins.
 - **State log repair:** `planner_state_repair` validates every line (ISO format, known phase, valid status), drops invalid lines, strips trailing partial writes (crash mid-write).
 - **Phase ordering:** `planner_position_derive` reads the log in reverse to find the last completed phase. Incomplete trailing entries (crash mid-phase) cause resume at that phase.
 - **Pipe character safety:** The message field may contain arbitrary text from agent output. `planner_state_write` does not sanitize the message parameter — callers should avoid `|` in messages. `planner_state_repair` preserves trailing fields by reconstructing with `printf` rather than `cut`.

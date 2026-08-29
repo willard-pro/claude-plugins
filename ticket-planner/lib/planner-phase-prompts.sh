@@ -32,6 +32,13 @@ _source_if_missing() {
 _source_if_missing "planner_resolve_lib_root" \
   "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/planner-lib-root.sh"
 
+# Invocation config (Linear project/milestone, branch override) is read back from
+# the state log at prompt-generation time and interpolated into the prompt as a
+# literal — the same way the plugin root is. The generating shell is not the shell
+# that parsed the flags, so an environment read here sees nothing (#144).
+_source_if_missing "planner_config_get" \
+  "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/planner-state.sh"
+
 # Resolved plugin root, memoized per shell. Empty until first resolution.
 _PLANNER_PROMPT_LIB_ROOT="${_PLANNER_PROMPT_LIB_ROOT:-}"
 
@@ -128,6 +135,24 @@ planner_sanitize_input() {
 
   echo "$normalized"
   return 0
+}
+
+# ── Invocation config lookup ────────────────────────────────────────────────────
+
+# Read one invocation-config value for prompt interpolation.
+# Tolerates a missing or unreadable state log: prompt generation is also exercised
+# by tests against initiatives that have no log at all, and a lookup failure must
+# never take down the prompt.
+#
+# Usage: _planner_prompt_config <initiative_id> <key>
+# Output: the value, or empty.
+_planner_prompt_config() {
+  local initiative_id="$1" key="$2"
+  declare -f planner_config_get >/dev/null 2>&1 || {
+    echo ""
+    return 0
+  }
+  planner_config_get "$initiative_id" "$key" 2>/dev/null || echo ""
 }
 
 # ── Phase 1: Appraisal ──────────────────────────────────────────────────────────
@@ -615,6 +640,15 @@ planner_prompt_epicgen() {
     return 1
   }
 
+  # Operator configuration, read from the state log where argument parsing wrote
+  # it and interpolated below as a literal. Reading LINEAR_PROJECT from the
+  # environment here would find nothing — this shell is six phases downstream of
+  # the one that parsed --project (#144).
+  local project_ref milestone_ref branch_override
+  project_ref=$(_planner_prompt_config "$initiative_id" "linear-project")
+  milestone_ref=$(_planner_prompt_config "$initiative_id" "linear-milestone")
+  branch_override=$(_planner_prompt_config "$initiative_id" "branch-override")
+
   cat <<AGENT_PROMPT
 You are the **Epic Generation** phase agent for the ticket-planner. Your job is
 to create the Linear epic that represents this initiative. You are phase 7 of 9.
@@ -644,7 +678,16 @@ if [ ! -f "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh" ]; then
 fi
 export CLAUDE_PLUGIN_ROOT
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh"
+source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-router.sh"
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-ticket-validate.sh"
+
+# Step 0: create gate. This is the first phase that writes to Linear, so it
+# re-verifies the operator's authorization from the state log rather than
+# trusting that the dispatcher checked. Never skip, never work around it.
+if ! planner_create_gate_check "${initiative_id}" "EpicGen"; then
+  planner_state_write "${initiative_id}" "EpicGen" "create-gate" "fail" "not authorized — resume with --create"
+  exit 5
+fi
 
 ENTITY_KEY="epic-\${initiative_id}"
 
@@ -667,18 +710,43 @@ source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-linear-api.sh"
 
 planner_state_write "${initiative_id}" "EpicGen" "create" "start" "Creating Linear epic for initiative"
 
-# Project / milestone are operator configuration, not your judgement. They come
-# from LINEAR_PROJECT / LINEAR_PROJECT_MILESTONE (or the --project / --milestone
-# flags, which export the same variables). Leave them unset to create the epic
-# with no project, which is the pre-existing behaviour.
+# Project / milestone are operator configuration, not your judgement. The values
+# below were interpolated from the state log, where argument parsing recorded the
+# --project / --milestone flags. Empty means no project — leave it that way.
+PROJECT_REF="${project_ref}"
+MILESTONE_REF="${milestone_ref}"
+
+# Resolve name → UUID here, before the epic is created, and persist the resolved
+# ids. TicketGen reads them straight back off disk, so the whole run files every
+# entity against exactly the ids this phase verified — no re-resolution, no
+# environment, no drift between the epic and its children.
+RESOLVED_PROJECT_ID=""
+RESOLVED_MILESTONE_ID=""
+if [ -n "\$PROJECT_REF" ]; then
+  RESOLVED_PROJECT_ID=\$(planner_linear_resolve_project "\$TEAM_ID" "\$PROJECT_REF") || {
+    planner_state_write "${initiative_id}" "EpicGen" "project" "fail" "cannot resolve project '\${PROJECT_REF}'"
+    exit 1
+  }
+  if [ -n "\$MILESTONE_REF" ]; then
+    RESOLVED_MILESTONE_ID=\$(planner_linear_resolve_milestone "\$RESOLVED_PROJECT_ID" "\$MILESTONE_REF") || {
+      planner_state_write "${initiative_id}" "EpicGen" "project" "fail" "cannot resolve milestone '\${MILESTONE_REF}'"
+      exit 1
+    }
+  fi
+  planner_config_set "${initiative_id}" "linear-project-id" "\$RESOLVED_PROJECT_ID"
+  planner_config_set "${initiative_id}" "linear-milestone-id" "\${RESOLVED_MILESTONE_ID:-none}"
+  planner_state_write "${initiative_id}" "EpicGen" "project" "done" \\
+    "project=\${RESOLVED_PROJECT_ID} milestone=\${RESOLVED_MILESTONE_ID:-none}"
+fi
+
 EPIC_RESPONSE=\$(planner_linear_create_issue \\
   "\$TEAM_ID" \\
   "\$EPIC_TITLE" \\
   "\$EPIC_DESCRIPTION" \\
   "\$(jq -nc --arg init "INIT-${initiative_id#INIT-}" '[\$init, "epic"]')" \\
   "" \\
-  "\${LINEAR_PROJECT:-}" \\
-  "\${LINEAR_PROJECT_MILESTONE:-}") || {
+  "\$RESOLVED_PROJECT_ID" \\
+  "\$RESOLVED_MILESTONE_ID") || {
   planner_state_write "${initiative_id}" "EpicGen" "create" "fail" "Linear issueCreate failed"
   exit 1
 }
@@ -687,15 +755,6 @@ CREATED_EPIC_ID=\$(echo "\$EPIC_RESPONSE" | jq -r '.data.issueCreate.issue.ident
 if [ -z "\$CREATED_EPIC_ID" ]; then
   planner_state_write "${initiative_id}" "EpicGen" "create" "fail" "issueCreate returned no identifier"
   exit 1
-fi
-
-# Record where the initiative was filed so a later reader can tell without
-# re-querying Linear. Skipped entirely when no project is configured.
-if [ -n "\${LINEAR_PROJECT:-}" ]; then
-  RESOLVED_PROJECT_ID=\$(planner_linear_resolve_project "\$TEAM_ID" "\${LINEAR_PROJECT}")
-  RESOLVED_MILESTONE_ID=\$(planner_linear_resolve_milestone "\$RESOLVED_PROJECT_ID" "\${LINEAR_PROJECT_MILESTONE:-}")
-  planner_state_write "${initiative_id}" "EpicGen" "project" "done" \\
-    "project=\${RESOLVED_PROJECT_ID} milestone=\${RESOLVED_MILESTONE_ID:-none}"
 fi
 
 # Step 4: Mark created
@@ -732,21 +791,23 @@ REASON=\$(echo "\$RECOMMENDATION" | jq -r '.reason')
 
 ### 5b. Apply operator overrides
 
-The recommender's output may be overridden by operator flags passed to the planner:
+The recommender's output may be overridden by an operator flag passed to the planner.
+The override below was read from the state log at prompt-generation time and
+interpolated as a literal — do not look for it in your environment, it is not there:
 
-- If **\`PLANNER_SHARED_BRANCH=true\`** is in the environment, the outcome is \`true\`
-  regardless of the recommender.
-- If **\`PLANNER_NO_SHARED_BRANCH=true\`** is in the environment, the outcome is \`false\`
-  regardless of the recommender.
-- Supplying both together is rejected before you are spawned — you will never see both
-  set.
+- \`shared\` (from \`--shared-branch\`) forces the outcome \`true\`.
+- \`no-shared\` (from \`--no-shared-branch\`) forces the outcome \`false\`.
+- Empty means no override — the recommender decides.
+- Supplying both flags together is rejected before you are spawned.
 
 \`\`\`bash
+BRANCH_OVERRIDE="${branch_override}"
+
 # Determine final outcome
-if [ "\${PLANNER_SHARED_BRANCH:-}" = "true" ]; then
+if [ "\$BRANCH_OVERRIDE" = "shared" ]; then
   EMIT_DIRECTIVE=true
   OVERRIDE_REASON="operator override: --shared-branch"
-elif [ "\${PLANNER_NO_SHARED_BRANCH:-}" = "true" ]; then
+elif [ "\$BRANCH_OVERRIDE" = "no-shared" ]; then
   EMIT_DIRECTIVE=false
   OVERRIDE_REASON="operator override: --no-shared-branch"
 else
@@ -851,6 +912,15 @@ planner_prompt_ticketgen() {
     return 1
   }
 
+  # Prefer the ids EpicGen already resolved and persisted — the children then land
+  # in exactly the project the epic did, with no second name lookup that could
+  # resolve differently. Fall back to the raw refs only if EpicGen recorded none.
+  local project_ref milestone_ref
+  project_ref=$(_planner_prompt_config "$initiative_id" "linear-project-id")
+  milestone_ref=$(_planner_prompt_config "$initiative_id" "linear-milestone-id")
+  [ -n "$project_ref" ] || project_ref=$(_planner_prompt_config "$initiative_id" "linear-project")
+  [ -n "$milestone_ref" ] || milestone_ref=$(_planner_prompt_config "$initiative_id" "linear-milestone")
+
   cat <<AGENT_PROMPT
 You are the **Ticket Generation** phase agent for the ticket-planner. Your job is
 to create planned child tickets in Linear. You are phase 8 of 9 — the main
@@ -895,10 +965,19 @@ if [ ! -f "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh" ]; then
 fi
 export CLAUDE_PLUGIN_ROOT
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh"
+source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-router.sh"
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-deps-check.sh"
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-context-gen.sh"
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-ticket-validate.sh"
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-linear-api.sh"
+
+# 0. Create gate — re-verified here from the state log, not assumed from the
+# dispatcher. This phase creates every ticket in the initiative; an unauthorized
+# run must produce none. Never skip, never work around it.
+if ! planner_create_gate_check "${initiative_id}" "TicketGen"; then
+  planner_state_write "${initiative_id}" "TicketGen" "create-gate" "fail" "not authorized — resume with --create"
+  exit 5
+fi
 
 # 1. Validate dependency graph is acyclic
 deps_json='{"TICKET-A":["TICKET-B"],"TICKET-B":[]}'  # from specs
@@ -1000,8 +1079,8 @@ TICKET_RESPONSE=\$(planner_linear_create_issue \\
   "\$description" \\
   "\$LABELS" \\
   "\$EPIC_ID" \\
-  "\${LINEAR_PROJECT:-}" \\
-  "\${LINEAR_PROJECT_MILESTONE:-}") || {
+  "${project_ref}" \\
+  "${milestone_ref}") || {
   planner_state_write "${initiative_id}" "TicketGen" "create" "fail" "issueCreate failed for \${ticket_slug}"
   continue
 }

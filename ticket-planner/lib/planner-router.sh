@@ -104,42 +104,122 @@ planner_run() {
   done
 }
 
-# ── Stop conditions (holds and --until) ────────────────────────────────────────
+# ── Stop conditions and the create gate ────────────────────────────────────────
 #
-# Three operator controls answer the same question — at which phase does the
-# dispatch loop stop? Rather than three checks in the loop, they collapse into a
-# single "earliest stop phase":
+# Phases 1-6 write only to disk; EpicGen (phase 7) is the first Linear write. The
+# planner therefore stops after Consensus *by default* — that is a constant, not
+# runtime state, so there is nothing that can fail to propagate and no flag whose
+# absence silently authorizes creation.
 #
-#   --until <Phase> / PLANNER_UNTIL   stop after <Phase> completes
-#   --dry-run                          alias for --until Consensus (the last
-#                                      phase before any Linear entity is created)
-#   PLANNER_REVIEW_HOLD=true           stop after Review
-#   PLANNER_CONSENSUS_HOLD=true        stop after Consensus
+# Proceeding past that boundary takes a separate, deliberate invocation:
 #
-# Stopping is not a special mode: the router holds no in-memory state, so a stop
-# is just "quit dispatching", and `resume` is the continuation — the same path
-# crash recovery already uses.
+#   /ticket-planner resume <INIT_ID> --create
+#
+# which records `META|create-authorized|done` in the state log *before* the loop
+# starts. Every later check re-reads that entry from disk, so the authorization
+# survives a crashed router, a killed agent, and the process boundary between
+# every pair of phases — exactly as the retry budget survives them.
+#
+# `--until <Phase>` narrows the stop further and is persisted the same way. When
+# both apply the earliest wins: `--until TicketGen` without `--create` still
+# stops at Consensus.
+#
+# Nothing here reads the environment. An `export` at argument-parsing time is
+# gone by the next phase iteration — that was #144.
 
-# Phase after which a --dry-run stops. Consensus is the last artifact-only phase;
-# EpicGen is the first Linear write.
+# Last artifact-only phase. EpicGen, the phase after it, is the first Linear write.
 PLANNER_DRY_RUN_PHASE="Consensus"
 
-# Resolve the effective stop phase from flags and env.
-# Usage: planner_stop_phase
+# The phase after which creation must be explicitly authorized.
+PLANNER_CREATE_GATE_PHASE="Consensus"
+
+# Phases that create or mutate Linear entities. Gated on create-authorization.
+PLANNER_LINEAR_WRITE_PHASES="EpicGen TicketGen"
+
+# Has the operator authorized Linear entity creation for this initiative?
+# Usage: planner_create_authorized <initiative_id>
+# Returns: 0 when authorized, 1 otherwise.
+planner_create_authorized() {
+  local initiative_id="$1"
+  planner_config_is_set "$initiative_id" "create-authorized"
+}
+
+# Record the operator's `--create` authorization. Persisted before the loop
+# starts so a crash between here and EpicGen does not lose it — `resume` without
+# the flag then still proceeds, because the decision lives on disk, not in a
+# variable that died with the process.
+#
+# Usage: planner_authorize_create <initiative_id> [note]
+planner_authorize_create() {
+  local initiative_id="$1" note="${2:-operator passed --create}"
+  planner_config_set "$initiative_id" "create-authorized" "$note"
+}
+
+# Is <phase> one that writes to Linear?
+# Usage: planner_phase_writes_linear <phase>
+planner_phase_writes_linear() {
+  case " ${PLANNER_LINEAR_WRITE_PHASES} " in
+  *" $1 "*) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
+# Refuse to dispatch a Linear-write phase without authorization.
+# The dispatch loop calls this immediately before spawning each phase agent; the
+# EpicGen and TicketGen prompts re-check it inside the agent. Two disk-backed
+# guards, because the failure mode being prevented is silent entity creation.
+#
+# Usage: planner_create_gate_check <initiative_id> <phase>
+# Returns: 0 to proceed, 1 to refuse (reason on stderr).
+planner_create_gate_check() {
+  local initiative_id="$1" phase="$2"
+
+  planner_phase_writes_linear "$phase" || return 0
+  planner_create_authorized "$initiative_id" && return 0
+
+  echo "ERROR: ${phase} creates Linear entities and this initiative is not authorized to." >&2
+  echo "Review the artifacts, then run: /ticket-planner resume ${initiative_id} --create" >&2
+  return 1
+}
+
+# Persist an explicit --until stop point. Pass an empty value (or "none") to
+# clear one an earlier invocation set — which is what --create does when it is
+# not itself narrowing the run.
+#
+# Usage: planner_stop_after_set <initiative_id> <phase_or_empty>
+planner_stop_after_set() {
+  local initiative_id="$1" phase="${2:-}"
+  planner_config_set "$initiative_id" "stop-after" "${phase:-none}"
+}
+
+# Resolve the effective stop phase for an initiative, entirely from disk.
+#
+# Usage: planner_stop_phase <initiative_id>
 # Output: phase name on stdout, or empty when the run should go to completion.
 planner_stop_phase() {
+  local initiative_id="$1"
   local -a candidates=()
+  local until_phase
 
-  [ -n "${PLANNER_UNTIL:-}" ] && candidates+=("$PLANNER_UNTIL")
-  [ "${PLANNER_REVIEW_HOLD:-false}" = "true" ] && candidates+=("Review")
-  [ "${PLANNER_CONSENSUS_HOLD:-false}" = "true" ] && candidates+=("Consensus")
+  if [ -z "$initiative_id" ]; then
+    echo "planner-router: planner_stop_phase requires an initiative ID" >&2
+    return 1
+  fi
+
+  until_phase=$(planner_config_get "$initiative_id" "stop-after")
+  [ -n "$until_phase" ] && candidates+=("$until_phase")
+
+  # The create gate: unauthorized runs stop on the last artifact-only phase.
+  if ! planner_create_authorized "$initiative_id"; then
+    candidates+=("$PLANNER_CREATE_GATE_PHASE")
+  fi
 
   [ "${#candidates[@]}" -eq 0 ] && {
     echo ""
     return 0
   }
 
-  # Earliest wins — a hold before the --until target still stops the run there.
+  # Earliest wins — an --until before the create gate still stops the run there.
   local best="" best_idx=-1 phase idx
   for phase in "${candidates[@]}"; do
     idx=$(planner_phase_index "$phase") || continue
@@ -152,20 +232,43 @@ planner_stop_phase() {
   echo "$best"
 }
 
+# Why did the run stop here? Used to build the operator-facing report, so the
+# message distinguishes "you asked for this" from "creation needs authorizing".
+#
+# Usage: planner_stop_reason <initiative_id>
+# Output: a one-line human-readable reason, or empty when there is no stop.
+planner_stop_reason() {
+  local initiative_id="$1"
+  local stop until_phase
+  stop=$(planner_stop_phase "$initiative_id") || return 1
+  [ -z "$stop" ] && {
+    echo ""
+    return 0
+  }
+
+  until_phase=$(planner_config_get "$initiative_id" "stop-after")
+  if [ -n "$until_phase" ] && [ "$until_phase" = "$stop" ]; then
+    echo "--until ${stop}"
+    return 0
+  fi
+
+  echo "creation not authorized — ${stop} is the last phase before any Linear write"
+}
+
 # Should the loop stop now that <phase> has completed?
-# Usage: planner_should_stop_after <phase>
+# Usage: planner_should_stop_after <initiative_id> <phase>
 # Returns: 0 to stop, 1 to keep dispatching.
 planner_should_stop_after() {
-  local phase="$1"
+  local initiative_id="$1" phase="$2"
   local stop
-  stop=$(planner_stop_phase)
+  stop=$(planner_stop_phase "$initiative_id") || return 1
 
   [ -z "$stop" ] && return 1
   [ "$phase" = "$stop" ] && return 0
   return 1
 }
 
-# Validate a --until / PLANNER_UNTIL value against the canonical phase sequence.
+# Validate a --until value against the canonical phase sequence.
 # The sequence is the single source of truth — never validate against a second list.
 #
 # Usage: planner_until_validate <until_phase> [initiative_id]

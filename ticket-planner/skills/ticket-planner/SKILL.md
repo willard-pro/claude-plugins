@@ -14,8 +14,9 @@ Sits upstream of `ticket-auto` and `fleet-controller`. Produces against frozen c
 
 | Trigger | Mode |
 |---------|------|
-| `/ticket-planner plan "idea"` | Start a new initiative from an idea |
+| `/ticket-planner plan "idea"` | Plan a new initiative — artifacts only, nothing in Linear |
 | `/ticket-planner resume <INIT_ID>` | Resume a crashed or paused initiative |
+| `/ticket-planner resume <INIT_ID> --create` | Authorize creation and run through to Linear |
 | `/ticket-planner status <INIT_ID>` | Show current phase and recent log entries |
 | `/ticket-planner replan <INIT_ID>` | Re-plan an initiative from feedback (requires Regenerate flag) |
 
@@ -23,11 +24,18 @@ Sits upstream of `ticket-auto` and `fleet-controller`. Produces against frozen c
 
 ### Plan (`plan`)
 
-Start a new planning run from a business idea. The planner initializes the state directory, creates the state log, and begins at the Appraisal phase. Each phase runs as an isolated agent; the router advances sequentially through the 9-phase state machine.
+Start a new planning run from a business idea. The planner initializes the state directory, creates the state log, and begins at the Appraisal phase. Each phase runs as an isolated agent; the router advances sequentially through the state machine.
 
 ```
 /ticket-planner plan "Add real-time collaboration to the document editor"
 ```
+
+**`plan` stops after Consensus and creates nothing in Linear.** Phases 1–6 write only
+to disk; Epic Gen (phase 7) is the first Linear write, and `plan` does not include it.
+This is not a flag that can be forgotten or fail to take effect — the phase sequence
+for `plan` simply ends at the write boundary. The run leaves the whole ticket set
+reviewable on disk (`proposal.md`, `review.md`, `consensus.md`, `specs/*.md`) and
+reports the command to continue.
 
 Or, pass a grill-me validated intent file (recommended):
 
@@ -41,37 +49,55 @@ If the run is interrupted (crash, timeout, manual stop), resume with `resume` �
 
 ### Plan flags
 
+Flags are accepted by both `plan` and `resume`. Every one of them is **written to the
+state log the moment it is parsed** and re-read from there wherever it is used — none
+of them is carried in an environment variable, because the dispatch loop spans a fresh
+process per phase and an `export` does not survive that (#144).
+
 | Flag | Effect |
 |------|--------|
+| `--create` | **`resume` only.** Authorize Linear creation, then run Epic Gen → Ticket Gen → Completed |
 | `--shared-branch` | Force a shared-branch directive on the epic regardless of the heuristic |
 | `--no-shared-branch` | Suppress the shared-branch directive regardless of the heuristic |
 | `--until <Phase>` | Stop the dispatch loop once `<Phase>` completes; `resume` continues |
-| `--dry-run` | Alias for `--until Consensus` — everything on disk, nothing in Linear |
-| `--project <name\|id>` | Linear project for the epic and its tickets (overrides `LINEAR_PROJECT`) |
-| `--milestone <name\|id>` | Linear project milestone (overrides `LINEAR_PROJECT_MILESTONE`) |
+| `--dry-run` | Accepted and redundant — stopping before Linear is already the default |
+| `--project <name\|id>` | Linear project for the epic and its tickets |
+| `--milestone <name\|id>` | Linear project milestone (needs `--project` when given by name) |
 
 The branch flags are optional. Supplying both together is an error. When neither is supplied,
 the binary heuristic decides (≥ 3 tickets **and** dependency chain depth ≥ 2).
 
-### Previewing a plan before it reaches Linear
+`--create` is rejected in `plan` mode. Authorizing creation is a separate, deliberate
+invocation made *after* the artifacts exist and have been read — a single command that
+both plans and creates would be the footgun this design exists to remove.
 
-Phases 1–6 are pure-artifact; phase 7 (Epic Gen) is the first Linear write. `--dry-run`
-stops the loop exactly on that boundary:
+### The create gate
 
-```
-/ticket-planner plan ./intents/rt-collab.md --dry-run
-```
-
-The run leaves the full ticket set on disk — `proposal.md`, `review.md`, `consensus.md`,
-and one `specs/{slug}.md` per ticket — and creates no Linear entities. Review them, then:
+Phases 1–6 are pure-artifact; phase 7 (Epic Gen) is the first Linear write. The loop
+stops on that boundary unless the initiative has been explicitly authorized to cross it:
 
 ```
-/ticket-planner resume INIT-42
+/ticket-planner plan ./intents/rt-collab.md     # → stops after Consensus
+# read the artifacts…
+/ticket-planner resume INIT-42 --create         # → Epic Gen, Ticket Gen, Completed
 ```
 
-`--until` accepts any phase name from `planner_phase_sequence`. Naming an unknown phase,
-or one the initiative has already passed, is rejected with the valid names (or the current
-position) in the message.
+`--create` writes `META|create-authorized|done` to the state log **before the loop
+starts**. Every later check reads it back from there, so the authorization survives a
+crashed router, a killed phase agent, and the process boundary between every pair of
+phases — a `resume` after a crash mid-Epic-Gen proceeds without re-passing the flag,
+because the decision is on disk rather than in a variable that died with the process.
+
+A plain `resume` on an initiative sitting at the gate does not create anything. It
+reports the position and the `--create` command, and stops. Epic Gen and Ticket Gen
+each re-verify the authorization from the state log themselves, so an unauthorized
+initiative produces no Linear entities even if something dispatches them directly.
+
+`--until <Phase>` narrows the stop further and is persisted the same way. When both
+apply the **earliest** wins — `--until TicketGen` without `--create` still stops at
+Consensus. `--until` accepts any phase name from `planner_phase_sequence`; an unknown
+phase, or one the initiative has already passed, is rejected with the valid names (or
+the current position) in the message.
 
 ### Resume (`resume`)
 
@@ -80,6 +106,17 @@ Continue an interrupted or paused run. The router reads the state log, finds the
 ```
 /ticket-planner resume INIT-42
 ```
+
+`resume` is also the mode that authorizes Linear creation. Add `--create` once the
+artifacts have been reviewed:
+
+```
+/ticket-planner resume INIT-42 --create
+```
+
+`--create` is checked once, at the top of the invocation, and persisted immediately —
+see [The create gate](#the-create-gate). A bare `resume` never crosses the write
+boundary, so recovering a crashed Discovery phase cannot silently authorize Epic Gen.
 
 ### Status (`status`)
 
@@ -107,7 +144,7 @@ Re-plan an initiative that carries the `Regenerate` flag. Ingests aggregated fee
 | 4 | Specify | Synthesizes proposal + writes per-ticket specs with signals | `proposal.md`, spec files |
 | 5 | Review | Critiques the proposal and specs (internal by default) | Review findings |
 | 6 | Consensus | Resolves review findings into a settled plan | Finalized proposal |
-| 7 | Epic Gen | Creates the initiative epic in Linear | Linear epic with `epic` label |
+| 7 | Epic Gen | Creates the initiative epic in Linear — **first Linear write, gated on `--create`** | Linear epic with `epic` label |
 | 8 | Ticket Gen | Creates planned child tickets, computes confidence, gate-dispatches | Linear tickets, `state:execution` on epic |
 | 9 | Completed | Terminal phase — no further transitions | Completed state |
 
@@ -137,21 +174,30 @@ The router never reasons about content; phases never mutate state directly (they
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PLANNER_REVIEW_HOLD` | false | When `true`, the loop stops after Review completes (env-var form of `--until Review`) |
-| `PLANNER_CONSENSUS_HOLD` | false | When `true`, the loop stops after Consensus completes (env-var form of `--dry-run`) |
-| `PLANNER_UNTIL` | *(unset)* | Phase name to stop after; the `--until` flag sets this |
+| `PLANNER_REVIEW_HOLD` | false | When `true`, the run stops after Review. Read **once, at argument-parsing time**, and persisted as `--until Review` |
+| `PLANNER_UNTIL` | *(unset)* | Phase name to stop after. Read once at parsing time, exactly as `--until` is |
 | `PLANNER_MAX_PHASE_RETRIES` | 2 | Max retries per phase before failing the run |
 | `PLANNER_PHASE_TIMEOUT` | 600 | Seconds before timing out a hung phase agent |
 | `PLANNER_TSORT_TIMEOUT` | 30 | Seconds before timing out dependency graph sort |
 | `PLANNER_CONFIDENCE_THRESHOLD` | 0.85 | Minimum confidence for `pre-approved` label |
 | `PLANNER_IDEA_MAX_LENGTH` | 2000 | Maximum idea length in chars (truncated with warning) |
 | `PLANNER_REQUIRE_INTENT` | false | When `true`, raw idea strings are refused — must pass a grill-me intent file |
-| `LINEAR_PROJECT` | *(unset)* | Project name or id for created epics/tickets. Unset ⇒ no project field is sent |
-| `LINEAR_PROJECT_MILESTONE` | *(unset)* | Project milestone name or id. Requires `LINEAR_PROJECT` when given by name |
+| `LINEAR_PROJECT` | *(unset)* | Default project name or id for created epics/tickets, read once at parsing time as the fallback for `--project`. Unset ⇒ no project field is sent |
+| `LINEAR_PROJECT_MILESTONE` | *(unset)* | Default project milestone name or id, the fallback for `--milestone`. Requires a project when given by name |
 | `FLEET_AUTO_DISPATCH` | false | Must be true for automatic fleet-controller dispatch |
 
+Every variable in this table is read **once, in the shell that parses arguments**, and
+its effect is persisted to the state log there and then. None of them is read again
+mid-run: the dispatch loop runs a fresh process per phase, so a variable exported during
+parsing is gone by the next iteration. Setting one of them *after* a run has started has
+no effect — re-invoke with the corresponding flag instead.
+
+`PLANNER_CONSENSUS_HOLD` is gone. Stopping before the first Linear write is now the
+default and needs no variable.
+
 When more than one stop point applies, the **earliest** wins — `PLANNER_REVIEW_HOLD=true`
-with `--until TicketGen` stops after Review.
+with `--until TicketGen` stops after Review, and an unauthorized run stops at Consensus
+whatever `--until` says.
 
 ---
 
@@ -194,28 +240,50 @@ and no state log entry, so `resume` re-runs straight back into the same failure.
 
 ### 2. Parse mode
 
-First argument is the mode: `plan`, `resume`, `status`, or `replan`.
+First argument is the mode: `plan`, `resume`, `status`, or `replan`. Capture it as
+`MODE` — step 2a checks it when rejecting `--create` outside `resume`.
 
-### 2a. Parse override flags (plan mode only)
+```bash
+MODE="${1:-}"
+shift || true
+```
 
-After extracting the idea, scan remaining arguments for override flags:
+### 2a. Parse override flags
+
+Flags are accepted in both `plan` and `resume` mode. **Parse them into plain shell
+variables here; do not export them.** They are persisted to the state log in step 2b,
+once an initiative ID exists, and every consumer reads them back from there.
+
+Exporting is what broke `--dry-run` (#144): the dispatch loop below spans one Bash tool
+call per phase with an Agent tool call between, so each iteration is a fresh process and
+an `export` from this step is simply not there when a later phase looks for it.
 
 ```bash
 SHARED_BRANCH_FLAG=""
 NO_SHARED_BRANCH_FLAG=""
+CREATE_FLAG=""
 UNTIL_PHASE=""
+PROJECT_REF=""
+MILESTONE_REF=""
+
+# Env vars are the defaults for the corresponding flags, read once, here.
+UNTIL_PHASE="${PLANNER_UNTIL:-}"
+[ "${PLANNER_REVIEW_HOLD:-false}" = "true" ] && UNTIL_PHASE="${UNTIL_PHASE:-Review}"
+PROJECT_REF="${LINEAR_PROJECT:-}"
+MILESTONE_REF="${LINEAR_PROJECT_MILESTONE:-}"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --shared-branch) SHARED_BRANCH_FLAG=true ;;
     --no-shared-branch) NO_SHARED_BRANCH_FLAG=true ;;
-    --dry-run) UNTIL_PHASE="$PLANNER_DRY_RUN_PHASE" ;;
+    --create) CREATE_FLAG=true ;;
+    --dry-run) ;;   # redundant: stopping before the first Linear write is the default
     --until) shift; UNTIL_PHASE="${1:-}" ;;
     --until=*) UNTIL_PHASE="${1#*=}" ;;
-    --project) shift; export LINEAR_PROJECT="${1:-}" ;;
-    --project=*) export LINEAR_PROJECT="${1#*=}" ;;
-    --milestone) shift; export LINEAR_PROJECT_MILESTONE="${1:-}" ;;
-    --milestone=*) export LINEAR_PROJECT_MILESTONE="${1#*=}" ;;
+    --project) shift; PROJECT_REF="${1:-}" ;;
+    --project=*) PROJECT_REF="${1#*=}" ;;
+    --milestone) shift; MILESTONE_REF="${1:-}" ;;
+    --milestone=*) MILESTONE_REF="${1#*=}" ;;
   esac
   shift
 done
@@ -226,30 +294,62 @@ if [ "$SHARED_BRANCH_FLAG" = "true" ] && [ "$NO_SHARED_BRANCH_FLAG" = "true" ]; 
   exit 1
 fi
 
-# Validate the stop phase against the canonical sequence before any state exists.
-# planner_until_validate prints the valid phase names (or the current position)
-# and returns 1 (unknown phase) or 2 (phase already passed).
-if [ -n "$UNTIL_PHASE" ]; then
-  planner_until_validate "$UNTIL_PHASE" "${INITIATIVE_ID:-}" || exit 1
-  export PLANNER_UNTIL="$UNTIL_PHASE"
-fi
-
-# Export for phase agents to consume
-if [ "$SHARED_BRANCH_FLAG" = "true" ]; then
-  export PLANNER_SHARED_BRANCH=true
-elif [ "$NO_SHARED_BRANCH_FLAG" = "true" ]; then
-  export PLANNER_NO_SHARED_BRANCH=true
+# --create is a deliberate, separate gesture made after reading the artifacts.
+# A single command that both plans and creates is the footgun this design removes.
+if [ "$CREATE_FLAG" = "true" ] && [ "$MODE" = "plan" ]; then
+  echo "ERROR: --create is not valid for 'plan'. Plan first, read the artifacts, then:" >&2
+  echo "       /ticket-planner resume <INIT_ID> --create" >&2
+  exit 1
 fi
 ```
 
-`--project` and `--milestone` set the same environment variables the EpicGen and
-TicketGen agents read, so a flag and an exported variable are interchangeable. Both
-are optional: with neither set, no `projectId` is sent and behaviour is unchanged for
-workspaces that do not use projects.
+Validate `--until` against the canonical sequence before writing anything.
+`planner_until_validate` prints the valid phase names (or the current position) and
+returns 1 (unknown phase) or 2 (phase already passed):
 
-These env vars are read by the Epic Gen phase agent during the branch-directive step.
-They take precedence over the heuristic: either flag beats the recommender; neither flag
-defers to it.
+```bash
+if [ -n "$UNTIL_PHASE" ]; then
+  planner_until_validate "$UNTIL_PHASE" "${INITIATIVE_ID:-}" || exit 1
+fi
+```
+
+### 2b. Persist the invocation config
+
+Run this **immediately after the initiative ID is known and `planner_state_init` has
+run** — in `plan` mode that is step 3's item 6, in `resume` mode it is item 2, before
+anything is dispatched. Nothing may be dispatched before it: the persisted config is what every
+later phase reads, and `--create` must be durable *before* Epic Gen can be reached, so
+that a crash in between does not lose the authorization.
+
+```bash
+# Authorization first — it is the entry that must survive a crash.
+if [ "$CREATE_FLAG" = "true" ]; then
+  planner_authorize_create "$INITIATIVE_ID" "operator passed --create"
+  # --create with no new --until clears a stop point an earlier invocation set,
+  # so `plan --until Consensus` does not keep stopping the authorized run.
+  planner_stop_after_set "$INITIATIVE_ID" "$UNTIL_PHASE"
+elif [ -n "$UNTIL_PHASE" ]; then
+  planner_stop_after_set "$INITIATIVE_ID" "$UNTIL_PHASE"
+fi
+
+[ -n "$PROJECT_REF" ] && planner_config_set "$INITIATIVE_ID" "linear-project" "$PROJECT_REF"
+[ -n "$MILESTONE_REF" ] && planner_config_set "$INITIATIVE_ID" "linear-milestone" "$MILESTONE_REF"
+
+if [ "$SHARED_BRANCH_FLAG" = "true" ]; then
+  planner_config_set "$INITIATIVE_ID" "branch-override" "shared"
+elif [ "$NO_SHARED_BRANCH_FLAG" = "true" ]; then
+  planner_config_set "$INITIATIVE_ID" "branch-override" "no-shared"
+fi
+```
+
+Config is last-write-wins, so a later invocation overrides an earlier one — that is how
+`resume --create` lifts the stop point `plan` recorded. `planner_config_set` rejects any
+key outside `PLANNER_CONFIG_KEYS`; do not invent new ones inline.
+
+The project and milestone refs are recorded here as given. Epic Gen resolves them to
+UUIDs against the team, records the resolved ids with `planner_config_set`, and Ticket
+Gen reads those ids straight back — so the epic and every child land in the same project
+with one name lookup for the whole run.
 
 ### 3. Plan mode
 
@@ -280,17 +380,19 @@ When mode is `plan`:
    - The original file path is preserved as `PLANNER_INTENT_FILE` for later artifact capture.
 4. Generate an initiative ID: `INIT-$(date +%s)-$(shuf -i 1000-9999 -n 1)` to avoid collision.
 5. Initialize state: `planner_state_init "$INITIATIVE_ID" "$IDEA"`
-6. **If an intent file was accepted:** Copy the verified file byte-identically to `${state_dir}/artifacts/intent.md` and write a `META|intent|done|${READINESS},${RECOMMENDATION},${HASH}` state log entry.
-7. Run the dispatch loop (see below).
+6. **Persist the invocation config** — run step 2b now that `$INITIATIVE_ID` exists.
+7. **If an intent file was accepted:** Copy the verified file byte-identically to `${state_dir}/artifacts/intent.md` and write a `META|intent|done|${READINESS},${RECOMMENDATION},${HASH}` state log entry.
+8. Run the dispatch loop (see below). It ends after Consensus — `plan` creates nothing in Linear.
 
 ### 4. Resume mode
 
 When mode is `resume`:
 
 1. Extract the initiative ID from the second argument.
-2. Call `planner_resume "$INITIATIVE_ID"` — it outputs `PLANNER_NEXT_PHASE`, `PLANNER_INITIATIVE`, `PLANNER_LAST_LOG`.
-3. If `PLANNER_COMPLETE=true` is output, report completion and stop.
-4. Run the dispatch loop starting from the returned phase.
+2. **Persist the invocation config** — run step 2b before anything is dispatched. `--create` must be on disk before Epic Gen becomes reachable, so that a crash in between cannot lose it.
+3. Call `planner_resume "$INITIATIVE_ID"` — it outputs `PLANNER_NEXT_PHASE`, `PLANNER_INITIATIVE`, `PLANNER_LAST_LOG`.
+4. If `PLANNER_COMPLETE=true` is output, report completion and stop.
+5. Run the dispatch loop starting from the returned phase.
 
 ### 5. Status mode
 
@@ -324,20 +426,43 @@ so the spawned agent never has to resolve anything.
 
 For each phase to run:
 
-1. **Get the prompt** for the current phase:
+1. **Check the create gate** before generating anything. Epic Gen and Ticket Gen write
+   to Linear; an initiative that has not been authorized stops here instead:
+
+   ```bash
+   if ! planner_create_gate_check "$INITIATIVE_ID" "$PHASE"; then
+     echo "Planning complete — nothing was created in Linear."
+     echo "Artifacts:  ${STATE_DIR}/artifacts/"
+     echo "Specs:      ${STATE_DIR}/artifacts/specs/"
+     echo "State log:  $(planner_state_log "$INITIATIVE_ID")"
+     echo "To create:  /ticket-planner resume ${INITIATIVE_ID} --create"
+     exit 0
+   fi
+   ```
+
+   This is a normal terminal outcome of a `plan` run, not a failure — report it as
+   completion of the planning stage. Do not ask the user whether to proceed; `resume
+   --create` is the continuation, and it is theirs to invoke after reading the specs.
+
+2. **Get the prompt** for the current phase:
    ```bash
    prompt=$(planner_prompt_for_phase "$PHASE" "$INITIATIVE_ID" "$IDEA" "$STATE_DIR")
    ```
 
-2. **Spawn the agent** using the Agent tool with:
+   The prompt is built fresh in this process and carries the invocation config —
+   project, milestone, branch override — interpolated as literals, read from the state
+   log by `planner_prompt_for_phase`. Do not try to pass configuration to the agent
+   through the environment; the agent does not inherit this shell.
+
+3. **Spawn the agent** using the Agent tool with:
    - `description`: "Run planner phase: $PHASE for $INITIATIVE_ID"
    - `prompt`: the phase prompt from `planner_prompt_for_phase`
    - `subagent_type`: "general-purpose" (the agent needs Read, Bash, and Linear API access)
    - `timeout_ms`: \$((PLANNER_PHASE_TIMEOUT * 1000)) (default 600000ms = 10min)
 
-3. **Wait for the agent** to complete. The agent writes state log entries itself.
+4. **Wait for the agent** to complete. The agent writes state log entries itself.
 
-4. **Check the result.** The retry budget is derived from `fail` entries in the state
+5. **Check the result.** The retry budget is derived from `fail` entries in the state
    log, not held in memory, so it survives a crashed router:
 
    ```bash
@@ -347,31 +472,36 @@ For each phase to run:
    fi
    ```
 
-   - If the agent succeeded (state log shows `done` for this phase), continue to step 5.
+   - If the agent succeeded (state log shows `done` for this phase), continue to step 6.
    - If the agent failed (state log shows `fail`) and the budget is not exhausted, retry
      the same phase.
    - If the state log has no terminal entry for the phase (agent crashed), retry
      (phases are idempotent, so re-running is safe).
 
-5. **Check the stop condition.** `--until`, `--dry-run`, `PLANNER_REVIEW_HOLD` and
-   `PLANNER_CONSENSUS_HOLD` collapse into one earliest-stop-phase decision:
+6. **Check the stop condition.** The create gate and `--until` collapse into one
+   earliest-stop-phase decision, resolved entirely from the state log — the initiative
+   ID is the only argument, and nothing is read from the environment:
 
    ```bash
-   if planner_should_stop_after "$PHASE"; then
-     echo "Stopped after ${PHASE} (stop point: $(planner_stop_phase))"
+   if planner_should_stop_after "$INITIATIVE_ID" "$PHASE"; then
+     echo "Stopped after ${PHASE} — $(planner_stop_reason "$INITIATIVE_ID")"
      echo "Artifacts:  ${STATE_DIR}/artifacts/"
      echo "Specs:      ${STATE_DIR}/artifacts/specs/"
      echo "State log:  $(planner_state_log "$INITIATIVE_ID")"
-     echo "Continue:   /ticket-planner resume ${INITIATIVE_ID}"
+     if planner_create_authorized "$INITIATIVE_ID"; then
+       echo "Continue:   /ticket-planner resume ${INITIATIVE_ID}"
+     else
+       echo "To create:  /ticket-planner resume ${INITIATIVE_ID} --create"
+     fi
      exit 0
    fi
    ```
 
    Report the initiative ID, the phase reached, the artifact directory, the spec files
-   written, and the exact `resume` command. Do not ask the user a question — stopping is
-   a terminal outcome of this invocation, and `resume` is the continuation.
+   written, and the exact continuation command. Do not ask the user a question —
+   stopping is a terminal outcome of this invocation, and `resume` is the continuation.
 
-6. **Advance** by re-reading `planner_position_derive`. If it returns empty, we're done —
+7. **Advance** by re-reading `planner_position_derive`. If it returns empty, we're done —
    Completed phase reached. Report the completion summary.
 
 ### 8. After completion
