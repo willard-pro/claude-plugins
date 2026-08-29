@@ -155,7 +155,10 @@ WHILE GRILL_RECOMMENDATION != "ready" AND round < --max-rounds AND --non-interac
         "present" (if the answer is thorough) or "partial" (if partial).
         Preserve the original evidence and gap text.
         Only re-assess dimensions targeted by the round's questions (design D9).
-      - Append each question + answer pair to a `resolved` array in the assessment.
+      - Append each question + answer pair to a `resolved` array in the assessment,
+        as `{question, dimension, why, round, answer}` (carry `question`/`dimension`/`why`
+        over from the original question entry; `round` is the round it was answered in).
+        `grill-render.sh` reads this array directly — field names must match exactly.
     Increment round.
     Update assessment.round = round.
     Re-run scoring (Step 4).
