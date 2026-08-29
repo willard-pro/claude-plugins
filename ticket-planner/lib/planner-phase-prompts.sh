@@ -19,6 +19,42 @@ _source_if_missing() {
   fi
 }
 
+# ── Plugin root resolution ──────────────────────────────────────────────────────
+#
+# Phase prompts emit bash that runs in a *spawned agent's* shell, where
+# CLAUDE_PLUGIN_ROOT is not guaranteed to be inherited. Rather than making every
+# agent resolve the path (and get it wrong), we resolve it here at
+# prompt-generation time and interpolate the literal into the prompt. The agent
+# then only has to check that the path exists.
+#
+# planner-lib-root.sh is a sibling of this file, so BASH_SOURCE always finds it —
+# that is the one lookup that cannot itself depend on CLAUDE_PLUGIN_ROOT.
+_source_if_missing "planner_resolve_lib_root" \
+  "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/planner-lib-root.sh"
+
+# Resolved plugin root, memoized per shell. Empty until first resolution.
+_PLANNER_PROMPT_LIB_ROOT="${_PLANNER_PROMPT_LIB_ROOT:-}"
+
+# Resolve (and cache) the plugin root used by every emitted prompt preamble.
+# Usage: planner_prompt_lib_root
+# Output: plugin root on stdout.
+# Returns: 0 on success, 5 when no candidate resolved (message on stderr).
+planner_prompt_lib_root() {
+  if [ -n "$_PLANNER_PROMPT_LIB_ROOT" ]; then
+    echo "$_PLANNER_PROMPT_LIB_ROOT"
+    return 0
+  fi
+
+  local root rc=0
+  root=$(planner_require_lib_root) || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$root" ]; then
+    return 5
+  fi
+
+  _PLANNER_PROMPT_LIB_ROOT="$root"
+  echo "$_PLANNER_PROMPT_LIB_ROOT"
+}
+
 # ── Input sanitization ──────────────────────────────────────────────────────────
 
 # Sanitize user-provided content for safe embedding in agent prompts.
@@ -173,10 +209,13 @@ ${intent_block}
 Source the state library and write your phase entries:
 
 \`\`\`bash
-# Resolve CLAUDE_PLUGIN_ROOT with fallback
-if [ -z "\${CLAUDE_PLUGIN_ROOT}" ]; then
-  CLAUDE_PLUGIN_ROOT="\${HOME}/.claude/plugins/cache/ticket-planner/current"
+# Plugin root resolved by the dispatcher — do not recompute it here.
+CLAUDE_PLUGIN_ROOT="${_PLANNER_PROMPT_LIB_ROOT}"
+if [ ! -f "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh" ]; then
+  echo "FATAL: planner libs not found at \${CLAUDE_PLUGIN_ROOT}/lib — reinstall ticket-planner" >&2
+  exit 5
 fi
+export CLAUDE_PLUGIN_ROOT
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh"
 planner_state_write "${initiative_id}" "Appraisal" "scope" "start" "Interpreting idea: ${safe_idea}"
 # ... do your work ...
@@ -234,9 +273,13 @@ API contracts, and existing patterns. You are phase 2 of 9.
 ## State log
 
 \`\`\`bash
-if [ -z "\${CLAUDE_PLUGIN_ROOT}" ]; then
-  CLAUDE_PLUGIN_ROOT="\${HOME}/.claude/plugins/cache/ticket-planner/current"
+# Plugin root resolved by the dispatcher — do not recompute it here.
+CLAUDE_PLUGIN_ROOT="${_PLANNER_PROMPT_LIB_ROOT}"
+if [ ! -f "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh" ]; then
+  echo "FATAL: planner libs not found at \${CLAUDE_PLUGIN_ROOT}/lib — reinstall ticket-planner" >&2
+  exit 5
 fi
+export CLAUDE_PLUGIN_ROOT
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh"
 planner_state_write "${initiative_id}" "Discovery" "explore" "start" "Exploring affected repositories"
 # ... do your work ...
@@ -298,9 +341,13 @@ document the decision. You are phase 3 of 9.
 ## State log
 
 \`\`\`bash
-if [ -z "\${CLAUDE_PLUGIN_ROOT}" ]; then
-  CLAUDE_PLUGIN_ROOT="\${HOME}/.claude/plugins/cache/ticket-planner/current"
+# Plugin root resolved by the dispatcher — do not recompute it here.
+CLAUDE_PLUGIN_ROOT="${_PLANNER_PROMPT_LIB_ROOT}"
+if [ ! -f "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh" ]; then
+  echo "FATAL: planner libs not found at \${CLAUDE_PLUGIN_ROOT}/lib — reinstall ticket-planner" >&2
+  exit 5
 fi
+export CLAUDE_PLUGIN_ROOT
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh"
 planner_state_write "${initiative_id}" "Architecture" "design" "start" "Evaluating technical approaches"
 # ... do your work ...
@@ -395,9 +442,13 @@ its title, affected service, and dependencies.
 ## State log
 
 \`\`\`bash
-if [ -z "\${CLAUDE_PLUGIN_ROOT}" ]; then
-  CLAUDE_PLUGIN_ROOT="\${HOME}/.claude/plugins/cache/ticket-planner/current"
+# Plugin root resolved by the dispatcher — do not recompute it here.
+CLAUDE_PLUGIN_ROOT="${_PLANNER_PROMPT_LIB_ROOT}"
+if [ ! -f "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh" ]; then
+  echo "FATAL: planner libs not found at \${CLAUDE_PLUGIN_ROOT}/lib — reinstall ticket-planner" >&2
+  exit 5
 fi
+export CLAUDE_PLUGIN_ROOT
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh"
 planner_state_write "${initiative_id}" "Specify" "synthesize" "start" "Synthesizing proposal and writing specs for N tickets"
 # ... do your work ...
@@ -464,9 +515,13 @@ what's wrong.
 ## State log
 
 \`\`\`bash
-if [ -z "\${CLAUDE_PLUGIN_ROOT}" ]; then
-  CLAUDE_PLUGIN_ROOT="\${HOME}/.claude/plugins/cache/ticket-planner/current"
+# Plugin root resolved by the dispatcher — do not recompute it here.
+CLAUDE_PLUGIN_ROOT="${_PLANNER_PROMPT_LIB_ROOT}"
+if [ ! -f "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh" ]; then
+  echo "FATAL: planner libs not found at \${CLAUDE_PLUGIN_ROOT}/lib — reinstall ticket-planner" >&2
+  exit 5
 fi
+export CLAUDE_PLUGIN_ROOT
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh"
 planner_state_write "${initiative_id}" "Review" "critique" "start" "Critiquing proposal for gaps and risks"
 # ... do your work ...
@@ -525,9 +580,13 @@ final version. You are phase 6 of 9.
 ## State log
 
 \`\`\`bash
-if [ -z "\${CLAUDE_PLUGIN_ROOT}" ]; then
-  CLAUDE_PLUGIN_ROOT="\${HOME}/.claude/plugins/cache/ticket-planner/current"
+# Plugin root resolved by the dispatcher — do not recompute it here.
+CLAUDE_PLUGIN_ROOT="${_PLANNER_PROMPT_LIB_ROOT}"
+if [ ! -f "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh" ]; then
+  echo "FATAL: planner libs not found at \${CLAUDE_PLUGIN_ROOT}/lib — reinstall ticket-planner" >&2
+  exit 5
 fi
+export CLAUDE_PLUGIN_ROOT
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh"
 planner_state_write "${initiative_id}" "Consensus" "resolve" "start" "Resolving N review findings"
 # ... do your work ...
@@ -577,9 +636,13 @@ Before calling the Linear API, use the idempotency helpers to check if this
 epic was already created (e.g., on a previous run that crashed after creation):
 
 \`\`\`bash
-if [ -z "\${CLAUDE_PLUGIN_ROOT}" ]; then
-  CLAUDE_PLUGIN_ROOT="\${HOME}/.claude/plugins/cache/ticket-planner/current"
+# Plugin root resolved by the dispatcher — do not recompute it here.
+CLAUDE_PLUGIN_ROOT="${_PLANNER_PROMPT_LIB_ROOT}"
+if [ ! -f "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh" ]; then
+  echo "FATAL: planner libs not found at \${CLAUDE_PLUGIN_ROOT}/lib — reinstall ticket-planner" >&2
+  exit 5
 fi
+export CLAUDE_PLUGIN_ROOT
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh"
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-ticket-validate.sh"
 
@@ -596,16 +659,44 @@ if planner_entity_exists "${initiative_id}" "\$ENTITY_KEY"; then
   # Exit agent — nothing to do
 fi
 
-# Step 3: Create the epic via Linear API
-# Use the Linear GraphQL API to create an issue with:
-#   - title: initiative summary from proposal
-#   - description: proposal summary + link to artifacts
-#   - team: resolve from REPOS_ROOT or LINEAR_TEAM
-#   - labels: ["INIT-${initiative_id#INIT-}", "epic"]
+# Step 3: Create the epic via Linear API.
+# planner_linear_create_issue takes label NAMES and resolves them to UUIDs itself
+# (IssueCreateInput.labelIds requires UUIDs). An unknown label is a hard failure —
+# do not work around it by dropping the label.
+source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-linear-api.sh"
 
 planner_state_write "${initiative_id}" "EpicGen" "create" "start" "Creating Linear epic for initiative"
 
-# ... Linear API call ...
+# Project / milestone are operator configuration, not your judgement. They come
+# from LINEAR_PROJECT / LINEAR_PROJECT_MILESTONE (or the --project / --milestone
+# flags, which export the same variables). Leave them unset to create the epic
+# with no project, which is the pre-existing behaviour.
+EPIC_RESPONSE=\$(planner_linear_create_issue \\
+  "\$TEAM_ID" \\
+  "\$EPIC_TITLE" \\
+  "\$EPIC_DESCRIPTION" \\
+  "\$(jq -nc --arg init "INIT-${initiative_id#INIT-}" '[\$init, "epic"]')" \\
+  "" \\
+  "\${LINEAR_PROJECT:-}" \\
+  "\${LINEAR_PROJECT_MILESTONE:-}") || {
+  planner_state_write "${initiative_id}" "EpicGen" "create" "fail" "Linear issueCreate failed"
+  exit 1
+}
+
+CREATED_EPIC_ID=\$(echo "\$EPIC_RESPONSE" | jq -r '.data.issueCreate.issue.identifier // empty')
+if [ -z "\$CREATED_EPIC_ID" ]; then
+  planner_state_write "${initiative_id}" "EpicGen" "create" "fail" "issueCreate returned no identifier"
+  exit 1
+fi
+
+# Record where the initiative was filed so a later reader can tell without
+# re-querying Linear. Skipped entirely when no project is configured.
+if [ -n "\${LINEAR_PROJECT:-}" ]; then
+  RESOLVED_PROJECT_ID=\$(planner_linear_resolve_project "\$TEAM_ID" "\${LINEAR_PROJECT}")
+  RESOLVED_MILESTONE_ID=\$(planner_linear_resolve_milestone "\$RESOLVED_PROJECT_ID" "\${LINEAR_PROJECT_MILESTONE:-}")
+  planner_state_write "${initiative_id}" "EpicGen" "project" "done" \\
+    "project=\${RESOLVED_PROJECT_ID} milestone=\${RESOLVED_MILESTONE_ID:-none}"
+fi
 
 # Step 4: Mark created
 planner_entity_mark_created "${initiative_id}" "\$ENTITY_KEY" "\$CREATED_EPIC_ID"
@@ -796,9 +887,13 @@ echo "Parent epic: \$EPIC_ID"
 Before creating ANY ticket, run the validators:
 
 \`\`\`bash
-if [ -z "\${CLAUDE_PLUGIN_ROOT}" ]; then
-  CLAUDE_PLUGIN_ROOT="\${HOME}/.claude/plugins/cache/ticket-planner/current"
+# Plugin root resolved by the dispatcher — do not recompute it here.
+CLAUDE_PLUGIN_ROOT="${_PLANNER_PROMPT_LIB_ROOT}"
+if [ ! -f "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh" ]; then
+  echo "FATAL: planner libs not found at \${CLAUDE_PLUGIN_ROOT}/lib — reinstall ticket-planner" >&2
+  exit 5
 fi
+export CLAUDE_PLUGIN_ROOT
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh"
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-deps-check.sh"
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-context-gen.sh"
@@ -821,42 +916,42 @@ fi
 
 # 3. For each ticket spec, compute confidence FROM BASH (NOT from LLM):
 # Extract the Signals JSON block from the spec file
-signals_json=$(sed -n '/```json/,/```/p' "${spec_file}" | sed '1d;$d' | jq -c)
+signals_json=\$(sed -n '/\`\`\`json/,/\`\`\`/p' "\${spec_file}" | sed '1d;\$d' | jq -c)
 
 # Compute confidence deterministically
-confidence=$(planner_confidence_derive "$signals_json")
+confidence=\$(planner_confidence_derive "\$signals_json")
 
 # Determine pre-approved from threshold
 pre_approved="false"
-PLANNER_THRESHOLD="${PLANNER_CONFIDENCE_THRESHOLD:-0.85}"
-if [ "$(echo "$confidence >= $PLANNER_THRESHOLD" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
+PLANNER_THRESHOLD="\${PLANNER_CONFIDENCE_THRESHOLD:-0.85}"
+if [ "\$(echo "\$confidence >= \$PLANNER_THRESHOLD" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
   pre_approved="true"
 fi
 
 # Build full context JSON with computed values
-context_json=$(jq -nc \
-    --argjson signals "$signals_json" \
-    --arg confidence "$confidence" \
-    --arg pre_approved "$pre_approved" \
-    --arg initiative "${initiative_id}" \
-    --arg epic "$EPIC_ID" \
-    --arg generated "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+context_json=\$(jq -nc \\
+    --argjson signals "\$signals_json" \\
+    --arg confidence "\$confidence" \\
+    --arg pre_approved "\$pre_approved" \\
+    --arg initiative "${initiative_id}" \\
+    --arg epic "\$EPIC_ID" \\
+    --arg generated "\$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \\
     '{
     "Schema-Version": 1,
-    "Initiative": $initiative,
-    "Epic": $epic,
-    "Confidence": ($confidence | tonumber),
-    "Strategy": ($signals.Strategy // "Balanced"),
-    "Decision": ($signals.Decision // ""),
-    "Affected Services": ($signals.AffectedServices // ""),
-    "Target Symbols": ($signals.TargetSymbols // ""),
-    "Pre-approved": ($pre_approved == "true"),
-    "Generated": $generated,
+    "Initiative": \$initiative,
+    "Epic": \$epic,
+    "Confidence": (\$confidence | tonumber),
+    "Strategy": (\$signals.Strategy // "Balanced"),
+    "Decision": (\$signals.Decision // ""),
+    "Affected Services": (\$signals.AffectedServices // ""),
+    "Target Symbols": (\$signals.TargetSymbols // ""),
+    "Pre-approved": (\$pre_approved == "true"),
+    "Generated": \$generated,
     "Regenerate": false
   }')
 
 # Generate Planner Context block
-planner_context=$(planner_context_generate "$context_json")
+planner_context=\$(planner_context_generate "\$context_json")
 
 # 4. Validate each generated ticket description with planned-ticket-check.sh
 description="<full ticket description with Planner Context block>"
@@ -887,12 +982,30 @@ if planner_entity_exists "${initiative_id}" "\$ENTITY_KEY"; then
   continue
 fi
 
-# Step 3: Create the ticket via Linear API (with retry wrapper)
-# Use planner_linear_create_issue from planner-linear-api.sh
-#   - title: from spec
-#   - description: from spec + generated Planner Context block
-#   - labels: planned, INIT-${initiative_id#INIT-}, Type label, blocked-by:{ID} if deps
-#   - parent: EPIC_ID from state log
+# Step 3: Create the ticket via Linear API (with retry wrapper).
+# Labels are passed as NAMES — planner_linear_create_issue resolves them to the
+# UUIDs IssueCreateInput.labelIds requires, and hard-fails on any it cannot find.
+# Never drop an unresolved label: a ticket without \`planned\` is invisible to the
+# ticket-auto fast-path.
+LABELS=\$(jq -nc --arg init "INIT-${initiative_id#INIT-}" --arg type "\$TYPE_LABEL" \\
+  '["planned", \$init, \$type]')
+[ "\$pre_approved" = "true" ] && LABELS=\$(echo "\$LABELS" | jq -c '. + ["pre-approved"]')
+for dep in \${TICKET_DEPS}; do
+  LABELS=\$(echo "\$LABELS" | jq -c --arg d "blocked-by:\$dep" '. + [\$d]')
+done
+
+TICKET_RESPONSE=\$(planner_linear_create_issue \\
+  "\$TEAM_ID" \\
+  "\$TICKET_TITLE" \\
+  "\$description" \\
+  "\$LABELS" \\
+  "\$EPIC_ID" \\
+  "\${LINEAR_PROJECT:-}" \\
+  "\${LINEAR_PROJECT_MILESTONE:-}") || {
+  planner_state_write "${initiative_id}" "TicketGen" "create" "fail" "issueCreate failed for \${ticket_slug}"
+  continue
+}
+CREATED_TICKET_ID=\$(echo "\$TICKET_RESPONSE" | jq -r '.data.issueCreate.issue.identifier // empty')
 
 # Step 4: Mark created
 planner_entity_mark_created "${initiative_id}" "\$ENTITY_KEY" "\$CREATED_TICKET_ID"
@@ -969,9 +1082,13 @@ terminal phase (9 of 9). No further transitions are permitted after this.
 ## State log
 
 \`\`\`bash
-if [ -z "\${CLAUDE_PLUGIN_ROOT}" ]; then
-  CLAUDE_PLUGIN_ROOT="\${HOME}/.claude/plugins/cache/ticket-planner/current"
+# Plugin root resolved by the dispatcher — do not recompute it here.
+CLAUDE_PLUGIN_ROOT="${_PLANNER_PROMPT_LIB_ROOT}"
+if [ ! -f "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh" ]; then
+  echo "FATAL: planner libs not found at \${CLAUDE_PLUGIN_ROOT}/lib — reinstall ticket-planner" >&2
+  exit 5
 fi
+export CLAUDE_PLUGIN_ROOT
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh"
 
 planner_state_write "${initiative_id}" "Completed" "summarize" "start" "Writing completion summary"
@@ -1001,6 +1118,11 @@ AGENT_PROMPT
 # Usage: planner_prompt_for_phase <phase> <initiative_id> <idea> <state_dir>
 planner_prompt_for_phase() {
   local phase="$1" initiative_id="$2" idea="$3" state_dir="$4"
+
+  # Resolve the plugin root once, before building anything. A prompt whose
+  # preamble points at a nonexistent lib dir would fail inside the spawned agent
+  # with no state log entry — fail here instead, where the operator sees it.
+  planner_prompt_lib_root >/dev/null || return 5
 
   case "$phase" in
   Appraisal) planner_prompt_appraisal "$initiative_id" "$idea" "$state_dir" ;;

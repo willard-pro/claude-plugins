@@ -399,6 +399,49 @@ planner_phase_is_done() {
   grep -q "^[^|]*|${phase}|[^|]*|done|" "$log_file" 2>/dev/null
 }
 
+# Count how many times a phase has failed in the state log.
+# Backs PLANNER_MAX_PHASE_RETRIES — the log is the only durable record of prior
+# attempts, so the counter is derived, never held in memory.
+#
+# Usage: planner_phase_fail_count <initiative_id> <phase>
+# Output: integer on stdout.
+planner_phase_fail_count() {
+  local initiative_id="$1" phase="$2"
+  local log_file
+  log_file=$(planner_state_log "$initiative_id")
+
+  if [ ! -f "$log_file" ]; then
+    echo 0
+    return 0
+  fi
+
+  # `grep -c` prints 0 *and* exits 1 when nothing matches, so the count must be
+  # captured rather than short-circuited — `|| echo 0` would emit "0" twice.
+  local count
+  count=$(grep -c "^[^|]*|${phase}|[^|]*|fail|" "$log_file" 2>/dev/null) || count=0
+  echo "${count:-0}"
+}
+
+# Return the 0-based position of a phase in the canonical sequence.
+# Usage: planner_phase_index <phase>
+# Output: index on stdout, or -1 when the name is not a phase.
+planner_phase_index() {
+  local phase="$1"
+  local -a phase_sequence
+  planner_phase_sequence phase_sequence
+
+  local i
+  for i in "${!phase_sequence[@]}"; do
+    if [ "${phase_sequence[$i]}" = "$phase" ]; then
+      echo "$i"
+      return 0
+    fi
+  done
+
+  echo "-1"
+  return 1
+}
+
 # ── State log repair ────────────────────────────────────────────────────────────
 
 # Validate each line of the state log, drop invalid lines, and strip trailing

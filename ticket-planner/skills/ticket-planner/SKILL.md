@@ -45,9 +45,33 @@ If the run is interrupted (crash, timeout, manual stop), resume with `resume` �
 |------|--------|
 | `--shared-branch` | Force a shared-branch directive on the epic regardless of the heuristic |
 | `--no-shared-branch` | Suppress the shared-branch directive regardless of the heuristic |
+| `--until <Phase>` | Stop the dispatch loop once `<Phase>` completes; `resume` continues |
+| `--dry-run` | Alias for `--until Consensus` — everything on disk, nothing in Linear |
+| `--project <name\|id>` | Linear project for the epic and its tickets (overrides `LINEAR_PROJECT`) |
+| `--milestone <name\|id>` | Linear project milestone (overrides `LINEAR_PROJECT_MILESTONE`) |
 
-Both flags are optional. Supplying both together is an error. When neither is supplied,
+The branch flags are optional. Supplying both together is an error. When neither is supplied,
 the binary heuristic decides (≥ 3 tickets **and** dependency chain depth ≥ 2).
+
+### Previewing a plan before it reaches Linear
+
+Phases 1–6 are pure-artifact; phase 7 (Epic Gen) is the first Linear write. `--dry-run`
+stops the loop exactly on that boundary:
+
+```
+/ticket-planner plan ./intents/rt-collab.md --dry-run
+```
+
+The run leaves the full ticket set on disk — `proposal.md`, `review.md`, `consensus.md`,
+and one `specs/{slug}.md` per ticket — and creates no Linear entities. Review them, then:
+
+```
+/ticket-planner resume INIT-42
+```
+
+`--until` accepts any phase name from `planner_phase_sequence`. Naming an unknown phase,
+or one the initiative has already passed, is rejected with the valid names (or the current
+position) in the message.
 
 ### Resume (`resume`)
 
@@ -113,15 +137,21 @@ The router never reasons about content; phases never mutate state directly (they
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PLANNER_REVIEW_HOLD` | false | When `true`, Review phase pauses for human input |
-| `PLANNER_CONSENSUS_HOLD` | false | When `true`, Consensus phase pauses for human input |
+| `PLANNER_REVIEW_HOLD` | false | When `true`, the loop stops after Review completes (env-var form of `--until Review`) |
+| `PLANNER_CONSENSUS_HOLD` | false | When `true`, the loop stops after Consensus completes (env-var form of `--dry-run`) |
+| `PLANNER_UNTIL` | *(unset)* | Phase name to stop after; the `--until` flag sets this |
 | `PLANNER_MAX_PHASE_RETRIES` | 2 | Max retries per phase before failing the run |
 | `PLANNER_PHASE_TIMEOUT` | 600 | Seconds before timing out a hung phase agent |
 | `PLANNER_TSORT_TIMEOUT` | 30 | Seconds before timing out dependency graph sort |
 | `PLANNER_CONFIDENCE_THRESHOLD` | 0.85 | Minimum confidence for `pre-approved` label |
 | `PLANNER_IDEA_MAX_LENGTH` | 2000 | Maximum idea length in chars (truncated with warning) |
 | `PLANNER_REQUIRE_INTENT` | false | When `true`, raw idea strings are refused — must pass a grill-me intent file |
+| `LINEAR_PROJECT` | *(unset)* | Project name or id for created epics/tickets. Unset ⇒ no project field is sent |
+| `LINEAR_PROJECT_MILESTONE` | *(unset)* | Project milestone name or id. Requires `LINEAR_PROJECT` when given by name |
 | `FLEET_AUTO_DISPATCH` | false | Must be true for automatic fleet-controller dispatch |
+
+When more than one stop point applies, the **earliest** wins — `PLANNER_REVIEW_HOLD=true`
+with `--until TicketGen` stops after Review.
 
 ---
 
@@ -131,12 +161,36 @@ When invoked, follow this procedure:
 
 ### 1. Source libraries
 
+`planner-lib-root.sh` resolves the plugin root across all install layouts
+(marketplace cache → `~/.claude/skills/lib` → source checkout). Use it rather than
+trusting `CLAUDE_PLUGIN_ROOT`, which is not guaranteed to be set or correct.
+
 ```bash
-PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(dirname "$0")/../..}"
+# Bootstrap: find the resolver itself. Try the marketplace cache first, then the
+# SessionStart-hook copy in ~/.claude/skills/lib.
+PLANNER_LIB_ROOT_SH=$(find "${HOME}/.claude/plugins/cache" \
+  -path "*/ticket-planner/*/lib/planner-lib-root.sh" 2>/dev/null | sort | tail -1)
+[ -f "$PLANNER_LIB_ROOT_SH" ] || PLANNER_LIB_ROOT_SH="${HOME}/.claude/skills/lib/planner-lib-root.sh"
+
+if [ ! -f "$PLANNER_LIB_ROOT_SH" ]; then
+  echo "FATAL: ticket-planner is not installed — no planner-lib-root.sh found." >&2
+  echo "Run: claude plugin install ticket-planner@willard-pro-claude-plugins" >&2
+  exit 5
+fi
+
+source "$PLANNER_LIB_ROOT_SH"
+PLUGIN_ROOT=$(planner_require_lib_root) || exit $?
+export CLAUDE_PLUGIN_ROOT="$PLUGIN_ROOT"
+
 source "${PLUGIN_ROOT}/lib/planner-state.sh"
 source "${PLUGIN_ROOT}/lib/planner-router.sh"
 source "${PLUGIN_ROOT}/lib/planner-phase-prompts.sh"
 ```
+
+If `planner_require_lib_root` fails it prints every path it tried plus the install
+command, and exits 5. Never fall back to a hardcoded path — a wrong one makes every
+spawned phase agent die at its first `source` with a bare "No such file or directory"
+and no state log entry, so `resume` re-runs straight back into the same failure.
 
 ### 2. Parse mode
 
@@ -149,18 +203,35 @@ After extracting the idea, scan remaining arguments for override flags:
 ```bash
 SHARED_BRANCH_FLAG=""
 NO_SHARED_BRANCH_FLAG=""
+UNTIL_PHASE=""
 
-for arg in "$@"; do
-  case "$arg" in
+while [ "$#" -gt 0 ]; do
+  case "$1" in
     --shared-branch) SHARED_BRANCH_FLAG=true ;;
     --no-shared-branch) NO_SHARED_BRANCH_FLAG=true ;;
+    --dry-run) UNTIL_PHASE="$PLANNER_DRY_RUN_PHASE" ;;
+    --until) shift; UNTIL_PHASE="${1:-}" ;;
+    --until=*) UNTIL_PHASE="${1#*=}" ;;
+    --project) shift; export LINEAR_PROJECT="${1:-}" ;;
+    --project=*) export LINEAR_PROJECT="${1#*=}" ;;
+    --milestone) shift; export LINEAR_PROJECT_MILESTONE="${1:-}" ;;
+    --milestone=*) export LINEAR_PROJECT_MILESTONE="${1#*=}" ;;
   esac
+  shift
 done
 
-# Reject both flags together
+# Reject both branch flags together
 if [ "$SHARED_BRANCH_FLAG" = "true" ] && [ "$NO_SHARED_BRANCH_FLAG" = "true" ]; then
   echo "ERROR: --shared-branch and --no-shared-branch are mutually exclusive" >&2
   exit 1
+fi
+
+# Validate the stop phase against the canonical sequence before any state exists.
+# planner_until_validate prints the valid phase names (or the current position)
+# and returns 1 (unknown phase) or 2 (phase already passed).
+if [ -n "$UNTIL_PHASE" ]; then
+  planner_until_validate "$UNTIL_PHASE" "${INITIATIVE_ID:-}" || exit 1
+  export PLANNER_UNTIL="$UNTIL_PHASE"
 fi
 
 # Export for phase agents to consume
@@ -170,6 +241,11 @@ elif [ "$NO_SHARED_BRANCH_FLAG" = "true" ]; then
   export PLANNER_NO_SHARED_BRANCH=true
 fi
 ```
+
+`--project` and `--milestone` set the same environment variables the EpicGen and
+TicketGen agents read, so a flag and an exported variable are interchangeable. Both
+are optional: with neither set, no `projectId` is sent and behaviour is unchanged for
+workspaces that do not use projects.
 
 These env vars are read by the Epic Gen phase agent during the branch-directive step.
 They take precedence over the heuristic: either flag beats the recommender; neither flag
@@ -241,11 +317,10 @@ When mode is `replan`:
 
 ### 7. Dispatch loop
 
-Before the loop, export CLAUDE_PLUGIN_ROOT so phase agents can source libraries:
-
-```bash
-export CLAUDE_PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${HOME}/.claude/plugins/cache/ticket-planner/current}"
-```
+`CLAUDE_PLUGIN_ROOT` was already resolved and exported in step 1. Phase prompts do not
+depend on it being inherited — `planner_prompt_for_phase` resolves the plugin root at
+prompt-generation time and interpolates the literal path into each prompt's preamble,
+so the spawned agent never has to resolve anything.
 
 For each phase to run:
 
@@ -254,24 +329,47 @@ For each phase to run:
    prompt=$(planner_prompt_for_phase "$PHASE" "$INITIATIVE_ID" "$IDEA" "$STATE_DIR")
    ```
 
-2. **Check for hold phases.** If `PLANNER_REVIEW_HOLD=true` and phase is Review, pause and ask
-   the user for input before proceeding. If `PLANNER_CONSENSUS_HOLD=true` and phase is Consensus,
-   pause and ask before proceeding.
-
-3. **Spawn the agent** using the Agent tool with:
+2. **Spawn the agent** using the Agent tool with:
    - `description`: "Run planner phase: $PHASE for $INITIATIVE_ID"
    - `prompt`: the phase prompt from `planner_prompt_for_phase`
    - `subagent_type`: "general-purpose" (the agent needs Read, Bash, and Linear API access)
    - `timeout_ms`: \$((PLANNER_PHASE_TIMEOUT * 1000)) (default 600000ms = 10min)
 
-4. **Wait for the agent** to complete. The agent writes state log entries itself.
+3. **Wait for the agent** to complete. The agent writes state log entries itself.
 
-5. **Check the result:**
-   - If the agent succeeded (state log shows `done` for this phase), advance to the next phase.
-   - If the agent failed (state log shows `fail`), check retry count. If under
-     `PLANNER_MAX_PHASE_RETRIES`, retry the same phase. Otherwise, report failure and stop.
+4. **Check the result.** The retry budget is derived from `fail` entries in the state
+   log, not held in memory, so it survives a crashed router:
+
+   ```bash
+   if planner_phase_retries_exhausted "$INITIATIVE_ID" "$PHASE"; then
+     echo "ERROR: ${PHASE} exhausted its retry budget (PLANNER_MAX_PHASE_RETRIES=${PLANNER_MAX_PHASE_RETRIES:-2})" >&2
+     exit 1
+   fi
+   ```
+
+   - If the agent succeeded (state log shows `done` for this phase), continue to step 5.
+   - If the agent failed (state log shows `fail`) and the budget is not exhausted, retry
+     the same phase.
    - If the state log has no terminal entry for the phase (agent crashed), retry
      (phases are idempotent, so re-running is safe).
+
+5. **Check the stop condition.** `--until`, `--dry-run`, `PLANNER_REVIEW_HOLD` and
+   `PLANNER_CONSENSUS_HOLD` collapse into one earliest-stop-phase decision:
+
+   ```bash
+   if planner_should_stop_after "$PHASE"; then
+     echo "Stopped after ${PHASE} (stop point: $(planner_stop_phase))"
+     echo "Artifacts:  ${STATE_DIR}/artifacts/"
+     echo "Specs:      ${STATE_DIR}/artifacts/specs/"
+     echo "State log:  $(planner_state_log "$INITIATIVE_ID")"
+     echo "Continue:   /ticket-planner resume ${INITIATIVE_ID}"
+     exit 0
+   fi
+   ```
+
+   Report the initiative ID, the phase reached, the artifact directory, the spec files
+   written, and the exact `resume` command. Do not ask the user a question — stopping is
+   a terminal outcome of this invocation, and `resume` is the continuation.
 
 6. **Advance** by re-reading `planner_position_derive`. If it returns empty, we're done —
    Completed phase reached. Report the completion summary.

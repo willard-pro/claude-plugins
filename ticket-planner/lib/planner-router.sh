@@ -17,8 +17,11 @@ _source_if_missing() {
   fi
 }
 
-# Source state library
-_source_if_missing "planner_initiative_dir" "${CLAUDE_PLUGIN_ROOT:-.}/lib/planner-state.sh"
+# Source sibling libraries. BASH_SOURCE is the only lookup that cannot depend on
+# CLAUDE_PLUGIN_ROOT being set — an unset-or-wrong value used to leave the router
+# silently unsourced (it fell back to "." — the caller's cwd).
+_PLANNER_ROUTER_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_source_if_missing "planner_initiative_dir" "${_PLANNER_ROUTER_LIB_DIR}/planner-state.sh"
 
 # ── Phase dispatch ─────────────────────────────────────────────────────────────
 
@@ -99,6 +102,127 @@ planner_run() {
     # The router then loops and re-derives position.
     break
   done
+}
+
+# ── Stop conditions (holds and --until) ────────────────────────────────────────
+#
+# Three operator controls answer the same question — at which phase does the
+# dispatch loop stop? Rather than three checks in the loop, they collapse into a
+# single "earliest stop phase":
+#
+#   --until <Phase> / PLANNER_UNTIL   stop after <Phase> completes
+#   --dry-run                          alias for --until Consensus (the last
+#                                      phase before any Linear entity is created)
+#   PLANNER_REVIEW_HOLD=true           stop after Review
+#   PLANNER_CONSENSUS_HOLD=true        stop after Consensus
+#
+# Stopping is not a special mode: the router holds no in-memory state, so a stop
+# is just "quit dispatching", and `resume` is the continuation — the same path
+# crash recovery already uses.
+
+# Phase after which a --dry-run stops. Consensus is the last artifact-only phase;
+# EpicGen is the first Linear write.
+PLANNER_DRY_RUN_PHASE="Consensus"
+
+# Resolve the effective stop phase from flags and env.
+# Usage: planner_stop_phase
+# Output: phase name on stdout, or empty when the run should go to completion.
+planner_stop_phase() {
+  local -a candidates=()
+
+  [ -n "${PLANNER_UNTIL:-}" ] && candidates+=("$PLANNER_UNTIL")
+  [ "${PLANNER_REVIEW_HOLD:-false}" = "true" ] && candidates+=("Review")
+  [ "${PLANNER_CONSENSUS_HOLD:-false}" = "true" ] && candidates+=("Consensus")
+
+  [ "${#candidates[@]}" -eq 0 ] && {
+    echo ""
+    return 0
+  }
+
+  # Earliest wins — a hold before the --until target still stops the run there.
+  local best="" best_idx=-1 phase idx
+  for phase in "${candidates[@]}"; do
+    idx=$(planner_phase_index "$phase") || continue
+    if [ "$best_idx" -lt 0 ] || [ "$idx" -lt "$best_idx" ]; then
+      best="$phase"
+      best_idx="$idx"
+    fi
+  done
+
+  echo "$best"
+}
+
+# Should the loop stop now that <phase> has completed?
+# Usage: planner_should_stop_after <phase>
+# Returns: 0 to stop, 1 to keep dispatching.
+planner_should_stop_after() {
+  local phase="$1"
+  local stop
+  stop=$(planner_stop_phase)
+
+  [ -z "$stop" ] && return 1
+  [ "$phase" = "$stop" ] && return 0
+  return 1
+}
+
+# Validate a --until / PLANNER_UNTIL value against the canonical phase sequence.
+# The sequence is the single source of truth — never validate against a second list.
+#
+# Usage: planner_until_validate <until_phase> [initiative_id]
+# Returns: 0 valid, 1 unknown phase, 2 phase already passed.
+planner_until_validate() {
+  local until_phase="$1" initiative_id="${2:-}"
+  local -a phase_sequence
+  planner_phase_sequence phase_sequence
+
+  local until_idx
+  # planner_phase_index returns 1 for an unknown name; tolerate it here so the
+  # error is reported below rather than tripping a caller's errexit.
+  until_idx=$(planner_phase_index "$until_phase" || true)
+  if [ "$until_idx" -lt 0 ]; then
+    local joined
+    joined=$(printf '%s, ' "${phase_sequence[@]}")
+    echo "ERROR: unknown phase '${until_phase}' for --until. Valid phases: ${joined%, }" >&2
+    return 1
+  fi
+
+  # Nothing more to check for a fresh run — the position check needs a state log.
+  if [ -z "$initiative_id" ] || [ ! -f "$(planner_state_log "$initiative_id")" ]; then
+    return 0
+  fi
+
+  local current current_idx
+  current=$(planner_position_derive "$initiative_id")
+  if [ -z "$current" ]; then
+    echo "ERROR: initiative '${initiative_id}' is already complete — --until ${until_phase} has nothing to stop." >&2
+    return 2
+  fi
+
+  current_idx=$(planner_phase_index "$current" || true)
+  if [ "$until_idx" -lt "$current_idx" ]; then
+    echo "ERROR: --until ${until_phase} names a phase already passed — '${initiative_id}' is at ${current}." >&2
+    return 2
+  fi
+
+  return 0
+}
+
+# ── Retry budget ───────────────────────────────────────────────────────────────
+
+# Has <phase> exhausted its retry budget? Derived from `fail` entries in the log,
+# so the count survives a crashed router the same way position does.
+#
+# Usage: planner_phase_retries_exhausted <initiative_id> <phase>
+# Returns: 0 when the budget is spent (stop), 1 when a retry remains.
+planner_phase_retries_exhausted() {
+  local initiative_id="$1" phase="$2"
+  local max="${PLANNER_MAX_PHASE_RETRIES:-2}"
+  local fails
+  fails=$(planner_phase_fail_count "$initiative_id" "$phase")
+
+  # `fails` counts attempts that already failed; the budget is retries *after*
+  # the first attempt, so failing once with max=2 still leaves two retries.
+  [ "$fails" -gt "$max" ]
 }
 
 # ── Resume ─────────────────────────────────────────────────────────────────────
