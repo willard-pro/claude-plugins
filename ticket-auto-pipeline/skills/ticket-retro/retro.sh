@@ -261,10 +261,13 @@ for log_file in "${LOG_FILES[@]}"; do
 
   actual="null"
   actual_source="missing"
-  outcome_line=$(grep '|IMPLEMENT|implement|done|' "$log_file" 2>/dev/null | tail -1 || true)
+  # Read the dedicated outcome-label-check.sh marker instead of parsing the
+  # free-prose IMPLEMENT|implement|done| message — that message's phrasing
+  # varies per agent and broke every comma/regex heuristic tried so far
+  # (GitHub #148).
+  outcome_line=$(grep '|META|outcome-label|info|' "$log_file" 2>/dev/null | tail -1 || true)
   if [ -n "$outcome_line" ]; then
-    outcome_msg=$(echo "$outcome_line" | cut -d'|' -f5)
-    actual=$(echo "$outcome_msg" | cut -d',' -f1)
+    actual=$(echo "$outcome_line" | cut -d'|' -f5)
     actual_source="log"
   fi
 
