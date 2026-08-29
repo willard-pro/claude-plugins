@@ -1109,7 +1109,11 @@ fi
 # The prior version tested the absence of the STEP_6 outcome-write marker below —
 # that line's only writer is this same step, written after this check ran, so the
 # condition was tautologically true on every run.
-if ! grep -q '^[^|]*|VERIFY|verify|done|PASS' "{LOG_FILE}" || ! grep -q '^[^|]*|PR-REVIEW|pr-review|done|PASS' "{LOG_FILE}"; then
+# PR-REVIEW's own Verdict tokens (pipeline-log-format.md) are OK/WARN/BLOCK, never
+# PASS — PASS is VERIFY-only. The literal 'PASS' check below never matched a real
+# PR-REVIEW success line, so this condition was true on every run regardless of
+# outcome (false-positive retro trigger — GitHub #149).
+if ! grep -q '^[^|]*|VERIFY|verify|done|PASS' "{LOG_FILE}" || ! grep -q '^[^|]*|PR-REVIEW|pr-review|done|OK' "{LOG_FILE}"; then
   NEEDS_RETRO=true
 fi
 # Condition 3: did any heartbeat fallback event fire?
