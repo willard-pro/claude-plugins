@@ -221,6 +221,42 @@ test_zombie_detection_triggers_on_old_waiting() {
   [ -n "$resume_step" ]
 }
 
+test_prescan_zombie_does_not_force_step5_on_fresh_ticket() {
+  # GitHub #151: PHASE=MAINTENANCE is shared by the Prescan gate
+  # (STEP=prescan, runs before APPRAISE) and real STEP_5
+  # (STEP=document/wiki-maintenance). A stale prescan zombie must not
+  # jump a fresh ticket straight to STEP_5, skipping every real phase.
+  local old_ts
+  old_ts=$(date -u -d "10 minutes ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "2020-01-01T00:00:00Z")
+  local out
+  out=$(_detect_resume_with_log "GH-151-1" \
+    "${old_ts}|META|schema|info|2" \
+    "${old_ts}|MAINTENANCE|prescan|waiting|repo prescan triggered (decayed)")
+  local resume_step
+  resume_step=$(_field "$out" RESUME_STEP)
+  [ "$resume_step" = "STEP_1" ]
+}
+
+test_maintenance_document_zombie_still_routes_to_step5() {
+  # Real STEP_5 zombies (document/wiki-maintenance) must still re-route
+  # to STEP_5 as before — only prescan is excluded.
+  local old_ts
+  old_ts=$(date -u -d "10 minutes ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "2020-01-01T00:00:00Z")
+  local out
+  out=$(_detect_resume_with_log "GH-151-2" \
+    "${old_ts}|META|schema|info|2" \
+    "${old_ts}|APPRAISE|appraise|done|complexity=simple" \
+    "${old_ts}|EXEC|create-artifact|done|simple-fix" \
+    "${old_ts}|GATE|gate|done|approved" \
+    "${old_ts}|IMPLEMENT|implement|done|committed" \
+    "${old_ts}|VERIFY|verify|done|PASS 3/3" \
+    "${old_ts}|PR-REVIEW|pr-review|done|OK — merged" \
+    "${old_ts}|MAINTENANCE|document|waiting|generating ai-context.md")
+  local resume_step
+  resume_step=$(_field "$out" RESUME_STEP)
+  [ "$resume_step" = "STEP_5" ]
+}
+
 test_zombie_detection_skips_non_phase_waiting() {
   local old_ts
   old_ts=$(date -u -d "10 minutes ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "2020-01-01T00:00:00Z")
@@ -270,6 +306,37 @@ test_schema_v2_accepted() {
   local resume_step
   resume_step=$(_field "$out" RESUME_STEP)
   [ "$resume_step" = "STEP_2" ]
+}
+
+# ── GATE_HELD reconcile loop (GitHub #146) ──────────────────────────────────
+
+test_gate_reconcile_done_advances_past_gate_held() {
+  # ticket-gate-reconcile writes GATE|reconcile|done|, never GATE|gate|done|.
+  # Without accepting both markers, this log's original GATE|gate|fail|held
+  # line keeps matching and RESUME_STEP falls back to GATE_HELD forever.
+  local out
+  out=$(_detect_resume_with_log "GH-146-1" \
+    "2026-07-05T10:00:00Z|META|schema|info|2" \
+    "2026-07-05T10:00:01Z|APPRAISE|appraise|done|complexity=simple" \
+    "2026-07-05T10:00:02Z|GATE|gate|fail|held" \
+    "2026-07-05T10:00:03Z|GATE|reconcile|done|clean")
+  local resume_step
+  resume_step=$(_field "$out" RESUME_STEP)
+  [ "$resume_step" = "STEP_4" ]
+}
+
+test_gate_gate_done_still_advances_past_gate_held() {
+  # The original marker must still work — this fix is additive, not a
+  # replacement.
+  local out
+  out=$(_detect_resume_with_log "GH-146-2" \
+    "2026-07-05T10:00:00Z|META|schema|info|2" \
+    "2026-07-05T10:00:01Z|APPRAISE|appraise|done|complexity=simple" \
+    "2026-07-05T10:00:02Z|GATE|gate|fail|held" \
+    "2026-07-05T10:00:03Z|GATE|gate|done|approved")
+  local resume_step
+  resume_step=$(_field "$out" RESUME_STEP)
+  [ "$resume_step" = "STEP_4" ]
 }
 
 # ── dispatch ──────────────────────────────────────────────────────────────────
@@ -377,6 +444,10 @@ for fn in \
   test_msg_field_preserves_embedded_pipes \
   test_schema_v1_accepted_with_warning \
   test_schema_v2_accepted \
+  test_gate_reconcile_done_advances_past_gate_held \
+  test_gate_gate_done_still_advances_past_gate_held \
+  test_prescan_zombie_does_not_force_step5_on_fresh_ticket \
+  test_maintenance_document_zombie_still_routes_to_step5 \
   test_branch_context_survives_resume \
   test_branch_context_carries_uat_policy \
   test_uat_policy_defaults_on_log_without_field \
