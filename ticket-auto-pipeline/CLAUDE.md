@@ -43,6 +43,20 @@ REPOS_ROOT/.ticket-auto/
       INDEX.md                    # Lookup by Topic / Lookup by Service (technical-writer)
 ```
 
+## Hooks (`hooks/`, registered in `.claude-plugin/plugin.json`)
+
+| Hook | Event | Purpose |
+|------|-------|---------|
+| `token-tracker-start.sh` | `SubagentStart` | Initializes per-spawn token tracking |
+| `token-tracker.sh` | `SubagentStop` | Records token usage against the phase in the spawn-meta file |
+| `tool-error-capture.sh` | `PostToolUseFailure` (Bash) | Appends deduplicated tool errors to `{tid}-tool-errors.log` |
+| `stop-capture.sh` | `Stop` | Captures `last_assistant_message` for a fleetd-spawned worker, so a headless worker's question — the only channel it has, since `AskUserQuestion` is absent from the `-p` tool list — reaches a human via the exit record and Slack notifier. Resolves the ticket by scanning `{FLEET_STATE_DIR}/*-run.json` for the payload's `session_id` (the hook itself never receives a ticket id). Does **not** fire on SIGINT or SIGKILL — those exits simply have no hook-captured field. Silently exits 0 whenever unresolvable (not a fleet-managed worker, e.g. an interactive session) — must never affect ordinary Claude Code usage. |
+| `stop-failure.sh` | `StopFailure` | Appends `META\|worker-api-error\|warn\|` to the ticket's own pipeline log when a turn ends on an API error (after retries are exhausted). Same session-id resolution as `stop-capture.sh`. |
+
+Both new hooks deliberately avoid two payload assumptions the observed `SessionStart`/`SessionEnd` shapes don't support: no `permission_mode` field exists on any hook payload, and `SessionEnd`'s `reason` is `other` for both signal-terminated and ordinary ends — so neither hook reads a permission mode or a signal-specific reason.
+
+**Watchdog exit conditions** (`lib/spawn-helper.sh:spawn_watchdog_start`): the watchdog now exits (stops emitting `watchdog|alive` heartbeats) on any of: the workspace directory being removed (pre-existing), the tracked `FLEET_WORKER_PID` no longer alive (`kill -0`), that PID having been reused by an unrelated process (`/proc/$PID/stat` field-22 start-ticks compared against `FLEET_WORKER_START_TICKS`, captured at spawn), or `FLEET_WATCHDOG_MAX_ITERATIONS` (default 720 ≈ 12h at the 60s poll interval) being reached. `FLEET_WORKER_PID`/`FLEET_WORKER_START_TICKS` are absent for a non-fleetd invocation, in which case only the workspace-removed and iteration-cap conditions apply.
+
 ## Skill categories
 
 ### Pipeline skills (core workflow, called in sequence by ticket-auto)
