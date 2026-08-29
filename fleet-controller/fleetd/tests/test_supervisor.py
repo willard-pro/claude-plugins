@@ -73,6 +73,30 @@ def _wait_health(port, timeout=5):
     return None
 
 
+def _safe_tmp_cleanup(tmp, retries=10, delay=0.1):
+    """Retry TemporaryDirectory.cleanup() against a narrow, benign race.
+
+    A spawned test worker's forked child creates its per-generation stdio
+    files (worker-reap-recovery) asynchronously relative to the parent
+    returning from _consume_queue — many tests here don't wait for or kill
+    the worker before tearDown. If shutil.rmtree snapshots the directory
+    listing at the exact instant the child is mid-open(), a new entry can
+    appear after the snapshot and rmdir raises ENOTEMPTY. The child's
+    remaining work (open, dup2, execve) completes in low-single-digit
+    milliseconds, so a short retry loop is sufficient — this is test
+    infrastructure hygiene, not a production concern (nothing deletes
+    FLEET_STATE_DIR out from under a live worker).
+    """
+    for attempt in range(retries):
+        try:
+            tmp.cleanup()
+            return
+        except OSError:
+            if attempt == retries - 1:
+                raise
+            time.sleep(delay)
+
+
 class SingleInstanceTest(unittest.TestCase):
     """Task 4.6: single-instance enforcement."""
 
@@ -83,7 +107,7 @@ class SingleInstanceTest(unittest.TestCase):
         self.port = _find_free_port()
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def test_second_instance_refuses_to_start(self):
         """Second instance exits with error when another holds the lock."""
@@ -158,7 +182,7 @@ class HealthEndpointTest(unittest.TestCase):
         self.port = _find_free_port()
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def test_empty_worker_set(self):
         """Health endpoint reports an empty worker set when nothing is running."""
@@ -239,7 +263,7 @@ class RegistryObservationTest(unittest.TestCase):
         self.port = _find_free_port()
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def test_zero_pid_entries_are_skipped(self):
         """Registry entries with PID 0 (sentinel) are not reported as live."""
@@ -316,7 +340,7 @@ class DetectionCycleTest(unittest.TestCase):
         self.workspace = Path(self._tmp.name)
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def _write_pipeline_log(self, tid, lines):
         """Write a minimal pipeline log for a ticket."""
@@ -436,7 +460,7 @@ class CycleCacheTest(unittest.TestCase):
         self.workspace = Path(self._tmp.name)
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def test_repeated_detection_hits_cache(self):
         """Second call to DetectionCycle.run with the same cache skips subprocess."""
@@ -531,7 +555,7 @@ class SpawnAndReapTest(unittest.TestCase):
         self._append_queue_entry('TST-S1', 'test-spawn', generation=1)
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def _append_queue_entry(self, tid, reason, generation=1):
         """Append one entry to the spawn queue JSONL file."""
@@ -1111,6 +1135,196 @@ def _make_worker_with_child(sleep_secs=30, child_pid_file=None):
     return [sys.executable, '-c', '\n'.join(script_lines)]
 
 
+class WorkerStdioAndEnvTest(unittest.TestCase):
+    """worker-reap-recovery task 2.8: stdio capture, session id, env, generations."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+        self._append_queue_entry('TST-S1', 'test-spawn', generation=1)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _append_queue_entry(self, tid, reason, generation=1):
+        queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+        entry = {
+            'tid': tid,
+            'reason': reason,
+            'generation': generation,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+        with open(queue_file, 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+
+    def _read_run_registry(self, tid):
+        run_file = self.workspace / f'{tid}-run.json'
+        if run_file.is_file():
+            return json.loads(run_file.read_text())
+        return None
+
+    def test_env_contains_fleet_worker_pid_matching_registry(self):
+        """The worker's environment carries FLEET_WORKER_PID == its own pid."""
+        from fleetd.supervisor import Supervisor
+
+        env_out = self.workspace / 'env_out.json'
+        script = (
+            'import os, json, time; '
+            'json.dump({"fleet_worker_pid": os.environ.get("FLEET_WORKER_PID"), '
+            '"own_pid": os.getpid()}, open(%r, "w")); '
+            'time.sleep(2)'
+        ) % str(env_out)
+        cmd = [sys.executable, '-c', script]
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            sup._consume_queue(cmd_override=cmd)
+            deadline = time.time() + 5
+            data = None
+            while time.time() < deadline:
+                if env_out.is_file():
+                    try:
+                        data = json.loads(env_out.read_text())
+                        break
+                    except json.JSONDecodeError:
+                        pass
+                time.sleep(0.1)
+            self.assertIsNotNone(data, "worker never wrote its env snapshot")
+            reg = self._read_run_registry('TST-S1')
+            self.assertEqual(str(data['own_pid']), reg['pid'])
+            self.assertEqual(str(data['fleet_worker_pid']), reg['pid'],
+                             "FLEET_WORKER_PID must equal the worker's own pid")
+        finally:
+            sup.release_lock()
+
+    def test_session_id_recorded_at_spawn(self):
+        """A session id is generated and recorded in the run registry."""
+        from fleetd.supervisor import Supervisor
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=5)
+            sup._consume_queue(cmd_override=cmd)
+            reg = self._read_run_registry('TST-S1')
+            self.assertIsNotNone(reg)
+            self.assertTrue(reg.get('session_id'),
+                            "run registry should carry a non-empty session_id")
+            child = sup._children.get('TST-S1')
+            self.assertEqual(child.get('session_id'), reg['session_id'],
+                             "child table session_id should match the registry")
+        finally:
+            sup.release_lock()
+
+    def test_stdout_and_stderr_land_in_separate_generation_files(self):
+        """fd1/fd2 are redirected to distinct per-generation files, never merged."""
+        from fleetd.supervisor import Supervisor
+
+        cmd = [
+            sys.executable, '-c',
+            'import sys, time; '
+            'sys.stdout.write("STDOUT-MARKER\\n"); sys.stdout.flush(); '
+            'sys.stderr.write("STDERR-MARKER\\n"); sys.stderr.flush(); '
+            'time.sleep(2)',
+        ]
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            sup._consume_queue(cmd_override=cmd)
+            stdout_file = self.workspace / 'TST-S1-gen1.json'
+            stderr_file = self.workspace / 'TST-S1-gen1.stderr'
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if stdout_file.is_file() and stdout_file.stat().st_size > 0:
+                    break
+                time.sleep(0.1)
+            self.assertTrue(stdout_file.is_file(), "stdout file should exist")
+            self.assertTrue(stderr_file.is_file(), "stderr file should exist")
+            self.assertIn('STDOUT-MARKER', stdout_file.read_text())
+            self.assertIn('STDERR-MARKER', stderr_file.read_text())
+            self.assertNotIn('STDERR-MARKER', stdout_file.read_text())
+            self.assertNotIn('STDOUT-MARKER', stderr_file.read_text())
+        finally:
+            sup.release_lock()
+
+    def test_second_generation_does_not_overwrite_first(self):
+        """A new generation for the same tid gets its own stdio files."""
+        from fleetd.supervisor import spawn_worker
+
+        pid1, _ = spawn_worker(
+            tid='TST-GEN', generation=1, state_dir=str(self.workspace),
+            cmd_override=[sys.executable, '-c',
+                          'print("GEN1"); import time; time.sleep(1)'],
+        )
+        deadline = time.time() + 5
+        gen1_file = self.workspace / 'TST-GEN-gen1.json'
+        while time.time() < deadline and not (
+                gen1_file.is_file() and gen1_file.stat().st_size > 0):
+            time.sleep(0.1)
+        os.waitpid(pid1, 0)
+
+        pid2, _ = spawn_worker(
+            tid='TST-GEN', generation=2, state_dir=str(self.workspace),
+            cmd_override=[sys.executable, '-c',
+                          'print("GEN2"); import time; time.sleep(1)'],
+        )
+        gen2_file = self.workspace / 'TST-GEN-gen2.json'
+        deadline = time.time() + 5
+        while time.time() < deadline and not (
+                gen2_file.is_file() and gen2_file.stat().st_size > 0):
+            time.sleep(0.1)
+        os.waitpid(pid2, 0)
+
+        self.assertIn('GEN1', gen1_file.read_text())
+        self.assertIn('GEN2', gen2_file.read_text())
+        self.assertNotIn('GEN2', gen1_file.read_text(),
+                         "the second generation must not overwrite the first")
+
+    def test_redirection_failure_does_not_abort_spawn(self):
+        """A stdio-redirect failure still lets the worker spawn and exec."""
+        from fleetd.supervisor import Supervisor
+
+        # Pre-create the stdout target AS A DIRECTORY so the child's
+        # os.open(..., O_WRONLY) raises OSError (IsADirectoryError) —
+        # isolates the redirection failure without touching the run
+        # registry write, which happens in the parent via a different path.
+        (self.workspace / 'TST-S1-gen1.json').mkdir()
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=3)
+            consumed = sup._consume_queue(cmd_override=cmd)
+            self.assertEqual(consumed, {'TST-S1'},
+                             "spawn must proceed despite redirection failure")
+            child = sup._children.get('TST-S1')
+            self.assertIsNotNone(child)
+            self.assertTrue(_pid_is_alive(child['pid']),
+                            "worker should still be running (exec succeeded)")
+        finally:
+            sup.release_lock()
+
+
 class KillEscalationTest(unittest.TestCase):
     """Task 7.6: escalation reaches SIGKILL, descendants die, early exit skips."""
 
@@ -1121,7 +1335,7 @@ class KillEscalationTest(unittest.TestCase):
 
     def tearDown(self):
         # Ensure any lingering test children are cleaned up.
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def _append_queue_entry(self, tid, reason, generation=1):
         queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
@@ -1336,7 +1550,7 @@ class CrashRecoveryTest(unittest.TestCase):
         self.workspace = Path(self._tmp.name)
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def _write_run_registry(self, tid, pid, started_at=None, generation=1):
         run_file = self.workspace / f'{tid}-run.json'
@@ -1552,7 +1766,7 @@ class GenerationFencingTest(unittest.TestCase):
         self.workspace = Path(self._tmp.name)
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def _append_queue(self, tid, reason='test'):
         queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
@@ -1839,7 +2053,7 @@ class StartupReconciliationTest(unittest.TestCase):
         self.port = _find_free_port()
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def _make_patched_supervisor(self):
         from fleetd.supervisor import Supervisor
@@ -1999,7 +2213,7 @@ class CLIAlignmentTest(unittest.TestCase):
         self.workspace = Path(self._tmp.name)
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def _write_queue_entry(self, tid, reason='cli-dispatch'):
         """Simulate fleet-controller dispatch writing to the spawn queue."""

@@ -691,6 +691,34 @@ spawn_capture() {
 # Backgrounds a watchdog heartbeat loop that emits hb_heartbeat entries every 60s
 # while the orchestrator waits for a sub-agent. Uses a stop-file to signal shutdown.
 #
+# Exit conditions (checked each iteration, in order):
+#   1. $stop_file exists — cooperative shutdown (spawn_agent_post ran normally).
+#   2. $stop_file's directory is gone — workspace torn down; nothing left to
+#      watch and no stop file will ever appear here again.
+#   3. $FLEET_WORKER_PID is set and no longer alive (`kill -0` fails), or the
+#      pid was recycled to an unrelated process (start-ticks mismatch) — the
+#      worker crashed without ever touching $stop_file. This is the fix for
+#      the watchdog outliving its worker and reporting a false pulse to
+#      detect_stalls; see worker-reap-recovery.
+#   4. The bounded iteration cap is reached — the fallback for runs where
+#      $FLEET_WORKER_PID is unset, and the backstop for the zombie window
+#      (`kill -0` succeeds for a reaped-but-not-yet-waited child).
+#
+# $$ is deliberately NOT used as the liveness check. This function runs
+# inside a Bash *tool call* whose own shell exits within seconds of the call
+# returning — a `kill -0 $$` guard would kill the watchdog almost
+# immediately and remove heartbeats entirely. $FLEET_WORKER_PID (stamped by
+# fleetd's spawn_worker into the worker's environment before exec) is the
+# correct handle: it is inherited by this subshell and names the actual
+# worker process, not the transient tool-call shell.
+#
+# Same-PID-namespace requirement: the pid comparison above only holds
+# because fleetd fork()s the worker into its own pid namespace. If a worker
+# were ever spawned into a new namespace (`unshare --pid`, a per-ticket
+# container, a systemd unit with PIDMode), the child's own getpid() would
+# be meaningless outside that namespace and this check would break INTO
+# always-alive — today's exact bug — rather than simply failing safe.
+#
 # Usage: spawn_watchdog_start <stop_file> <phase_label> [sleep_secs=60] [ticket_id]
 spawn_watchdog_start() {
   [ -z "${HB_LOG_FILE:-}" ] && return 0
@@ -701,11 +729,17 @@ spawn_watchdog_start() {
   local ticket_id="${4:-}"
   local stop_dir
   stop_dir=$(dirname "$stop_file")
+  # Captured once at start — inherited from the worker's own environment and
+  # constant for the life of this watchdog.
+  local worker_pid="${FLEET_WORKER_PID:-}"
+  local worker_start_ticks="${FLEET_WORKER_START_TICKS:-}"
+  local max_iterations="${FLEET_WATCHDOG_MAX_ITERATIONS:-720}"
 
   rm -f "$stop_file"
 
   (
     set +e
+    local iterations=0
     while true; do
       sleep "$sleep_secs"
       [ -f "$stop_file" ] && break
@@ -713,6 +747,24 @@ spawn_watchdog_start() {
       # left to watch, and no stop file will ever appear here again. Exit
       # rather than spin until the process table fills up.
       [ -d "$stop_dir" ] || break
+      if [ -n "$worker_pid" ]; then
+        if ! kill -0 "$worker_pid" 2>/dev/null; then
+          break
+        fi
+        # PID-reuse guard: `kill -0` succeeds for any live process holding
+        # this pid, including one the kernel recycled it to after the
+        # original worker exited. Compare the /proc start-time ticks
+        # stamped at spawn against the current occupant's.
+        if [ -n "$worker_start_ticks" ] && [ -r "/proc/$worker_pid/stat" ]; then
+          local _current_ticks
+          _current_ticks=$(awk '{print $22}' "/proc/$worker_pid/stat" 2>/dev/null)
+          if [ -n "$_current_ticks" ] && [ "$_current_ticks" != "$worker_start_ticks" ]; then
+            break
+          fi
+        fi
+      fi
+      iterations=$((iterations + 1))
+      [ "$iterations" -ge "$max_iterations" ] && break
       hb_heartbeat "watchdog" "alive" "waiting for ${phase_label} agent" || true
       # Read agent progress file — if non-empty, emit as agent-progress heartbeat
       if [ -n "$ticket_id" ]; then

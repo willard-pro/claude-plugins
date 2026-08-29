@@ -1004,6 +1004,98 @@ test_watchdog_exits_when_workspace_removed() {
   return 0
 }
 
+# ── FLEET_WORKER_PID honesty (worker-reap-recovery, tasks 1.7-1.8) ────────────
+
+test_watchdog_exits_when_worker_pid_dies() {
+  # A watchdog told about a real worker pid via FLEET_WORKER_PID exits as
+  # soon as that pid dies — even though its own stop file was never touched
+  # and its workspace directory still exists. This is the exact bug this
+  # section fixes: a crashed worker used to leave the watchdog heartbeating
+  # forever, reporting a false pulse to detect_stalls.
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local stop_file="$tmpdir/watchdog-stop"
+  local watchdog_pid sleeper_pid
+
+  # A real process the watchdog will watch and we will kill ourselves.
+  sleep 30 &
+  sleeper_pid=$!
+
+  (
+    export HB_LOG_FILE="$tmpdir/hb.log"
+    export FLEET_WORKER_PID="$sleeper_pid"
+    unset -f hb_heartbeat hb_pinger_start hb_pinger_stop cl_write _plog _iso_now 2>/dev/null || true
+    source "$LIB_DIR/spawn-helper.sh"
+    hb_init
+    spawn_watchdog_start "$stop_file" "TEST" 1
+    echo "$!"
+  ) >"$tmpdir/pid.txt"
+  watchdog_pid=$(cat "$tmpdir/pid.txt")
+
+  # Kill the "worker" — never touch the stop file.
+  kill "$sleeper_pid" 2>/dev/null || true
+  wait "$sleeper_pid" 2>/dev/null || true
+
+  local waited=0
+  while kill -0 "$watchdog_pid" 2>/dev/null; do
+    if [ "$waited" -ge 30 ]; then
+      kill "$watchdog_pid" 2>/dev/null || true
+      rm -rf "$tmpdir"
+      echo "watchdog still alive after 3s of worker death"
+      return 1
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  # No heartbeat should have been written after the worker died — the
+  # honesty check must fire before the alive heartbeat, not after.
+  local result=0
+  if [ -f "$tmpdir/hb.log" ] && grep -q 'watchdog' "$tmpdir/hb.log"; then
+    result=1
+    echo "watchdog emitted a heartbeat for a dead worker"
+  fi
+  rm -rf "$tmpdir"
+  return $result
+}
+
+test_watchdog_exits_at_iteration_cap_when_pid_unset() {
+  # With FLEET_WORKER_PID unset (interactive/manual runs), the watchdog has
+  # no liveness signal to check and must still exit eventually — the
+  # bounded iteration cap is the only thing preventing it from outliving
+  # its purpose indefinitely.
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local stop_file="$tmpdir/watchdog-stop"
+  local watchdog_pid
+
+  (
+    export HB_LOG_FILE="$tmpdir/hb.log"
+    unset FLEET_WORKER_PID FLEET_WORKER_START_TICKS
+    export FLEET_WATCHDOG_MAX_ITERATIONS=2
+    unset -f hb_heartbeat hb_pinger_start hb_pinger_stop cl_write _plog _iso_now 2>/dev/null || true
+    source "$LIB_DIR/spawn-helper.sh"
+    hb_init
+    spawn_watchdog_start "$stop_file" "TEST" 1
+    echo "$!"
+  ) >"$tmpdir/pid.txt"
+  watchdog_pid=$(cat "$tmpdir/pid.txt")
+
+  # 2 iterations at 1s sleep = ~2s to the cap; allow generous headroom.
+  local waited=0
+  while kill -0 "$watchdog_pid" 2>/dev/null; do
+    if [ "$waited" -ge 60 ]; then
+      kill "$watchdog_pid" 2>/dev/null || true
+      rm -rf "$tmpdir"
+      echo "watchdog still alive after 6s — iteration cap not honoured"
+      return 1
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  rm -rf "$tmpdir"
+  return 0
+}
+
 # ── spawn_agent_post wait/reaping (Bug #4 fix) ─────────────────────────────────
 
 test_spawn_agent_post_waits_for_captured_pids() {
@@ -1238,6 +1330,8 @@ for fn in \
   test_watchdog_integrated_into_spawn_agent_post \
   test_watchdog_emits_heartbeats \
   test_watchdog_exits_when_workspace_removed \
+  test_watchdog_exits_when_worker_pid_dies \
+  test_watchdog_exits_at_iteration_cap_when_pid_unset \
   test_spawn_agent_post_waits_for_captured_pids \
   test_f10_guard_clears_stale_stop_files_from_prior_phase \
   test_f10_guard_still_blocks_external_kill \

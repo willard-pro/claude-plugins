@@ -941,7 +941,7 @@ class TestConsumeQueueStopPinned(unittest.TestCase):
 
         def _fake_spawn(**kwargs):
             spawned.append(kwargs['tid'])
-            return 90000 + len(spawned)
+            return 90000 + len(spawned), 'fake-session-id'
 
         with patch('fleetd.supervisor.spawn_worker', side_effect=_fake_spawn):
             consumed = sup._consume_queue()
@@ -959,7 +959,7 @@ class TestConsumeQueueStopPinned(unittest.TestCase):
 
         def _fake_spawn(**kwargs):
             spawned.append(kwargs['tid'])
-            return 90000 + len(spawned)
+            return 90000 + len(spawned), 'fake-session-id'
 
         with patch('fleetd.supervisor.spawn_worker', side_effect=_fake_spawn):
             consumed = sup._consume_queue()
