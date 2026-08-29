@@ -124,7 +124,7 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 | `FLEET_FENCE_ENFORCE` | true | Enable generation fencing in flow.sh |
 | `FLEET_QUEUE_LOCK_TIMEOUT` | 5 | Spawn queue flock timeout in seconds |
 | `FLEET_POLL_INTERVAL` | 30 | Seconds between monitor cycles |
-| `FLEET_STALL_WARN_SECS` | 300 | Stale heartbeat threshold for WARN |
+| `FLEET_STALL_WARN_SECS` | 600 | Stale heartbeat threshold for WARN. Raised from 300 — background subagents are waited for up to 10 minutes at exit (`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`), so 300 false-positived on a worker legitimately still exiting. Must stay strictly less than `FLEET_STALL_KILL_SECS`/`FLEET_STALL_RESTART_SECS` |
 | `FLEET_STALL_KILL_SECS` | 900 | Stale heartbeat threshold for KILL |
 | `FLEET_STALL_RESTART_SECS` | 1800 | Stale heartbeat threshold for KILL+RESTART |
 | `FLEET_ABANDON_WARN_HOURS` | 1 | Abandonment threshold for WARN |

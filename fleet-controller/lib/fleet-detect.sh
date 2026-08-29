@@ -159,8 +159,13 @@ detect_stalls() {
   pinger_iter=$(command grep '|orchestrator-waiting|.*pinger ' "$hb_file" 2>/dev/null | tail -1 | awk -F'|' '{print $5}' | command grep -oP '\d+(?=/)' || echo "0")
   pinger_iter="${pinger_iter:-0}"
 
+  # Default warn threshold is 600s, not 300s: background subagents are
+  # waited for up to 10 minutes at exit (CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS),
+  # so 300s false-positived on a worker that was legitimately still exiting
+  # (worker-reap-recovery task 5.1). kill_secs/restart_secs must stay
+  # strictly greater than warn_secs (task 5.3) — 900/1800 already hold.
   local severity=0
-  local warn_secs="${FLEET_STALL_WARN_SECS:-300}"
+  local warn_secs="${FLEET_STALL_WARN_SECS:-600}"
   local kill_secs="${FLEET_STALL_KILL_SECS:-900}"
   local restart_secs="${FLEET_STALL_RESTART_SECS:-1800}"
 

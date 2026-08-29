@@ -141,6 +141,43 @@ test_stall_old_heartbeat_returns_warn() {
   )
 }
 
+test_stall_default_warn_threshold_is_600_not_300() {
+  # worker-reap-recovery task 5.1: default FLEET_STALL_WARN_SECS is 600, not
+  # 300 — background subagents are waited for up to 10 minutes at exit
+  # (CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS), so 300 false-positived on a
+  # worker that was legitimately still exiting.
+  local ws
+  ws=$(_setup_workspace)
+  local mid_age
+  mid_age=$(date -u -d '400 seconds ago' +%Y-%m-%dT%H:%M:%SZ)
+  _hblog "$ws" "CRE-47" "heartbeat" "orchestrator-waiting" "ok" "pinger 1/80" "$mid_age"
+  (
+    unset FLEET_STALL_WARN_SECS FLEET_STALL_KILL_SECS FLEET_STALL_RESTART_SECS
+    source "$LIB_DIR/fleet-detect.sh"
+    local r
+    r=$(detect_stalls "CRE-47" "$ws")
+    rm -rf "$ws"
+    # 400s is stale under the old 300s default but healthy under 600s.
+    [ "$r" -eq 0 ]
+  )
+}
+
+test_stall_default_still_warns_past_600() {
+  local ws
+  ws=$(_setup_workspace)
+  local old
+  old=$(date -u -d '700 seconds ago' +%Y-%m-%dT%H:%M:%SZ)
+  _hblog "$ws" "CRE-47" "heartbeat" "orchestrator-waiting" "ok" "pinger 1/80" "$old"
+  (
+    unset FLEET_STALL_WARN_SECS FLEET_STALL_KILL_SECS FLEET_STALL_RESTART_SECS
+    source "$LIB_DIR/fleet-detect.sh"
+    local r
+    r=$(detect_stalls "CRE-47" "$ws")
+    rm -rf "$ws"
+    [ "$r" -ge 1 ]
+  )
+}
+
 test_stall_empty_hb_returns_ok() {
   local ws
   ws=$(_setup_workspace)
@@ -889,6 +926,8 @@ for fn in \
   test_stall_no_hb_file_returns_ok \
   test_stall_recent_heartbeat_returns_ok \
   test_stall_old_heartbeat_returns_warn \
+  test_stall_default_warn_threshold_is_600_not_300 \
+  test_stall_default_still_warns_past_600 \
   test_stall_empty_hb_returns_ok \
   test_stall_watchdog_alive_detected \
   test_zombie_no_file_returns_ok \
