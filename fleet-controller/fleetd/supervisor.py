@@ -977,6 +977,21 @@ def _write_exit_record(state_dir, tid, generation, pid, exit_code, exit_type,
     return entry
 
 
+def _read_hook_capture(state_dir, tid, generation):
+    """Read {tid}-gen{N}-hook.json, written by the Stop hook (stop-capture.sh).
+
+    Returns {} when absent — `Stop` fires on neither SIGINT nor SIGKILL, so
+    a missing capture file is the expected case for those rungs, not an
+    error (task 6.4). Best-effort: any parse failure degrades to {} rather
+    than blocking exit-record persistence.
+    """
+    hook_file = Path(state_dir) / f'{tid}-gen{generation}-hook.json'
+    try:
+        return json.loads(hook_file.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
 def _update_exit_record_action(state_dir, tid, generation, action):
     """Best-effort update of an already-written exit record's `action` field.
 
@@ -1427,6 +1442,12 @@ def spawn_worker(tid, generation, state_dir, reason='dispatched',
 
         worker_env = dict(os.environ)
         worker_env['FLEET_WORKER_PID'] = str(os.getpid())
+        # Explicit, not inherited: the hooks (stop-capture.sh, stop-failure.sh)
+        # need to resolve their own tid/generation by scanning run-registry
+        # files for their session_id, and must not depend on fleetd's own
+        # process having FLEET_STATE_DIR set — it may have resolved state_dir
+        # via the DEFAULT_WORKSPACE fallback instead.
+        worker_env['FLEET_STATE_DIR'] = str(state_dir)
         start_ticks = _read_own_start_ticks()
         if start_ticks:
             worker_env['FLEET_WORKER_START_TICKS'] = start_ticks
@@ -2465,12 +2486,14 @@ class Supervisor:
                     if not terminal and not skip_127 and self._circuit_breaker_tripped:
                         action = f'skipped: circuit-breaker ({self._circuit_breaker_reason})'
 
+                    hook_capture = _read_hook_capture(str(self._state_dir), tid, generation)
                     _write_exit_record(
                         str(self._state_dir), tid, generation, pid,
                         exit_code, exit_type,
                         killed_by_fleet=False,
                         terminal=terminal,
                         session_id=entry.get('session_id'),
+                        last_assistant_message=hook_capture.get('last_assistant_message'),
                         action=action or 'reconcile-pending',
                         suppressed_retry_reason=suppressed,
                     )
@@ -2728,12 +2751,18 @@ class Supervisor:
         state_dir = str(self._state_dir)
         generation = child.get('generation', 0)
         terminal = _log_reached_terminal(state_dir, tid)
+        # A cooperative stop lets the worker exit on its own — the Stop hook
+        # fires for that rung same as any normal end. SIGINT/SIGTERM/SIGKILL
+        # do not fire it, so hook_capture is simply {} for those; harmless
+        # to look up unconditionally.
+        hook_capture = _read_hook_capture(state_dir, tid, generation)
         _write_exit_record(
             state_dir, tid, generation, child.get('pid'),
             exit_code=None, exit_type=method,
             killed_by_fleet=True,
             terminal=terminal,
             session_id=child.get('session_id'),
+            last_assistant_message=hook_capture.get('last_assistant_message'),
             action='killed-by-fleet',
         )
         _append_pipeline_log_line(

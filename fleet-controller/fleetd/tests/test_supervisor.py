@@ -1945,6 +1945,72 @@ class ExitPersistenceAndRecoveryTest(unittest.TestCase):
         finally:
             sup.release_lock()
 
+    def test_hook_capture_merges_into_natural_reap_exit_record(self):
+        """A Stop-hook-written {tid}-gen{N}-hook.json is merged into the exit
+        record on natural reap (task 6.4)."""
+        tid = 'TST-R5'
+        self._append_queue_entry(tid)
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1, exit_code=0)
+            sup._consume_queue(cmd_override=cmd)
+            hook_file = self.workspace / f'{tid}-gen1-hook.json'
+            hook_file.write_text(json.dumps({'last_assistant_message': 'need clarification'}))
+            time.sleep(2)
+            sup._reap_children()
+
+            record = self._read_exit_record(tid)
+            self.assertIsNotNone(record)
+            self.assertEqual(record['last_assistant_message'], 'need clarification')
+        finally:
+            sup.release_lock()
+
+    def test_hook_capture_merges_into_killed_by_fleet_exit_record(self):
+        """A hook capture present at kill time (e.g. cooperative stop, which
+        lets the worker exit on its own and so can fire Stop) still merges
+        into the killed-by-fleet exit record."""
+        tid = 'TST-R6'
+        self._append_queue_entry(tid)
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=30)
+            sup._consume_queue(cmd_override=cmd)
+            hook_file = self.workspace / f'{tid}-gen1-hook.json'
+            hook_file.write_text(json.dumps({'last_assistant_message': 'done early'}))
+
+            result = sup.kill_worker(tid, grace_secs=1)
+            self.assertTrue(result.success)
+
+            record = self._read_exit_record(tid)
+            self.assertIsNotNone(record)
+            self.assertTrue(record['killed_by_fleet'])
+            self.assertEqual(record['last_assistant_message'], 'done early')
+        finally:
+            sup.release_lock()
+
+    def test_exit_record_valid_when_hook_capture_absent(self):
+        """SIGKILL leaves no hook capture — the exit record must still be
+        valid, with last_assistant_message simply None."""
+        tid = 'TST-R7'
+        self._append_queue_entry(tid)
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            cmd = _make_ignoring_worker(sleep_secs=30)
+            sup._consume_queue(cmd_override=cmd)
+
+            result = sup.kill_worker(tid, grace_secs=1)
+            self.assertTrue(result.success)
+            self.assertEqual(result.method, 'SIGKILL')
+
+            record = self._read_exit_record(tid)
+            self.assertIsNotNone(record)
+            self.assertIsNone(record['last_assistant_message'])
+        finally:
+            sup.release_lock()
+
     def test_circuit_breaker_trips_after_consecutive_fast_failures(self):
         """N consecutive fast non-zero exits across different tickets halts
         dispatch (spawn_enabled False) rather than reconciling every one."""

@@ -14,6 +14,7 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-capture-transcript.sh
 	bash ticket-auto-pipeline/lib/tests/test-reconcile-comments.sh
 	bash ticket-auto-pipeline/lib/tests/test-spawn-helper.sh
+	bash ticket-auto-pipeline/lib/tests/test-worker-hooks.sh
 	bash ticket-auto-pipeline/lib/tests/test-error-handler.sh
 	bash ticket-auto-pipeline/lib/tests/test-trajectory.sh
 	bash ticket-auto-pipeline/lib/tests/test-verifier-result.sh
