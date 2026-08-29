@@ -141,6 +141,15 @@ else
   _var "GITHUB_PERSONAL_ACCESS_TOKEN" "warn" "" "settings.local.json" "only needed when FLEET_EPIC_AUTO_PR=true"
 fi
 
+# SLACK_BOT_TOKEN — optional. Powers fleet-notify.sh's chat.postMessage calls
+# (worker-reap-recovery task 7). Without it, and without SLACK_CHANNEL,
+# fleet_slack_post degrades to a log-only line — never a hard failure.
+if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
+  _var "SLACK_BOT_TOKEN" "ok" "$(_mask "${SLACK_BOT_TOKEN}")" "settings.local.json" "used by fleet-notify.sh"
+else
+  _var "SLACK_BOT_TOKEN" "warn" "" "settings.local.json" "optional — worker-exit/dead-letter Slack alerts degrade to log-only without it"
+fi
+
 # ── CLAUDE.md fields ────────────────────────────────────────────────────────
 
 if [ ! -f "$PROJECT_DIR/CLAUDE.md" ]; then

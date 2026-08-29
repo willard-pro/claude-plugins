@@ -100,6 +100,24 @@ test_github_token_masks_value() {
   [[ "$(_row "$out" "GITHUB_PERSONAL_ACCESS_TOKEN")" == *"****9999"* ]] && [[ "$out" != *"ghp_wxyz9999"* ]]
 }
 
+test_slack_bot_token_warn_when_absent() {
+  local tmpdir out
+  tmpdir=$(mktemp -d)
+  _mk_project_dir "$tmpdir"
+  out=$(LINEAR_API_KEY=x _env_vars "$tmpdir")
+  rm -rf "$tmpdir"
+  [[ "$(_row "$out" "SLACK_BOT_TOKEN")" == *"|warn|"* ]]
+}
+
+test_slack_bot_token_masks_value() {
+  local tmpdir out
+  tmpdir=$(mktemp -d)
+  _mk_project_dir "$tmpdir"
+  out=$(LINEAR_API_KEY=x SLACK_BOT_TOKEN=xoxb-1234-abcd9999 _env_vars "$tmpdir")
+  rm -rf "$tmpdir"
+  [[ "$(_row "$out" "SLACK_BOT_TOKEN")" == *"****9999"* ]] && [[ "$out" != *"xoxb-1234-abcd9999"* ]]
+}
+
 # ── REPOS_ROOT ────────────────────────────────────────────────────────────────
 
 test_repos_root_ok_when_declared() {
@@ -287,6 +305,8 @@ for fn in \
   test_github_token_optional_when_auto_pr_off \
   test_github_token_required_when_auto_pr_on \
   test_github_token_masks_value \
+  test_slack_bot_token_warn_when_absent \
+  test_slack_bot_token_masks_value \
   test_repos_root_ok_when_declared \
   test_repos_root_missing_when_no_claude_md \
   test_claude_bin_default_ok_when_resolvable \

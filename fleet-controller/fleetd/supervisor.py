@@ -1009,6 +1009,30 @@ def _update_exit_record_action(state_dir, tid, generation, action):
         pass
 
 
+def _notify_worker_event(fleet_lib_dir, state_dir, tid, event_type, detail=''):
+    """Fire the deterministic Slack notifier for a non-terminal worker exit.
+
+    Shells out to fleet-notify.sh (bash `curl`, per design.md Decision 7) so
+    the transport is shared with the bash-side dead-letter call site in
+    fleet-reconcile.sh. Fail-soft: an absent script, a missing SLACK_* env,
+    or a transport failure must never affect reaping or reconciliation.
+    """
+    notify_script = Path(fleet_lib_dir) / 'fleet-notify.sh'
+    if not notify_script.is_file():
+        return
+    try:
+        subprocess.run(
+            ['bash', '-c',
+             f'source {shlex.quote(str(notify_script))} && '
+             f'fleet_notify_worker_event {shlex.quote(tid)} '
+             f'{shlex.quote(str(state_dir))} {shlex.quote(event_type)} '
+             f'{shlex.quote(detail)}'],
+            timeout=15, capture_output=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
 def _sweep_stale_generation_files(state_dir, tid, current_generation,
                                   retention=None):
     """Delete gen/.stderr/-exit.json files older than the retention window.
@@ -2440,6 +2464,9 @@ class Supervisor:
         with self._state_lock:
             non_terminal_tids = self._reap_children_locked()
         for tid in non_terminal_tids:
+            _notify_worker_event(
+                self._fleet_lib_dir, str(self._state_dir), tid, 'non-terminal-exit',
+            )
             self.reconcile_orphaned_tickets(scope_tids=[tid])
             _update_exit_record_action(
                 str(self._state_dir), tid,

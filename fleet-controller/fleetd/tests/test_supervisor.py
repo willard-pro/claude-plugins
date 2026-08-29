@@ -1871,6 +1871,56 @@ class ExitPersistenceAndRecoveryTest(unittest.TestCase):
         finally:
             sup.release_lock()
 
+    def test_notify_called_for_non_terminal_exit(self):
+        """The Slack notifier fires for a crash over a non-terminal log
+        (task 7.2), before scoped reconciliation runs."""
+        from unittest import mock
+
+        tid = 'TST-N1'
+        self._append_queue_entry(tid)
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1, exit_code=1)
+            sup._consume_queue(cmd_override=cmd)
+            time.sleep(2)
+
+            with mock.patch('fleetd.supervisor._notify_worker_event') as notify, \
+                 mock.patch.object(sup, 'reconcile_orphaned_tickets'):
+                sup._reap_children()
+
+            notify.assert_called_once_with(
+                sup._fleet_lib_dir, str(self.workspace), tid, 'non-terminal-exit',
+            )
+        finally:
+            sup.release_lock()
+
+    def test_notify_not_called_for_terminal_log_or_clean_completion(self):
+        """A worker completing over a terminal (done) pipeline log must
+        never trigger a Slack notification — only crashes do."""
+        from unittest import mock
+
+        tid = 'TST-N2'
+        self._append_queue_entry(tid)
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1, exit_code=0)
+            sup._consume_queue(cmd_override=cmd)
+            log_file = self.workspace / f'{tid}-pipeline.log'
+            log_file.write_text(
+                '2026-08-29T00:00:00Z|META|schema|done|1\n'
+                '2026-08-29T00:00:01Z|META|outcome|done|completed\n'
+            )
+            time.sleep(2)
+
+            with mock.patch('fleetd.supervisor._notify_worker_event') as notify:
+                sup._reap_children()
+
+            notify.assert_not_called()
+        finally:
+            sup.release_lock()
+
     def test_exit_127_worker_not_reconciled(self):
         """fleetd's own exec-failure sentinel (127) is a hard skip."""
         from unittest import mock

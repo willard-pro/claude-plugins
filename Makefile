@@ -34,6 +34,7 @@ test-lib:
 	bash fleet-controller/lib/tests/test-fleet-monitor-dispatch.sh
 	bash fleet-controller/lib/tests/test-plugin-structure.sh
 	bash fleet-controller/lib/tests/test-fleet-env-check.sh
+	bash fleet-controller/lib/tests/test-fleet-notify.sh
 	# ticket-planner enrichment tests
 	bash ticket-auto-pipeline/lib/tests/test-planned-ticket-check.sh
 	bash ticket-auto-pipeline/lib/tests/test-appraise-fast-path.sh

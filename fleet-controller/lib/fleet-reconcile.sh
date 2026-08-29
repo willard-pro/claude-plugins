@@ -30,6 +30,9 @@ fi
 if ! declare -f _fleet_queue_append >/dev/null 2>&1; then
   [ -f "$_RECONCILE_DIR/fleet-dispatch.sh" ] && source "$_RECONCILE_DIR/fleet-dispatch.sh"
 fi
+if ! declare -f fleet_notify_worker_event >/dev/null 2>&1; then
+  [ -f "$_RECONCILE_DIR/fleet-notify.sh" ] && source "$_RECONCILE_DIR/fleet-notify.sh"
+fi
 
 # _fleet_tid_live <tid>
 # Returns 0 if a worker process for the ticket appears to be running — its
@@ -358,6 +361,9 @@ fleet_reconcile_orphans() {
         # Terminal marker on the ticket's own log (also keeps classification
         # idempotent) + structured notification line.
         _log_pipeline "$log_file" "META" "dead-letter" "warn" "reason=orphaned-after-max-restarts"
+        if declare -f fleet_notify_worker_event >/dev/null 2>&1; then
+          fleet_notify_worker_event "$tid" "$state_dir" "dead-letter" "orphaned-after-max-restarts" || true
+        fi
         echo "fleet-dead-letter|tid=${tid}|reason=orphaned-after-max-restarts"
         echo "fleet_reconcile: ${tid} — restart cap reached (${restarts}/${max_restarts}), dead-lettered as orphaned-after-max-restarts"
         continue
