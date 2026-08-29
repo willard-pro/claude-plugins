@@ -386,8 +386,14 @@ test_router_retro_condition_2_uses_success_markers() {
     echo "retro condition 2 does not check verify PASS marker"
     return 1
   }
-  echo "$block" | grep -q 'PR-REVIEW|pr-review|done|PASS' || {
-    echo "retro condition 2 does not check PR-review PASS marker"
+  # PR-REVIEW's own Verdict tokens are OK/WARN/BLOCK, never PASS (that's
+  # VERIFY-only) — GitHub #149.
+  echo "$block" | grep -q 'PR-REVIEW|pr-review|done|OK' || {
+    echo "retro condition 2 does not check PR-review OK marker"
+    return 1
+  }
+  echo "$block" | grep -q 'PR-REVIEW|pr-review|done|PASS' && {
+    echo "retro condition 2 still checks the non-existent PR-review PASS token"
     return 1
   }
   echo "$block" | grep -q 'META|outcome|info|completed:' && {

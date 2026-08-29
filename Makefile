@@ -55,6 +55,7 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-pipeline-phases.sh
 	CLAUDE_SKILLS_LIB="$(CURDIR)/ticket-auto-pipeline/lib" \
 	bash ticket-auto-pipeline/lib/tests/test-detect-resume.sh
+	bash ticket-auto-pipeline/lib/tests/test-retro-outcome-parse.sh
 	# ticket-audit tests
 	bash ticket-auto-pipeline/lib/tests/test-ticket-audit-split-detection.sh
 	bash ticket-auto-pipeline/lib/tests/test-ticket-audit-drift.sh

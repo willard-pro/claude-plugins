@@ -143,7 +143,12 @@ else
     RESUME_STEP="STEP_4_5"
   elif grep -q '^[^|]*|IMPLEMENT|implement|done|' "$LOG_FILE"; then
     RESUME_STEP="STEP_4_5"
-  elif grep -q '^[^|]*|GATE|gate|done|' "$LOG_FILE"; then
+  elif grep -qE '^[^|]*\|GATE\|(gate|reconcile)\|done\|' "$LOG_FILE"; then
+    # Accept both the original gate-check completion marker (GATE|gate|done|)
+    # and ticket-gate-reconcile's actual completion marker (GATE|reconcile|done|).
+    # Without this, STEP_3_5 loops forever after re-approval unless a
+    # hand-authored compensating GATE|gate|done| line is written (see
+    # CRE-12 retro, 2026-08-29; GitHub #146).
     RESUME_STEP="STEP_4"
   elif grep -q '^[^|]*|GATE|gate|fail|held' "$LOG_FILE"; then
     RESUME_STEP="GATE_HELD"
@@ -216,7 +221,20 @@ if [ -s "$LOG_FILE" ]; then
           IMPLEMENT) RESUME_STEP="STEP_4" ;;
           VERIFY) RESUME_STEP="STEP_4_5" ;;
           PR-REVIEW) RESUME_STEP="STEP_5" ;;
-          MAINTENANCE) RESUME_STEP="STEP_5" ;;
+          MAINTENANCE)
+            # PHASE=MAINTENANCE is shared by two unrelated dispatch sites:
+            # the Prescan gate (STEP=prescan, runs BEFORE appraise) and real
+            # STEP_5 (STEP=document/wiki-maintenance, runs AFTER pr-review).
+            # A stale prescan zombie must never force RESUME_STEP=STEP_5 on
+            # a ticket that hasn't even reached APPRAISE yet (GitHub #151) —
+            # leave RESUME_STEP untouched so the normal phase-order
+            # computation above decides the resume point, exactly as if
+            # this zombie flag hadn't fired.
+            case "$_z_step" in
+            prescan) : ;;
+            *) RESUME_STEP="STEP_5" ;;
+            esac
+            ;;
           esac
         fi
       fi
