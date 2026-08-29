@@ -278,7 +278,12 @@ Append to `notes.md`:
 
 ### Simple-fix mode
 
-Work through each change in `simple-fix.md` in order.
+Work through each change in `simple-fix.md` in order. **As each acceptance
+criterion is verified, check off its box in the `## Completion Checklist`
+section of `simple-fix.md`** (`- [ ]` → `- [x]`) before moving on to Step 4b.
+`return-completeness-check.sh` reads these boxes directly and reports
+`RETURN_INCOMPLETE` for any left unchecked — even when the underlying work
+is fully done and verified.
 
 ### Openspec mode
 
