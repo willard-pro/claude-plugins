@@ -22,6 +22,10 @@
 #   planner_linear_resolve_label_ids <team_id> <label_names_json>
 #     Maps label names to UUIDs. Hard-fails naming any unresolvable label.
 #
+#   planner_linear_resolve_team_id [name_key_or_id]
+#     Resolves the team to create on: explicit ref → $LINEAR_TEAM_ID → the only
+#     team. Ambiguity is an error, never a guess.
+#
 #   planner_linear_get_issue <issue_id>
 #     Fetches a single issue by ID. Returns issue JSON on stdout.
 #
@@ -223,6 +227,65 @@ planner_linear_resolve_label_ids() {
 }
 
 # Resolve a Linear project by name or id, scoped to a team.
+# ── Team resolution ───────────────────────────────────────────────────────────
+
+# Resolve the Linear team to create issues on.
+#
+# Every issue the planner creates needs a teamId, and nothing else in the planner
+# derives one — the phase prompts referenced a $TEAM_ID that was never assigned,
+# so every create call would have gone out with an empty team. Resolution order:
+#
+#   1. an explicit ref (the --team flag, persisted as config)
+#   2. $LINEAR_TEAM_ID, the convention ticket-auto already uses
+#   3. the workspace's only team, when there is exactly one
+#
+# More than one team with no ref is an error, not a guess: picking one would file
+# a whole initiative against the wrong board.
+#
+# Usage: planner_linear_resolve_team_id [name_key_or_id]
+# Output: team UUID on stdout. Returns 1 if unresolvable.
+planner_linear_resolve_team_id() {
+  local ref="${1:-${LINEAR_TEAM_ID:-}}"
+
+  if _planner_is_uuid "$ref"; then
+    echo "$ref"
+    return 0
+  fi
+
+  local query='query Teams { teams(first: 250) { nodes { id key name } } }'
+  local payload resp id count
+  payload=$(jq -nc --arg query "$query" '{query: $query}')
+  resp=$(planner_linear_graphql "$payload") || return 1
+
+  if [ -n "$ref" ]; then
+    # A team is addressable by key ("CRE") or by name — accept either.
+    id=$(echo "$resp" | jq -r --arg ref "$ref" \
+      '[.data.teams.nodes[]? | select(.key == $ref or .name == $ref) | .id] | first // ""')
+    if [ -z "$id" ]; then
+      echo "planner-linear-api: no team with key or name '${ref}'" >&2
+      echo "Available: $(echo "$resp" | jq -r '[.data.teams.nodes[]? | "\(.key) (\(.name))"] | join(", ")')" >&2
+      return 1
+    fi
+    echo "$id"
+    return 0
+  fi
+
+  count=$(echo "$resp" | jq -r '[.data.teams.nodes[]?] | length')
+  if [ "$count" = "1" ]; then
+    echo "$resp" | jq -r '.data.teams.nodes[0].id'
+    return 0
+  fi
+
+  if [ "$count" = "0" ]; then
+    echo "planner-linear-api: the API token has access to no teams" >&2
+    return 1
+  fi
+
+  echo "planner-linear-api: ${count} teams are visible — set LINEAR_TEAM_ID or pass --team" >&2
+  echo "Available: $(echo "$resp" | jq -r '[.data.teams.nodes[]? | "\(.key) (\(.name))"] | join(", ")')" >&2
+  return 1
+}
+
 # Usage: planner_linear_resolve_project <team_id> <name_or_id>
 # Output: project UUID on stdout. Returns 1 if not found.
 planner_linear_resolve_project() {

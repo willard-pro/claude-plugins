@@ -90,6 +90,8 @@ time. These are written with status `done` by `planner_config_set` and read back
 |------|-------------|
 | `create-authorized` | The operator passed `--create`. Until this entry exists, no phase may write to Linear |
 | `stop-after` | Phase to stop after (`--until`). The literal `none` clears one an earlier invocation set |
+| `linear-team` | Team key, name or id as given (`--team` / `LINEAR_TEAM_ID`) |
+| `linear-team-id` | The team UUID Epic Gen resolved, reused verbatim by Ticket Gen |
 | `linear-project` / `linear-milestone` | Project and milestone as given on the command line |
 | `linear-project-id` / `linear-milestone-id` | The UUIDs Epic Gen resolved them to, reused verbatim by Ticket Gen |
 | `branch-override` | `shared` or `no-shared`, from the branch flags |

@@ -335,6 +335,7 @@ The router never reasons about content. Phases never mutate state directly (they
 |----------|---------|-------------|
 | `REPOS_ROOT` | `${HOME}/repos` | Root for initiative directories and repo discovery |
 | `LINEAR_API_KEY` | (required) | Linear API authentication token |
+| `LINEAR_TEAM_ID` | *(unset)* | Team key, name or id to create on, the fallback for `--team`. Unset resolves to the workspace's only team; several visible teams is an error naming them, never a guess |
 | `LINEAR_API_URL` | `https://api.linear.app/graphql` | Linear GraphQL API endpoint |
 | `LINEAR_MAX_RETRIES` | 3 | Max Linear API call retries |
 | `LINEAR_RETRY_DELAYS` | `1 2 4` | Retry backoff delays in seconds |
@@ -407,7 +408,10 @@ separate process so a regression fails a test rather than shipping.
 
 The ref given is persisted as `META|linear-project`; Epic Gen resolves it to a UUID
 against the team, records the result as `META|linear-project-id`, and Ticket Gen reads
-that id straight back. The epic and every child therefore land in the same project off
+that id straight back. The team itself follows the same path — `META|linear-team` →
+`planner_linear_resolve_team_id` in Epic Gen → `META|linear-team-id`, reused verbatim by
+Ticket Gen, because children on a different team from their parent epic cannot be fixed
+without deleting and recreating them. The epic and every child therefore land in the same project off
 a single name lookup, and no phase reads the variable from its environment.
 
 Which project an initiative belongs to is an operator decision, so it comes from

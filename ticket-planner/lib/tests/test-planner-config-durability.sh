@@ -131,6 +131,7 @@ echo "--- Test 4: project/milestone reach prompt generation ---"
 
 in_new_process 'planner_state_init INIT-PROJ "an idea" >/dev/null
                 planner_authorize_create INIT-PROJ
+                planner_config_set INIT-PROJ linear-team "LED"
                 planner_config_set INIT-PROJ linear-project "Ledgerly M1"
                 planner_config_set INIT-PROJ linear-milestone "Vertical Slice 1"
                 planner_config_set INIT-PROJ branch-override "shared"'
@@ -155,6 +156,12 @@ else
   fail "branch override reaches EpicGen" "$(echo "$prompt" | grep -m1 'BRANCH_OVERRIDE=' || echo 'absent')"
 fi
 
+if echo "$prompt" | grep -qF 'TEAM_REF="LED"'; then
+  pass "the team ref is interpolated into the EpicGen prompt as a literal"
+else
+  fail "team ref reaches EpicGen" "$(echo "$prompt" | grep -m1 'TEAM_REF=' || echo 'absent')"
+fi
+
 # ── Test 5: TicketGen prefers the ids EpicGen resolved ─────────────────────────
 
 echo "--- Test 5: TicketGen files against the resolved ids ---"
@@ -167,14 +174,24 @@ else
 fi
 
 in_new_process 'planner_config_set INIT-PROJ linear-project-id "11111111-2222-3333-4444-555555555555"
-                planner_config_set INIT-PROJ linear-milestone-id "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"'
+                planner_config_set INIT-PROJ linear-milestone-id "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+                planner_config_set INIT-PROJ linear-team-id "99999999-8888-7777-6666-555555555555"'
 
 tg=$(in_new_process 'planner_prompt_ticketgen INIT-PROJ "an idea" /tmp/state')
 if echo "$tg" | grep -qF '"11111111-2222-3333-4444-555555555555"' &&
   ! echo "$tg" | grep -qF '"Ledgerly M1"'; then
-  pass "TicketGen prefers the resolved id EpicGen persisted"
+  pass "TicketGen prefers the resolved project id EpicGen persisted"
 else
-  fail "TicketGen prefers the resolved id" "still using the raw ref"
+  fail "TicketGen prefers the resolved project id" "still using the raw ref"
+fi
+
+# The team is the one value where a second, independent lookup would be actively
+# harmful: children on a different team from their parent epic is unrecoverable
+# without deleting and recreating them.
+if echo "$tg" | grep -qF 'TEAM_ID="99999999-8888-7777-6666-555555555555"'; then
+  pass "TicketGen files children against the team id EpicGen resolved"
+else
+  fail "TicketGen reuses the resolved team id" "$(echo "$tg" | grep -m1 'TEAM_ID=' || echo 'absent')"
 fi
 
 # ── Test 6: no library reads the flag variables at use time ────────────────────

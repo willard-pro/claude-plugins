@@ -272,6 +272,102 @@ else
   fail "create_issue sends teamId" "$(jq -c '.variables.input' "$CAPTURE_FILE")"
 fi
 
+# ── Test 8: team resolution ────────────────────────────────────────────────────
+#
+# Nothing in the planner derived a team id: the phase prompts referenced a
+# $TEAM_ID that was never assigned, so every issueCreate would have gone out with
+# an empty teamId. Resolution order is ref → $LINEAR_TEAM_ID → the only team, and
+# ambiguity is an error rather than a guess.
+
+echo "--- Test 8: team resolution ---"
+
+ONE_TEAM='{"data":{"teams":{"nodes":[{"id":"team-uuid-1","key":"CRE","name":"Credit Network"}]}}}'
+TWO_TEAMS='{"data":{"teams":{"nodes":[{"id":"t1","key":"CRE","name":"Credit"},{"id":"t2","key":"LED","name":"Ledgerly"}]}}}'
+NO_TEAMS='{"data":{"teams":{"nodes":[]}}}'
+
+TEAMS_RESPONSE="$ONE_TEAM"
+planner_linear_graphql() { echo "$TEAMS_RESPONSE"; }
+
+unset LINEAR_TEAM_ID
+
+got=$(planner_linear_resolve_team_id 2>/dev/null)
+if [ "$got" = "team-uuid-1" ]; then
+  pass "a single-team workspace resolves without configuration"
+else
+  fail "single team resolves" "got '$got'"
+fi
+
+got=$(planner_linear_resolve_team_id "CRE" 2>/dev/null)
+if [ "$got" = "team-uuid-1" ]; then
+  pass "a team key resolves to its id"
+else
+  fail "team key resolves" "got '$got'"
+fi
+
+got=$(planner_linear_resolve_team_id "Credit Network" 2>/dev/null)
+if [ "$got" = "team-uuid-1" ]; then
+  pass "a team name resolves to its id"
+else
+  fail "team name resolves" "got '$got'"
+fi
+
+# A UUID must short-circuit before any query — that is what makes the resolved id
+# safe to persist and hand to Ticket Gen without a second lookup.
+QUERIED=0
+planner_linear_graphql() {
+  QUERIED=1
+  echo "$TEAMS_RESPONSE"
+}
+got=$(planner_linear_resolve_team_id "$TEAM_UUID" 2>/dev/null)
+planner_linear_graphql() { echo "$TEAMS_RESPONSE"; }
+if [ "$got" = "$TEAM_UUID" ]; then
+  pass "a bare UUID passes through without a query"
+else
+  fail "UUID passes through" "got '$got'"
+fi
+
+got=$(LINEAR_TEAM_ID="CRE" planner_linear_resolve_team_id 2>/dev/null)
+if [ "$got" = "team-uuid-1" ]; then
+  pass "LINEAR_TEAM_ID is the fallback when no ref is passed"
+else
+  fail "LINEAR_TEAM_ID fallback" "got '$got'"
+fi
+
+if err=$(planner_linear_resolve_team_id "NOPE" 2>&1); then
+  fail "an unknown team is rejected" "accepted"
+else
+  if echo "$err" | grep -q "CRE (Credit Network)"; then
+    pass "an unknown team is rejected, listing the available ones"
+  else
+    fail "rejection lists available teams" "$err"
+  fi
+fi
+
+TEAMS_RESPONSE="$TWO_TEAMS"
+if err=$(planner_linear_resolve_team_id 2>&1); then
+  fail "an ambiguous workspace is an error, not a guess" "resolved to '$err'"
+else
+  if echo "$err" | grep -q "LINEAR_TEAM_ID"; then
+    pass "several visible teams is an error naming how to disambiguate"
+  else
+    fail "ambiguity names the fix" "$err"
+  fi
+fi
+
+got=$(LINEAR_TEAM_ID="LED" planner_linear_resolve_team_id 2>/dev/null)
+if [ "$got" = "t2" ]; then
+  pass "LINEAR_TEAM_ID disambiguates a multi-team workspace"
+else
+  fail "LINEAR_TEAM_ID disambiguates" "got '$got'"
+fi
+
+TEAMS_RESPONSE="$NO_TEAMS"
+if planner_linear_resolve_team_id 2>/dev/null; then
+  fail "a token with no team access fails" "resolved"
+else
+  pass "a token with no team access fails rather than returning empty"
+fi
+
 echo ""
 echo "=== planner-linear-api.sh: ${PASS} passed, ${FAIL} failed ==="
 [ "$FAIL" -eq 0 ]

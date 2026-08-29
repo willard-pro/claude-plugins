@@ -61,6 +61,7 @@ process per phase and an `export` does not survive that (#144).
 | `--no-shared-branch` | Suppress the shared-branch directive regardless of the heuristic |
 | `--until <Phase>` | Stop the dispatch loop once `<Phase>` completes; `resume` continues |
 | `--dry-run` | Accepted and redundant — stopping before Linear is already the default |
+| `--team <key\|name\|id>` | Linear team to create on (overrides `LINEAR_TEAM_ID`) |
 | `--project <name\|id>` | Linear project for the epic and its tickets |
 | `--milestone <name\|id>` | Linear project milestone (needs `--project` when given by name) |
 
@@ -182,6 +183,7 @@ The router never reasons about content; phases never mutate state directly (they
 | `PLANNER_CONFIDENCE_THRESHOLD` | 0.85 | Minimum confidence for `pre-approved` label |
 | `PLANNER_IDEA_MAX_LENGTH` | 2000 | Maximum idea length in chars (truncated with warning) |
 | `PLANNER_REQUIRE_INTENT` | false | When `true`, raw idea strings are refused — must pass a grill-me intent file |
+| `LINEAR_TEAM_ID` | *(unset)* | Team key, name or id to create on, the fallback for `--team`. Unset ⇒ the workspace's only team, or an error naming the candidates |
 | `LINEAR_PROJECT` | *(unset)* | Default project name or id for created epics/tickets, read once at parsing time as the fallback for `--project`. Unset ⇒ no project field is sent |
 | `LINEAR_PROJECT_MILESTONE` | *(unset)* | Default project milestone name or id, the fallback for `--milestone`. Requires a project when given by name |
 | `FLEET_AUTO_DISPATCH` | false | Must be true for automatic fleet-controller dispatch |
@@ -263,12 +265,14 @@ SHARED_BRANCH_FLAG=""
 NO_SHARED_BRANCH_FLAG=""
 CREATE_FLAG=""
 UNTIL_PHASE=""
+TEAM_REF=""
 PROJECT_REF=""
 MILESTONE_REF=""
 
 # Env vars are the defaults for the corresponding flags, read once, here.
 UNTIL_PHASE="${PLANNER_UNTIL:-}"
 [ "${PLANNER_REVIEW_HOLD:-false}" = "true" ] && UNTIL_PHASE="${UNTIL_PHASE:-Review}"
+TEAM_REF="${LINEAR_TEAM_ID:-}"
 PROJECT_REF="${LINEAR_PROJECT:-}"
 MILESTONE_REF="${LINEAR_PROJECT_MILESTONE:-}"
 
@@ -280,6 +284,8 @@ while [ "$#" -gt 0 ]; do
     --dry-run) ;;   # redundant: stopping before the first Linear write is the default
     --until) shift; UNTIL_PHASE="${1:-}" ;;
     --until=*) UNTIL_PHASE="${1#*=}" ;;
+    --team) shift; TEAM_REF="${1:-}" ;;
+    --team=*) TEAM_REF="${1#*=}" ;;
     --project) shift; PROJECT_REF="${1:-}" ;;
     --project=*) PROJECT_REF="${1#*=}" ;;
     --milestone) shift; MILESTONE_REF="${1:-}" ;;
@@ -332,6 +338,7 @@ elif [ -n "$UNTIL_PHASE" ]; then
   planner_stop_after_set "$INITIATIVE_ID" "$UNTIL_PHASE"
 fi
 
+[ -n "$TEAM_REF" ] && planner_config_set "$INITIATIVE_ID" "linear-team" "$TEAM_REF"
 [ -n "$PROJECT_REF" ] && planner_config_set "$INITIATIVE_ID" "linear-project" "$PROJECT_REF"
 [ -n "$MILESTONE_REF" ] && planner_config_set "$INITIATIVE_ID" "linear-milestone" "$MILESTONE_REF"
 
@@ -346,10 +353,14 @@ Config is last-write-wins, so a later invocation overrides an earlier one — th
 `resume --create` lifts the stop point `plan` recorded. `planner_config_set` rejects any
 key outside `PLANNER_CONFIG_KEYS`; do not invent new ones inline.
 
-The project and milestone refs are recorded here as given. Epic Gen resolves them to
-UUIDs against the team, records the resolved ids with `planner_config_set`, and Ticket
-Gen reads those ids straight back — so the epic and every child land in the same project
-with one name lookup for the whole run.
+The team, project and milestone refs are recorded here as given. Epic Gen resolves them
+to UUIDs, records the resolved ids with `planner_config_set`, and Ticket Gen reads those
+ids straight back — so the epic and every child land on the same team and in the same
+project, with one name lookup for the whole run.
+
+`--team` is optional. With nothing set, `planner_linear_resolve_team_id` falls back to
+the workspace's only team; when several are visible it fails naming them, because
+guessing would file an entire initiative against the wrong board.
 
 ### 3. Plan mode
 

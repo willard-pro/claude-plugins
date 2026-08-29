@@ -28,6 +28,7 @@ claude plugin install ticket-planner@willard-pro-claude-plugins
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `LINEAR_API_KEY` | Yes | — | Linear API authentication token |
+| `LINEAR_TEAM_ID` | No | only team | Team to create on. Required when the token sees more than one |
 | `REPOS_ROOT` | No | `~/repos` | Root directory for source repositories and initiative state |
 
 **2. Set project fields** in your working directory's `CLAUDE.md`:
@@ -81,6 +82,7 @@ Accepted by both `plan` and `resume`:
 | `--shared-branch` | Force a shared-branch directive on the epic regardless of the heuristic |
 | `--no-shared-branch` | Suppress the shared-branch directive regardless of the heuristic |
 | `--until <Phase>` | Stop the run once `<Phase>` completes |
+| `--team <key\|name\|id>` | Linear team to create on (overrides `LINEAR_TEAM_ID`) |
 | `--project <name\|id>` | Linear project for the epic and its tickets |
 | `--milestone <name\|id>` | Linear project milestone |
 
