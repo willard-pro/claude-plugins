@@ -199,6 +199,90 @@ planner_state_init() {
   planner_state_write "$initiative_id" "META" "idea" "start" "$safe_idea"
 }
 
+# ── Durable invocation config ──────────────────────────────────────────────────
+#
+# Values supplied at invocation time — the stop point, the create authorization,
+# the Linear project/milestone refs, the branch override — have to survive the
+# dispatch loop. That loop is not one shell: an Agent tool call sits between every
+# phase, so each iteration runs in a fresh process and an `export` from argument
+# parsing is simply gone by the time a later phase looks for it (#144, and #138
+# before it).
+#
+# They are therefore written to the state log the moment they are parsed, and
+# re-read from there at every point of use — the same durability the retry budget
+# already gets from `fail` entries, and the same "hand it down as data, never as
+# an environment assumption" rule the plugin-root fix established.
+#
+# Config is last-write-wins: `resume --create` must be able to override the stop
+# point `plan` recorded, so these steps are exempt from duplicate-done suppression.
+
+# Config keys recognised by planner_config_set / planner_config_get.
+PLANNER_CONFIG_KEYS="stop-after create-authorized linear-team linear-team-id linear-project linear-milestone linear-project-id linear-milestone-id branch-override"
+
+# Is <step> a config key rather than a progress marker?
+# Usage: _planner_is_config_key <step>
+_planner_is_config_key() {
+  case " ${PLANNER_CONFIG_KEYS} " in
+  *" $1 "*) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
+# Persist an invocation-time config value.
+# Usage: planner_config_set <initiative_id> <key> <value>
+# Returns: 0 on success, 1 for an unknown key.
+#
+# Pass the literal string "none" to clear a value a previous invocation set —
+# planner_config_get reads it back as empty.
+planner_config_set() {
+  local initiative_id="$1" key="$2" value="$3"
+
+  if ! _planner_is_config_key "$key"; then
+    echo "planner-state: '${key}' is not a known config key (${PLANNER_CONFIG_KEYS})" >&2
+    return 1
+  fi
+
+  # The log is pipe-delimited and line-oriented; ids and phase names contain
+  # neither, but an operator-supplied project name could.
+  local safe
+  safe=$(printf '%s' "$value" | tr '|' ' ' | tr -d '\n\r')
+
+  planner_state_write "$initiative_id" "META" "$key" "done" "$safe"
+}
+
+# Read an invocation-time config value back from the state log.
+# Usage: planner_config_get <initiative_id> <key>
+# Output: the value on stdout, or empty when unset or explicitly cleared.
+planner_config_get() {
+  local initiative_id="$1" key="$2"
+  local log_file value
+
+  log_file=$(planner_state_log "$initiative_id") || return 1
+  if [ ! -f "$log_file" ]; then
+    echo ""
+    return 0
+  fi
+
+  # Last write wins. `-f5-` rather than `-f5`: a value containing a pipe would
+  # otherwise be silently truncated at the first one.
+  value=$(grep "^[^|]*|META|${key}|done|" "$log_file" 2>/dev/null | tail -1 | cut -d'|' -f5-)
+
+  # "none" is the explicit clear marker, written by an invocation that revokes a
+  # value an earlier one set.
+  [ "$value" = "none" ] && value=""
+
+  echo "$value"
+}
+
+# Is a config key set to a non-empty value?
+# Usage: planner_config_is_set <initiative_id> <key>
+# Returns: 0 when set, 1 when unset or cleared.
+planner_config_is_set() {
+  local value
+  value=$(planner_config_get "$1" "$2")
+  [ -n "$value" ]
+}
+
 # ── Phase sequence ─────────────────────────────────────────────────────────────
 
 # Return the ordered phase sequence. Single source of truth — both position
@@ -543,6 +627,13 @@ _planner_check_duplicate() {
 
   case "$status" in
   done)
+    # Config META steps are last-write-wins, not progress markers: `resume
+    # --create` overriding the stop point `plan` recorded is a legitimate
+    # re-write, and suppressing it would leave the stale value in force.
+    if [ "$phase" = "META" ] && _planner_is_config_key "$step"; then
+      return 0
+    fi
+
     # Check if a 'done' entry already exists for this phase+step
     if grep -q "^[^|]*|${phase}|${step}|done|" "$log_file" 2>/dev/null; then
       # Check if the last entry was 'fail' (retry pattern is allowed)

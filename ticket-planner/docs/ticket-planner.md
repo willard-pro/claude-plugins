@@ -335,34 +335,84 @@ The router never reasons about content. Phases never mutate state directly (they
 |----------|---------|-------------|
 | `REPOS_ROOT` | `${HOME}/repos` | Root for initiative directories and repo discovery |
 | `LINEAR_API_KEY` | (required) | Linear API authentication token |
+| `LINEAR_TEAM_ID` | *(unset)* | Team key, name or id to create on, the fallback for `--team`. Unset resolves to the workspace's only team; several visible teams is an error naming them, never a guess |
 | `LINEAR_API_URL` | `https://api.linear.app/graphql` | Linear GraphQL API endpoint |
 | `LINEAR_MAX_RETRIES` | 3 | Max Linear API call retries |
 | `LINEAR_RETRY_DELAYS` | `1 2 4` | Retry backoff delays in seconds |
 | `CLAUDE_PLUGIN_ROOT` | (resolved at runtime) | Plugin cache location for library sourcing |
 
-### Stop conditions
+### The create gate and stop conditions
+
+Phases 1–6 write only to disk. Epic Gen (phase 7) is the first Linear write, and the
+dispatch loop **stops on that boundary unless the initiative has been explicitly
+authorized to cross it**. That default is a constant, not runtime state: there is no
+flag whose absence permits creation, and nothing that has to propagate correctly for
+the safe outcome to hold.
+
+Crossing the boundary takes a separate invocation:
+
+```
+/ticket-planner plan "…"                  # → Appraisal … Consensus, nothing in Linear
+/ticket-planner resume INIT-42 --create   # → Epic Gen, Ticket Gen, Completed
+```
+
+`--create` is read once, at the top of that invocation, and written to the state log
+as `META|create-authorized|done` **before the loop starts**. Every later check reads
+it back from disk, so the authorization survives a crashed router and the process
+boundary between phases — the same durability the retry budget gets from `fail`
+entries. A `resume` after a crash mid-Epic-Gen proceeds without re-passing the flag.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PLANNER_UNTIL` | *(unset)* | Stop the dispatch loop once this phase completes. Set by `--until`; `--dry-run` sets it to `Consensus` |
-| `PLANNER_REVIEW_HOLD` | false | When `true`, stop after Review — the env-var form of `--until Review` |
-| `PLANNER_CONSENSUS_HOLD` | false | When `true`, stop after Consensus — the env-var form of `--dry-run` |
+| `PLANNER_UNTIL` | *(unset)* | Phase to stop after. Read **once, during argument parsing**, and persisted as `META|stop-after` |
+| `PLANNER_REVIEW_HOLD` | false | When `true`, stop after Review — folded into `--until Review` at parsing time |
 | `PLANNER_MAX_PHASE_RETRIES` | 2 | Max retries per phase before failing the run |
 
-All three stop controls resolve through a single function, `planner_stop_phase`, which
-returns the **earliest** configured stop point. There is one stop condition in the
-dispatch loop, not three, so the flag and env-var forms cannot diverge.
+`PLANNER_CONSENSUS_HOLD` was removed: stopping before the first Linear write is now
+the default and needs no variable.
+
+Both controls resolve through a single function, `planner_stop_phase <initiative_id>`,
+which returns the **earliest** applicable stop point — `--until TicketGen` on an
+unauthorized initiative still stops at Consensus. There is one stop condition in the
+dispatch loop, not several, so the forms cannot diverge.
+
+Two further guards sit under the stop check, because the failure being prevented is
+silent entity creation: `planner_create_gate_check` refuses to dispatch a write phase
+without authorization, and the Epic Gen and Ticket Gen prompts re-verify it from the
+state log inside the agent.
 
 Stopping is not a distinct mode. The router holds no in-memory state, so a stop is
-just "quit dispatching", and `/ticket-planner resume <INIT_ID>` is the continuation —
-the same path crash recovery already uses.
+just "quit dispatching", and `resume` is the continuation — the same path crash
+recovery already uses.
+
+#### Why the controls live on disk
+
+Every value that survives the dispatch loop correctly — the initiative ID, the idea,
+the current phase, retry counts — survives by being re-derived from disk or re-supplied
+as a literal argument, never by shell persistence. The loop is not one process: an
+Agent tool call sits between every pair of phases, so each iteration runs in a fresh
+shell and an `export` from argument parsing is gone by the next one.
+
+The stop conditions and project/milestone flags were, briefly, the only pieces of state
+that tried to cross that boundary via `export`, and they were the only pieces that were
+broken — `--dry-run` silently did nothing (#144), the same root cause as the plugin-root
+defect before it (#138). `test-planner-config-durability.sh` now runs each step in a
+separate process so a regression fails a test rather than shipping.
 
 ### Projects and milestones
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LINEAR_PROJECT` | *(unset)* | Project name or id for created epics and tickets. Set by `--project` |
-| `LINEAR_PROJECT_MILESTONE` | *(unset)* | Project milestone name or id. Set by `--milestone` |
+| `LINEAR_PROJECT` | *(unset)* | Default project name or id, the fallback for `--project`. Read once during argument parsing |
+| `LINEAR_PROJECT_MILESTONE` | *(unset)* | Default project milestone, the fallback for `--milestone`. Read once during argument parsing |
+
+The ref given is persisted as `META|linear-project`; Epic Gen resolves it to a UUID
+against the team, records the result as `META|linear-project-id`, and Ticket Gen reads
+that id straight back. The team itself follows the same path — `META|linear-team` →
+`planner_linear_resolve_team_id` in Epic Gen → `META|linear-team-id`, reused verbatim by
+Ticket Gen, because children on a different team from their parent epic cannot be fixed
+without deleting and recreating them. The epic and every child therefore land in the same project off
+a single name lookup, and no phase reads the variable from its environment.
 
 Which project an initiative belongs to is an operator decision, so it comes from
 configuration rather than agent judgement — it stays on the deterministic side of the

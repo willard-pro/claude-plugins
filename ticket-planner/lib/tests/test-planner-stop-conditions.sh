@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# test-planner-stop-conditions.sh — Tests for --until / --dry-run / hold vars and
-# the retry budget.
+# test-planner-stop-conditions.sh — Tests for the create gate, --until, and the
+# retry budget.
 #
-# The three stop controls (issues #140, #141) collapse into one earliest-stop-phase
-# decision, so these tests pin that they cannot diverge. PLANNER_MAX_PHASE_RETRIES
-# is derived from `fail` entries in the state log, so it survives a crashed router.
+# The create gate and --until collapse into one earliest-stop-phase decision, so
+# these tests pin that they cannot diverge. Every one of them is resolved from the
+# state log: after #144 nothing here may consult the environment, because the
+# dispatch loop runs a fresh process per phase and an export does not survive it.
+# Cross-process durability itself is proven in test-planner-config-durability.sh —
+# same-process tests structurally cannot see the boundary that broke #141.
 #
 # Run: bash ticket-planner/lib/tests/test-planner-stop-conditions.sh
 
@@ -32,6 +35,8 @@ fail() {
 }
 
 reset_env() {
+  # These are read only by argument parsing now; unsetting them here guards against
+  # a regression that reintroduces a mid-loop environment read.
   unset PLANNER_UNTIL PLANNER_REVIEW_HOLD PLANNER_CONSENSUS_HOLD PLANNER_MAX_PHASE_RETRIES
 }
 
@@ -59,122 +64,198 @@ else
   fail "an unknown phase is -1" "got '$(planner_phase_index Banana || true)'"
 fi
 
-# ── Test 2: no stop configured ─────────────────────────────────────────────────
-
-echo "--- Test 2: default is run to completion ---"
-
-reset_env
-if [ -z "$(planner_stop_phase)" ]; then
-  pass "no flags and no hold vars means no stop phase"
-else
-  fail "no stop phase by default" "got '$(planner_stop_phase)'"
-fi
-
-reset_env
-if planner_should_stop_after Consensus; then
-  fail "default does not stop at Consensus" "stopped"
-else
-  pass "default does not stop at Consensus"
-fi
-
-# ── Test 3: --until / PLANNER_UNTIL ────────────────────────────────────────────
-
-echo "--- Test 3: --until ---"
-
-reset_env
-PLANNER_UNTIL="Specify"
-if [ "$(planner_stop_phase)" = "Specify" ]; then
-  pass "PLANNER_UNTIL sets the stop phase"
-else
-  fail "PLANNER_UNTIL sets the stop phase" "got '$(planner_stop_phase)'"
-fi
-
-if planner_should_stop_after Specify; then
-  pass "stops after the named phase"
-else
-  fail "stops after the named phase" "did not stop"
-fi
-
-if planner_should_stop_after Discovery; then
-  fail "does not stop before the named phase" "stopped at Discovery"
-else
-  pass "does not stop before the named phase"
-fi
-
-# ── Test 4: --dry-run stops on the Linear-write boundary ───────────────────────
+# ── Test 2: the default is the create gate ─────────────────────────────────────
 #
-# Consensus is the last artifact-only phase; EpicGen is the first Linear write.
+# The safe state is the default. An initiative nobody authorized stops on the last
+# artifact-only phase, with no flag involved — there is nothing to forget to pass
+# and nothing that can fail to propagate.
 
-echo "--- Test 4: dry-run boundary ---"
-
-if [ "$PLANNER_DRY_RUN_PHASE" = "Consensus" ]; then
-  pass "dry-run stops at Consensus — the last phase before any Linear write"
-else
-  fail "dry-run stops at Consensus" "got '$PLANNER_DRY_RUN_PHASE'"
-fi
+echo "--- Test 2: default stops at the create gate ---"
 
 reset_env
-PLANNER_UNTIL="$PLANNER_DRY_RUN_PHASE"
-if planner_should_stop_after Consensus && ! planner_should_stop_after EpicGen; then
-  pass "a dry run stops after Consensus and never reaches EpicGen"
+planner_state_init "INIT-GATE" "an idea" >/dev/null
+
+if [ "$(planner_stop_phase INIT-GATE)" = "Consensus" ]; then
+  pass "an unauthorized initiative stops after Consensus by default"
 else
-  fail "dry run stops before EpicGen" "stop phase '$(planner_stop_phase)'"
+  fail "default stop is Consensus" "got '$(planner_stop_phase INIT-GATE)'"
 fi
 
-# ── Test 5: hold vars are the env-var form of the same mechanism ────────────────
-
-echo "--- Test 5: hold variables ---"
-
-reset_env
-PLANNER_REVIEW_HOLD=true
-if [ "$(planner_stop_phase)" = "Review" ]; then
-  pass "PLANNER_REVIEW_HOLD stops after Review"
+if planner_should_stop_after INIT-GATE Consensus; then
+  pass "the loop stops once Consensus completes"
 else
-  fail "PLANNER_REVIEW_HOLD stops after Review" "got '$(planner_stop_phase)'"
+  fail "the loop stops after Consensus" "did not stop"
 fi
 
-reset_env
-PLANNER_CONSENSUS_HOLD=true
-if [ "$(planner_stop_phase)" = "Consensus" ]; then
-  pass "PLANNER_CONSENSUS_HOLD stops after Consensus"
+if planner_create_authorized INIT-GATE; then
+  fail "a fresh initiative is unauthorized" "reported authorized"
 else
-  fail "PLANNER_CONSENSUS_HOLD stops after Consensus" "got '$(planner_stop_phase)'"
+  pass "a fresh initiative is not authorized to create"
 fi
 
-reset_env
-PLANNER_REVIEW_HOLD=false
-PLANNER_CONSENSUS_HOLD=false
-if [ -z "$(planner_stop_phase)" ]; then
-  pass "hold vars set to false do not stop the run"
+if err=$(planner_create_gate_check INIT-GATE EpicGen 2>&1); then
+  fail "EpicGen is refused without authorization" "allowed"
 else
-  fail "false hold vars do not stop" "got '$(planner_stop_phase)'"
+  if echo "$err" | grep -q -- "--create"; then
+    pass "EpicGen is refused, naming the --create command"
+  else
+    fail "refusal names --create" "$err"
+  fi
 fi
 
-# ── Test 6: the earliest stop point wins ───────────────────────────────────────
-
-echo "--- Test 6: earliest stop wins ---"
-
-reset_env
-PLANNER_REVIEW_HOLD=true
-PLANNER_UNTIL="TicketGen"
-if [ "$(planner_stop_phase)" = "Review" ]; then
-  pass "a hold earlier than --until wins"
+if planner_create_gate_check INIT-GATE Specify 2>/dev/null; then
+  pass "artifact-only phases are never gated"
 else
-  fail "earliest stop wins" "got '$(planner_stop_phase)'"
+  fail "artifact-only phases are ungated" "Specify was refused"
 fi
 
-reset_env
-PLANNER_CONSENSUS_HOLD=true
-PLANNER_UNTIL="Discovery"
-if [ "$(planner_stop_phase)" = "Discovery" ]; then
-  pass "an --until earlier than a hold wins"
+# ── Test 3: --create lifts the gate, durably ───────────────────────────────────
+
+echo "--- Test 3: --create ---"
+
+planner_authorize_create INIT-GATE "operator passed --create"
+
+if planner_create_authorized INIT-GATE; then
+  pass "--create authorizes the initiative"
 else
-  fail "earliest stop wins" "got '$(planner_stop_phase)'"
+  fail "--create authorizes" "still unauthorized"
 fi
 
-# ── Test 7: --until validation ─────────────────────────────────────────────────
+if [ -z "$(planner_stop_phase INIT-GATE)" ]; then
+  pass "an authorized run has no stop phase"
+else
+  fail "authorized run runs to completion" "got '$(planner_stop_phase INIT-GATE)'"
+fi
 
-echo "--- Test 7: --until validation ---"
+if planner_create_gate_check INIT-GATE EpicGen 2>/dev/null &&
+  planner_create_gate_check INIT-GATE TicketGen 2>/dev/null; then
+  pass "both Linear-write phases are allowed once authorized"
+else
+  fail "write phases allowed once authorized" "still refused"
+fi
+
+# The authorization is a log entry, not a variable — that is the whole point.
+if grep -q '|META|create-authorized|done|' "$(planner_state_log INIT-GATE)"; then
+  pass "authorization is persisted to the state log"
+else
+  fail "authorization is persisted" "no META entry written"
+fi
+
+# ── Test 4: --until narrows the run, and the earliest stop wins ────────────────
+
+echo "--- Test 4: --until ---"
+
+planner_state_init "INIT-UNTIL" "an idea" >/dev/null
+planner_stop_after_set INIT-UNTIL "Specify"
+
+if [ "$(planner_stop_phase INIT-UNTIL)" = "Specify" ]; then
+  pass "--until sets the stop phase"
+else
+  fail "--until sets the stop phase" "got '$(planner_stop_phase INIT-UNTIL)'"
+fi
+
+if planner_should_stop_after INIT-UNTIL Specify && ! planner_should_stop_after INIT-UNTIL Discovery; then
+  pass "stops after the named phase, not before it"
+else
+  fail "stops exactly at the named phase" "stop='$(planner_stop_phase INIT-UNTIL)'"
+fi
+
+# An --until past the gate cannot be used to sneak past it.
+planner_stop_after_set INIT-UNTIL "TicketGen"
+if [ "$(planner_stop_phase INIT-UNTIL)" = "Consensus" ]; then
+  pass "--until past the gate still stops at the gate"
+else
+  fail "the earliest stop wins" "got '$(planner_stop_phase INIT-UNTIL)'"
+fi
+
+# …and an --until before the gate wins over it.
+planner_stop_after_set INIT-UNTIL "Review"
+if [ "$(planner_stop_phase INIT-UNTIL)" = "Review" ]; then
+  pass "--until earlier than the gate wins"
+else
+  fail "the earliest stop wins" "got '$(planner_stop_phase INIT-UNTIL)'"
+fi
+
+# ── Test 5: --create clears a stop point an earlier invocation set ─────────────
+#
+# `plan --until Consensus` then `resume --create` must not keep stopping at
+# Consensus. Config is last-write-wins, which requires that a re-written config
+# entry is not suppressed as a duplicate `done`.
+
+echo "--- Test 5: config is last-write-wins ---"
+
+planner_state_init "INIT-OVERRIDE" "an idea" >/dev/null
+planner_stop_after_set INIT-OVERRIDE "Consensus"
+planner_authorize_create INIT-OVERRIDE
+planner_stop_after_set INIT-OVERRIDE ""
+
+if [ -z "$(planner_stop_phase INIT-OVERRIDE)" ]; then
+  pass "--create clears the stop point plan recorded"
+else
+  fail "--create clears the earlier stop point" "got '$(planner_stop_phase INIT-OVERRIDE)'"
+fi
+
+if [ "$(grep -c '|META|stop-after|done|' "$(planner_state_log INIT-OVERRIDE)")" = "2" ]; then
+  pass "a re-written config entry is appended, not suppressed as a duplicate"
+else
+  fail "config re-writes are appended" "$(grep -c '|META|stop-after|done|' "$(planner_state_log INIT-OVERRIDE)") entries"
+fi
+
+# ── Test 6: the dry-run boundary is still the phase before the first write ─────
+
+echo "--- Test 6: write boundary ---"
+
+if [ "$PLANNER_DRY_RUN_PHASE" = "Consensus" ] && [ "$PLANNER_CREATE_GATE_PHASE" = "Consensus" ]; then
+  pass "the gate sits on the last artifact-only phase"
+else
+  fail "gate is at Consensus" "dry-run='$PLANNER_DRY_RUN_PHASE' gate='$PLANNER_CREATE_GATE_PHASE'"
+fi
+
+for phase in EpicGen TicketGen; do
+  if planner_phase_writes_linear "$phase"; then
+    pass "${phase} is classed as a Linear-write phase"
+  else
+    fail "${phase} writes Linear" "not classed as a write phase"
+  fi
+done
+
+for phase in Appraisal Discovery Architecture Specify Review Consensus; do
+  if planner_phase_writes_linear "$phase"; then
+    fail "${phase} is artifact-only" "classed as a Linear-write phase"
+  else
+    pass "${phase} is artifact-only"
+  fi
+done
+
+# ── Test 7: stop reason distinguishes the gate from an explicit --until ────────
+
+echo "--- Test 7: stop reason ---"
+
+planner_state_init "INIT-REASON" "an idea" >/dev/null
+if planner_stop_reason INIT-REASON | grep -q "not authorized"; then
+  pass "the default stop is reported as an authorization gate"
+else
+  fail "gate stop reason" "got '$(planner_stop_reason INIT-REASON)'"
+fi
+
+planner_stop_after_set INIT-REASON "Review"
+if [ "$(planner_stop_reason INIT-REASON)" = "--until Review" ]; then
+  pass "an explicit --until is reported as such"
+else
+  fail "--until stop reason" "got '$(planner_stop_reason INIT-REASON)'"
+fi
+
+planner_authorize_create INIT-REASON
+planner_stop_after_set INIT-REASON ""
+if [ -z "$(planner_stop_reason INIT-REASON)" ]; then
+  pass "an unstopped run has no stop reason"
+else
+  fail "no stop reason when nothing stops" "got '$(planner_stop_reason INIT-REASON)'"
+fi
+
+# ── Test 7b: --until validation ────────────────────────────────────────────────
+
+echo "--- Test 7b: --until validation ---"
 
 reset_env
 if err=$(planner_until_validate "Banana" 2>&1); then

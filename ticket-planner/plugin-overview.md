@@ -61,12 +61,16 @@ User invokes /ticket-planner plan "idea"
   → SKILL.md sources planner-state.sh + planner-router.sh
     → planner_state_init "$ID" "$IDEA"
     → planner_run "$ID" "$IDEA"
-      → dispatch loop:
+    → persist invocation config (planner_config_set) — flags become log entries
+      → dispatch loop (one process per iteration):
         1. planner_position_derive → current phase
-        2. planner_prompt_for_phase → agent prompt
-        3. Spawn isolated agent with prompt
-        4. Agent writes state log entries via planner_state_write
-        5. Re-read position → next phase or done
+        2. planner_create_gate_check → refuse EpicGen/TicketGen unless authorized
+        3. planner_prompt_for_phase → agent prompt, config read back off disk
+        4. Spawn isolated agent with prompt
+        5. Agent writes state log entries via planner_state_write
+        6. planner_should_stop_after → stop at the create gate or an --until
+        7. Re-read position → next phase or done
+      → plan stops after Consensus; resume --create continues
       → Completed → planner_position_derive returns "" → stop
 ```
 
@@ -80,7 +84,7 @@ User invokes /ticket-planner plan "idea"
 | 4 | Specify | `planner_prompt_specify` | `proposal.md`, `specs/*.md` |
 | 5 | Review | `planner_prompt_review` | `review.md` |
 | 6 | Consensus | `planner_prompt_consensus` | `proposal.md` (overwritten), `consensus.md` |
-| 7 | EpicGen | `planner_prompt_epicgen` | Linear epic |
+| 7 | EpicGen | `planner_prompt_epicgen` | Linear epic — **first Linear write, gated on `--create`** |
 | 8 | TicketGen | `planner_prompt_ticketgen` | Linear tickets, `state:execution` on epic |
 | 9 | Completed | `planner_prompt_completed` | `COMPLETED.md` |
 
@@ -101,6 +105,7 @@ The merge reduced phase count from 12 to 9 without removing any capability. Phas
 - **Phase sequence is single source of truth.** `planner_phase_sequence` in `planner-state.sh` is the canonical phase list. Position derivation, transition validation, and the dispatch table all derive from it. There is no second copy to drift.
 - **Confidence from signals, not self-assessment.** The LLM writes raw signal values (services count, symbols count, prior art boolean, complexity enum, exploration depth enum). A deterministic bash function computes confidence from these. The LLM never sees its own confidence score — it can't game it.
 - **Regenerate is an explicit flag.** Feedback is not read by default. The `Regenerate` flag must be set on the Planner Context block before `replan` will ingest feedback. This keeps planner runs reproducible and feedback ingestion a deliberate act.
+- **Creation is authorized separately from planning.** `plan` ends at Consensus, the last artifact-only phase; EpicGen is the first Linear write and runs only for an initiative carrying `META|create-authorized|done`, written by `resume <ID> --create`. The default is a constant in the phase sequence rather than a flag, so nothing has to propagate correctly for the safe outcome to hold — and the authorization, being a log entry, survives a crashed router.
 - **`state:execution` is set by TicketGen, not EpicGen.** The epic is created without the execution label. Only after all child tickets are created and verified does TicketGen apply `state:execution`. This prevents fleet-controller from dispatching a partially-created initiative.
 - **Cross-plugin dependency on `planned-ticket-check.sh`.** The planner does not bundle its own ticket validator. It resolves `planned-ticket-check.sh` from ticket-auto-pipeline via a three-level fallback. This is deliberate — schema drift between planner output and pipeline consumption is a hard stop, not a silent degradation.
 

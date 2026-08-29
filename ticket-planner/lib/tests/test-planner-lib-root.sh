@@ -153,6 +153,77 @@ for needle in \
   fi
 done
 
+# ── Test 9: no generator-only variable survives into an emitted prompt ─────────
+#
+# The mirror image of Test 8. There, an *unescaped* $(...) executed at generation
+# time and vanished from the prompt. Here, an *over-escaped* ${var} reaches the
+# agent's shell — where the variable does not exist, because it is a local of the
+# generating function. It expands to empty and the agent operates on a truncated
+# path with no error.
+#
+# That was ENTITY_KEY="epic-${initiative_id}" (idempotency key became "epic-") and,
+# worse, TicketGen reading "${state_dir}/state.log" — which resolves to
+# "/state.log", so EPIC_ID came back empty and the phase hard-exited on every run.
+#
+# These names exist only in the prompt-building functions, so their appearance in
+# emitted text is always a bug, in prose as much as in bash.
+
+echo "--- Test 9: no generator-only variables reach the agent ---"
+
+GENERATOR_LOCALS=(state_dir initiative_id safe_idea team_ref project_ref milestone_ref branch_override)
+
+for phase in "${PHASES[@]}"; do
+  prompt=$(planner_prompt_for_phase "$phase" "INIT-TEST" "an idea" "/repos/.ticket-auto/initiatives/INIT-TEST")
+  found=""
+  for var in "${GENERATOR_LOCALS[@]}"; do
+    if echo "$prompt" | grep -qE "\\\$\{?${var}\\b"; then
+      found="${found}${var} "
+    fi
+  done
+  if [ -z "$found" ]; then
+    pass "${phase} prompt references no generator-only variable"
+  else
+    fail "${phase} prompt references no generator-only variable" "leaked: ${found}"
+  fi
+done
+
+# The positive half: the interpolated values must actually be there, or the fix
+# above could be "satisfied" by deleting the references entirely.
+tg=$(planner_prompt_ticketgen "INIT-TEST" "an idea" "/repos/.ticket-auto/initiatives/INIT-TEST")
+if echo "$tg" | grep -qF '"/repos/.ticket-auto/initiatives/INIT-TEST/state.log"'; then
+  pass "TicketGen reads the epic id from the real state log path"
+else
+  fail "TicketGen reads the real state log path" "path not interpolated"
+fi
+
+eg=$(planner_prompt_epicgen "INIT-TEST" "an idea" "/repos/.ticket-auto/initiatives/INIT-TEST")
+if echo "$eg" | grep -qF 'ENTITY_KEY="epic-INIT-TEST"'; then
+  pass "the EpicGen idempotency key carries the initiative id"
+else
+  fail "EpicGen idempotency key carries the initiative id" "$(echo "$eg" | grep -m1 'ENTITY_KEY=')"
+fi
+
+# …and the genuinely agent-owned variables must stay escaped. ticket_slug is a
+# loop variable in the agent's shell, so interpolating it here would be the
+# opposite mistake.
+if echo "$tg" | grep -qF 'ENTITY_KEY="ticket-${ticket_slug}"'; then
+  pass "agent-owned loop variables stay escaped"
+else
+  fail "agent-owned loop variables stay escaped" "ticket_slug was interpolated at generation time"
+fi
+
+# TEAM_ID is used by both creating phases and was never assigned anywhere.
+for phase in EpicGen TicketGen; do
+  prompt=$(planner_prompt_for_phase "$phase" "INIT-TEST" "an idea" "/repos/.ticket-auto/initiatives/INIT-TEST")
+  assign=$(echo "$prompt" | grep -n '^TEAM_ID=' | head -1 | cut -d: -f1)
+  use=$(echo "$prompt" | grep -n '"\$TEAM_ID"' | head -1 | cut -d: -f1)
+  if [ -n "$assign" ] && [ -n "$use" ] && [ "$assign" -lt "$use" ]; then
+    pass "${phase} assigns TEAM_ID before it is used"
+  else
+    fail "${phase} assigns TEAM_ID before use" "assign='${assign}' first-use='${use}'"
+  fi
+done
+
 echo ""
 echo "=== planner-lib-root.sh: ${PASS} passed, ${FAIL} failed ==="
 [ "$FAIL" -eq 0 ]

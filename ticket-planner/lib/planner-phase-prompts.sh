@@ -32,6 +32,13 @@ _source_if_missing() {
 _source_if_missing "planner_resolve_lib_root" \
   "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/planner-lib-root.sh"
 
+# Invocation config (Linear project/milestone, branch override) is read back from
+# the state log at prompt-generation time and interpolated into the prompt as a
+# literal — the same way the plugin root is. The generating shell is not the shell
+# that parsed the flags, so an environment read here sees nothing (#144).
+_source_if_missing "planner_config_get" \
+  "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/planner-state.sh"
+
 # Resolved plugin root, memoized per shell. Empty until first resolution.
 _PLANNER_PROMPT_LIB_ROOT="${_PLANNER_PROMPT_LIB_ROOT:-}"
 
@@ -130,6 +137,24 @@ planner_sanitize_input() {
   return 0
 }
 
+# ── Invocation config lookup ────────────────────────────────────────────────────
+
+# Read one invocation-config value for prompt interpolation.
+# Tolerates a missing or unreadable state log: prompt generation is also exercised
+# by tests against initiatives that have no log at all, and a lookup failure must
+# never take down the prompt.
+#
+# Usage: _planner_prompt_config <initiative_id> <key>
+# Output: the value, or empty.
+_planner_prompt_config() {
+  local initiative_id="$1" key="$2"
+  declare -f planner_config_get >/dev/null 2>&1 || {
+    echo ""
+    return 0
+  }
+  planner_config_get "$initiative_id" "$key" 2>/dev/null || echo ""
+}
+
 # ── Phase 1: Appraisal ──────────────────────────────────────────────────────────
 
 planner_prompt_appraisal() {
@@ -196,7 +221,7 @@ ${intent_block}
 3. Classify the work: is this a feature, improvement, bugfix, security change,
    or chore? What's the rough complexity (simple/moderate/complex)?
 4. Identify unknowns: what would you need to explore to be confident in the plan?
-5. Write a scope summary to \${state_dir}/artifacts/appraisal.md with sections:
+5. Write a scope summary to ${state_dir}/artifacts/appraisal.md with sections:
    - **Summary** — one paragraph on what this is
    - **Affected Services** — list of repos/services with brief rationale
    - **Type** — feature/improvement/bugfix/security/chore
@@ -254,7 +279,7 @@ API contracts, and existing patterns. You are phase 2 of 9.
 
 ## Your task
 
-1. Read the Appraisal output at \${state_dir}/artifacts/appraisal.md. It tells you
+1. Read the Appraisal output at ${state_dir}/artifacts/appraisal.md. It tells you
    which services/repos are affected and what unknowns were flagged.
 2. For each affected service, explore the repository:
    - Trace relevant code paths (entry point → handler → core logic).
@@ -262,7 +287,7 @@ API contracts, and existing patterns. You are phase 2 of 9.
      would need to change. Record file:line references.
    - Find existing patterns that are similar to what needs to be built (prior art).
    - Note API contracts, database schemas, or config surfaces that constrain the work.
-3. Write a discovery report to \${state_dir}/artifacts/discovery.md with sections:
+3. Write a discovery report to ${state_dir}/artifacts/discovery.md with sections:
    - **Code Paths** — per-service, the execution flows traced
    - **Target Symbols** — \`symbol:file:line\` references for code that will change
    - **API Contracts** — endpoints, request/response shapes, auth requirements
@@ -318,8 +343,8 @@ document the decision. You are phase 3 of 9.
 
 ## Your task
 
-1. Read the Appraisal (\${state_dir}/artifacts/appraisal.md) and Discovery
-   (\${state_dir}/artifacts/discovery.md) outputs. They define scope and
+1. Read the Appraisal (${state_dir}/artifacts/appraisal.md) and Discovery
+   (${state_dir}/artifacts/discovery.md) outputs. They define scope and
    ground-truth about the codebase.
 2. Evaluate whether Appraisal's Recommended Strategy is still appropriate given
    Discovery findings. If Discovery surfaced constraints or risks that Appraisal
@@ -330,7 +355,7 @@ document the decision. You are phase 3 of 9.
    - Identify risk factors (data loss, auth bypass, performance regression, etc.).
    - Assess fit with existing codebase patterns (consistent vs. introduces new pattern).
 4. Select the recommended approach and justify why.
-5. Write an Architecture Decision Record to \${state_dir}/artifacts/architecture.md:
+5. Write an Architecture Decision Record to ${state_dir}/artifacts/architecture.md:
    - **Decision** — one sentence: what we will do
    - **Alternatives Considered** — each with pros/cons
    - **Rationale** — why the chosen approach over alternatives
@@ -390,11 +415,11 @@ review.
 ### Part 1: Write the proposal
 
 Read all upstream artifacts:
-- \${state_dir}/artifacts/appraisal.md — scope, type, complexity
-- \${state_dir}/artifacts/discovery.md — code paths, symbols, prior art
-- \${state_dir}/artifacts/architecture.md — decision, rationale, risks
+- ${state_dir}/artifacts/appraisal.md — scope, type, complexity
+- ${state_dir}/artifacts/discovery.md — code paths, symbols, prior art
+- ${state_dir}/artifacts/architecture.md — decision, rationale, risks
 
-Synthesize into a proposal document at \${state_dir}/artifacts/proposal.md:
+Synthesize into a proposal document at ${state_dir}/artifacts/proposal.md:
 - **Summary** — what we're building, for whom, why
 - **Scope** — in scope, out of scope, explicit boundaries
 - **Technical Approach** — the architecture decision, key files/symbols that change
@@ -407,7 +432,7 @@ Synthesize into a proposal document at \${state_dir}/artifacts/proposal.md:
 ### Part 2: Write per-ticket spec files
 
 For each ticket in the work breakdown, produce a spec file at
-\${state_dir}/artifacts/specs/<ticket-slug>.md. Each spec must include:
+${state_dir}/artifacts/specs/<ticket-slug>.md. Each spec must include:
 
 1. **Title** — the ticket title (will become the Linear ticket title)
 2. **Description** — the ticket body. Include what needs to change, acceptance criteria (observable, testable), and any user-story narrative if helpful.
@@ -436,7 +461,7 @@ function — do NOT compute Confidence or Pre-approved yourself.
 
 ### Part 3: Write spec index
 
-Write \${state_dir}/artifacts/specs/INDEX.md listing every ticket spec with
+Write ${state_dir}/artifacts/specs/INDEX.md listing every ticket spec with
 its title, affected service, and dependencies.
 
 ## State log
@@ -490,7 +515,7 @@ what's wrong.
 
 ## Your task
 
-1. Read the proposal at \${state_dir}/artifacts/proposal.md — this is what you're reviewing.
+1. Read the proposal at ${state_dir}/artifacts/proposal.md — this is what you're reviewing.
 2. Also re-read the upstream artifacts (appraisal, discovery, architecture) —
    the proposal is a synthesis and may have dropped or distorted things.
 3. Critique across these dimensions:
@@ -504,7 +529,7 @@ what's wrong.
      or too small (trivial, no independent value)?
    - **Contract Compliance** — will the proposed tickets (once generated) satisfy
      the Planner Context schema? Are Affected Services and Target Symbols complete?
-4. Write review findings to \${state_dir}/artifacts/review.md:
+4. Write review findings to ${state_dir}/artifacts/review.md:
    - **Summary** — one paragraph verdict: ready / needs-revision / blocked
    - **Findings** — each with severity (blocker/major/minor/nit) and a concrete
      recommendation. A blocker means the proposal cannot proceed as-is.
@@ -563,14 +588,14 @@ final version. You are phase 6 of 9.
 
 ## Your task
 
-1. Read the proposal (\${state_dir}/artifacts/proposal.md) and the review
-   (\${state_dir}/artifacts/review.md).
+1. Read the proposal (${state_dir}/artifacts/proposal.md) and the review
+   (${state_dir}/artifacts/review.md).
 2. For each review finding, decide: accept the recommendation and modify the
    proposal, reject it with rationale, or defer it (record as a known risk).
-3. Produce the finalized proposal at \${state_dir}/artifacts/proposal.md
+3. Produce the finalized proposal at ${state_dir}/artifacts/proposal.md
    (overwrite — the review digest is preserved in review.md). This is now the
    authoritative plan that OpenSpec and the generation phases consume.
-4. Write a consensus digest to \${state_dir}/artifacts/consensus.md:
+4. Write a consensus digest to ${state_dir}/artifacts/consensus.md:
    - **Findings Addressed** — each review finding, its disposition (accepted/rejected/deferred),
      and what changed (if anything)
    - **Changes from Original Proposal** — summary of what's different
@@ -615,6 +640,17 @@ planner_prompt_epicgen() {
     return 1
   }
 
+  # Operator configuration, read from the state log where argument parsing wrote
+  # it and interpolated below as a literal. Reading LINEAR_PROJECT from the
+  # environment here would find nothing — this shell is six phases downstream of
+  # the one that parsed --project (#144).
+  local team_ref project_ref milestone_ref branch_override
+  team_ref=$(_planner_prompt_config "$initiative_id" "linear-team-id")
+  [ -n "$team_ref" ] || team_ref=$(_planner_prompt_config "$initiative_id" "linear-team")
+  project_ref=$(_planner_prompt_config "$initiative_id" "linear-project")
+  milestone_ref=$(_planner_prompt_config "$initiative_id" "linear-milestone")
+  branch_override=$(_planner_prompt_config "$initiative_id" "branch-override")
+
   cat <<AGENT_PROMPT
 You are the **Epic Generation** phase agent for the ticket-planner. Your job is
 to create the Linear epic that represents this initiative. You are phase 7 of 9.
@@ -626,8 +662,8 @@ to create the Linear epic that represents this initiative. You are phase 7 of 9.
 
 ## Your task
 
-1. Read the proposal (\${state_dir}/artifacts/proposal.md) and the spec index
-   (\${state_dir}/artifacts/specs/INDEX.md) for context.
+1. Read the proposal (${state_dir}/artifacts/proposal.md) and the spec index
+   (${state_dir}/artifacts/specs/INDEX.md) for context.
 2. Create a Linear epic using the Linear API. The epic represents this initiative.
 
 ## Idompotency — CRITICAL
@@ -644,9 +680,18 @@ if [ ! -f "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh" ]; then
 fi
 export CLAUDE_PLUGIN_ROOT
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh"
+source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-router.sh"
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-ticket-validate.sh"
 
-ENTITY_KEY="epic-\${initiative_id}"
+# Step 0: create gate. This is the first phase that writes to Linear, so it
+# re-verifies the operator's authorization from the state log rather than
+# trusting that the dispatcher checked. Never skip, never work around it.
+if ! planner_create_gate_check "${initiative_id}" "EpicGen"; then
+  planner_state_write "${initiative_id}" "EpicGen" "create-gate" "fail" "not authorized — resume with --create"
+  exit 5
+fi
+
+ENTITY_KEY="epic-${initiative_id}"
 
 # Step 1: Record intent
 planner_record_intent "${initiative_id}" "EpicGen" "epic" "\$ENTITY_KEY"
@@ -667,18 +712,55 @@ source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-linear-api.sh"
 
 planner_state_write "${initiative_id}" "EpicGen" "create" "start" "Creating Linear epic for initiative"
 
-# Project / milestone are operator configuration, not your judgement. They come
-# from LINEAR_PROJECT / LINEAR_PROJECT_MILESTONE (or the --project / --milestone
-# flags, which export the same variables). Leave them unset to create the epic
-# with no project, which is the pre-existing behaviour.
+# Every issueCreate needs a teamId. TEAM_REF below is whatever the operator
+# configured (--team, or LINEAR_TEAM_ID) interpolated from the state log; when it
+# is empty the resolver falls back to the workspace's only team and fails loudly
+# rather than guessing between several. Resolve it once and persist it, so Ticket
+# Gen files its children against exactly the team this epic went to.
+TEAM_REF="${team_ref}"
+TEAM_ID=\$(planner_linear_resolve_team_id "\$TEAM_REF") || {
+  planner_state_write "${initiative_id}" "EpicGen" "team" "fail" "cannot resolve Linear team (ref='\${TEAM_REF}')"
+  exit 1
+}
+planner_config_set "${initiative_id}" "linear-team-id" "\$TEAM_ID"
+
+# Project / milestone are operator configuration, not your judgement. The values
+# below were interpolated from the state log, where argument parsing recorded the
+# --project / --milestone flags. Empty means no project — leave it that way.
+PROJECT_REF="${project_ref}"
+MILESTONE_REF="${milestone_ref}"
+
+# Resolve name → UUID here, before the epic is created, and persist the resolved
+# ids. TicketGen reads them straight back off disk, so the whole run files every
+# entity against exactly the ids this phase verified — no re-resolution, no
+# environment, no drift between the epic and its children.
+RESOLVED_PROJECT_ID=""
+RESOLVED_MILESTONE_ID=""
+if [ -n "\$PROJECT_REF" ]; then
+  RESOLVED_PROJECT_ID=\$(planner_linear_resolve_project "\$TEAM_ID" "\$PROJECT_REF") || {
+    planner_state_write "${initiative_id}" "EpicGen" "project" "fail" "cannot resolve project '\${PROJECT_REF}'"
+    exit 1
+  }
+  if [ -n "\$MILESTONE_REF" ]; then
+    RESOLVED_MILESTONE_ID=\$(planner_linear_resolve_milestone "\$RESOLVED_PROJECT_ID" "\$MILESTONE_REF") || {
+      planner_state_write "${initiative_id}" "EpicGen" "project" "fail" "cannot resolve milestone '\${MILESTONE_REF}'"
+      exit 1
+    }
+  fi
+  planner_config_set "${initiative_id}" "linear-project-id" "\$RESOLVED_PROJECT_ID"
+  planner_config_set "${initiative_id}" "linear-milestone-id" "\${RESOLVED_MILESTONE_ID:-none}"
+  planner_state_write "${initiative_id}" "EpicGen" "project" "done" \\
+    "project=\${RESOLVED_PROJECT_ID} milestone=\${RESOLVED_MILESTONE_ID:-none}"
+fi
+
 EPIC_RESPONSE=\$(planner_linear_create_issue \\
   "\$TEAM_ID" \\
   "\$EPIC_TITLE" \\
   "\$EPIC_DESCRIPTION" \\
   "\$(jq -nc --arg init "INIT-${initiative_id#INIT-}" '[\$init, "epic"]')" \\
   "" \\
-  "\${LINEAR_PROJECT:-}" \\
-  "\${LINEAR_PROJECT_MILESTONE:-}") || {
+  "\$RESOLVED_PROJECT_ID" \\
+  "\$RESOLVED_MILESTONE_ID") || {
   planner_state_write "${initiative_id}" "EpicGen" "create" "fail" "Linear issueCreate failed"
   exit 1
 }
@@ -687,15 +769,6 @@ CREATED_EPIC_ID=\$(echo "\$EPIC_RESPONSE" | jq -r '.data.issueCreate.issue.ident
 if [ -z "\$CREATED_EPIC_ID" ]; then
   planner_state_write "${initiative_id}" "EpicGen" "create" "fail" "issueCreate returned no identifier"
   exit 1
-fi
-
-# Record where the initiative was filed so a later reader can tell without
-# re-querying Linear. Skipped entirely when no project is configured.
-if [ -n "\${LINEAR_PROJECT:-}" ]; then
-  RESOLVED_PROJECT_ID=\$(planner_linear_resolve_project "\$TEAM_ID" "\${LINEAR_PROJECT}")
-  RESOLVED_MILESTONE_ID=\$(planner_linear_resolve_milestone "\$RESOLVED_PROJECT_ID" "\${LINEAR_PROJECT_MILESTONE:-}")
-  planner_state_write "${initiative_id}" "EpicGen" "project" "done" \\
-    "project=\${RESOLVED_PROJECT_ID} milestone=\${RESOLVED_MILESTONE_ID:-none}"
 fi
 
 # Step 4: Mark created
@@ -732,21 +805,23 @@ REASON=\$(echo "\$RECOMMENDATION" | jq -r '.reason')
 
 ### 5b. Apply operator overrides
 
-The recommender's output may be overridden by operator flags passed to the planner:
+The recommender's output may be overridden by an operator flag passed to the planner.
+The override below was read from the state log at prompt-generation time and
+interpolated as a literal — do not look for it in your environment, it is not there:
 
-- If **\`PLANNER_SHARED_BRANCH=true\`** is in the environment, the outcome is \`true\`
-  regardless of the recommender.
-- If **\`PLANNER_NO_SHARED_BRANCH=true\`** is in the environment, the outcome is \`false\`
-  regardless of the recommender.
-- Supplying both together is rejected before you are spawned — you will never see both
-  set.
+- \`shared\` (from \`--shared-branch\`) forces the outcome \`true\`.
+- \`no-shared\` (from \`--no-shared-branch\`) forces the outcome \`false\`.
+- Empty means no override — the recommender decides.
+- Supplying both flags together is rejected before you are spawned.
 
 \`\`\`bash
+BRANCH_OVERRIDE="${branch_override}"
+
 # Determine final outcome
-if [ "\${PLANNER_SHARED_BRANCH:-}" = "true" ]; then
+if [ "\$BRANCH_OVERRIDE" = "shared" ]; then
   EMIT_DIRECTIVE=true
   OVERRIDE_REASON="operator override: --shared-branch"
-elif [ "\${PLANNER_NO_SHARED_BRANCH:-}" = "true" ]; then
+elif [ "\$BRANCH_OVERRIDE" = "no-shared" ]; then
   EMIT_DIRECTIVE=false
   OVERRIDE_REASON="operator override: --no-shared-branch"
 else
@@ -767,7 +842,7 @@ if [ "\$EMIT_DIRECTIVE" = "true" ]; then
       "Directive already present (idempotent): \$(echo \"\$EXISTING_BLOCK\" | _extract_field \"Branch\")"
   else
     # Read the proposal title for the slug
-    PROPOSAL_TITLE=\$(grep -m1 '^# ' "\${state_dir}/artifacts/proposal.md" 2>/dev/null | sed 's/^# //' || echo "initiative")
+    PROPOSAL_TITLE=\$(grep -m1 '^# ' "${state_dir}/artifacts/proposal.md" 2>/dev/null | sed 's/^# //' || echo "initiative")
     TITLE_SLUG=\$(echo "\$PROPOSAL_TITLE" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | sed 's/^-//;s/-$//')
 
     DIRECTIVE_JSON=\$(jq -n \
@@ -851,6 +926,17 @@ planner_prompt_ticketgen() {
     return 1
   }
 
+  # Prefer the ids EpicGen already resolved and persisted — the children then land
+  # in exactly the project the epic did, with no second name lookup that could
+  # resolve differently. Fall back to the raw refs only if EpicGen recorded none.
+  local team_ref project_ref milestone_ref
+  team_ref=$(_planner_prompt_config "$initiative_id" "linear-team-id")
+  [ -n "$team_ref" ] || team_ref=$(_planner_prompt_config "$initiative_id" "linear-team")
+  project_ref=$(_planner_prompt_config "$initiative_id" "linear-project-id")
+  milestone_ref=$(_planner_prompt_config "$initiative_id" "linear-milestone-id")
+  [ -n "$project_ref" ] || project_ref=$(_planner_prompt_config "$initiative_id" "linear-project")
+  [ -n "$milestone_ref" ] || milestone_ref=$(_planner_prompt_config "$initiative_id" "linear-milestone")
+
   cat <<AGENT_PROMPT
 You are the **Ticket Generation** phase agent for the ticket-planner. Your job is
 to create planned child tickets in Linear. You are phase 8 of 9 — the main
@@ -866,7 +952,7 @@ entity-creation phase that produces what the pipeline consumes.
 Extract the epic ID from the state log where Epic Gen recorded it:
 
 \`\`\`bash
-EPIC_ID=\$(grep '|EpicGen|.*|done|EPIC_ID=' "\${state_dir}/state.log" | tail -1 | sed 's/.*EPIC_ID=//')
+EPIC_ID=\$(grep '|EpicGen|.*|done|EPIC_ID=' "${state_dir}/state.log" | tail -1 | sed 's/.*EPIC_ID=//')
 if [ -z "\$EPIC_ID" ]; then
   echo "ERROR: could not find EPIC_ID in state log — Epic Gen may have failed" >&2
   planner_state_write "${initiative_id}" "TicketGen" "generate" "fail" "Missing EPIC_ID — cannot create tickets without parent epic"
@@ -877,8 +963,8 @@ echo "Parent epic: \$EPIC_ID"
 
 ## Your task
 
-1. Read the spec index (\${state_dir}/artifacts/specs/INDEX.md), each ticket spec
-   in \${state_dir}/artifacts/specs/, and the proposal (\${state_dir}/artifacts/proposal.md).
+1. Read the spec index (${state_dir}/artifacts/specs/INDEX.md), each ticket spec
+   in ${state_dir}/artifacts/specs/, and the proposal (${state_dir}/artifacts/proposal.md).
 2. For each ticket in dependency order (use topological sort — tickets with no
    dependencies first), create a Linear ticket as a child of \${EPIC_ID}.
 
@@ -895,10 +981,30 @@ if [ ! -f "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh" ]; then
 fi
 export CLAUDE_PLUGIN_ROOT
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh"
+source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-router.sh"
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-deps-check.sh"
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-context-gen.sh"
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-ticket-validate.sh"
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-linear-api.sh"
+
+# 0. Create gate — re-verified here from the state log, not assumed from the
+# dispatcher. This phase creates every ticket in the initiative; an unauthorized
+# run must produce none. Never skip, never work around it.
+if ! planner_create_gate_check "${initiative_id}" "TicketGen"; then
+  planner_state_write "${initiative_id}" "TicketGen" "create-gate" "fail" "not authorized — resume with --create"
+  exit 5
+fi
+
+# 0b. The team Epic Gen filed the epic against, interpolated from the state log.
+# Children must land on the same team, so this is read back rather than resolved
+# a second time; the resolver only runs if Epic Gen somehow recorded nothing.
+TEAM_ID="${team_ref}"
+if [ -z "\$TEAM_ID" ]; then
+  TEAM_ID=\$(planner_linear_resolve_team_id) || {
+    planner_state_write "${initiative_id}" "TicketGen" "team" "fail" "cannot resolve Linear team"
+    exit 1
+  }
+fi
 
 # 1. Validate dependency graph is acyclic
 deps_json='{"TICKET-A":["TICKET-B"],"TICKET-B":[]}'  # from specs
@@ -1000,8 +1106,8 @@ TICKET_RESPONSE=\$(planner_linear_create_issue \\
   "\$description" \\
   "\$LABELS" \\
   "\$EPIC_ID" \\
-  "\${LINEAR_PROJECT:-}" \\
-  "\${LINEAR_PROJECT_MILESTONE:-}") || {
+  "${project_ref}" \\
+  "${milestone_ref}") || {
   planner_state_write "${initiative_id}" "TicketGen" "create" "fail" "issueCreate failed for \${ticket_slug}"
   continue
 }
@@ -1068,8 +1174,8 @@ terminal phase (9 of 9). No further transitions are permitted after this.
 
 ## Your task
 
-1. Read the full state log (\${state_dir}/state.log) and summarize the run.
-2. Write a completion summary to \${state_dir}/artifacts/COMPLETED.md:
+1. Read the full state log (${state_dir}/state.log) and summarize the run.
+2. Write a completion summary to ${state_dir}/artifacts/COMPLETED.md:
    - **Initiative** — ID, idea summary
    - **Tickets Created** — count, with Linear IDs
    - **Epic** — Linear ID
