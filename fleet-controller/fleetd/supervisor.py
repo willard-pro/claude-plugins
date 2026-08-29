@@ -1019,7 +1019,7 @@ def _sweep_stale_generation_files(state_dir, tid, current_generation,
 
 # ── Kill escalation ────────────────────────────────────────────────────────
 
-KILL_ESCALATION_ORDER = ('cooperative', 'SIGTERM', 'SIGKILL')
+KILL_ESCALATION_ORDER = ('cooperative', 'SIGINT', 'SIGTERM', 'SIGKILL')
 
 
 def _try_reap(pid):
@@ -1038,10 +1038,11 @@ def _try_reap(pid):
 
 def kill_worker(tid, pid, generation, state_dir, reason='fleet-kill',
                 grace_secs=None):
-    """Escalate: cooperative stop → grace → SIGTERM → grace → SIGKILL.
+    """Escalate: cooperative stop → grace → SIGINT → grace → SIGTERM → grace → SIGKILL.
 
     Each step verifies the process is still alive before proceeding.
     - Cooperative stop: touch stop files, wait grace, check.
+    - SIGINT: signal the process group, wait grace, check.
     - SIGTERM: signal the process group, wait grace, check.
     - SIGKILL: signal the process group, brief wait, check.
 
@@ -1050,6 +1051,25 @@ def kill_worker(tid, pid, generation, state_dir, reason='fleet-kill',
     Signals target the process GROUP (not just the PID) because the worker
     spawns subprocesses (git, CLI tools, test runners) and those must
     terminate with the worker.
+
+    What the SIGINT rung actually buys, per observation (worker-reap-recovery
+    validation, not assumption): it ends the in-progress turn and produces a
+    `result` line with a `session_id` over a finalized transcript, which
+    SIGTERM does not — SIGTERM leaves the turn unfinished with no result
+    recorded. It does NOT yield readable output: the observed subtype is
+    `error_during_execution`, whose `result` field is documented as
+    unavailable, `stop_reason` was `null`, and there was no text. It also
+    does NOT fire the `Stop` hook, so Increment B's final-message capture
+    yields nothing on this rung — do not build anything that reads output
+    from a SIGINT-terminated worker. The rung is still worth having: a
+    finalized transcript is strictly better than an abandoned turn for
+    `--resume` and post-mortem.
+
+    Empirically, SIGINT terminates a `-p` worker with exit 0 — this rung is
+    only safe alongside kill-attribution sourced from fleetd's own call
+    succeeding (never from an exit code): without it, every SIGINT-killed
+    worker would look exactly like an exit-0 orphan and be re-enqueued by
+    reap-time recovery. See Supervisor._record_fleet_kill_exit.
     """
     grace = grace_secs if grace_secs is not None else _env_int('FLEET_KILL_GRACE_SECS', 10)
 
@@ -1067,7 +1087,15 @@ def kill_worker(tid, pid, generation, state_dir, reason='fleet-kill',
         _write_fence_files(tid, generation, state_dir)
         return KillResult(True, 'cooperative', None)
 
-    # ── Step 2: SIGTERM to process group ──────────────────────────────────
+    # ── Step 2: SIGINT to process group ─────────────────────────────────────
+    _signal_process_group(pid, signal.SIGINT)
+    time.sleep(grace)
+
+    if _is_dead():
+        _write_fence_files(tid, generation, state_dir)
+        return KillResult(True, 'SIGINT', None)
+
+    # ── Step 3: SIGTERM to process group ──────────────────────────────────
     _signal_process_group(pid, signal.SIGTERM)
     time.sleep(grace)
 
@@ -1075,7 +1103,7 @@ def kill_worker(tid, pid, generation, state_dir, reason='fleet-kill',
         _write_fence_files(tid, generation, state_dir)
         return KillResult(True, 'SIGTERM', None)
 
-    # ── Step 3: SIGKILL to process group ──────────────────────────────────
+    # ── Step 4: SIGKILL to process group ──────────────────────────────────
     _signal_process_group(pid, signal.SIGKILL)
     time.sleep(1)  # Brief wait for kernel to reap
 

@@ -1096,10 +1096,17 @@ class SpawnAndReapTest(unittest.TestCase):
 
 
 def _make_ignoring_worker(sleep_secs=30):
-    """Worker that ignores SIGTERM — forces escalation to SIGKILL."""
+    """Worker that ignores SIGINT and SIGTERM — forces escalation to SIGKILL.
+
+    SIGINT must be ignored too now that kill escalation has a SIGINT rung
+    (worker-reap-recovery) — otherwise Python's default SIGINT handling
+    (KeyboardInterrupt, uncaught) would kill this "unresponsive" worker one
+    rung early, at SIGINT rather than SIGKILL.
+    """
     return [
         sys.executable, '-c',
         f'import signal, time; '
+        f'signal.signal(signal.SIGINT, signal.SIG_IGN); '
         f'signal.signal(signal.SIGTERM, signal.SIG_IGN); '
         f'time.sleep({sleep_secs})',
     ]
@@ -1892,8 +1899,8 @@ class ExitPersistenceAndRecoveryTest(unittest.TestCase):
             sup.release_lock()
 
     def test_sigint_killed_worker_marked_killed_by_fleet_and_skipped(self):
-        """A worker killed via kill_worker() (SIGINT rung, exits 0) is
-        recorded killed_by_fleet=True and never reaches reap-time recovery."""
+        """A worker killed via kill_worker()'s SIGINT rung is recorded
+        killed_by_fleet=True and never reaches reap-time recovery."""
         from unittest import mock
 
         tid = 'TST-R4'
@@ -1901,11 +1908,12 @@ class ExitPersistenceAndRecoveryTest(unittest.TestCase):
         sup = self._make_sup()
         sup.acquire_lock()
         try:
-            # A worker that ignores SIGINT/SIGTERM would still be confirmed
-            # dead by kill escalation reaching SIGKILL — exit code is
-            # irrelevant to killed_by_fleet, only that fleetd's own
-            # kill_worker() call succeeded.
-            cmd = _make_ignoring_worker(sleep_secs=30)
+            # Plain worker with no signal handling installed — Python's
+            # default SIGINT disposition (uncaught KeyboardInterrupt)
+            # terminates it immediately, so the kill succeeds at the SIGINT
+            # rung specifically (the scenario this test targets: the real
+            # `claude -p` behavior of exiting 0 on SIGINT).
+            cmd = _make_worker_cmd(sleep_secs=30)
             sup._consume_queue(cmd_override=cmd)
 
             called = []
@@ -1915,6 +1923,7 @@ class ExitPersistenceAndRecoveryTest(unittest.TestCase):
             ):
                 result = sup.kill_worker(tid, grace_secs=1)
                 self.assertTrue(result.success)
+                self.assertEqual(result.method, 'SIGINT')
                 # The kill path itself must never trigger reconciliation —
                 # a verified kill is a deliberate pause, not a crash.
                 self.assertEqual(called, [])
@@ -2607,7 +2616,8 @@ class CLIAlignmentTest(unittest.TestCase):
             result = json.loads(result_file.read_text())
             self.assertTrue(result['success'],
                             f"kill should succeed: {result.get('error')}")
-            self.assertIn(result['method'], ['cooperative', 'SIGTERM', 'SIGKILL'])
+            self.assertIn(result['method'],
+                         ['cooperative', 'SIGINT', 'SIGTERM', 'SIGKILL'])
         finally:
             sup.release_lock()
 
