@@ -233,6 +233,31 @@ fleet_kill_pipeline() {
     return 0
   fi
 
+  # ── SIGINT escalation ──────────────────────────────────────────────────────────
+  # Ends the worker's in-progress turn (a result line + finalized transcript)
+  # rather than abandoning it mid-turn the way SIGTERM does — see
+  # supervisor.py kill_worker()'s docstring for the full empirical picture
+  # (no readable output on this rung, Stop hook does not fire). Mirrored here
+  # so the bash and Python kill paths do not diverge (worker-reap-recovery
+  # task 4.3).
+  kill -INT "$registry_pid" 2>/dev/null || true
+  sleep "$kill_grace"
+
+  if ! kill -0 "$registry_pid" 2>/dev/null; then
+    # SIGINT succeeded
+    _log_pipeline "$log_file" "META" "outcome" "info" "stopped: fleet-kill (SIGINT); ${reason}"
+    export HB_LOG_FILE="${hb_file}"
+    hb_decision "fleet-kill" "fired" "reason=${reason}"
+
+    if [ "$registry_gen" -gt 0 ] 2>/dev/null; then
+      fence_write "$tid" "$registry_gen" "$state_dir"
+    fi
+
+    _fleet_postmortem "$tid" "$log_file" "$hb_file"
+    echo "fleet_kill_pipeline: killed ${tid} (SIGINT) — ${reason}"
+    return 0
+  fi
+
   # ── SIGTERM escalation ─────────────────────────────────────────────────────────
   kill -TERM "$registry_pid" 2>/dev/null || true
   sleep "$kill_grace"

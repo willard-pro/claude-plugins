@@ -141,6 +141,15 @@ else
   _var "GITHUB_PERSONAL_ACCESS_TOKEN" "warn" "" "settings.local.json" "only needed when FLEET_EPIC_AUTO_PR=true"
 fi
 
+# SLACK_BOT_TOKEN — optional. Powers fleet-notify.sh's chat.postMessage calls
+# (worker-reap-recovery task 7). Without it, and without SLACK_CHANNEL,
+# fleet_slack_post degrades to a log-only line — never a hard failure.
+if [ -n "${SLACK_BOT_TOKEN:-}" ]; then
+  _var "SLACK_BOT_TOKEN" "ok" "$(_mask "${SLACK_BOT_TOKEN}")" "settings.local.json" "used by fleet-notify.sh"
+else
+  _var "SLACK_BOT_TOKEN" "warn" "" "settings.local.json" "optional — worker-exit/dead-letter Slack alerts degrade to log-only without it"
+fi
+
 # ── CLAUDE.md fields ────────────────────────────────────────────────────────
 
 if [ ! -f "$PROJECT_DIR/CLAUDE.md" ]; then
@@ -201,6 +210,83 @@ fi
 
 _var "FLEETD_SPAWN_ENABLED" "info" "${FLEETD_SPAWN_ENABLED:-0}" "env" "must be 1 to enable worker spawning (default: observe-only)"
 _var "FLEET_EPIC_AUTO_PR" "info" "$_epic_auto_pr" "env" "gh + GITHUB_PERSONAL_ACCESS_TOKEN only required when true"
+
+# ── Worker permission mode (worker-reap-recovery) ────────────────────────────
+# fleetd itself always emits an explicit --permission-mode unless CLAUDE_CMD
+# already supplies one (see supervisor.py _cmd_already_sets_permission_mode) —
+# so "missing" here means the operator's CLAUDE_CMD has NOT opted out and
+# nothing further to configure, "ok" means CLAUDE_CMD has explicitly taken
+# over the decision. Either way, `--restricted` and root both silently defeat
+# bypassPermissions, so both are checked regardless.
+
+_cmd_for_mode_check="${CLAUDE_CMD:-}"
+if [ -n "$_cmd_for_mode_check" ] && { [[ "$_cmd_for_mode_check" == *"--permission-mode"* ]] || [[ "$_cmd_for_mode_check" == *"--dangerously-skip-permissions"* ]] || [[ "$_cmd_for_mode_check" == *"--bypass"* ]]; }; then
+  _var "FLEET_WORKER_PERMISSION_MODE" "ok" "(from CLAUDE_CMD)" "env" "CLAUDE_CMD already specifies a permission mode — fleetd will not double-specify"
+else
+  _var "FLEET_WORKER_PERMISSION_MODE" "missing" "${FLEET_WORKER_PERMISSION_MODE:-bypassPermissions}" "env" "no explicit mode configured — fleetd defaults to bypassPermissions; run the preflight probe below to confirm"
+  issues=$((issues + 1))
+fi
+
+if [ "$(id -u)" = "0" ]; then
+  _var "FLEETD_NOT_ROOT" "missing" "uid=0" "process" "--dangerously-skip-permissions (bypassPermissions) refuses to run as root — fleetd worker spawns will fail"
+  issues=$((issues + 1))
+else
+  _var "FLEETD_NOT_ROOT" "ok" "uid=$(id -u)" "process" ""
+fi
+
+if [ "${CLAUDE_CODE_SIMPLE:-}" = "1" ] || [ "${CLAUDE_CODE_SIMPLE:-}" = "true" ]; then
+  _var "CLAUDE_CODE_SIMPLE" "missing" "$CLAUDE_CODE_SIMPLE" "env" "--bare mode is active — drops the entire plugin, all skills, MCP, CLAUDE.md and OAuth credentials; fleetd would lose the whole pipeline"
+  issues=$((issues + 1))
+else
+  _var "CLAUDE_CODE_SIMPLE" "ok" "(unset)" "env" "--bare mode not active"
+fi
+
+if [ "${CLAUDE_CODE_RESTRICTED:-}" = "1" ] || [ "${CLAUDE_CODE_RESTRICTED:-}" = "true" ]; then
+  _var "CLAUDE_CODE_RESTRICTED" "missing" "$CLAUDE_CODE_RESTRICTED" "env" "--restricted refuses bypassPermissions — worker spawns will silently downgrade to Manual mode"
+  issues=$((issues + 1))
+else
+  _var "CLAUDE_CODE_RESTRICTED" "ok" "(unset)" "env" "--restricted not active"
+fi
+
+# Preflight probe: run a trivial worker turn and assert permission_denials
+# is empty — a Manual-mode (or otherwise misconfigured) run exits 0 with
+# subtype "success" and is_error false having written nothing, so the
+# denial array is the only reliable tell. Opt-in (costs one real worker
+# turn — a network call and, on a paid plan, tokens) rather than run on
+# every check invocation, matching the FLEET_POSTMORTEM_ON_KILL opt-in
+# convention elsewhere in this file's sibling libs. Also what keeps
+# fleet-env-check safe to run inside `make test`, where CLAUDE_CMD is
+# frequently set to an arbitrary test stub whose argv this probe must not
+# execute unasked.
+if [ "${FLEET_ENV_CHECK_LIVE_PROBE:-false}" = "true" ]; then
+  _probe_bin="${CLAUDE_CMD:-${CLAUDE_BIN:-claude}}"
+  # shellcheck disable=SC2206
+  _probe_words=(${_probe_bin})
+  if command -v "${_probe_words[0]}" &>/dev/null; then
+    _probe_dir=$(mktemp -d 2>/dev/null || echo "")
+    if [ -n "$_probe_dir" ]; then
+      _probe_out=$(cd "$_probe_dir" && timeout 60 "${_probe_words[@]}" -p \
+        "Write a file named probe.txt containing the word ok, then stop." \
+        --output-format json --permission-mode bypassPermissions 2>/dev/null || true)
+      _denials="null"
+      if [ -n "$_probe_out" ] && command -v jq &>/dev/null; then
+        _denials=$(echo "$_probe_out" | jq -c '.result.permission_denials // .permission_denials // null' 2>/dev/null || echo "null")
+      fi
+      if [ "$_denials" = "[]" ]; then
+        _var "FLEET_WORKER_PERMISSION_PROBE" "ok" "permission_denials=[]" "probe" "bypassPermissions confirmed by a live trivial-write run"
+      elif [ -n "$_probe_out" ]; then
+        _var "FLEET_WORKER_PERMISSION_PROBE" "warn" "$_denials" "probe" "worker ran but did not report an empty permission_denials array — inspect manually"
+      else
+        _var "FLEET_WORKER_PERMISSION_PROBE" "warn" "(no output)" "probe" "probe run produced no output within 60s — could not verify permission mode live"
+      fi
+      rm -rf "$_probe_dir" 2>/dev/null || true
+    fi
+  else
+    _var "FLEET_WORKER_PERMISSION_PROBE" "warn" "" "probe" "worker binary not resolvable — skipped live probe"
+  fi
+else
+  _var "FLEET_WORKER_PERMISSION_PROBE" "info" "" "probe" "set FLEET_ENV_CHECK_LIVE_PROBE=true to run a live trivial-write probe (costs one worker turn)"
+fi
 
 # ── CLI tools ────────────────────────────────────────────────────────────────
 

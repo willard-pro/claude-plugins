@@ -218,6 +218,25 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|fleet-restart-marker|info|restart-inte
 
 `fleet-restart-marker` entries are scanned by the monitor loop — each one triggers an `ACTION:spawn-restart` directive. `fleet-intervention` and `fleet-restart` entries serve as audit trail; `fleet_can_restart` counts `fleet-restart` entries to enforce the `FLEET_MAX_RESTARTS` circuit breaker.
 
+### Worker exit entries (worker-reap-recovery)
+
+Written by fleetd (`fleet-controller/fleetd/supervisor.py`) at reap time, for every worker exit — natural or fleet-killed:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|worker-exit|done|code=0 type=exit gen=1 killed_by_fleet=false" >> "$LOG_FILE"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|worker-exit|fail|code=1 type=exit gen=2 killed_by_fleet=false" >> "$LOG_FILE"
+```
+
+`STATUS` is `done` only for a clean `exit_type=exit, exit_code=0`; anything else (non-zero exit, or a signal-derived `exit_type` such as `SIGINT`/`SIGKILL`) is `fail`. `MSG` carries the same fields as the per-generation `{tid}-gen{N}-exit.json` exit record: `code`, `type`, `gen`, and `killed_by_fleet` (`true` only when fleetd's own `kill_worker()` succeeded — never inferred from an exit code, since a headless `claude -p` worker exits 0 on SIGINT).
+
+`stop-failure.sh` (the `StopFailure` hook) appends a second, independent entry when a worker's turn ends on an API error after retries are exhausted:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|worker-api-error|warn|turn ended on API error (session=<uuid>)" >> "$LOG_FILE"
+```
+
+Both are additive — schema version stays **1**.
+
 ### Verifier-result entries (Phase 0 RLVR)
 
 Uniform verifier output from all verifier sites. Written by `write_verifier_result` in `lib/verifier-result.sh`. The MSG is a JSON object with fixed fields:

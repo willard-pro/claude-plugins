@@ -100,6 +100,24 @@ test_github_token_masks_value() {
   [[ "$(_row "$out" "GITHUB_PERSONAL_ACCESS_TOKEN")" == *"****9999"* ]] && [[ "$out" != *"ghp_wxyz9999"* ]]
 }
 
+test_slack_bot_token_warn_when_absent() {
+  local tmpdir out
+  tmpdir=$(mktemp -d)
+  _mk_project_dir "$tmpdir"
+  out=$(LINEAR_API_KEY=x _env_vars "$tmpdir")
+  rm -rf "$tmpdir"
+  [[ "$(_row "$out" "SLACK_BOT_TOKEN")" == *"|warn|"* ]]
+}
+
+test_slack_bot_token_masks_value() {
+  local tmpdir out
+  tmpdir=$(mktemp -d)
+  _mk_project_dir "$tmpdir"
+  out=$(LINEAR_API_KEY=x SLACK_BOT_TOKEN=xoxb-1234-abcd9999 _env_vars "$tmpdir")
+  rm -rf "$tmpdir"
+  [[ "$(_row "$out" "SLACK_BOT_TOKEN")" == *"****9999"* ]] && [[ "$out" != *"xoxb-1234-abcd9999"* ]]
+}
+
 # ── REPOS_ROOT ────────────────────────────────────────────────────────────────
 
 test_repos_root_ok_when_declared() {
@@ -199,6 +217,83 @@ test_summary_file_written() {
   [ "$ok" -eq 0 ]
 }
 
+# ── Worker permission mode (worker-reap-recovery, task 2.7) ─────────────────
+
+test_permission_mode_missing_when_not_configured() {
+  local tmpdir out
+  tmpdir=$(mktemp -d)
+  _mk_project_dir "$tmpdir"
+  out=$(
+    unset CLAUDE_CMD
+    LINEAR_API_KEY=x _env_vars "$tmpdir"
+  )
+  rm -rf "$tmpdir"
+  [[ "$(_row "$out" "FLEET_WORKER_PERMISSION_MODE")" == *"|missing|"* ]]
+}
+
+test_permission_mode_ok_when_claude_cmd_specifies_one() {
+  local tmpdir out
+  tmpdir=$(mktemp -d)
+  _mk_project_dir "$tmpdir"
+  out=$(LINEAR_API_KEY=x CLAUDE_CMD="bash --dangerously-skip-permissions" _env_vars "$tmpdir")
+  rm -rf "$tmpdir"
+  [[ "$(_row "$out" "FLEET_WORKER_PERMISSION_MODE")" == *"|ok|"* ]]
+}
+
+test_not_root_ok_for_normal_user() {
+  local tmpdir out
+  tmpdir=$(mktemp -d)
+  _mk_project_dir "$tmpdir"
+  out=$(LINEAR_API_KEY=x _env_vars "$tmpdir")
+  rm -rf "$tmpdir"
+  [[ "$(_row "$out" "FLEETD_NOT_ROOT")" == *"|ok|"* ]]
+}
+
+test_claude_code_simple_ok_when_unset() {
+  local tmpdir out
+  tmpdir=$(mktemp -d)
+  _mk_project_dir "$tmpdir"
+  out=$(
+    unset CLAUDE_CODE_SIMPLE
+    LINEAR_API_KEY=x _env_vars "$tmpdir"
+  )
+  rm -rf "$tmpdir"
+  [[ "$(_row "$out" "CLAUDE_CODE_SIMPLE")" == *"|ok|"* ]]
+}
+
+test_claude_code_simple_missing_when_bare_active() {
+  local tmpdir out exit_code=0
+  tmpdir=$(mktemp -d)
+  _mk_project_dir "$tmpdir"
+  out=$(LINEAR_API_KEY=x CLAUDE_CODE_SIMPLE=1 bash "$LIB_DIR/fleet-env-check.sh" "$tmpdir" 2>/dev/null) || exit_code=$?
+  rm -rf "$tmpdir"
+  [[ "$(_row "$out" "CLAUDE_CODE_SIMPLE")" == *"|missing|"* ]] && [ "$exit_code" -gt 0 ]
+}
+
+test_restricted_missing_when_active() {
+  local tmpdir out exit_code=0
+  tmpdir=$(mktemp -d)
+  _mk_project_dir "$tmpdir"
+  out=$(LINEAR_API_KEY=x CLAUDE_CODE_RESTRICTED=true bash "$LIB_DIR/fleet-env-check.sh" "$tmpdir" 2>/dev/null) || exit_code=$?
+  rm -rf "$tmpdir"
+  [[ "$(_row "$out" "CLAUDE_CODE_RESTRICTED")" == *"|missing|"* ]] && [ "$exit_code" -gt 0 ]
+}
+
+test_permission_probe_skipped_by_default() {
+  # The live probe must never run unless explicitly opted in — it would
+  # otherwise execute CLAUDE_CMD's real argv on every env-check invocation,
+  # including inside make test where CLAUDE_CMD is often a test stub.
+  local tmpdir out
+  tmpdir=$(mktemp -d)
+  _mk_project_dir "$tmpdir"
+  out=$(
+    unset FLEET_ENV_CHECK_LIVE_PROBE
+    LINEAR_API_KEY=x CLAUDE_CMD="bash 2 --bypass" _env_vars "$tmpdir"
+  )
+  rm -rf "$tmpdir"
+  [[ "$(_row "$out" "FLEET_WORKER_PERMISSION_PROBE")" == *"|info|"* ]]
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Runner
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -210,6 +305,8 @@ for fn in \
   test_github_token_optional_when_auto_pr_off \
   test_github_token_required_when_auto_pr_on \
   test_github_token_masks_value \
+  test_slack_bot_token_warn_when_absent \
+  test_slack_bot_token_masks_value \
   test_repos_root_ok_when_declared \
   test_repos_root_missing_when_no_claude_md \
   test_claude_bin_default_ok_when_resolvable \
@@ -218,7 +315,14 @@ for fn in \
   test_jq_ok_when_present \
   test_gh_required_only_when_auto_pr_on \
   test_rowcount_matches_emitted_rows \
-  test_summary_file_written; do
+  test_summary_file_written \
+  test_permission_mode_missing_when_not_configured \
+  test_permission_mode_ok_when_claude_cmd_specifies_one \
+  test_not_root_ok_for_normal_user \
+  test_claude_code_simple_ok_when_unset \
+  test_claude_code_simple_missing_when_bare_active \
+  test_restricted_missing_when_active \
+  test_permission_probe_skipped_by_default; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

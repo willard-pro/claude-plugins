@@ -209,6 +209,87 @@ test_fleet_kill_pipeline_dry_run_does_not_mutate() {
   [ "$rc" -eq 0 ]
 }
 
+test_fleet_kill_pipeline_sigint_rung_kills_plain_worker() {
+  # worker-reap-recovery task 4.3: a registered PID with no signal handling
+  # (default SIGINT disposition terminates immediately) is confirmed dead
+  # at the SIGINT rung — before ever reaching SIGTERM.
+  local ws
+  ws=$(_setup_workspace)
+  (
+    cd "$ws"
+    mkdir -p logs
+    _make_pipeline_log "./logs" "CRE-48"
+    source "$LIB_DIR/fleet-registry.sh"
+    source "$LIB_DIR/fleet-intervene.sh"
+
+    # Bash sets SIGINT to ignore on backgrounded jobs by default (so Ctrl-C
+    # in the foreground doesn't kill them) — reset it to default disposition
+    # before exec'ing into sleep, or this "plain" worker would ignore SIGINT
+    # for the same reason a real ignoring-worker does, defeating the test.
+    (
+      trap - INT
+      exec sleep 30
+    ) &
+    local worker_pid=$!
+    registry_write "CRE-48" "$worker_pid" 1 "test" "./logs"
+
+    FLEET_KILL_GRACE_SECS=1 fleet_kill_pipeline "CRE-48" "test-sigint" "./logs"
+    wait "$worker_pid" 2>/dev/null || true
+
+    grep -q "META|outcome|info|stopped: fleet-kill (SIGINT)" "./logs/CRE-48-pipeline.log" || {
+      echo "expected SIGINT outcome entry, got:" >&2
+      cat "./logs/CRE-48-pipeline.log" >&2
+      exit 1
+    }
+    kill -0 "$worker_pid" 2>/dev/null && {
+      echo "worker still alive after SIGINT rung" >&2
+      kill -9 "$worker_pid" 2>/dev/null || true
+      exit 1
+    }
+    exit 0
+  )
+  local rc=$?
+  rm -rf "$ws"
+  [ "$rc" -eq 0 ]
+}
+
+test_fleet_kill_pipeline_ignoring_worker_escalates_to_sigkill() {
+  # A worker that ignores SIGINT and SIGTERM is escalated all the way to
+  # SIGKILL — the SIGINT rung must not be a dead end for an unresponsive
+  # worker.
+  local ws
+  ws=$(_setup_workspace)
+  (
+    cd "$ws"
+    mkdir -p logs
+    _make_pipeline_log "./logs" "CRE-49"
+    source "$LIB_DIR/fleet-registry.sh"
+    source "$LIB_DIR/fleet-intervene.sh"
+
+    bash -c 'trap "" INT TERM; sleep 30' &
+    local worker_pid=$!
+    registry_write "CRE-49" "$worker_pid" 1 "test" "./logs"
+
+    FLEET_KILL_GRACE_SECS=1 fleet_kill_pipeline "CRE-49" "test-sigkill" "./logs"
+    wait "$worker_pid" 2>/dev/null || true
+
+    grep -q "META|outcome|info|stopped: fleet-kill (SIGKILL)" "./logs/CRE-49-pipeline.log" || {
+      echo "expected SIGKILL outcome entry, got:" >&2
+      cat "./logs/CRE-49-pipeline.log" >&2
+      exit 1
+    }
+    kill -0 "$worker_pid" 2>/dev/null && {
+      echo "unresponsive worker still alive after full escalation" >&2
+      kill -9 "$worker_pid" 2>/dev/null || true
+      exit 1
+    }
+    exit 0
+  )
+  local rc=$?
+  rm -rf "$ws"
+  [ "$rc" -eq 0 ]
+}
+
 # ── _count_restarts regression tests ─────────────────────────────────────────────
 
 test_count_restarts_single_restart_counts_one() {
@@ -464,6 +545,8 @@ for fn in \
   test_fleet_kill_pipeline_nonexistent_ticket \
   test_fleet_kill_pipeline_normal \
   test_fleet_kill_pipeline_dry_run_does_not_mutate \
+  test_fleet_kill_pipeline_sigint_rung_kills_plain_worker \
+  test_fleet_kill_pipeline_ignoring_worker_escalates_to_sigkill \
   test_count_restarts_single_restart_counts_one \
   test_count_restarts_zero_matches_single_zero_line \
   test_fleet_can_restart_not_exhausted_after_single_restart \

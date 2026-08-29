@@ -73,6 +73,30 @@ def _wait_health(port, timeout=5):
     return None
 
 
+def _safe_tmp_cleanup(tmp, retries=10, delay=0.1):
+    """Retry TemporaryDirectory.cleanup() against a narrow, benign race.
+
+    A spawned test worker's forked child creates its per-generation stdio
+    files (worker-reap-recovery) asynchronously relative to the parent
+    returning from _consume_queue — many tests here don't wait for or kill
+    the worker before tearDown. If shutil.rmtree snapshots the directory
+    listing at the exact instant the child is mid-open(), a new entry can
+    appear after the snapshot and rmdir raises ENOTEMPTY. The child's
+    remaining work (open, dup2, execve) completes in low-single-digit
+    milliseconds, so a short retry loop is sufficient — this is test
+    infrastructure hygiene, not a production concern (nothing deletes
+    FLEET_STATE_DIR out from under a live worker).
+    """
+    for attempt in range(retries):
+        try:
+            tmp.cleanup()
+            return
+        except OSError:
+            if attempt == retries - 1:
+                raise
+            time.sleep(delay)
+
+
 class SingleInstanceTest(unittest.TestCase):
     """Task 4.6: single-instance enforcement."""
 
@@ -83,7 +107,7 @@ class SingleInstanceTest(unittest.TestCase):
         self.port = _find_free_port()
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def test_second_instance_refuses_to_start(self):
         """Second instance exits with error when another holds the lock."""
@@ -158,7 +182,7 @@ class HealthEndpointTest(unittest.TestCase):
         self.port = _find_free_port()
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def test_empty_worker_set(self):
         """Health endpoint reports an empty worker set when nothing is running."""
@@ -239,7 +263,7 @@ class RegistryObservationTest(unittest.TestCase):
         self.port = _find_free_port()
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def test_zero_pid_entries_are_skipped(self):
         """Registry entries with PID 0 (sentinel) are not reported as live."""
@@ -316,7 +340,7 @@ class DetectionCycleTest(unittest.TestCase):
         self.workspace = Path(self._tmp.name)
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def _write_pipeline_log(self, tid, lines):
         """Write a minimal pipeline log for a ticket."""
@@ -436,7 +460,7 @@ class CycleCacheTest(unittest.TestCase):
         self.workspace = Path(self._tmp.name)
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def test_repeated_detection_hits_cache(self):
         """Second call to DetectionCycle.run with the same cache skips subprocess."""
@@ -531,7 +555,7 @@ class SpawnAndReapTest(unittest.TestCase):
         self._append_queue_entry('TST-S1', 'test-spawn', generation=1)
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def _append_queue_entry(self, tid, reason, generation=1):
         """Append one entry to the spawn queue JSONL file."""
@@ -1072,10 +1096,17 @@ class SpawnAndReapTest(unittest.TestCase):
 
 
 def _make_ignoring_worker(sleep_secs=30):
-    """Worker that ignores SIGTERM — forces escalation to SIGKILL."""
+    """Worker that ignores SIGINT and SIGTERM — forces escalation to SIGKILL.
+
+    SIGINT must be ignored too now that kill escalation has a SIGINT rung
+    (worker-reap-recovery) — otherwise Python's default SIGINT handling
+    (KeyboardInterrupt, uncaught) would kill this "unresponsive" worker one
+    rung early, at SIGINT rather than SIGKILL.
+    """
     return [
         sys.executable, '-c',
         f'import signal, time; '
+        f'signal.signal(signal.SIGINT, signal.SIG_IGN); '
         f'signal.signal(signal.SIGTERM, signal.SIG_IGN); '
         f'time.sleep({sleep_secs})',
     ]
@@ -1111,6 +1142,196 @@ def _make_worker_with_child(sleep_secs=30, child_pid_file=None):
     return [sys.executable, '-c', '\n'.join(script_lines)]
 
 
+class WorkerStdioAndEnvTest(unittest.TestCase):
+    """worker-reap-recovery task 2.8: stdio capture, session id, env, generations."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+        self._append_queue_entry('TST-S1', 'test-spawn', generation=1)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _append_queue_entry(self, tid, reason, generation=1):
+        queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+        entry = {
+            'tid': tid,
+            'reason': reason,
+            'generation': generation,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+        with open(queue_file, 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+
+    def _read_run_registry(self, tid):
+        run_file = self.workspace / f'{tid}-run.json'
+        if run_file.is_file():
+            return json.loads(run_file.read_text())
+        return None
+
+    def test_env_contains_fleet_worker_pid_matching_registry(self):
+        """The worker's environment carries FLEET_WORKER_PID == its own pid."""
+        from fleetd.supervisor import Supervisor
+
+        env_out = self.workspace / 'env_out.json'
+        script = (
+            'import os, json, time; '
+            'json.dump({"fleet_worker_pid": os.environ.get("FLEET_WORKER_PID"), '
+            '"own_pid": os.getpid()}, open(%r, "w")); '
+            'time.sleep(2)'
+        ) % str(env_out)
+        cmd = [sys.executable, '-c', script]
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            sup._consume_queue(cmd_override=cmd)
+            deadline = time.time() + 5
+            data = None
+            while time.time() < deadline:
+                if env_out.is_file():
+                    try:
+                        data = json.loads(env_out.read_text())
+                        break
+                    except json.JSONDecodeError:
+                        pass
+                time.sleep(0.1)
+            self.assertIsNotNone(data, "worker never wrote its env snapshot")
+            reg = self._read_run_registry('TST-S1')
+            self.assertEqual(str(data['own_pid']), reg['pid'])
+            self.assertEqual(str(data['fleet_worker_pid']), reg['pid'],
+                             "FLEET_WORKER_PID must equal the worker's own pid")
+        finally:
+            sup.release_lock()
+
+    def test_session_id_recorded_at_spawn(self):
+        """A session id is generated and recorded in the run registry."""
+        from fleetd.supervisor import Supervisor
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=5)
+            sup._consume_queue(cmd_override=cmd)
+            reg = self._read_run_registry('TST-S1')
+            self.assertIsNotNone(reg)
+            self.assertTrue(reg.get('session_id'),
+                            "run registry should carry a non-empty session_id")
+            child = sup._children.get('TST-S1')
+            self.assertEqual(child.get('session_id'), reg['session_id'],
+                             "child table session_id should match the registry")
+        finally:
+            sup.release_lock()
+
+    def test_stdout_and_stderr_land_in_separate_generation_files(self):
+        """fd1/fd2 are redirected to distinct per-generation files, never merged."""
+        from fleetd.supervisor import Supervisor
+
+        cmd = [
+            sys.executable, '-c',
+            'import sys, time; '
+            'sys.stdout.write("STDOUT-MARKER\\n"); sys.stdout.flush(); '
+            'sys.stderr.write("STDERR-MARKER\\n"); sys.stderr.flush(); '
+            'time.sleep(2)',
+        ]
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            sup._consume_queue(cmd_override=cmd)
+            stdout_file = self.workspace / 'TST-S1-gen1.json'
+            stderr_file = self.workspace / 'TST-S1-gen1.stderr'
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if stdout_file.is_file() and stdout_file.stat().st_size > 0:
+                    break
+                time.sleep(0.1)
+            self.assertTrue(stdout_file.is_file(), "stdout file should exist")
+            self.assertTrue(stderr_file.is_file(), "stderr file should exist")
+            self.assertIn('STDOUT-MARKER', stdout_file.read_text())
+            self.assertIn('STDERR-MARKER', stderr_file.read_text())
+            self.assertNotIn('STDERR-MARKER', stdout_file.read_text())
+            self.assertNotIn('STDOUT-MARKER', stderr_file.read_text())
+        finally:
+            sup.release_lock()
+
+    def test_second_generation_does_not_overwrite_first(self):
+        """A new generation for the same tid gets its own stdio files."""
+        from fleetd.supervisor import spawn_worker
+
+        pid1, _ = spawn_worker(
+            tid='TST-GEN', generation=1, state_dir=str(self.workspace),
+            cmd_override=[sys.executable, '-c',
+                          'print("GEN1"); import time; time.sleep(1)'],
+        )
+        deadline = time.time() + 5
+        gen1_file = self.workspace / 'TST-GEN-gen1.json'
+        while time.time() < deadline and not (
+                gen1_file.is_file() and gen1_file.stat().st_size > 0):
+            time.sleep(0.1)
+        os.waitpid(pid1, 0)
+
+        pid2, _ = spawn_worker(
+            tid='TST-GEN', generation=2, state_dir=str(self.workspace),
+            cmd_override=[sys.executable, '-c',
+                          'print("GEN2"); import time; time.sleep(1)'],
+        )
+        gen2_file = self.workspace / 'TST-GEN-gen2.json'
+        deadline = time.time() + 5
+        while time.time() < deadline and not (
+                gen2_file.is_file() and gen2_file.stat().st_size > 0):
+            time.sleep(0.1)
+        os.waitpid(pid2, 0)
+
+        self.assertIn('GEN1', gen1_file.read_text())
+        self.assertIn('GEN2', gen2_file.read_text())
+        self.assertNotIn('GEN2', gen1_file.read_text(),
+                         "the second generation must not overwrite the first")
+
+    def test_redirection_failure_does_not_abort_spawn(self):
+        """A stdio-redirect failure still lets the worker spawn and exec."""
+        from fleetd.supervisor import Supervisor
+
+        # Pre-create the stdout target AS A DIRECTORY so the child's
+        # os.open(..., O_WRONLY) raises OSError (IsADirectoryError) —
+        # isolates the redirection failure without touching the run
+        # registry write, which happens in the parent via a different path.
+        (self.workspace / 'TST-S1-gen1.json').mkdir()
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=3)
+            consumed = sup._consume_queue(cmd_override=cmd)
+            self.assertEqual(consumed, {'TST-S1'},
+                             "spawn must proceed despite redirection failure")
+            child = sup._children.get('TST-S1')
+            self.assertIsNotNone(child)
+            self.assertTrue(_pid_is_alive(child['pid']),
+                            "worker should still be running (exec succeeded)")
+        finally:
+            sup.release_lock()
+
+
 class KillEscalationTest(unittest.TestCase):
     """Task 7.6: escalation reaches SIGKILL, descendants die, early exit skips."""
 
@@ -1121,7 +1342,7 @@ class KillEscalationTest(unittest.TestCase):
 
     def tearDown(self):
         # Ensure any lingering test children are cleaned up.
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def _append_queue_entry(self, tid, reason, generation=1):
         queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
@@ -1336,7 +1557,7 @@ class CrashRecoveryTest(unittest.TestCase):
         self.workspace = Path(self._tmp.name)
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def _write_run_registry(self, tid, pid, started_at=None, generation=1):
         run_file = self.workspace / f'{tid}-run.json'
@@ -1541,6 +1762,437 @@ class CrashRecoveryTest(unittest.TestCase):
             sup.release_lock()
 
 
+# ── worker-reap-recovery: exit persistence + reap-time recovery ──────────
+
+
+class ExitPersistenceAndRecoveryTest(unittest.TestCase):
+    """worker-reap-recovery tasks 3.10-3.11: exit records, scoped reap-time
+    reconciliation, kill attribution, circuit breaker, lock hoist."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _append_queue_entry(self, tid, reason='test', generation=1):
+        queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+        entry = {
+            'tid': tid,
+            'reason': reason,
+            'generation': generation,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+        with open(queue_file, 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+
+    def _read_exit_record(self, tid, generation=1):
+        exit_file = self.workspace / f'{tid}-gen{generation}-exit.json'
+        if exit_file.is_file():
+            return json.loads(exit_file.read_text())
+        return None
+
+    def _make_sup(self, **kwargs):
+        from fleetd.supervisor import Supervisor
+        defaults = dict(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=3,
+        )
+        defaults.update(kwargs)
+        return Supervisor(**defaults)
+
+    def test_crashed_worker_exit_record_and_scoped_reconcile(self):
+        """A worker that exits non-zero over a non-terminal log gets an exit
+        record (killed_by_fleet=False) and triggers scoped reconciliation."""
+        from unittest import mock
+
+        self._append_queue_entry('TST-R1')
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1, exit_code=1)
+            sup._consume_queue(cmd_override=cmd)
+            time.sleep(2)
+
+            recorded_scopes = []
+            with mock.patch.object(
+                sup, 'reconcile_orphaned_tickets',
+                side_effect=lambda scope_tids=None: recorded_scopes.append(scope_tids),
+            ):
+                sup._reap_children()
+
+            self.assertEqual(recorded_scopes, [['TST-R1']],
+                             "reap-time recovery must scope reconcile to the "
+                             "exact tid that just exited")
+            record = self._read_exit_record('TST-R1')
+            self.assertIsNotNone(record, "exit record must be written")
+            self.assertEqual(record['exit_code'], 1)
+            self.assertEqual(record['exit_type'], 'exit')
+            self.assertFalse(record['killed_by_fleet'])
+            self.assertFalse(record['terminal'])
+        finally:
+            sup.release_lock()
+
+    def test_terminal_log_worker_not_reconciled(self):
+        """A worker over an already-terminal pipeline log is not re-enqueued."""
+        from unittest import mock
+
+        tid = 'TST-R2'
+        self._append_queue_entry(tid)
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1, exit_code=0)
+            sup._consume_queue(cmd_override=cmd)
+            # Write the terminal marker AFTER spawn (consume-time terminality
+            # would instead take the "stale queue entry" path and never
+            # spawn at all) but BEFORE reap, so reap-time classification
+            # sees a genuinely completed pipeline.
+            log_file = self.workspace / f'{tid}-pipeline.log'
+            log_file.write_text(
+                '2026-08-29T00:00:00Z|META|schema|done|1\n'
+                '2026-08-29T00:00:01Z|META|outcome|done|completed\n'
+            )
+            time.sleep(2)
+
+            called = []
+            with mock.patch.object(
+                sup, 'reconcile_orphaned_tickets',
+                side_effect=lambda scope_tids=None: called.append(scope_tids),
+            ):
+                sup._reap_children()
+
+            self.assertEqual(called, [], "a terminal-log worker must not be reconciled")
+            record = self._read_exit_record(tid)
+            self.assertTrue(record['terminal'])
+        finally:
+            sup.release_lock()
+
+    def test_notify_called_for_non_terminal_exit(self):
+        """The Slack notifier fires for a crash over a non-terminal log
+        (task 7.2), before scoped reconciliation runs."""
+        from unittest import mock
+
+        tid = 'TST-N1'
+        self._append_queue_entry(tid)
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1, exit_code=1)
+            sup._consume_queue(cmd_override=cmd)
+            time.sleep(2)
+
+            with mock.patch('fleetd.supervisor._notify_worker_event') as notify, \
+                 mock.patch.object(sup, 'reconcile_orphaned_tickets'):
+                sup._reap_children()
+
+            notify.assert_called_once_with(
+                sup._fleet_lib_dir, str(self.workspace), tid, 'non-terminal-exit',
+            )
+        finally:
+            sup.release_lock()
+
+    def test_notify_not_called_for_terminal_log_or_clean_completion(self):
+        """A worker completing over a terminal (done) pipeline log must
+        never trigger a Slack notification — only crashes do."""
+        from unittest import mock
+
+        tid = 'TST-N2'
+        self._append_queue_entry(tid)
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1, exit_code=0)
+            sup._consume_queue(cmd_override=cmd)
+            log_file = self.workspace / f'{tid}-pipeline.log'
+            log_file.write_text(
+                '2026-08-29T00:00:00Z|META|schema|done|1\n'
+                '2026-08-29T00:00:01Z|META|outcome|done|completed\n'
+            )
+            time.sleep(2)
+
+            with mock.patch('fleetd.supervisor._notify_worker_event') as notify:
+                sup._reap_children()
+
+            notify.assert_not_called()
+        finally:
+            sup.release_lock()
+
+    def test_exit_127_worker_not_reconciled(self):
+        """fleetd's own exec-failure sentinel (127) is a hard skip."""
+        from unittest import mock
+
+        tid = 'TST-R3'
+        self._append_queue_entry(tid)
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1, exit_code=127)
+            sup._consume_queue(cmd_override=cmd)
+            time.sleep(2)
+
+            called = []
+            with mock.patch.object(
+                sup, 'reconcile_orphaned_tickets',
+                side_effect=lambda scope_tids=None: called.append(scope_tids),
+            ):
+                sup._reap_children()
+
+            self.assertEqual(called, [], "exit 127 must skip reconciliation")
+            record = self._read_exit_record(tid)
+            self.assertEqual(record['suppressed_retry_reason'],
+                             'exec-failure (exit 127)')
+        finally:
+            sup.release_lock()
+
+    def test_sigint_killed_worker_marked_killed_by_fleet_and_skipped(self):
+        """A worker killed via kill_worker()'s SIGINT rung is recorded
+        killed_by_fleet=True and never reaches reap-time recovery."""
+        from unittest import mock
+
+        tid = 'TST-R4'
+        self._append_queue_entry(tid)
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            # Plain worker with no signal handling installed — Python's
+            # default SIGINT disposition (uncaught KeyboardInterrupt)
+            # terminates it immediately, so the kill succeeds at the SIGINT
+            # rung specifically (the scenario this test targets: the real
+            # `claude -p` behavior of exiting 0 on SIGINT).
+            cmd = _make_worker_cmd(sleep_secs=30)
+            sup._consume_queue(cmd_override=cmd)
+
+            called = []
+            with mock.patch.object(
+                sup, 'reconcile_orphaned_tickets',
+                side_effect=lambda scope_tids=None: called.append(scope_tids),
+            ):
+                result = sup.kill_worker(tid, grace_secs=1)
+                self.assertTrue(result.success)
+                self.assertEqual(result.method, 'SIGINT')
+                # The kill path itself must never trigger reconciliation —
+                # a verified kill is a deliberate pause, not a crash.
+                self.assertEqual(called, [])
+
+            record = self._read_exit_record(tid)
+            self.assertIsNotNone(record)
+            self.assertTrue(record['killed_by_fleet'])
+            self.assertEqual(record['action'], 'killed-by-fleet')
+
+            # And a subsequent reap cycle (SIGCHLD for the already-reaped
+            # pid) must not double-process or re-trigger reconciliation —
+            # kill_worker's own _try_reap already consumed the exit status.
+            with mock.patch.object(
+                sup, 'reconcile_orphaned_tickets',
+                side_effect=lambda scope_tids=None: called.append(scope_tids),
+            ):
+                sup._reap_children()
+            self.assertEqual(called, [])
+        finally:
+            sup.release_lock()
+
+    def test_hook_capture_merges_into_natural_reap_exit_record(self):
+        """A Stop-hook-written {tid}-gen{N}-hook.json is merged into the exit
+        record on natural reap (task 6.4)."""
+        tid = 'TST-R5'
+        self._append_queue_entry(tid)
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1, exit_code=0)
+            sup._consume_queue(cmd_override=cmd)
+            hook_file = self.workspace / f'{tid}-gen1-hook.json'
+            hook_file.write_text(json.dumps({'last_assistant_message': 'need clarification'}))
+            time.sleep(2)
+            sup._reap_children()
+
+            record = self._read_exit_record(tid)
+            self.assertIsNotNone(record)
+            self.assertEqual(record['last_assistant_message'], 'need clarification')
+        finally:
+            sup.release_lock()
+
+    def test_hook_capture_merges_into_killed_by_fleet_exit_record(self):
+        """A hook capture present at kill time (e.g. cooperative stop, which
+        lets the worker exit on its own and so can fire Stop) still merges
+        into the killed-by-fleet exit record."""
+        tid = 'TST-R6'
+        self._append_queue_entry(tid)
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=30)
+            sup._consume_queue(cmd_override=cmd)
+            hook_file = self.workspace / f'{tid}-gen1-hook.json'
+            hook_file.write_text(json.dumps({'last_assistant_message': 'done early'}))
+
+            result = sup.kill_worker(tid, grace_secs=1)
+            self.assertTrue(result.success)
+
+            record = self._read_exit_record(tid)
+            self.assertIsNotNone(record)
+            self.assertTrue(record['killed_by_fleet'])
+            self.assertEqual(record['last_assistant_message'], 'done early')
+        finally:
+            sup.release_lock()
+
+    def test_exit_record_valid_when_hook_capture_absent(self):
+        """SIGKILL leaves no hook capture — the exit record must still be
+        valid, with last_assistant_message simply None."""
+        tid = 'TST-R7'
+        self._append_queue_entry(tid)
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            cmd = _make_ignoring_worker(sleep_secs=30)
+            sup._consume_queue(cmd_override=cmd)
+
+            result = sup.kill_worker(tid, grace_secs=1)
+            self.assertTrue(result.success)
+            self.assertEqual(result.method, 'SIGKILL')
+
+            record = self._read_exit_record(tid)
+            self.assertIsNotNone(record)
+            self.assertIsNone(record['last_assistant_message'])
+        finally:
+            sup.release_lock()
+
+    def test_circuit_breaker_trips_after_consecutive_fast_failures(self):
+        """N consecutive fast non-zero exits across different tickets halts
+        dispatch (spawn_enabled False) rather than reconciling every one."""
+        from unittest import mock
+
+        for i in range(3):
+            self._append_queue_entry(f'TST-CB{i}')
+        sup = self._make_sup(max_concurrent=3)
+        os.environ['FLEET_DETERMINISTIC_FAILURE_SECS'] = '30'
+        os.environ['FLEET_DETERMINISTIC_FAILURE_COUNT'] = '3'
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=0, exit_code=1)
+            sup._consume_queue(cmd_override=cmd)
+            time.sleep(1)
+
+            with mock.patch.object(sup, 'reconcile_orphaned_tickets'):
+                sup._reap_children()
+
+            self.assertTrue(sup._circuit_breaker_tripped,
+                            "3 consecutive fast failures should trip the breaker")
+            self.assertFalse(sup._spawn_enabled,
+                             "tripped breaker must halt further dispatch")
+
+            # A subsequent spawn attempt is a no-op — dispatch is halted.
+            self._append_queue_entry('TST-CB-after')
+            consumed = sup._consume_queue(cmd_override=cmd)
+            self.assertEqual(consumed, set())
+        finally:
+            sup.release_lock()
+            os.environ.pop('FLEET_DETERMINISTIC_FAILURE_SECS', None)
+            os.environ.pop('FLEET_DETERMINISTIC_FAILURE_COUNT', None)
+
+    def test_circuit_breaker_resets_on_slow_or_successful_exit(self):
+        """A streak is reset by any exit that is not itself a fast failure."""
+        from unittest import mock
+
+        self._append_queue_entry('TST-CB-A')
+        sup = self._make_sup(max_concurrent=1)
+        os.environ['FLEET_DETERMINISTIC_FAILURE_SECS'] = '30'
+        sup.acquire_lock()
+        try:
+            # Fast failure #1.
+            cmd_fail = _make_worker_cmd(sleep_secs=0, exit_code=1)
+            sup._consume_queue(cmd_override=cmd_fail)
+            time.sleep(1)
+            with mock.patch.object(sup, 'reconcile_orphaned_tickets'):
+                sup._reap_children()
+            self.assertEqual(len(sup._fast_failure_streak), 1)
+
+            # A clean exit resets the streak.
+            self._append_queue_entry('TST-CB-B')
+            cmd_ok = _make_worker_cmd(sleep_secs=0, exit_code=0)
+            sup._consume_queue(cmd_override=cmd_ok)
+            time.sleep(1)
+            with mock.patch.object(sup, 'reconcile_orphaned_tickets'):
+                sup._reap_children()
+            self.assertEqual(sup._fast_failure_streak, [])
+            self.assertFalse(sup._circuit_breaker_tripped)
+        finally:
+            sup.release_lock()
+            os.environ.pop('FLEET_DETERMINISTIC_FAILURE_SECS', None)
+
+    def test_kill_request_processed_without_waiting_for_reconcile(self):
+        """Lock-hoist: reaping a crashed worker must not block kill-request
+        processing on a slow reconcile subprocess (task 3.11)."""
+        from unittest import mock
+
+        self._append_queue_entry('TST-LH1')
+        sup = self._make_sup(max_concurrent=1)
+        sup.acquire_lock()
+        try:
+            crash_cmd = _make_worker_cmd(sleep_secs=1, exit_code=1)
+            sup._consume_queue(cmd_override=crash_cmd)
+            time.sleep(2)  # let it crash so the reaper has something to find
+
+            entered = threading.Event()
+            release = threading.Event()
+
+            def _slow_reconcile(scope_tids=None):
+                entered.set()
+                release.wait(timeout=10)
+
+            with mock.patch.object(sup, 'reconcile_orphaned_tickets',
+                                   side_effect=_slow_reconcile):
+                t = threading.Thread(target=sup._reap_children)
+                t.start()
+                self.assertTrue(entered.wait(timeout=5),
+                                "reconcile subprocess never started")
+                # _state_lock must be free while reconcile runs — a pending
+                # kill-request (or the health endpoint) must not stall for
+                # up to 120s behind it.
+                self.assertTrue(sup._state_lock.acquire(timeout=2),
+                                "_state_lock held during reconcile subprocess")
+                sup._state_lock.release()
+                release.set()
+                t.join(timeout=10)
+        finally:
+            sup.release_lock()
+
+    def test_exit_record_fields_use_iso_utc_timestamp(self):
+        """Sanity check on the exit record's timestamp shape."""
+        from fleetd.supervisor import _write_exit_record
+
+        entry = _write_exit_record(
+            str(self.workspace), 'TST-FMT', 1, 12345, -9, 'signal',
+            killed_by_fleet=False, terminal=False,
+        )
+        self.assertRegex(entry['exited_at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+
+    def test_generation_files_swept_beyond_retention(self):
+        """Stale per-generation stdio/exit files are pruned beyond retention."""
+        from fleetd.supervisor import _sweep_stale_generation_files
+
+        tid = 'TST-SWEEP'
+        for gen in range(1, 6):
+            (self.workspace / f'{tid}-gen{gen}.json').write_text('x')
+            (self.workspace / f'{tid}-gen{gen}.stderr').write_text('x')
+            (self.workspace / f'{tid}-gen{gen}-exit.json').write_text('{}')
+
+        _sweep_stale_generation_files(str(self.workspace), tid, current_generation=5,
+                                      retention=2)
+
+        # Generations 1-3 are beyond the retention-2 window (keep 4, 5).
+        for gen in (1, 2, 3):
+            self.assertFalse((self.workspace / f'{tid}-gen{gen}.json').exists())
+            self.assertFalse((self.workspace / f'{tid}-gen{gen}.stderr').exists())
+            self.assertFalse((self.workspace / f'{tid}-gen{gen}-exit.json').exists())
+        for gen in (4, 5):
+            self.assertTrue((self.workspace / f'{tid}-gen{gen}.json').exists())
+
+
 # ── Group 9: Generation fencing tests ────────────────────────────────────
 
 
@@ -1552,7 +2204,7 @@ class GenerationFencingTest(unittest.TestCase):
         self.workspace = Path(self._tmp.name)
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def _append_queue(self, tid, reason='test'):
         queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
@@ -1839,7 +2491,7 @@ class StartupReconciliationTest(unittest.TestCase):
         self.port = _find_free_port()
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def _make_patched_supervisor(self):
         from fleetd.supervisor import Supervisor
@@ -1999,7 +2651,7 @@ class CLIAlignmentTest(unittest.TestCase):
         self.workspace = Path(self._tmp.name)
 
     def tearDown(self):
-        self._tmp.cleanup()
+        _safe_tmp_cleanup(self._tmp)
 
     def _write_queue_entry(self, tid, reason='cli-dispatch'):
         """Simulate fleet-controller dispatch writing to the spawn queue."""
@@ -2080,7 +2732,8 @@ class CLIAlignmentTest(unittest.TestCase):
             result = json.loads(result_file.read_text())
             self.assertTrue(result['success'],
                             f"kill should succeed: {result.get('error')}")
-            self.assertIn(result['method'], ['cooperative', 'SIGTERM', 'SIGKILL'])
+            self.assertIn(result['method'],
+                         ['cooperative', 'SIGINT', 'SIGTERM', 'SIGKILL'])
         finally:
             sup.release_lock()
 

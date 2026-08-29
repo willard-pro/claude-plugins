@@ -21,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -135,7 +136,7 @@ class ChildTable:
         self._workers = {}
 
     def add(self, tid, pid, generation=0, reason='', adopted=False, phase='',
-            anomalies=''):
+            anomalies='', session_id=None):
         self._workers[tid] = {
             'tid': tid,
             'pid': pid,
@@ -145,6 +146,7 @@ class ChildTable:
             'adopted': adopted,
             'phase': phase,
             'anomalies': anomalies,
+            'session_id': session_id,
         }
 
     def remove(self, tid):
@@ -186,6 +188,7 @@ class ChildTable:
                 'adopted': w['adopted'],
                 'phase': w['phase'],
                 'anomalies': w['anomalies'],
+                'session_id': w.get('session_id'),
             }
             for w in self._workers.values()
         ]
@@ -913,9 +916,149 @@ def _write_fence_files(tid, generation, state_dir):
         pass
 
 
+# ── Worker exit persistence (worker-reap-recovery) ─────────────────────────
+
+FLEET_WORKER_LOG_RETENTION = _env_int('FLEET_WORKER_LOG_RETENTION', 3)
+
+
+def _append_pipeline_log_line(state_dir, tid, phase, step, status, msg):
+    """Append one ISO|PHASE|STEP|STATUS|MSG line to {tid}-pipeline.log.
+
+    Python mirror of the bash `_plog` writer (heartbeat.sh) — same schema,
+    same timestamp format — so every existing consumer (detectors,
+    detect-resume.sh, the dashboard, /ticket-overseer) reads this exactly
+    like any other pipeline-log entry. Fail-soft: a logging failure must
+    never interrupt reap-time recovery.
+    """
+    log_file = Path(state_dir) / f'{tid}-pipeline.log'
+    iso = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    # MSG must not contain '|' — would corrupt the pipe-delimited format,
+    # mirroring _plog's own guard.
+    msg = msg.replace('|', '/')
+    try:
+        with open(log_file, 'a') as f:
+            f.write(f'{iso}|{phase}|{step}|{status}|{msg}\n')
+    except OSError:
+        pass
+
+
+def _write_exit_record(state_dir, tid, generation, pid, exit_code, exit_type,
+                       killed_by_fleet, terminal, session_id=None,
+                       last_assistant_message=None, action=None,
+                       suppressed_retry_reason=None):
+    """Write {tid}-gen{N}-exit.json — per-generation, no shared-write races.
+
+    Follows the same per-ticket no-shared-write pattern as
+    `_write_run_registry`. Fail-soft on OSError: a missing exit record
+    degrades to today's behaviour of recording nothing (Migration Plan).
+    Returns the entry dict regardless of whether the write succeeded, so
+    callers (and later hook-driven merges) can still act on it in memory.
+    """
+    exit_file = Path(state_dir) / f'{tid}-gen{generation}-exit.json'
+    entry = {
+        'tid': tid,
+        'generation': generation,
+        'pid': pid,
+        'exit_code': exit_code,
+        'exit_type': exit_type,
+        'exited_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        'killed_by_fleet': killed_by_fleet,
+        'terminal': terminal,
+        'session_id': session_id,
+        'last_assistant_message': last_assistant_message,
+        'action': action,
+    }
+    if suppressed_retry_reason:
+        entry['suppressed_retry_reason'] = suppressed_retry_reason
+    try:
+        exit_file.write_text(json.dumps(entry))
+    except OSError:
+        pass
+    return entry
+
+
+def _read_hook_capture(state_dir, tid, generation):
+    """Read {tid}-gen{N}-hook.json, written by the Stop hook (stop-capture.sh).
+
+    Returns {} when absent — `Stop` fires on neither SIGINT nor SIGKILL, so
+    a missing capture file is the expected case for those rungs, not an
+    error (task 6.4). Best-effort: any parse failure degrades to {} rather
+    than blocking exit-record persistence.
+    """
+    hook_file = Path(state_dir) / f'{tid}-gen{generation}-hook.json'
+    try:
+        return json.loads(hook_file.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _update_exit_record_action(state_dir, tid, generation, action):
+    """Best-effort update of an already-written exit record's `action` field.
+
+    Used after reap-time recovery has actually attempted reconciliation for
+    a tid, so the record reflects what fleetd did, not just what it decided
+    to do at reap time. Never raises — a missing/unreadable record is a
+    no-op, not an error.
+    """
+    exit_file = Path(state_dir) / f'{tid}-gen{generation}-exit.json'
+    try:
+        entry = json.loads(exit_file.read_text())
+        entry['action'] = action
+        exit_file.write_text(json.dumps(entry))
+    except (OSError, json.JSONDecodeError):
+        pass
+
+
+def _notify_worker_event(fleet_lib_dir, state_dir, tid, event_type, detail=''):
+    """Fire the deterministic Slack notifier for a non-terminal worker exit.
+
+    Shells out to fleet-notify.sh (bash `curl`, per design.md Decision 7) so
+    the transport is shared with the bash-side dead-letter call site in
+    fleet-reconcile.sh. Fail-soft: an absent script, a missing SLACK_* env,
+    or a transport failure must never affect reaping or reconciliation.
+    """
+    notify_script = Path(fleet_lib_dir) / 'fleet-notify.sh'
+    if not notify_script.is_file():
+        return
+    try:
+        subprocess.run(
+            ['bash', '-c',
+             f'source {shlex.quote(str(notify_script))} && '
+             f'fleet_notify_worker_event {shlex.quote(tid)} '
+             f'{shlex.quote(str(state_dir))} {shlex.quote(event_type)} '
+             f'{shlex.quote(detail)}'],
+            timeout=15, capture_output=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+
+
+def _sweep_stale_generation_files(state_dir, tid, current_generation,
+                                  retention=None):
+    """Delete gen/.stderr/-exit.json files older than the retention window.
+
+    Per-generation worker output is otherwise unbounded — Increment A ships
+    the sweep alongside capture rather than deferring it (tasks.md 3.12).
+    Keeps the most recent `retention` generations (default
+    FLEET_WORKER_LOG_RETENTION); best-effort, never raises.
+    """
+    keep = retention if retention is not None else FLEET_WORKER_LOG_RETENTION
+    cutoff = current_generation - keep
+    if cutoff < 1:
+        return
+    state = Path(state_dir)
+    for suffix in ('.json', '.stderr', '-exit.json'):
+        for gen in range(1, cutoff + 1):
+            stale = state / f'{tid}-gen{gen}{suffix}'
+            try:
+                stale.unlink()
+            except OSError:
+                pass
+
+
 # ── Kill escalation ────────────────────────────────────────────────────────
 
-KILL_ESCALATION_ORDER = ('cooperative', 'SIGTERM', 'SIGKILL')
+KILL_ESCALATION_ORDER = ('cooperative', 'SIGINT', 'SIGTERM', 'SIGKILL')
 
 
 def _try_reap(pid):
@@ -934,10 +1077,11 @@ def _try_reap(pid):
 
 def kill_worker(tid, pid, generation, state_dir, reason='fleet-kill',
                 grace_secs=None):
-    """Escalate: cooperative stop → grace → SIGTERM → grace → SIGKILL.
+    """Escalate: cooperative stop → grace → SIGINT → grace → SIGTERM → grace → SIGKILL.
 
     Each step verifies the process is still alive before proceeding.
     - Cooperative stop: touch stop files, wait grace, check.
+    - SIGINT: signal the process group, wait grace, check.
     - SIGTERM: signal the process group, wait grace, check.
     - SIGKILL: signal the process group, brief wait, check.
 
@@ -946,6 +1090,25 @@ def kill_worker(tid, pid, generation, state_dir, reason='fleet-kill',
     Signals target the process GROUP (not just the PID) because the worker
     spawns subprocesses (git, CLI tools, test runners) and those must
     terminate with the worker.
+
+    What the SIGINT rung actually buys, per observation (worker-reap-recovery
+    validation, not assumption): it ends the in-progress turn and produces a
+    `result` line with a `session_id` over a finalized transcript, which
+    SIGTERM does not — SIGTERM leaves the turn unfinished with no result
+    recorded. It does NOT yield readable output: the observed subtype is
+    `error_during_execution`, whose `result` field is documented as
+    unavailable, `stop_reason` was `null`, and there was no text. It also
+    does NOT fire the `Stop` hook, so Increment B's final-message capture
+    yields nothing on this rung — do not build anything that reads output
+    from a SIGINT-terminated worker. The rung is still worth having: a
+    finalized transcript is strictly better than an abandoned turn for
+    `--resume` and post-mortem.
+
+    Empirically, SIGINT terminates a `-p` worker with exit 0 — this rung is
+    only safe alongside kill-attribution sourced from fleetd's own call
+    succeeding (never from an exit code): without it, every SIGINT-killed
+    worker would look exactly like an exit-0 orphan and be re-enqueued by
+    reap-time recovery. See Supervisor._record_fleet_kill_exit.
     """
     grace = grace_secs if grace_secs is not None else _env_int('FLEET_KILL_GRACE_SECS', 10)
 
@@ -963,7 +1126,15 @@ def kill_worker(tid, pid, generation, state_dir, reason='fleet-kill',
         _write_fence_files(tid, generation, state_dir)
         return KillResult(True, 'cooperative', None)
 
-    # ── Step 2: SIGTERM to process group ──────────────────────────────────
+    # ── Step 2: SIGINT to process group ─────────────────────────────────────
+    _signal_process_group(pid, signal.SIGINT)
+    time.sleep(grace)
+
+    if _is_dead():
+        _write_fence_files(tid, generation, state_dir)
+        return KillResult(True, 'SIGINT', None)
+
+    # ── Step 3: SIGTERM to process group ──────────────────────────────────
     _signal_process_group(pid, signal.SIGTERM)
     time.sleep(grace)
 
@@ -971,7 +1142,7 @@ def kill_worker(tid, pid, generation, state_dir, reason='fleet-kill',
         _write_fence_files(tid, generation, state_dir)
         return KillResult(True, 'SIGTERM', None)
 
-    # ── Step 3: SIGKILL to process group ──────────────────────────────────
+    # ── Step 4: SIGKILL to process group ──────────────────────────────────
     _signal_process_group(pid, signal.SIGKILL)
     time.sleep(1)  # Brief wait for kernel to reap
 
@@ -1124,7 +1295,8 @@ def _remove_consumed_entries(state_dir, consumed_tids):
 
 # ── Worker spawning ────────────────────────────────────────────────────────
 
-def _write_run_registry(state_dir, tid, pid, generation, reason='dispatched'):
+def _write_run_registry(state_dir, tid, pid, generation, reason='dispatched',
+                        session_id=None):
     """Write a run registry entry with the REAL pid (not a sentinel)."""
     run_file = Path(state_dir) / f'{tid}-run.json'
     entry = {
@@ -1134,10 +1306,51 @@ def _write_run_registry(state_dir, tid, pid, generation, reason='dispatched'):
         'started_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
         'reason': reason,
     }
+    if session_id:
+        entry['session_id'] = session_id
     run_file.write_text(json.dumps(entry))
 
 
-def _build_worker_cmd(tid, claude_bin=None, claude_cmd=None):
+# Non-interactive subprocess environment. A `-p` worker has no TTY and no
+# human to answer a credential or hostkey prompt — without these, a git
+# operation or a tool expecting a terminal can hang the worker indefinitely
+# with no exit code for the reaper to ever see.
+_NON_INTERACTIVE_ENV = {
+    'GIT_TERMINAL_PROMPT': '0',
+    'GIT_ASKPASS': '/bin/true',
+    'SSH_ASKPASS': '/bin/true',
+    'GIT_SSH_COMMAND': 'ssh -o BatchMode=yes -o StrictHostKeyChecking=accept-new',
+    'DEBIAN_FRONTEND': 'noninteractive',
+    'CI': 'true',
+    'PAGER': 'cat',
+    'GIT_PAGER': 'cat',
+    'NO_COLOR': '1',
+}
+
+# `bypassPermissions` pairs with scoped `disallowedTools` deny rules — deny
+# rules bind even under bypass, whereas `allowedTools` does not constrain
+# bypass. `dontAsk` is deliberately not used (denies every tool requiring
+# user interaction even when an allow rule matches); `auto` is deliberately
+# not used (in a non-interactive session there is no turn boundary, so one
+# classifier denial is reused for the rest of the run and the run does not
+# stop — see design.md Decision 9).
+FLEET_WORKER_PERMISSION_MODE = os.environ.get(
+    'FLEET_WORKER_PERMISSION_MODE', 'bypassPermissions')
+FLEET_WORKER_DISALLOWED_TOOLS = os.environ.get('FLEET_WORKER_DISALLOWED_TOOLS', '')
+
+# Markers indicating CLAUDE_CMD already supplies its own permission mode —
+# fleetd must not double-specify (the CLI rejects conflicting/duplicate
+# permission flags).
+_PERMISSION_FLAG_MARKERS = (
+    '--permission-mode', '--dangerously-skip-permissions', '--bypass',
+)
+
+
+def _cmd_already_sets_permission_mode(cmd_str):
+    return any(marker in cmd_str for marker in _PERMISSION_FLAG_MARKERS)
+
+
+def _build_worker_cmd(tid, claude_bin=None, claude_cmd=None, session_id=None):
     """Build the argument list for spawning a ticket-auto worker.
 
     `claude_cmd` (or the CLAUDE_CMD env var) is a shell-style command line —
@@ -1145,11 +1358,47 @@ def _build_worker_cmd(tid, claude_bin=None, claude_cmd=None):
     and takes precedence over `claude_bin`/CLAUDE_BIN. The ticket-auto
     invocation is always appended after it.
 
+    `--output-format json` yields session_id, subtype, stop_reason,
+    total_cost_usd and permission_denials on the final object — one `jq`
+    call, no NDJSON reader (stream-json adoption is explicitly out of
+    scope). `--session-id` is generated by the caller before exec so the
+    --resume handle exists even for a worker SIGKILLed before any hook
+    could run. An explicit permission mode is added unless `claude_cmd`/
+    CLAUDE_CMD already specifies one — `-p` starts in Manual mode on every
+    plan otherwise, which fails silently (exits 0, writes nothing).
+
     Returns a list suitable for os.execvpe().
     """
     cmd_str = claude_cmd or CLAUDE_CMD
     prefix = shlex.split(cmd_str) if cmd_str else [claude_bin or CLAUDE_BIN]
-    return prefix + ['-p', f'/ticket-auto {tid} --auto --from-planned']
+    args = ['-p', f'/ticket-auto {tid} --auto --from-planned',
+            '--output-format', 'json']
+    if session_id:
+        args += ['--session-id', session_id]
+    if not _cmd_already_sets_permission_mode(cmd_str):
+        args += ['--permission-mode', FLEET_WORKER_PERMISSION_MODE]
+        if FLEET_WORKER_DISALLOWED_TOOLS:
+            args += ['--disallowedTools', FLEET_WORKER_DISALLOWED_TOOLS]
+    return prefix + args
+
+
+def _read_own_start_ticks():
+    """Read this process's own /proc/self/stat field-22 start ticks.
+
+    Stamped into the worker's environment (as FLEET_WORKER_START_TICKS)
+    alongside FLEET_WORKER_PID so the watchdog can detect PID reuse:
+    `kill -0` succeeds for any live process occupying a recycled pid, but
+    its start ticks will not match. Mirrors the existing
+    `awk '{print $22}' /proc/$pid/stat` convention already used elsewhere
+    in this codebase (fleet-dispatch.sh) rather than introducing a new one.
+    Returns '' when /proc is unavailable (non-Linux) or unreadable.
+    """
+    try:
+        with open('/proc/self/stat') as f:
+            fields = f.read().split()
+        return fields[21]
+    except (OSError, IndexError):
+        return ''
 
 
 class SpawnError(Exception):
@@ -1163,13 +1412,23 @@ def spawn_worker(tid, generation, state_dir, reason='dispatched',
     The child is placed in its own process group so that kill escalation
     (group 7) can signal the entire worker subtree.
 
+    Worker stdout/stderr are redirected to per-generation files
+    (`{tid}-gen{N}.json` / `.stderr`) — never merged. Hook execution
+    failures are visible only on stderr, which makes the split a
+    prerequisite for Increment B rather than a convenience. Redirection
+    failure must not abort the spawn.
+
     cmd_override: if provided, used as the argv list instead of the default
     claude invocation. This allows tests to spawn a simple Python process.
     claude_bin/claude_cmd: forwarded to _build_worker_cmd when cmd_override
     is not given — see its docstring.
     """
+    session_id = str(uuid.uuid4())
     cmd = cmd_override if cmd_override is not None else _build_worker_cmd(
-        tid, claude_bin=claude_bin, claude_cmd=claude_cmd)
+        tid, claude_bin=claude_bin, claude_cmd=claude_cmd, session_id=session_id)
+
+    stdout_path = Path(state_dir) / f'{tid}-gen{generation}.json'
+    stderr_path = Path(state_dir) / f'{tid}-gen{generation}.stderr'
 
     pid = os.fork()
     if pid == 0:
@@ -1180,7 +1439,8 @@ def spawn_worker(tid, generation, state_dir, reason='dispatched',
             pass  # best-effort — we may already be the group leader
 
         # Ensure stdin is detached so the worker does not compete for the
-        # terminal with the daemon.
+        # terminal with the daemon. This is also the documented remedy for
+        # a 3-second per-worker startup stall waiting on stdin.
         try:
             fd = os.open(os.devnull, os.O_RDONLY)
             os.dup2(fd, 0)
@@ -1188,17 +1448,47 @@ def spawn_worker(tid, generation, state_dir, reason='dispatched',
         except OSError:
             pass
 
+        # Two separate files, never merged — see docstring. A redirection
+        # failure here must not abort the spawn: the worker still runs,
+        # just without captured output, which is strictly better than not
+        # spawning at all.
         try:
-            os.execvpe(cmd[0], cmd, os.environ)
+            out_fd = os.open(str(stdout_path),
+                             os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            os.dup2(out_fd, 1)
+            os.close(out_fd)
+            err_fd = os.open(str(stderr_path),
+                             os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+            os.dup2(err_fd, 2)
+            os.close(err_fd)
+        except OSError:
+            pass
+
+        worker_env = dict(os.environ)
+        worker_env['FLEET_WORKER_PID'] = str(os.getpid())
+        # Explicit, not inherited: the hooks (stop-capture.sh, stop-failure.sh)
+        # need to resolve their own tid/generation by scanning run-registry
+        # files for their session_id, and must not depend on fleetd's own
+        # process having FLEET_STATE_DIR set — it may have resolved state_dir
+        # via the DEFAULT_WORKSPACE fallback instead.
+        worker_env['FLEET_STATE_DIR'] = str(state_dir)
+        start_ticks = _read_own_start_ticks()
+        if start_ticks:
+            worker_env['FLEET_WORKER_START_TICKS'] = start_ticks
+        worker_env.update(_NON_INTERACTIVE_ENV)
+
+        try:
+            os.execvpe(cmd[0], cmd, worker_env)
         except OSError:
             # exec failed — exit so the parent's SIGCHLD handler can record
             # the failure rather than having a forked Python interpreter
             # running supervisor code in the child.
             os._exit(127)
 
-    # Parent: record the real PID in the run registry.
-    _write_run_registry(state_dir, tid, pid, generation, reason)
-    return pid
+    # Parent: record the real PID (and session id) in the run registry.
+    _write_run_registry(state_dir, tid, pid, generation, reason,
+                        session_id=session_id)
+    return pid, session_id
 
 
 # ── Child reaping (self-pipe trick) ────────────────────────────────────────
@@ -1544,6 +1834,18 @@ class Supervisor:
         # ticket's Planner Context block (one Linear call), then served from
         # memory for the daemon's lifetime.
         self._confidence_cache = {}
+        # Deterministic-failure circuit breaker (worker-reap-recovery task
+        # 3.8): a streak of fast, non-zero exits across the fleet — expired
+        # auth, a bad CLAUDE_CMD — halts dispatch rather than burning
+        # FLEET_MAX_RESTARTS per ticket. Reset to [] by any reap that is
+        # NOT a fast failure.
+        self._fast_failure_streak = []
+        self._circuit_breaker_tripped = False
+        self._circuit_breaker_reason = None
+        # Generation of the last-reaped worker per tid — bridges
+        # _reap_children_locked (which knows the generation) to
+        # _reap_children's post-lock _update_exit_record_action call.
+        self._last_reaped_generation = {}
         self._health_state = {
             'workers': [],
             'queue_depth': 0,
@@ -1552,6 +1854,8 @@ class Supervisor:
             'last_cycle_error': None,
             'cycle_count': 0,
             'spawn_enabled': self._spawn_enabled,
+            'circuit_breaker_tripped': False,
+            'circuit_breaker_reason': None,
         }
 
     # ── lock ────────────────────────────────────────────────────────────────
@@ -1598,19 +1902,33 @@ class Supervisor:
             )
         self._sync_health()
 
-    def reconcile_orphaned_tickets(self):
-        """One-shot startup reconciliation of tickets orphaned by a restart.
+    def reconcile_orphaned_tickets(self, scope_tids=None):
+        """Reconciliation via the bash fleet-reconcile.sh.
 
-        Runs the bash fleet-reconcile.sh once, immediately after worker
-        adoption: classifies every known ticket by its own pipeline log
-        (read-only, no Linear/gh calls) and re-enqueues `incomplete`
-        tickets that have no adopted-live worker and no existing queue
-        entry. The adopted-live TID set is passed in so the bash side can
-        exclude workers this instance just adopted.
+        Two callers:
+        - Startup (scope_tids=None): one-shot, immediately after worker
+          adoption. Classifies every known ticket by its own pipeline log
+          (read-only, no Linear/gh calls) and re-enqueues `incomplete`
+          tickets that have no adopted-live worker and no existing queue
+          entry.
+        - Reap-time (scope_tids=[tid, ...]): called by `_reap_children`
+          after releasing `_state_lock`, once per tid whose worker just
+          exited over a non-terminal log. `scope_tids` sets
+          FLEET_RECONCILE_TIDS, which `fleet_reconcile_orphans` already
+          supports natively — it limits the scan to exactly these tids
+          instead of the startup path's global glob. All of the restart
+          cap, stop-pin exclusion, queue-exclusion and dead-lettering
+          logic is identical between the two callers; only the scope
+          differs.
+
+        The adopted-live TID set is passed in so the bash side can exclude
+        workers this instance just adopted (irrelevant, but harmless, for
+        the scoped reap-time case — a just-reaped tid was removed from the
+        child table before this call and so can never appear there).
 
         A reconciliation failure logs and continues — it must never block
-        daemon startup (matching the sync-failure-does-not-block-dispatch
-        pattern).
+        daemon startup or the reap loop (matching the
+        sync-failure-does-not-block-dispatch pattern).
         """
         reconcile_script = self._fleet_lib_dir / 'fleet-reconcile.sh'
         if not reconcile_script.is_file():
@@ -1631,6 +1949,7 @@ class Supervisor:
         # Tickets pinned by any stop-*.json must not be resurrected by
         # reconciliation — a stop survives a fleetd restart through this pin.
         pinned_tids = ' '.join(sorted(_collect_stop_pinned_tids(self._state_dir)))
+        scope = ' '.join(sorted(scope_tids)) if scope_tids else ''
 
         # Values that originate outside this process (state-dir file names,
         # adopted TIDs from run-registry entries, env-derived paths) are
@@ -1657,6 +1976,7 @@ class Supervisor:
                     'FLEET_RECONCILE_QUEUE_FILE': str(queue_file),
                     'FLEET_RECONCILE_LIVE_TIDS': live_tids,
                     'FLEET_RECONCILE_PINNED_TIDS': pinned_tids,
+                    'FLEET_RECONCILE_TIDS': scope,
                 },
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
@@ -1768,6 +2088,9 @@ class Supervisor:
     def _sync_health(self):
         self._health_state['workers'] = self._children.list_workers()
         self._health_state['queue_depth'] = get_queue_depth(self._state_dir)
+        self._health_state['spawn_enabled'] = self._spawn_enabled
+        self._health_state['circuit_breaker_tripped'] = self._circuit_breaker_tripped
+        self._health_state['circuit_breaker_reason'] = self._circuit_breaker_reason
 
     def update_cycle_result(self, success, completed_at=None):
         """Record the outcome of a detection cycle (for group 5+ consumers)."""
@@ -2124,15 +2447,50 @@ class Supervisor:
     # ── spawn and reap (group 6) ──────────────────────────────────────────
 
     def _reap_children(self):
-        """Reap any exited children and update the child table.
+        """Reap any exited children and re-enqueue non-terminal survivors.
 
-        Removes reaped workers from the child table and records their exit
-        status. Called from the main loop each cycle. Acquires _state_lock.
+        Removes reaped workers from the child table, persists an exit
+        record, and — for a worker whose pipeline log is not terminal —
+        triggers scoped reconciliation through the existing
+        `fleet_reconcile_orphans` restart/dead-letter path.
+
+        The reconcile calls happen AFTER releasing _state_lock (collected
+        while locked, in _reap_children_locked). Reconcile is a
+        `subprocess.run(timeout=120)`; holding the lock across it would
+        stall reaping, kill-request processing and the health endpoint for
+        up to two minutes per dead worker — the hazard already documented
+        at the `reconcile_orphaned_tickets` call site.
         """
         with self._state_lock:
-            self._reap_children_locked()
+            non_terminal_tids = self._reap_children_locked()
+        for tid in non_terminal_tids:
+            _notify_worker_event(
+                self._fleet_lib_dir, str(self._state_dir), tid, 'non-terminal-exit',
+            )
+            self.reconcile_orphaned_tickets(scope_tids=[tid])
+            _update_exit_record_action(
+                str(self._state_dir), tid,
+                self._last_reaped_generation.get(tid, 0),
+                'reconcile-attempted',
+            )
 
     def _reap_children_locked(self):
+        """Reap exited children, persist exit records, classify terminality.
+
+        Returns the list of tids whose worker exited over a NON-terminal
+        pipeline log and were not skipped (killed_by_fleet, exit 127, or
+        the circuit breaker already open) — the set `_reap_children` must
+        hand to scoped reconciliation once the lock is released.
+
+        A worker fleetd itself killed never reaches this path: kill_worker's
+        own liveness re-check (`_try_reap`) already consumes the exit
+        status before the SIGCHLD-driven ChildReaper sees it, and the exit
+        record for that case is written at the kill call site instead (see
+        _kill_worker_locked) with killed_by_fleet=True. Everything that
+        reaches here died on its own — crash, OOM, an unexplained signal —
+        which is exactly why `killed_by_fleet=False` is safe to hard-code.
+        """
+        non_terminal_tids = []
         newly_reaped = self._reaper.reap()
         for pid, exit_code, exit_type in newly_reaped:
             # Find the child entry by PID and remove it.
@@ -2141,14 +2499,94 @@ class Supervisor:
                     entry['exit_code'] = exit_code
                     entry['exit_type'] = exit_type
                     entry['exited_at'] = datetime.now(timezone.utc).isoformat()
+                    generation = entry.get('generation', 0)
+                    self._last_reaped_generation[tid] = generation
+
+                    terminal = _log_reached_terminal(str(self._state_dir), tid)
+                    skip_127 = (exit_type == 'exit' and exit_code == 127)
+                    action = 'terminal' if terminal else None
+                    suppressed = 'exec-failure (exit 127)' if skip_127 else None
+                    if skip_127 and not terminal:
+                        action = 'skipped: exec-failure'
+
+                    self._update_circuit_breaker(tid, entry, exit_code, exit_type)
+                    if not terminal and not skip_127 and self._circuit_breaker_tripped:
+                        action = f'skipped: circuit-breaker ({self._circuit_breaker_reason})'
+
+                    hook_capture = _read_hook_capture(str(self._state_dir), tid, generation)
+                    _write_exit_record(
+                        str(self._state_dir), tid, generation, pid,
+                        exit_code, exit_type,
+                        killed_by_fleet=False,
+                        terminal=terminal,
+                        session_id=entry.get('session_id'),
+                        last_assistant_message=hook_capture.get('last_assistant_message'),
+                        action=action or 'reconcile-pending',
+                        suppressed_retry_reason=suppressed,
+                    )
+                    status = 'done' if (exit_type == 'exit' and exit_code == 0) else 'fail'
+                    _append_pipeline_log_line(
+                        str(self._state_dir), tid, 'META', 'worker-exit', status,
+                        f'code={exit_code} type={exit_type} gen={generation} '
+                        f'killed_by_fleet=false'
+                    )
+                    _sweep_stale_generation_files(str(self._state_dir), tid, generation)
+
                     self._children.remove(tid)
                     print(
                         f"fleetd[{os.getpid()}]: worker {tid} (pid {pid}) "
                         f"exited ({exit_type}, code={exit_code})"
                     )
+                    if not terminal and not skip_127 and not self._circuit_breaker_tripped:
+                        non_terminal_tids.append(tid)
                     break
         if newly_reaped:
             self._sync_health()
+        return non_terminal_tids
+
+    def _update_circuit_breaker(self, tid, entry, exit_code, exit_type):
+        """Track the deterministic-failure streak; trip dispatch off at cap.
+
+        A fast, non-zero exit (`exit`, not a signal — a signal death is a
+        different failure mode, not the "generic exit 1 in ~2.3s" expired-
+        auth scenario this guards) resets nothing and extends the streak.
+        Anything else (success, a slow failure, a signal) resets the streak
+        to empty — the breaker cares about a STREAK of fleet-wide faults,
+        not an isolated bad ticket, which the per-tid restart cap already
+        bounds.
+        """
+        if self._circuit_breaker_tripped:
+            return
+        threshold_secs = _env_int('FLEET_DETERMINISTIC_FAILURE_SECS', 5)
+        threshold_count = _env_int('FLEET_DETERMINISTIC_FAILURE_COUNT', 3)
+        elapsed = None
+        try:
+            started = datetime.fromisoformat(entry.get('started_at', ''))
+            elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+        except (ValueError, TypeError):
+            pass
+
+        is_fast_failure = (
+            exit_type == 'exit' and exit_code != 0
+            and elapsed is not None and elapsed < threshold_secs
+        )
+        if not is_fast_failure:
+            self._fast_failure_streak = []
+            return
+
+        self._fast_failure_streak.append(tid)
+        if len(self._fast_failure_streak) >= threshold_count:
+            self._circuit_breaker_tripped = True
+            self._circuit_breaker_reason = (
+                f'{len(self._fast_failure_streak)} consecutive fast failures '
+                f'({", ".join(self._fast_failure_streak)}) — dispatch halted'
+            )
+            self._spawn_enabled = False
+            print(
+                f"fleetd[{os.getpid()}]: CIRCUIT BREAKER TRIPPED — "
+                f"{self._circuit_breaker_reason}",
+                file=sys.stderr,
+            )
 
     def _consume_queue(self, cmd_override=None):
         """Consume spawn queue entries up to FLEET_MAX_CONCURRENT.
@@ -2210,7 +2648,7 @@ class Supervisor:
             reason = entry.get('reason', 'dispatched')
 
             try:
-                pid = spawn_worker(
+                pid, session_id = spawn_worker(
                     tid=tid,
                     generation=generation,
                     state_dir=str(self._state_dir),
@@ -2232,6 +2670,7 @@ class Supervisor:
                 generation=generation,
                 reason=reason,
                 adopted=False,  # we forked it — not adopted
+                session_id=session_id,
             )
             consumed.add(tid)
             print(
@@ -2284,6 +2723,7 @@ class Supervisor:
                            else _env_int('FLEET_KILL_GRACE_SECS', 10))
                 alive = _pid_is_alive(pid)
                 if not alive:
+                    self._record_fleet_kill_exit(tid, child, 'cooperative')
                     self._children.remove(tid)
                     self._sync_health()
                     return KillResult(True, 'cooperative', None)
@@ -2301,6 +2741,16 @@ class Supervisor:
         )
 
         if result.success:
+            # killed_by_fleet is sourced from THIS call succeeding — never
+            # from an exit code. SIGINT exits 0, so without this, every
+            # deliberate kill would look exactly like a crash and be
+            # re-enqueued by reap-time recovery (design.md Decision 2/4).
+            # kill_worker()'s own _is_dead()/_try_reap already consumed the
+            # exit status via waitpid before this returns, so the natural
+            # SIGCHLD-driven ChildReaper path in _reap_children_locked will
+            # never see this pid — this is the only place its exit record
+            # gets written.
+            self._record_fleet_kill_exit(tid, child, result.method)
             self._children.remove(tid)
             self._sync_health()
             print(
@@ -2314,6 +2764,39 @@ class Supervisor:
             )
 
         return result
+
+    def _record_fleet_kill_exit(self, tid, child, method):
+        """Write the exit record + META|worker-exit| line for a fleet-killed worker.
+
+        The exit code itself is unknown here — kill_worker()'s liveness
+        re-check consumes it via waitpid without propagating the status —
+        but that is fine: killed_by_fleet=True comes from THIS call
+        succeeding, never from a code, so the skip predicate (task 3.7)
+        applies regardless. Reconciliation is never triggered for this
+        path — a verified kill is a deliberate pause, not a crash.
+        """
+        state_dir = str(self._state_dir)
+        generation = child.get('generation', 0)
+        terminal = _log_reached_terminal(state_dir, tid)
+        # A cooperative stop lets the worker exit on its own — the Stop hook
+        # fires for that rung same as any normal end. SIGINT/SIGTERM/SIGKILL
+        # do not fire it, so hook_capture is simply {} for those; harmless
+        # to look up unconditionally.
+        hook_capture = _read_hook_capture(state_dir, tid, generation)
+        _write_exit_record(
+            state_dir, tid, generation, child.get('pid'),
+            exit_code=None, exit_type=method,
+            killed_by_fleet=True,
+            terminal=terminal,
+            session_id=child.get('session_id'),
+            last_assistant_message=hook_capture.get('last_assistant_message'),
+            action='killed-by-fleet',
+        )
+        _append_pipeline_log_line(
+            state_dir, tid, 'META', 'worker-exit', 'fail',
+            f'code=none type={method} gen={generation} killed_by_fleet=true'
+        )
+        _sweep_stale_generation_files(state_dir, tid, generation)
 
     # ── run ─────────────────────────────────────────────────────────────────
 

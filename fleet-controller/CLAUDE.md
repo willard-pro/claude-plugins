@@ -25,16 +25,33 @@ fleet-controller/
 **Key properties:**
 - **Real PIDs**: Every worker's registry PID is the PID of a process fleetd forked. No sentinel zeros. (The legacy cron/monitor path writes a PID=0 sentinel until the spawn captures the real PID — startup reconciliation's live-process check compensates so such workers are not re-enqueued.)
 - **Single-instance**: `fcntl.flock` on a pidfile; kernel releases on death.
-- **Kill escalation**: Cooperative stop → SIGTERM → SIGKILL, signalling the process group.
+- **Kill escalation**: Cooperative stop → SIGINT → SIGTERM → SIGKILL, signalling the process group, with a liveness re-check + zombie reap + fence write after each rung. The SIGINT rung exists because a headless `claude -p` worker exits **0** on SIGINT, not a signal-derived code — so `killed_by_fleet` attribution comes from `kill_worker()`'s own success, never from an exit code (a bare `exit 143`/`0` is not proof of anything). See "Worker exit records" below.
 - **Crash recovery**: On restart, verifies surviving PIDs via `/proc/<pid>/stat` start time before adoption. When `/proc` start-time verification is unavailable, falls back to a cmdline substring match — a known limitation: a reused PID whose command line happens to contain the ticket ID could be misadopted (documented and tested, not fixed). Stale registry deletion preserves the last-known generation to `{tid}-last-generation` so a reconciled re-spawn continues the generation sequence. Startup orphan reconciliation (pipeline-log-based, read-only) re-enqueues `incomplete` tickets whose workers died while fleetd was down; the restart cap reuses the existing `FLEET_MAX_RESTARTS` mechanism.
 - **Generation fencing**: Supervisor assigns generations above any fenced predecessor.
 - **CLI alignment**: The `/fleet-controller` skill writes kill requests to `{state_dir}/kill-requests/`; fleetd processes them.
+- **Worker identity**: fleetd generates a `--session-id <uuid>` before exec (not the `SessionStart` hook — that can't fire for a worker SIGKILLed before startup completes) and appends `--output-format json` for machine-readable `session_id`/`stop_reason`/`total_cost_usd`/`permission_denials`/`is_error` on the final turn. `FLEET_WORKER_PID` and `FLEET_WORKER_START_TICKS` (the child's own PID + `/proc` start-ticks) are stamped into the worker's env so the ticket-auto-pipeline watchdog (`spawn-helper.sh`) can tell a live worker from a stale/reused PID instead of trusting its own continued existence as a liveness proxy.
+- **Explicit permission mode**: fleetd appends `--permission-mode ${FLEET_WORKER_PERMISSION_MODE:-bypassPermissions}` unless `CLAUDE_CMD` already specifies one. `dontAsk`/`auto` are deliberately never defaulted to — `auto` has no turn boundary in non-interactive mode, so one classifier denial silently poisons the rest of the run.
+- **Deterministic-failure circuit breaker**: a streak of `FLEET_DETERMINISTIC_FAILURE_COUNT` consecutive fast (`< FLEET_DETERMINISTIC_FAILURE_SECS`) non-zero-exit workers halts dispatch (`spawn_enabled=False`) instead of burning `FLEET_MAX_RESTARTS` per ticket — a bad `CLAUDE_CMD` or expired auth would otherwise restart every ticket in the fleet to the cap before anyone noticed.
 
 **Invocation:** `python -m fleet-controller.fleetd [--port PORT] [--state-dir DIR]`
 
 **Gating:** Set `FLEETD_SPAWN_ENABLED=1` to enable worker spawning. Default is observe-only (detection + health API, no spawns).
 
 **HTTP control surface (on-demand, loopback-bound):** alongside `GET /health`, fleetd serves `POST /dispatch` (scoped dispatch of one epic against the running daemon — same `fleet_dispatch_initiative` the skill and auto-sweep call, spawns immediately instead of waiting for the poll cycle), `POST /stop` (epic-scoped stop: purge queue, escalate-kill workers, write `stop-{epic}.json`; the single bash implementation is `fleet_stop_initiative`, also reachable via the skill's `stop` subcommand with the daemon down), and read-only `GET /workers`, `GET /workers/<tid>` (phase/anomalies/tokens/confidence per worker), `GET /queue`, `GET /epics`. Use these as an alternative to the `/fleet-controller dispatch` skill (on-demand, no restart-to-reconfigure) and to the fleet dashboard (per-ticket detail without re-rendering the whole fleet). Dispatch is the single start/resume/un-stop entry point: a stop-file gates every dispatch trigger path until an explicit `resume: true` clears it; the auto-sweep never clears. See README "HTTP API" for request/response shapes.
+
+## Worker exit records & recovery
+
+Every worker exit — natural or fleet-killed — is persisted per-generation, never overwriting a prior generation's record:
+
+- `{tid}-gen{N}.json` / `{tid}-gen{N}.stderr` — captured stdout/stderr, opened `O_APPEND` at spawn.
+- `{tid}-gen{N}-exit.json` — `{tid, generation, pid, exit_code, exit_type, exited_at, killed_by_fleet, terminal, session_id, last_assistant_message, action}` (+ `suppressed_retry_reason` when set). `killed_by_fleet` is `True` only when written from `kill_worker()`'s own success (never inferred from an exit code); `terminal` reflects whether the ticket's pipeline log already reached `META|outcome|`. `FLEET_WORKER_LOG_RETENTION` (default 3) generations of these files are kept per ticket; older ones are swept at each reap.
+- `{tid}-gen{N}-hook.json` — written by the `Stop` hook (`ticket-auto-pipeline/hooks/stop-capture.sh`) with `last_assistant_message`, the only channel a headless worker's question travels through (`AskUserQuestion` is absent from the `-p` tool list). Merged into the exit record when present; absent whenever `Stop` doesn't fire — SIGINT and SIGKILL never trigger it, only a cooperative stop or a normal completion do. `hooks/stop-failure.sh` (`StopFailure`) instead appends a `META|worker-api-error|warn|` line to the ticket's own pipeline log when a turn ends on an API error.
+
+A natural (non-fleet-killed) exit over a **non-terminal** pipeline log — the only reliable "did it actually finish" signal — triggers scoped reap-time recovery: `reconcile_orphaned_tickets(scope_tids=[tid])` calls the existing `fleet_reconcile_orphans` (bash), which shares the restart cap / stop-pin / dead-letter logic with startup reconciliation via `FLEET_RECONCILE_TIDS`. Exit code `127` (fleetd's own exec-failure sentinel) and a tripped circuit breaker both skip reconciliation — recorded as `action: "skipped: exec-failure"` / `"skipped: circuit-breaker (...)"` on the exit record — rather than burning a restart credit on a failure that will only repeat.
+
+The pipeline log gains one new `META` step: `META|worker-exit|done|fail|code=<N> type=<T> gen=<G> killed_by_fleet=<bool>`, appended at reap time regardless of recovery outcome.
+
+**Slack notifier** (`lib/fleet-notify.sh`): posts via `chat.postMessage` (never a webhook — webhooks don't return the `ts` a reply thread needs) for a non-terminal natural exit or a dead-letter, never for clean completion. Content is observed facts only — ticket, phase, generation, elapsed, exit classification, recovery decision, and the captured final assistant message when present — deliberately not classified as "question vs. failure." Follow-ups for the same ticket reply into the stored `{tid}-slack-thread.json` thread. Requires `SLACK_BOT_TOKEN` + `SLACK_CHANNEL`; absent or misconfigured, or a transport failure, degrades to a log-only line and never affects reaping, reconciliation, or the daemon.
 
 ## Skills
 
@@ -53,7 +70,8 @@ fleet-controller/
 | `fleet-dashboard.sh` | Dashboard renderer: `fleet_render_dashboard` / `fleet_render_dashboard_from_data` (terminal health table) and `fleet_write_report` / `fleet_write_report_from_data` (markdown report). |
 | `fleet-dispatch.sh` | Planned-ticket dispatch. Reads initiative epics from Linear via `lib/linear-api.sh`, validates `state:execution`, ensures the epic branch exists in **every** working repo under `REPOS_ROOT` before enqueue (multi-repo precondition — creation failure in any repo gate-stops with `EPIC_BRANCH_UNAVAILABLE`; sync failure in one repo warns and continues), resolves `blocked-by` dependencies, orders tickets by explicit dispatch rank (`Urgent`→`High`→`Medium`→`Low`→`No priority` last), writes spawn queue JSONL with `generation` field via shared `_fleet_queue_append` (flock, retry, dead-letter). Respects `FLEET_MAX_CONCURRENT` and `FLEET_DRY_RUN`. |
 | `fleet-feedback.sh` | Feedback aggregation. Scans pipeline logs for `META\|planner-feedback`, groups by `{initiative-id}`, computes confidence drift, writes `$REPOS_ROOT/.ticket-auto/initiatives/{ID}/feedback/{rundate}.json`. |
-| `fleet-env-check.sh` | Standalone (not sourced) — validates `LINEAR_API_KEY`, `REPOS_ROOT`, `GITHUB_PERSONAL_ACCESS_TOKEN`/`GH_TOKEN` (only required when `FLEET_EPIC_AUTO_PR=true`), the fleetd worker spawn command (`CLAUDE_CMD` if set, else `CLAUDE_BIN`), and `jq`/`git`/`python3`/`gh` presence. Same `NAME\|STATUS\|VALUE\|LOCATION\|NOTE` pipe-delimited contract as ticket-auto-pipeline's `env-check.sh`. Masks `LINEAR_API_KEY`/`GITHUB_PERSONAL_ACCESS_TOKEN`/`GH_TOKEN` values to `****` + last 4 chars — never echoes secrets in full. |
+| `fleet-env-check.sh` | Standalone (not sourced) — validates `LINEAR_API_KEY`, `REPOS_ROOT`, `GITHUB_PERSONAL_ACCESS_TOKEN`/`GH_TOKEN` (only required when `FLEET_EPIC_AUTO_PR=true`), `SLACK_BOT_TOKEN` (optional), the fleetd worker spawn command (`CLAUDE_CMD` if set, else `CLAUDE_BIN`) including its permission mode, and `jq`/`git`/`python3`/`gh` presence. Same `NAME\|STATUS\|VALUE\|LOCATION\|NOTE` pipe-delimited contract as ticket-auto-pipeline's `env-check.sh`. Masks secret values to `****` + last 4 chars — never echoes secrets in full. The live permission probe (an actual worker turn) is opt-in via `FLEET_ENV_CHECK_LIVE_PROBE=true` — off by default so `make test`/CI never spawns a real worker. |
+| `fleet-notify.sh` | Deterministic Slack notifier: `fleet_slack_post <tid> <state_dir> <text>` (transport — `chat.postMessage`, persists/reuses `{tid}-slack-thread.json`'s `ts`), `fleet_notify_worker_event <tid> <state_dir> <event_type> [detail]` (`event_type`: `non-terminal-exit`\|`dead-letter` — builds the message from the ticket's exit record + pipeline log). Called from `supervisor.py`'s reap path and from `fleet-reconcile.sh`'s dead-letter branch. Fail-soft throughout. |
 ### Canonical library sources (dependency bridge)
 
 Fleet controller depends on two libraries defined in `ticket-auto-pipeline/`:
@@ -124,7 +142,7 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 | `FLEET_FENCE_ENFORCE` | true | Enable generation fencing in flow.sh |
 | `FLEET_QUEUE_LOCK_TIMEOUT` | 5 | Spawn queue flock timeout in seconds |
 | `FLEET_POLL_INTERVAL` | 30 | Seconds between monitor cycles |
-| `FLEET_STALL_WARN_SECS` | 300 | Stale heartbeat threshold for WARN |
+| `FLEET_STALL_WARN_SECS` | 600 | Stale heartbeat threshold for WARN. Raised from 300 — background subagents are waited for up to 10 minutes at exit (`CLAUDE_CODE_PRINT_BG_WAIT_CEILING_MS`), so 300 false-positived on a worker legitimately still exiting. Must stay strictly less than `FLEET_STALL_KILL_SECS`/`FLEET_STALL_RESTART_SECS` |
 | `FLEET_STALL_KILL_SECS` | 900 | Stale heartbeat threshold for KILL |
 | `FLEET_STALL_RESTART_SECS` | 1800 | Stale heartbeat threshold for KILL+RESTART |
 | `FLEET_ABANDON_WARN_HOURS` | 1 | Abandonment threshold for WARN |
@@ -146,6 +164,13 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 | `FLEET_SUMMARY_INTERVAL_CYCLES` | 10 | Cycles between forced fleet-summary heartbeat emissions |
 | `CLAUDE_BIN` | `claude` | Worker binary name used by fleetd's `spawn_worker` |
 | `CLAUDE_CMD` | (unset) | Full worker command line, overrides `CLAUDE_BIN` — e.g. `claude-deepseek 2 --bypass`. The `-p '/ticket-auto {tid} ...'` invocation is always appended after it |
+| `FLEET_WORKER_PERMISSION_MODE` | `bypassPermissions` | Appended as `--permission-mode` unless `CLAUDE_CMD` already specifies one. `dontAsk`/`auto` are not sane defaults for a headless worker — see design.md Decision 9 |
+| `FLEET_WORKER_DISALLOWED_TOOLS` | (unset) | Passed through to the worker invocation when set — comma-separated tool names to block. Recommended defense-in-depth given `bypassPermissions` is the default worker mode (e.g. `Bash(rm -rf:*),Bash(sudo:*)`) — not enforced by fleetd, since the pipeline's autonomy model already requires unattended write access to the workspace |
+| `FLEET_WORKER_LOG_RETENTION` | 3 | Generations of `{tid}-gen{N}.json`/`.stderr`/`-exit.json` kept per ticket; older ones are swept at reap |
+| `FLEET_DETERMINISTIC_FAILURE_SECS` | 5 | A worker exit faster than this counts toward the deterministic-failure circuit breaker streak |
+| `FLEET_DETERMINISTIC_FAILURE_COUNT` | 3 | Consecutive fast-failure streak length that trips the circuit breaker (halts dispatch) |
+| `FLEET_ENV_CHECK_LIVE_PROBE` | false | Opt-in: `fleet-env-check.sh` spawns one real worker turn to verify `permission_denials == []`. Off by default — never runs in `make test`/CI |
+| `SLACK_BOT_TOKEN` | (unset) | Bot token for `fleet-notify.sh`'s `chat.postMessage` calls. Absent → notifications degrade to log-only |
 
 ## Known sharp edges
 
