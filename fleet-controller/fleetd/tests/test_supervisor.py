@@ -1755,6 +1755,319 @@ class CrashRecoveryTest(unittest.TestCase):
             sup.release_lock()
 
 
+# ── worker-reap-recovery: exit persistence + reap-time recovery ──────────
+
+
+class ExitPersistenceAndRecoveryTest(unittest.TestCase):
+    """worker-reap-recovery tasks 3.10-3.11: exit records, scoped reap-time
+    reconciliation, kill attribution, circuit breaker, lock hoist."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _append_queue_entry(self, tid, reason='test', generation=1):
+        queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+        entry = {
+            'tid': tid,
+            'reason': reason,
+            'generation': generation,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+        with open(queue_file, 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+
+    def _read_exit_record(self, tid, generation=1):
+        exit_file = self.workspace / f'{tid}-gen{generation}-exit.json'
+        if exit_file.is_file():
+            return json.loads(exit_file.read_text())
+        return None
+
+    def _make_sup(self, **kwargs):
+        from fleetd.supervisor import Supervisor
+        defaults = dict(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=3,
+        )
+        defaults.update(kwargs)
+        return Supervisor(**defaults)
+
+    def test_crashed_worker_exit_record_and_scoped_reconcile(self):
+        """A worker that exits non-zero over a non-terminal log gets an exit
+        record (killed_by_fleet=False) and triggers scoped reconciliation."""
+        from unittest import mock
+
+        self._append_queue_entry('TST-R1')
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1, exit_code=1)
+            sup._consume_queue(cmd_override=cmd)
+            time.sleep(2)
+
+            recorded_scopes = []
+            with mock.patch.object(
+                sup, 'reconcile_orphaned_tickets',
+                side_effect=lambda scope_tids=None: recorded_scopes.append(scope_tids),
+            ):
+                sup._reap_children()
+
+            self.assertEqual(recorded_scopes, [['TST-R1']],
+                             "reap-time recovery must scope reconcile to the "
+                             "exact tid that just exited")
+            record = self._read_exit_record('TST-R1')
+            self.assertIsNotNone(record, "exit record must be written")
+            self.assertEqual(record['exit_code'], 1)
+            self.assertEqual(record['exit_type'], 'exit')
+            self.assertFalse(record['killed_by_fleet'])
+            self.assertFalse(record['terminal'])
+        finally:
+            sup.release_lock()
+
+    def test_terminal_log_worker_not_reconciled(self):
+        """A worker over an already-terminal pipeline log is not re-enqueued."""
+        from unittest import mock
+
+        tid = 'TST-R2'
+        self._append_queue_entry(tid)
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1, exit_code=0)
+            sup._consume_queue(cmd_override=cmd)
+            # Write the terminal marker AFTER spawn (consume-time terminality
+            # would instead take the "stale queue entry" path and never
+            # spawn at all) but BEFORE reap, so reap-time classification
+            # sees a genuinely completed pipeline.
+            log_file = self.workspace / f'{tid}-pipeline.log'
+            log_file.write_text(
+                '2026-08-29T00:00:00Z|META|schema|done|1\n'
+                '2026-08-29T00:00:01Z|META|outcome|done|completed\n'
+            )
+            time.sleep(2)
+
+            called = []
+            with mock.patch.object(
+                sup, 'reconcile_orphaned_tickets',
+                side_effect=lambda scope_tids=None: called.append(scope_tids),
+            ):
+                sup._reap_children()
+
+            self.assertEqual(called, [], "a terminal-log worker must not be reconciled")
+            record = self._read_exit_record(tid)
+            self.assertTrue(record['terminal'])
+        finally:
+            sup.release_lock()
+
+    def test_exit_127_worker_not_reconciled(self):
+        """fleetd's own exec-failure sentinel (127) is a hard skip."""
+        from unittest import mock
+
+        tid = 'TST-R3'
+        self._append_queue_entry(tid)
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1, exit_code=127)
+            sup._consume_queue(cmd_override=cmd)
+            time.sleep(2)
+
+            called = []
+            with mock.patch.object(
+                sup, 'reconcile_orphaned_tickets',
+                side_effect=lambda scope_tids=None: called.append(scope_tids),
+            ):
+                sup._reap_children()
+
+            self.assertEqual(called, [], "exit 127 must skip reconciliation")
+            record = self._read_exit_record(tid)
+            self.assertEqual(record['suppressed_retry_reason'],
+                             'exec-failure (exit 127)')
+        finally:
+            sup.release_lock()
+
+    def test_sigint_killed_worker_marked_killed_by_fleet_and_skipped(self):
+        """A worker killed via kill_worker() (SIGINT rung, exits 0) is
+        recorded killed_by_fleet=True and never reaches reap-time recovery."""
+        from unittest import mock
+
+        tid = 'TST-R4'
+        self._append_queue_entry(tid)
+        sup = self._make_sup()
+        sup.acquire_lock()
+        try:
+            # A worker that ignores SIGINT/SIGTERM would still be confirmed
+            # dead by kill escalation reaching SIGKILL — exit code is
+            # irrelevant to killed_by_fleet, only that fleetd's own
+            # kill_worker() call succeeded.
+            cmd = _make_ignoring_worker(sleep_secs=30)
+            sup._consume_queue(cmd_override=cmd)
+
+            called = []
+            with mock.patch.object(
+                sup, 'reconcile_orphaned_tickets',
+                side_effect=lambda scope_tids=None: called.append(scope_tids),
+            ):
+                result = sup.kill_worker(tid, grace_secs=1)
+                self.assertTrue(result.success)
+                # The kill path itself must never trigger reconciliation —
+                # a verified kill is a deliberate pause, not a crash.
+                self.assertEqual(called, [])
+
+            record = self._read_exit_record(tid)
+            self.assertIsNotNone(record)
+            self.assertTrue(record['killed_by_fleet'])
+            self.assertEqual(record['action'], 'killed-by-fleet')
+
+            # And a subsequent reap cycle (SIGCHLD for the already-reaped
+            # pid) must not double-process or re-trigger reconciliation —
+            # kill_worker's own _try_reap already consumed the exit status.
+            with mock.patch.object(
+                sup, 'reconcile_orphaned_tickets',
+                side_effect=lambda scope_tids=None: called.append(scope_tids),
+            ):
+                sup._reap_children()
+            self.assertEqual(called, [])
+        finally:
+            sup.release_lock()
+
+    def test_circuit_breaker_trips_after_consecutive_fast_failures(self):
+        """N consecutive fast non-zero exits across different tickets halts
+        dispatch (spawn_enabled False) rather than reconciling every one."""
+        from unittest import mock
+
+        for i in range(3):
+            self._append_queue_entry(f'TST-CB{i}')
+        sup = self._make_sup(max_concurrent=3)
+        os.environ['FLEET_DETERMINISTIC_FAILURE_SECS'] = '30'
+        os.environ['FLEET_DETERMINISTIC_FAILURE_COUNT'] = '3'
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=0, exit_code=1)
+            sup._consume_queue(cmd_override=cmd)
+            time.sleep(1)
+
+            with mock.patch.object(sup, 'reconcile_orphaned_tickets'):
+                sup._reap_children()
+
+            self.assertTrue(sup._circuit_breaker_tripped,
+                            "3 consecutive fast failures should trip the breaker")
+            self.assertFalse(sup._spawn_enabled,
+                             "tripped breaker must halt further dispatch")
+
+            # A subsequent spawn attempt is a no-op — dispatch is halted.
+            self._append_queue_entry('TST-CB-after')
+            consumed = sup._consume_queue(cmd_override=cmd)
+            self.assertEqual(consumed, set())
+        finally:
+            sup.release_lock()
+            os.environ.pop('FLEET_DETERMINISTIC_FAILURE_SECS', None)
+            os.environ.pop('FLEET_DETERMINISTIC_FAILURE_COUNT', None)
+
+    def test_circuit_breaker_resets_on_slow_or_successful_exit(self):
+        """A streak is reset by any exit that is not itself a fast failure."""
+        from unittest import mock
+
+        self._append_queue_entry('TST-CB-A')
+        sup = self._make_sup(max_concurrent=1)
+        os.environ['FLEET_DETERMINISTIC_FAILURE_SECS'] = '30'
+        sup.acquire_lock()
+        try:
+            # Fast failure #1.
+            cmd_fail = _make_worker_cmd(sleep_secs=0, exit_code=1)
+            sup._consume_queue(cmd_override=cmd_fail)
+            time.sleep(1)
+            with mock.patch.object(sup, 'reconcile_orphaned_tickets'):
+                sup._reap_children()
+            self.assertEqual(len(sup._fast_failure_streak), 1)
+
+            # A clean exit resets the streak.
+            self._append_queue_entry('TST-CB-B')
+            cmd_ok = _make_worker_cmd(sleep_secs=0, exit_code=0)
+            sup._consume_queue(cmd_override=cmd_ok)
+            time.sleep(1)
+            with mock.patch.object(sup, 'reconcile_orphaned_tickets'):
+                sup._reap_children()
+            self.assertEqual(sup._fast_failure_streak, [])
+            self.assertFalse(sup._circuit_breaker_tripped)
+        finally:
+            sup.release_lock()
+            os.environ.pop('FLEET_DETERMINISTIC_FAILURE_SECS', None)
+
+    def test_kill_request_processed_without_waiting_for_reconcile(self):
+        """Lock-hoist: reaping a crashed worker must not block kill-request
+        processing on a slow reconcile subprocess (task 3.11)."""
+        from unittest import mock
+
+        self._append_queue_entry('TST-LH1')
+        sup = self._make_sup(max_concurrent=1)
+        sup.acquire_lock()
+        try:
+            crash_cmd = _make_worker_cmd(sleep_secs=1, exit_code=1)
+            sup._consume_queue(cmd_override=crash_cmd)
+            time.sleep(2)  # let it crash so the reaper has something to find
+
+            entered = threading.Event()
+            release = threading.Event()
+
+            def _slow_reconcile(scope_tids=None):
+                entered.set()
+                release.wait(timeout=10)
+
+            with mock.patch.object(sup, 'reconcile_orphaned_tickets',
+                                   side_effect=_slow_reconcile):
+                t = threading.Thread(target=sup._reap_children)
+                t.start()
+                self.assertTrue(entered.wait(timeout=5),
+                                "reconcile subprocess never started")
+                # _state_lock must be free while reconcile runs — a pending
+                # kill-request (or the health endpoint) must not stall for
+                # up to 120s behind it.
+                self.assertTrue(sup._state_lock.acquire(timeout=2),
+                                "_state_lock held during reconcile subprocess")
+                sup._state_lock.release()
+                release.set()
+                t.join(timeout=10)
+        finally:
+            sup.release_lock()
+
+    def test_exit_record_fields_use_iso_utc_timestamp(self):
+        """Sanity check on the exit record's timestamp shape."""
+        from fleetd.supervisor import _write_exit_record
+
+        entry = _write_exit_record(
+            str(self.workspace), 'TST-FMT', 1, 12345, -9, 'signal',
+            killed_by_fleet=False, terminal=False,
+        )
+        self.assertRegex(entry['exited_at'], r'^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$')
+
+    def test_generation_files_swept_beyond_retention(self):
+        """Stale per-generation stdio/exit files are pruned beyond retention."""
+        from fleetd.supervisor import _sweep_stale_generation_files
+
+        tid = 'TST-SWEEP'
+        for gen in range(1, 6):
+            (self.workspace / f'{tid}-gen{gen}.json').write_text('x')
+            (self.workspace / f'{tid}-gen{gen}.stderr').write_text('x')
+            (self.workspace / f'{tid}-gen{gen}-exit.json').write_text('{}')
+
+        _sweep_stale_generation_files(str(self.workspace), tid, current_generation=5,
+                                      retention=2)
+
+        # Generations 1-3 are beyond the retention-2 window (keep 4, 5).
+        for gen in (1, 2, 3):
+            self.assertFalse((self.workspace / f'{tid}-gen{gen}.json').exists())
+            self.assertFalse((self.workspace / f'{tid}-gen{gen}.stderr').exists())
+            self.assertFalse((self.workspace / f'{tid}-gen{gen}-exit.json').exists())
+        for gen in (4, 5):
+            self.assertTrue((self.workspace / f'{tid}-gen{gen}.json').exists())
+
+
 # ── Group 9: Generation fencing tests ────────────────────────────────────
 
 
