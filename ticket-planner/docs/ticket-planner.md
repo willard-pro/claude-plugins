@@ -97,7 +97,7 @@ If a phase fails (`fail` status in state log), the router halts. The operator ca
 - Manually intervene and skip the phase by writing `skip` to the state log
 - Abandon the initiative
 
-Max retries per phase: retry on `fail` or crash (phases are idempotent, so re-running is safe). `PLANNER_MAX_PHASE_RETRIES` (default 2) is planned but not yet implemented in the router dispatch loop.
+Max retries per phase: retry on `fail` or crash (phases are idempotent, so re-running is safe). `PLANNER_MAX_PHASE_RETRIES` (default 2) bounds this. The count is derived by `planner_phase_retries_exhausted` from `fail` entries in the state log rather than held in memory, so the budget survives a crashed router the same way position does.
 
 ## State Representation
 
@@ -340,13 +340,38 @@ The router never reasons about content. Phases never mutate state directly (they
 | `LINEAR_RETRY_DELAYS` | `1 2 4` | Retry backoff delays in seconds |
 | `CLAUDE_PLUGIN_ROOT` | (resolved at runtime) | Plugin cache location for library sourcing |
 
-### Planned (not yet implemented)
+### Stop conditions
 
-| Variable | Planned Default | Description |
+| Variable | Default | Description |
 |----------|---------|-------------|
-| `PLANNER_REVIEW_HOLD` | false | When `true`, Review phase pauses for human input |
-| `PLANNER_CONSENSUS_HOLD` | false | When `true`, Consensus phase pauses for human input |
+| `PLANNER_UNTIL` | *(unset)* | Stop the dispatch loop once this phase completes. Set by `--until`; `--dry-run` sets it to `Consensus` |
+| `PLANNER_REVIEW_HOLD` | false | When `true`, stop after Review — the env-var form of `--until Review` |
+| `PLANNER_CONSENSUS_HOLD` | false | When `true`, stop after Consensus — the env-var form of `--dry-run` |
 | `PLANNER_MAX_PHASE_RETRIES` | 2 | Max retries per phase before failing the run |
+
+All three stop controls resolve through a single function, `planner_stop_phase`, which
+returns the **earliest** configured stop point. There is one stop condition in the
+dispatch loop, not three, so the flag and env-var forms cannot diverge.
+
+Stopping is not a distinct mode. The router holds no in-memory state, so a stop is
+just "quit dispatching", and `/ticket-planner resume <INIT_ID>` is the continuation —
+the same path crash recovery already uses.
+
+### Projects and milestones
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LINEAR_PROJECT` | *(unset)* | Project name or id for created epics and tickets. Set by `--project` |
+| `LINEAR_PROJECT_MILESTONE` | *(unset)* | Project milestone name or id. Set by `--milestone` |
+
+Which project an initiative belongs to is an operator decision, so it comes from
+configuration rather than agent judgement — it stays on the deterministic side of the
+boundary. With both unset, no `projectId` is sent and the payload is byte-identical to
+what workspaces that do not use projects saw before. A named milestone that does not
+exist is an error; the planner does not create milestones.
+
+The resolved ids are recorded at EpicGen as `EpicGen|project|done|project=… milestone=…`
+so a later reader can tell where the initiative was filed without re-querying Linear.
 
 ## Planned-Entry Gate Dormancy
 

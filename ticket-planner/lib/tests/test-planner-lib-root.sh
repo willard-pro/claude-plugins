@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# test-planner-lib-root.sh — Tests for plugin-root resolution and prompt preambles.
+#
+# Covers the gap that let issue #138 ship: no suite exercised prompt-emitted bash,
+# so a fallback path that could never resolve went unnoticed through 142 tests.
+#
+# Run: bash ticket-planner/lib/tests/test-planner-lib-root.sh
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LIB_DIR="${SCRIPT_DIR}/.."
+PLUGIN_ROOT="${SCRIPT_DIR}/../.."
+
+source "${LIB_DIR}/planner-lib-root.sh"
+
+TMPDIR=$(mktemp -d)
+trap 'rm -rf "$TMPDIR"' EXIT
+
+PASS=0
+FAIL=0
+pass() {
+  echo "  PASS $1"
+  PASS=$((PASS + 1))
+}
+fail() {
+  echo "  FAIL $1: $2"
+  FAIL=$((FAIL + 1))
+}
+
+echo "=== planner-lib-root.sh tests ==="
+
+# ── Test 1: a valid CLAUDE_PLUGIN_ROOT is honoured ──────────────────────────────
+
+echo "--- Test 1: valid CLAUDE_PLUGIN_ROOT wins ---"
+
+mkdir -p "${TMPDIR}/fake-root/lib"
+touch "${TMPDIR}/fake-root/lib/planner-state.sh"
+
+got=$(CLAUDE_PLUGIN_ROOT="${TMPDIR}/fake-root" planner_resolve_lib_root)
+if [ "$got" = "${TMPDIR}/fake-root" ]; then
+  pass "a CLAUDE_PLUGIN_ROOT holding lib/planner-state.sh is used as-is"
+else
+  fail "valid CLAUDE_PLUGIN_ROOT is used as-is" "got '$got'"
+fi
+
+# ── Test 2: an invalid CLAUDE_PLUGIN_ROOT does not shadow a good candidate ──────
+
+echo "--- Test 2: invalid CLAUDE_PLUGIN_ROOT falls through ---"
+
+got=$(CLAUDE_PLUGIN_ROOT="${TMPDIR}/does-not-exist" HOME="$TMPDIR" planner_resolve_lib_root)
+if [ "$got" = "$(cd "$PLUGIN_ROOT" && pwd)" ]; then
+  pass "an inherited-but-wrong root falls through to the source checkout"
+else
+  fail "invalid root falls through" "got '$got'"
+fi
+
+# ── Test 3: the marketplace cache layout resolves ────────────────────────────────
+
+echo "--- Test 3: versioned marketplace cache layout ---"
+
+cache="${TMPDIR}/home1/.claude/plugins/cache/willard-pro-claude-plugins/ticket-planner"
+mkdir -p "${cache}/0.4.0/lib" "${cache}/0.5.0/lib"
+touch "${cache}/0.4.0/lib/planner-state.sh" "${cache}/0.5.0/lib/planner-state.sh"
+
+got=$(env -u CLAUDE_PLUGIN_ROOT HOME="${TMPDIR}/home1" bash -c \
+  "source '${LIB_DIR}/planner-lib-root.sh'; planner_resolve_lib_root")
+if [ "$got" = "${cache}/0.5.0" ]; then
+  pass "resolves the newest version under {marketplace}/{plugin}/{version}/"
+else
+  fail "resolves newest cached version" "got '$got'"
+fi
+
+# ── Test 4: the ~/.claude/skills/lib copy resolves ───────────────────────────────
+
+echo "--- Test 4: SessionStart hook skills/lib copy ---"
+
+mkdir -p "${TMPDIR}/home2/.claude/skills/lib" "${TMPDIR}/home2/.claude/plugins/cache"
+touch "${TMPDIR}/home2/.claude/skills/lib/planner-state.sh"
+
+got=$(env -u CLAUDE_PLUGIN_ROOT HOME="${TMPDIR}/home2" bash -c \
+  "source '${LIB_DIR}/planner-lib-root.sh'; planner_resolve_lib_root")
+if [ "$got" = "${TMPDIR}/home2/.claude/skills" ]; then
+  pass "falls back to ~/.claude/skills (its lib/ is populated by the SessionStart hook)"
+else
+  fail "falls back to skills lib" "got '$got'"
+fi
+
+# ── Test 5: the old fallback path is gone from the tree ─────────────────────────
+
+echo "--- Test 5: dead fallback path is gone ---"
+
+# Assembled from parts so this file does not match its own search.
+DEAD_PATH="cache/ticket-planner/""current"
+hits=$(grep -rl "$DEAD_PATH" "$PLUGIN_ROOT" 2>/dev/null | grep -v "$(basename "${BASH_SOURCE[0]}")" || true)
+if [ -n "$hits" ]; then
+  fail "no reference to the non-existent fallback path remains" "$(echo "$hits" | tr '\n' ' ')"
+else
+  pass "no reference to the non-existent fallback path remains"
+fi
+
+# ── Test 6: every phase prompt emits a resolvable preamble ──────────────────────
+
+echo "--- Test 6: prompt preambles point at a real lib dir ---"
+
+source "${LIB_DIR}/planner-phase-prompts.sh"
+
+PHASES=(Appraisal Discovery Architecture Specify Review Consensus EpicGen TicketGen Completed)
+
+for phase in "${PHASES[@]}"; do
+  prompt=$(planner_prompt_for_phase "$phase" "INIT-TEST" "an idea" "${TMPDIR}/state")
+
+  # Pull the resolved root out of the emitted preamble and check it really exists.
+  root=$(echo "$prompt" | grep -m1 '^CLAUDE_PLUGIN_ROOT=' | sed 's/^CLAUDE_PLUGIN_ROOT="//;s/"$//')
+  if [ -n "$root" ] && [ -f "${root}/lib/planner-state.sh" ]; then
+    pass "${phase} preamble resolves to a real lib dir"
+  else
+    fail "${phase} preamble resolves" "root='${root}'"
+  fi
+done
+
+# ── Test 7: prompt generation leaks nothing to stderr ───────────────────────────
+#
+# An unescaped $(...) or backtick inside these unquoted heredocs executes at
+# prompt-generation time instead of being emitted for the agent. That silently
+# blanked the whole deterministic confidence block in the TicketGen prompt.
+
+echo "--- Test 7: no generation-time command substitution leaks ---"
+
+for phase in "${PHASES[@]}"; do
+  leak=$(planner_prompt_for_phase "$phase" "INIT-TEST" "an idea" "${TMPDIR}/state" 2>&1 >/dev/null)
+  if [ -z "$leak" ]; then
+    pass "${phase} prompt generates with no stderr"
+  else
+    fail "${phase} prompt generates with no stderr" "$leak"
+  fi
+done
+
+# ── Test 8: the TicketGen confidence block survives to the agent ────────────────
+
+echo "--- Test 8: TicketGen confidence block is emitted, not executed ---"
+
+tg=$(planner_prompt_ticketgen "INIT-TEST" "an idea" "${TMPDIR}/state")
+
+for needle in \
+  'confidence=$(planner_confidence_derive' \
+  'planner_context=$(planner_context_generate' \
+  'signals_json=$(sed -n'; do
+  if echo "$tg" | grep -qF "$needle"; then
+    pass "emits: ${needle}"
+  else
+    fail "emits: ${needle}" "assignment was evaluated at generation time (empty in prompt)"
+  fi
+done
+
+echo ""
+echo "=== planner-lib-root.sh: ${PASS} passed, ${FAIL} failed ==="
+[ "$FAIL" -eq 0 ]

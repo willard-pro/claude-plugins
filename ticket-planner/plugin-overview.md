@@ -113,7 +113,7 @@ See [CLAUDE.md § Known sharp edges](CLAUDE.md#known-sharp-edges) for the curren
 - Pipe character in state log message field can truncate naive `cut -f5` consumers
 - Stale phase lock blocks resume until PID dies or lock is manually removed
 - Prompt phase indices are hardcoded — changing phase sequence requires updating 9 prompt functions
-- Three config variables (`PLANNER_REVIEW_HOLD`, `PLANNER_CONSENSUS_HOLD`, `PLANNER_MAX_PHASE_RETRIES`) are documented as planned but unimplemented
+- Phase prompts embed bash inside unquoted heredocs, so every `$`, backtick and trailing `\` intended for the agent's shell must be escaped. An unescaped one executes at prompt-generation time and lands in the prompt blank — this is not covered by type checking or linting, only by `test-planner-lib-root.sh`
 
 ## Related plugins
 

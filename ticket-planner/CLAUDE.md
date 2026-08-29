@@ -14,8 +14,8 @@ Produces against frozen consumption-side contracts: Planner Context block schema
 ticket-planner/
   .claude-plugin/plugin.json      # Plugin manifest (name, version, hooks)
   skills/ticket-planner/SKILL.md  # Single skill: /ticket-planner
-  lib/                            # Shared bash libraries (9 files)
-  lib/tests/                      # Test suites (6 files)
+  lib/                            # Shared bash libraries (12 files)
+  lib/tests/                      # Test suites (12 files)
   docs/                           # Architecture and reference docs
   README.md                       # Marketplace entry point
   plugin-overview.md              # Maintainer-facing design doc
@@ -90,15 +90,16 @@ The router is bash; phases are Claude agents. The router never reasons about con
 
 | File | Exports |
 |------|---------|
-| `planner-state.sh` | State log format, state directory layout. `planner_validate_initiative_id`, `planner_initiative_dir`, `planner_initiative_dir_init`, `planner_state_log`, `planner_state_read`, `planner_state_write`, `planner_state_init`, `planner_phase_sequence`, `planner_position_derive`, `planner_phase_lock`/`planner_phase_unlock`, `planner_phase_validate_transition`, `planner_phase_is_done`, `planner_state_repair` |
-| `planner-router.sh` | Phase router: `planner_phase_dispatch`, `planner_run`, `planner_resume`. Reads state log, spawns phase agents. |
+| `planner-state.sh` | State log format, state directory layout. `planner_phase_fail_count`, `planner_phase_index`, `planner_validate_initiative_id`, `planner_initiative_dir`, `planner_initiative_dir_init`, `planner_state_log`, `planner_state_read`, `planner_state_write`, `planner_state_init`, `planner_phase_sequence`, `planner_position_derive`, `planner_phase_lock`/`planner_phase_unlock`, `planner_phase_validate_transition`, `planner_phase_is_done`, `planner_state_repair` |
+| `planner-router.sh` | Phase router: `planner_phase_dispatch`, `planner_run`, `planner_resume`. Reads state log, spawns phase agents. Stop conditions: `planner_stop_phase` (earliest of `--until` / `PLANNER_REVIEW_HOLD` / `PLANNER_CONSENSUS_HOLD`), `planner_should_stop_after`, `planner_until_validate`. Retry budget: `planner_phase_retries_exhausted`. |
 | `planner-phase-prompts.sh` | Per-phase agent prompt templates: `planner_prompt_appraisal`, `planner_prompt_discovery`, `planner_prompt_architecture`, `planner_prompt_specify`, `planner_prompt_review`, `planner_prompt_consensus`, `planner_prompt_epicgen`, `planner_prompt_ticketgen`, `planner_prompt_completed`. Dispatch via `planner_prompt_for_phase`. Input sanitization: `planner_sanitize_input`. |
 | `planner-context-gen.sh` | Deterministic Planner Context block generator: `planner_context_generate`, `planner_confidence_derive`. Validates all 11 required fields, emits formatted markdown. |
 | `planner-deps-check.sh` | Dependency acyclicity validation: `planner_deps_check_acyclic` (`tsort`-based), `planner_deps_validate_targets`, `planner_deps_topological_sort`, `planner_deps_from_tickets`. Also: `planner_branch_directive_recommend` (shared-branch heuristic). |
 | `branch-directive-gen.sh` | Deterministic Branch Directive block generator: `branch_directive_generate` (JSON→markdown), `branch_directive_name_derive` (deterministic branch naming). Generates against the downstream validator — no bundled copy. |
 | `planner-ticket-validate.sh` | Pre-creation validation: `planner_validate_ticket` (wraps `planned-ticket-check.sh`). Idempotency: `planner_record_intent`, `planner_entity_exists`, `planner_entity_get_id`, `planner_entity_mark_created`. Post-creation: `planner_verify_tickets`, `planner_dispatch_gate`. |
 | `planner-replan.sh` | Re-planning support: `planner_replan_flag_is_set`, `planner_replan_flag_set`, `planner_feedback_list`, `planner_feedback_read_all`, `planner_feedback_status`, `planner_drift_compute`, `planner_replan_eligible_tickets`, `planner_replan_validate_deps`, `planner_replan_record`. |
-| `planner-linear-api.sh` | Linear GraphQL API client with retry (3 attempts, exponential backoff). Wraps curl. `planner_linear_graphql`, `planner_linear_create_issue`, `planner_linear_get_issue`. |
+| `planner-linear-api.sh` | Linear GraphQL API client with retry (3 attempts, exponential backoff). Wraps curl. `planner_linear_graphql`, `planner_linear_create_issue`, `planner_linear_get_issue`. Pure payload builder `planner_linear_build_issue_input` (unit-testable, no network). Name→id resolution: `planner_linear_resolve_label_ids` (hard-fails on an unknown label), `planner_linear_resolve_project`, `planner_linear_resolve_milestone`. |
+| `planner-lib-root.sh` | Plugin-root resolution for prompt preambles and SKILL.md: `planner_resolve_lib_root` (four-level search), `planner_require_lib_root` (hard stop with every path tried). Sibling-resolvable via `BASH_SOURCE` — the one lookup that cannot depend on `CLAUDE_PLUGIN_ROOT`. |
 | `planner-intent-gate.sh` | Pre-flight intent file gate. `_resolve_grill_seal` (three-level fallback → grill-seal.sh), `planner_intent_gate <path>` (validate seal + recommendation), `planner_intent_gate_check_require` (PLANNER_REQUIRE_INTENT check). Resolves grill-me plugin's seal verifier — no bundled copy. |
 | `planner-spec-validate.sh` | Deterministic spec file validation gate. `planner_spec_validate_all`, `planner_spec_validate_one`. Checks required sections + parseable Signals JSON. |
 
@@ -120,7 +121,7 @@ Statuses: `start`, `done`, `fail`, `skip`. Phases: Appraisal, Discovery, Archite
 - **State log pipe character in message field:** The message field in `ISO|PHASE|STEP|STATUS|MSG` can contain arbitrary text. If a message contains `|`, naive `cut -d'|' -f5` truncates. `planner_state_write` sanitizes the idea field but phase agents write message fields directly. `planner_state_repair` handles this defensively by preserving trailing fields, but consumers that use `cut -f5` may see truncated messages.
 - **Phase concurrency lock:** `planner_phase_lock` uses a PID-based lock file. If the lock holder crashes without cleanup, a stale lock blocks resume until manually removed or until the PID is no longer alive. `planner_state_init` auto-removes stale locks, but `planner_phase_lock` itself does not.
 - **Prompt phase indices:** The 9 agent prompt functions embed their phase position as "phase N of 9". If the phase sequence changes (new phase inserted, phase removed), every prompt function's index must be updated. There is no centralized constant — each function hardcodes its index. A mismatch would confuse agents about their position in the pipeline.
-- **`PLANNER_REVIEW_HOLD`, `PLANNER_CONSENSUS_HOLD`, `PLANNER_MAX_PHASE_RETRIES` documented but unimplemented.** These config variables appear in `docs/ticket-planner.md` under a "Planned" section. The router dispatch loop does not check them. If an operator sets them expecting behavior, nothing happens.
+- **Prompt-embedded bash is escaped by hand.** The 9 phase prompts are unquoted heredocs, so every `$`, backtick and trailing `\` meant for the *agent's* shell must be escaped. An unescaped one runs at prompt-generation time and lands in the prompt as an empty assignment — silently, with only stderr noise. This is how the TicketGen confidence block came to hand a bash-only decision back to the LLM. `test-planner-lib-root.sh` guards it (no stderr on generation, key assignments present verbatim); nothing else will.
 - **Cross-plugin grill-me dependency:** `planner-intent-gate.sh` resolves `grill-seal.sh` from the grill-me plugin via a three-level fallback (plugin cache → `~/.claude/skills/lib` → relative path). If grill-me is not installed and an intent file is passed, the gate exits 3 with an install instruction. There is no bundled copy — a drifting duplicate would silently pass invalid seals. The gate runs before `planner_state_init` so a rejected intent leaves no state behind.
 
 ## Related docs
