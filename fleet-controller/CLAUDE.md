@@ -165,7 +165,7 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 | `CLAUDE_BIN` | `claude` | Worker binary name used by fleetd's `spawn_worker` |
 | `CLAUDE_CMD` | (unset) | Full worker command line, overrides `CLAUDE_BIN` — e.g. `claude-deepseek 2 --bypass`. The `-p '/ticket-auto {tid} ...'` invocation is always appended after it |
 | `FLEET_WORKER_PERMISSION_MODE` | `bypassPermissions` | Appended as `--permission-mode` unless `CLAUDE_CMD` already specifies one. `dontAsk`/`auto` are not sane defaults for a headless worker — see design.md Decision 9 |
-| `FLEET_WORKER_DISALLOWED_TOOLS` | (unset) | Passed through to the worker invocation when set — comma-separated tool names to block |
+| `FLEET_WORKER_DISALLOWED_TOOLS` | (unset) | Passed through to the worker invocation when set — comma-separated tool names to block. Recommended defense-in-depth given `bypassPermissions` is the default worker mode (e.g. `Bash(rm -rf:*),Bash(sudo:*)`) — not enforced by fleetd, since the pipeline's autonomy model already requires unattended write access to the workspace |
 | `FLEET_WORKER_LOG_RETENTION` | 3 | Generations of `{tid}-gen{N}.json`/`.stderr`/`-exit.json` kept per ticket; older ones are swept at reap |
 | `FLEET_DETERMINISTIC_FAILURE_SECS` | 5 | A worker exit faster than this counts toward the deterministic-failure circuit breaker streak |
 | `FLEET_DETERMINISTIC_FAILURE_COUNT` | 3 | Consecutive fast-failure streak length that trips the circuit breaker (halts dispatch) |
