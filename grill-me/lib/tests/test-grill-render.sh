@@ -280,6 +280,66 @@ else
   fail "Open Gaps rows keyed by id" "scope_ok=$SCOPE_ROW_OK ac_ok=$AC_ROW_OK constraints_ok=$CONSTRAINTS_ROW_OK; section:\n${GAPS_SECTION}"
 fi
 
+echo "=== Resolved Questions renders answers from assessment.resolved ==="
+
+# Regression test for the bug where _render_resolved_questions read the
+# pending .questions array (always empty by the time rendering happens,
+# since resolved questions are removed from it) instead of .resolved, and
+# hardcoded the answer column to "_(pending)_".
+make_assessment_with_resolved() {
+  cat <<'JSON'
+{
+  "profile": "product-idea",
+  "subject": "Test Subject",
+  "round": 2,
+  "dimensions": [
+    {"id":"objective","status":"present","evidence":"Build real-time collaboration","gap":""},
+    {"id":"users_problem","status":"present","evidence":"Enterprise users need co-editing","gap":""},
+    {"id":"success_criteria","status":"present","evidence":"500ms cursor update","gap":""},
+    {"id":"scope","status":"present","evidence":"Real-time cursors, doc locking","gap":""},
+    {"id":"acceptance_criteria","status":"present","evidence":"Two users open same doc simultaneously","gap":""},
+    {"id":"constraints","status":"present","evidence":"Within existing WebSocket infra","gap":""},
+    {"id":"dependencies","status":"present","evidence":"WebSocket service v2","gap":""},
+    {"id":"risks","status":"present","evidence":"Network latency","gap":""},
+    {"id":"edge_cases","status":"present","evidence":"Answered in round 2","gap":""},
+    {"id":"assumptions","status":"missing","evidence":"","gap":"Assumptions not stated"}
+  ],
+  "flags": {},
+  "assumptions": [],
+  "risks": [],
+  "questions": [],
+  "resolved": [
+    {"question":"What happens on concurrent edit conflict?","dimension":"edge_cases","why":"Untested edge case","round":2,"answer":"ANSWER_TEXT_SHOULD_APPEAR"}
+  ]
+}
+JSON
+}
+
+ASSESSMENT_RESOLVED_FILE="$SCRATCH/assessment-resolved.json"
+make_assessment_with_resolved >"$ASSESSMENT_RESOLVED_FILE"
+OUTPUT_RESOLVED_FILE="$SCRATCH/output-resolved.md"
+grill_render "$RESULT_FILE" "$ASSESSMENT_RESOLVED_FILE" "$OUTPUT_RESOLVED_FILE" 2>/dev/null
+
+RESOLVED_SECTION=$(sed -n '/^## Resolved Questions$/,/^## Open Gaps$/p' "$OUTPUT_RESOLVED_FILE")
+
+if echo "$RESOLVED_SECTION" | grep -q "ANSWER_TEXT_SHOULD_APPEAR" && ! echo "$RESOLVED_SECTION" | grep -q "_(pending)_" && ! echo "$RESOLVED_SECTION" | grep -q "No questions were asked"; then
+  pass "Resolved Questions renders real answer text from .resolved"
+else
+  fail "Resolved Questions renders real answer text from .resolved" "$RESOLVED_SECTION"
+fi
+
+echo "=== Resolved Questions shows 'no questions' only when .resolved is empty ==="
+
+# .questions empty but .resolved also empty (never asked) — must still show
+# the "no questions" message, not an empty table.
+OUTPUT_NONE_FILE="$SCRATCH/output-none.md"
+grill_render "$RESULT_FILE" "$ASSESSMENT_FILE" "$OUTPUT_NONE_FILE" 2>/dev/null
+if grep -q "No questions were asked" "$OUTPUT_NONE_FILE"; then
+  pass "empty .resolved still renders 'no questions' message"
+else
+  fail "empty .resolved still renders 'no questions' message" "$(grep -A2 '## Resolved Questions' "$OUTPUT_NONE_FILE")"
+fi
+
 echo "=== Results ==="
 TOTAL=$((PASS + FAIL))
 echo "$PASS/$TOTAL passed"

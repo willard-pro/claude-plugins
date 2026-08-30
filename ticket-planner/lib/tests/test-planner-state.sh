@@ -166,6 +166,64 @@ else
   fail "unknown initiative errors" "planner_resume with nonexistent ID succeeded"
 fi
 
+# ── Test 10: planner_initiative_dir tolerates a symlinked REPOS_ROOT ────────────
+
+echo "--- Test 10: symlinked REPOS_ROOT ---"
+
+REAL_ROOT="$TMPDIR/real-root"
+mkdir -p "$REAL_ROOT"
+SYMLINK_ROOT="$TMPDIR/symlink-root"
+ln -s "$REAL_ROOT" "$SYMLINK_ROOT"
+
+(
+  REPOS_ROOT="$SYMLINK_ROOT"
+  if resolved_dir=$(planner_initiative_dir "INIT-SYMLINK-1"); then
+    echo "PASS: resolved_dir=$resolved_dir"
+  else
+    echo "FAIL"
+  fi
+) >"$TMPDIR/symlink-test-1.out" 2>&1
+
+if grep -q "^PASS" "$TMPDIR/symlink-test-1.out"; then
+  pass "planner_initiative_dir succeeds when REPOS_ROOT contains a symlink"
+else
+  fail "planner_initiative_dir succeeds when REPOS_ROOT contains a symlink" "$(cat "$TMPDIR/symlink-test-1.out")"
+fi
+
+(
+  REPOS_ROOT="$SYMLINK_ROOT"
+  if dir=$(planner_initiative_dir_init "INIT-SYMLINK-2") && [ -d "${dir}/artifacts" ] && [ -d "${dir}/feedback" ]; then
+    echo "PASS"
+  else
+    echo "FAIL"
+  fi
+) >"$TMPDIR/symlink-test-2.out" 2>&1
+
+if grep -q "^PASS" "$TMPDIR/symlink-test-2.out"; then
+  pass "planner_initiative_dir_init creates artifacts/feedback dirs through a symlinked REPOS_ROOT"
+else
+  fail "planner_initiative_dir_init creates artifacts/feedback dirs through a symlinked REPOS_ROOT" "$(cat "$TMPDIR/symlink-test-2.out")"
+fi
+
+# ── Test 11: planner_initiative_dir_init propagates failure instead of mkdir'ing garbage ──
+
+echo "--- Test 11: dir_init propagates planner_initiative_dir failure ---"
+
+(
+  REPOS_ROOT="$TMPDIR"
+  if planner_initiative_dir_init "../escape-attempt" >/dev/null 2>&1; then
+    echo "FAIL: dir_init succeeded on an invalid ID"
+  else
+    echo "PASS"
+  fi
+) >"$TMPDIR/escape-test.out" 2>&1
+
+if grep -q "^PASS" "$TMPDIR/escape-test.out"; then
+  pass "planner_initiative_dir_init fails (not mkdir) when planner_initiative_dir rejects the ID"
+else
+  fail "planner_initiative_dir_init fails when planner_initiative_dir rejects the ID" "$(cat "$TMPDIR/escape-test.out")"
+fi
+
 # ── Summary ─────────────────────────────────────────────────────────────────────
 
 echo ""

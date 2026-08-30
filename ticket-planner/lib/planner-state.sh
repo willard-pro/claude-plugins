@@ -60,14 +60,24 @@ planner_initiative_dir() {
 
   local dir="${repos_root}/.ticket-auto/initiatives/${initiative_id}"
 
-  # Defense-in-depth: verify the resolved path is still under the expected root
-  local resolved
+  # Defense-in-depth: verify the resolved path is still under the expected root.
+  # Both sides must be canonicalized the same way, with a missing-path-tolerant
+  # mode (realpath -m / readlink -m) on both — otherwise:
+  #   - a REPOS_ROOT that contains a symlink component (a documented, supported
+  #     setup) resolves the candidate path but not expected_prefix, so they
+  #     diverge on every call once .ticket-auto/initiatives exists; and
+  #   - without -m, canonicalization of a not-yet-created path fails outright
+  #     (GNU realpath/readlink -f require all but the last component to
+  #     exist), silently falling back to the raw, unresolved string — which
+  #     only coincidentally matched expected_prefix before this fix.
+  local resolved expected_prefix
   if command -v realpath >/dev/null 2>&1; then
-    resolved=$(realpath "$dir" 2>/dev/null || echo "$dir")
+    resolved=$(realpath -m "$dir" 2>/dev/null || echo "$dir")
+    expected_prefix=$(realpath -m "${repos_root}/.ticket-auto/initiatives" 2>/dev/null || echo "${repos_root}/.ticket-auto/initiatives")
   else
-    resolved=$(readlink -f "$dir" 2>/dev/null || echo "$dir")
+    resolved=$(readlink -m "$dir" 2>/dev/null || echo "$dir")
+    expected_prefix=$(readlink -m "${repos_root}/.ticket-auto/initiatives" 2>/dev/null || echo "${repos_root}/.ticket-auto/initiatives")
   fi
-  local expected_prefix="${repos_root}/.ticket-auto/initiatives"
   case "$resolved" in
   "${expected_prefix}"/*) ;;
   *)
@@ -92,7 +102,9 @@ planner_initiative_dir_init() {
     return 1
   fi
 
-  dir=$(planner_initiative_dir "$initiative_id")
+  if ! dir=$(planner_initiative_dir "$initiative_id"); then
+    return 1
+  fi
   mkdir -p "${dir}/artifacts" "${dir}/feedback"
   echo "$dir"
 }

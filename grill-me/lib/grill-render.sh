@@ -274,18 +274,14 @@ _render_resolved_questions() {
   local assessment="$1"
   local max_round="$2"
 
-  # In the current design, resolved questions come from the assessment's
-  # questions array with answers recorded during the grill loop.
-  # For v1, the assessment.questions array holds pending questions; resolved
-  # ones would be recorded in later rounds. We render from the result's
-  # perspective: if there are questions and we're past round 1, we show them.
-  # For now, render any questions present in the assessment as "asked" with
-  # the round number.
+  # Resolved question+answer pairs are folded into assessment.resolved by the
+  # interactive grill loop (SKILL.md Step 5) — .questions holds only pending
+  # questions, so an empty .questions array is the expected steady state once
+  # everything has been answered, not evidence nothing was ever asked.
+  local r_count
+  r_count=$(echo "$assessment" | jq '.resolved | length')
 
-  local q_count
-  q_count=$(echo "$assessment" | jq '.questions | length')
-
-  if [ "$q_count" -eq 0 ]; then
+  if [ "$r_count" -eq 0 ]; then
     cat <<MD
 ## Resolved Questions
 
@@ -302,18 +298,21 @@ MD
 | # | Question | Dimension | Why | Round | Answer |
 |---|----------|-----------|-----|-------|--------|
 "
-  local qi
-  for qi in $(seq 0 $((q_count - 1))); do
-    local q_text q_dim q_why
-    q_text=$(echo "$assessment" | jq -r ".questions[$qi].text // \"\"")
-    q_dim=$(echo "$assessment" | jq -r ".questions[$qi].dimension // \"\"")
-    q_why=$(echo "$assessment" | jq -r ".questions[$qi].why // \"\"")
+  local ri
+  for ri in $(seq 0 $((r_count - 1))); do
+    local q_text q_dim q_why q_round q_answer
+    q_text=$(echo "$assessment" | jq -r ".resolved[$ri].question // \"\"")
+    q_dim=$(echo "$assessment" | jq -r ".resolved[$ri].dimension // \"\"")
+    q_why=$(echo "$assessment" | jq -r ".resolved[$ri].why // \"\"")
+    q_round=$(echo "$assessment" | jq -r ".resolved[$ri].round // \"${max_round}\"")
+    q_answer=$(echo "$assessment" | jq -r ".resolved[$ri].answer // \"\"")
 
     # Escape pipes in table cells
     q_text=$(echo "$q_text" | sed 's/|/\\|/g')
     q_why=$(echo "$q_why" | sed 's/|/\\|/g')
+    q_answer=$(echo "$q_answer" | sed 's/|/\\|/g')
 
-    table="${table}| $((qi + 1)) | ${q_text} | ${q_dim} | ${q_why} | ${max_round} | _(pending)_ |
+    table="${table}| $((ri + 1)) | ${q_text} | ${q_dim} | ${q_why} | ${q_round} | ${q_answer} |
 "
   done
 
