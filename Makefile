@@ -101,6 +101,7 @@ test-planner:
 	bash ticket-planner/lib/tests/test-planner-integration.sh
 	bash ticket-planner/lib/tests/test-branch-decision.sh
 	bash ticket-planner/lib/tests/test-branch-directive-gen.sh
+	bash ticket-planner/lib/tests/test-planner-crosscheck-citations.sh
 
 test-planner-intent-gate:
 	@echo "=== planner intent gate tests ==="
