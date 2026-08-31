@@ -122,7 +122,20 @@ hb_gate "trigger-dispatch" "fired" "trigger ${TRIGGER} dispatched" '{"trigger":"
 NEW_STATE_NAME=$(echo "$def" | jq -r '.to // empty')
 SET_ASSIGNEE_ME=$(echo "$def" | jq -r '.set_assignee == "me"')
 
-# Build label arrays — substitute {complexity} and {outcome} placeholders
+# Build label arrays — substitute {complexity}, {complexity-opposite} and
+# {outcome} placeholders.
+#
+# {complexity-opposite} resolves to whichever of simple/complex is NOT being
+# applied. Simple and Complex are members of a mutually-exclusive Linear label
+# group, so a stale label left behind by an abandoned appraisal session makes
+# the whole mutation fail. A trigger declares the cleanup in its "removes"
+# array rather than each caller reconciling by hand.
+_COMPLEXITY_VALUE=$(printf '%s' "${DATA[complexity]:-simple}" | tr '[:upper:]' '[:lower:]')
+case "$_COMPLEXITY_VALUE" in
+complex) COMPLEXITY_OPPOSITE="simple" ;;
+*) COMPLEXITY_OPPOSITE="complex" ;;
+esac
+
 ADD_LABEL_NAMES=()
 while IFS= read -r label; do
   [ -z "$label" ] && continue
@@ -135,6 +148,10 @@ done < <(echo "$def" | jq -r '.adds[]? // empty')
 REMOVE_LABEL_NAMES=()
 while IFS= read -r label; do
   [ -z "$label" ] && continue
+  label=$(echo "$label" | sed \
+    -e "s/{complexity-opposite}/${COMPLEXITY_OPPOSITE}/g" \
+    -e "s/{complexity}/${DATA[complexity]:-simple}/g" \
+    -e "s/{outcome}/${DATA[outcome]:-Smooth}/g")
   REMOVE_LABEL_NAMES+=("$label")
 done < <(echo "$def" | jq -r '.removes[]? // empty')
 

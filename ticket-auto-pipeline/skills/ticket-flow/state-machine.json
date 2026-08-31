@@ -89,7 +89,9 @@
         "claimed",
         "{complexity}"
       ],
-      "removes": [],
+      "removes": [
+        "{complexity-opposite}"
+      ],
       "set_assignee": "me",
       "description": "Claim a ticket and begin appraisal",
       "precondition": "must_not_be_epic"

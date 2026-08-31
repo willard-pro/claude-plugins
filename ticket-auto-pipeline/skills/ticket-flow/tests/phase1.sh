@@ -777,6 +777,96 @@ test_flow_implement_outcome_logs_line_when_idempotent() {
   [ "$rc" -eq 0 ] && [ "$found" -eq 0 ]
 }
 
+# ── test_flow_complexity_opposite ────────────────────────────────────────────
+# appraise-start must clear a stale opposite-complexity label in the same
+# mutation that applies the new one. Simple and Complex belong to a
+# mutually-exclusive Linear label group, so leaving both on the issue makes
+# Linear reject the whole mutation (issue #170).
+
+_stub_lib_dir_labels() {
+  # Like _stub_lib_dir, but the issue's current label set is caller-supplied
+  # so a test can seed a stale complexity label. The issue is parked in Todo
+  # (a legal "from" state for appraise-start) and carries no epic marker.
+  local dir="$1"
+  local labels_json="$2"
+  mkdir -p "$dir"
+  cp "$PLUGIN_DIR/lib/heartbeat.sh" "$dir/"
+  cp "$PLUGIN_DIR/lib/epic-precondition.sh" "$dir/"
+  cat >"$dir/linear-api.sh" <<STUBEOF
+get_issue() {
+  jq -n --argjson labels '$labels_json' '{id:"issue-1",identifier:"WIL-99",team:{id:"team-1",name:"Test"},state:{id:"state-todo",name:"Todo"},labels:{nodes:\$labels},description:"",project:null,parent:null}'
+}
+get_team() {
+  jq -n '{states:[{id:"state-todo",name:"Todo"}],labels:[{id:"lbl-claimed",name:"claimed"},{id:"lbl-simple",name:"Simple"},{id:"lbl-complex",name:"Complex"}]}'
+}
+update_issue() { jq -n '{success:true,issue:{id:"issue-1",identifier:"WIL-99"}}'; }
+get_me() { jq -n '{id:"me-1",name:"Test"}'; }
+STUBEOF
+}
+
+_appraise_start_dry_run_labels() {
+  # Echoes the comma-joined label set appraise-start would compute.
+  local labels_json="$1"
+  local complexity="$2"
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs" "$tmpdir/lib"
+  _stub_lib_dir_labels "$tmpdir/lib" "$labels_json"
+
+  local out
+  out=$(FLEET_FENCE_ENFORCE=false CLAUDE_SKILLS_LIB="$tmpdir/lib" \
+    LOG_FILE="$tmpdir/logs/WIL-99-pipeline.log" \
+    TICKET_FLOW_LOCK_DIR="$tmpdir/logs" \
+    "$FLOW_SH" WIL-99 appraise-start --data complexity="$complexity" --dry-run 2>/dev/null)
+  rm -rf "$tmpdir"
+  echo "$out" | jq -r '.computed.labels'
+}
+
+test_flow_appraise_start_drops_stale_opposite_label() {
+  local labels
+  labels=$(_appraise_start_dry_run_labels '[{"id":"lbl-simple","name":"Simple"}]' complex)
+  echo "$labels" | grep -q "Complex" || {
+    echo "expected Complex in computed labels, got: $labels"
+    return 1
+  }
+  # grep -w so the "Simple" check is not satisfied by the "Complex" substring.
+  echo "$labels" | tr ',' '\n' | grep -qx "Simple" && {
+    echo "stale Simple label survived appraise-start: $labels"
+    return 1
+  }
+  return 0
+}
+
+test_flow_appraise_start_drops_stale_complex_label() {
+  local labels
+  labels=$(_appraise_start_dry_run_labels '[{"id":"lbl-complex","name":"Complex"}]' simple)
+  echo "$labels" | tr ',' '\n' | grep -qx "Simple" || {
+    echo "expected Simple in computed labels, got: $labels"
+    return 1
+  }
+  echo "$labels" | tr ',' '\n' | grep -qx "Complex" && {
+    echo "stale Complex label survived appraise-start: $labels"
+    return 1
+  }
+  return 0
+}
+
+test_flow_appraise_start_no_prior_complexity_label() {
+  # The common case: nothing to remove. The removal must no-op rather than
+  # fail, since removes resolve IDs from the issue's own label set.
+  local labels
+  labels=$(_appraise_start_dry_run_labels '[]' complex)
+  echo "$labels" | tr ',' '\n' | grep -qx "Complex" || {
+    echo "expected Complex in computed labels, got: $labels"
+    return 1
+  }
+  echo "$labels" | tr ',' '\n' | grep -qx "claimed" || {
+    echo "expected claimed in computed labels, got: $labels"
+    return 1
+  }
+  return 0
+}
+
 # ── test_state_machine_single_source ───────────────────────────────────────
 
 test_state_machine_single_source() {
@@ -825,6 +915,9 @@ for fn in \
   test_flow_from_precondition_logic \
   test_flow_implement_outcome_logs_line_on_mutation \
   test_flow_implement_outcome_logs_line_when_idempotent \
+  test_flow_appraise_start_drops_stale_opposite_label \
+  test_flow_appraise_start_drops_stale_complex_label \
+  test_flow_appraise_start_no_prior_complexity_label \
   test_state_machine_single_source \
   test_ticket_dir_disambiguation \
   test_gen_mermaid_roundtrip; do
