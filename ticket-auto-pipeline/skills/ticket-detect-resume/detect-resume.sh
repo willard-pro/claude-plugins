@@ -86,9 +86,21 @@ fi
 if [ ! -s "$LOG_FILE" ]; then
   RESUME_STEP="STEP_1"
 else
+  # Terminal state: pipeline-finalize.sh writes "completed: STEP_6" as the
+  # LAST log line (tail-guarded, F10 fix) only when the pipeline genuinely
+  # finished — never for "held: gate" (GATE_HELD, awaiting re-approval) or
+  # "stopped: ..." (gate-stop/exhaustion) outcomes, which must fall through to
+  # the normal backward-scan below so their own resume points are detected.
+  # Checked first and only against the tail line, so a stale outcome earlier
+  # in a crash-resumed log never falsely reports a live pipeline as done.
+  # Without this, a naive /ticket-auto re-run after completion loops STEP_6
+  # forever (#168).
+  _last_line=$(tail -1 "$LOG_FILE" 2>/dev/null || true)
+  if echo "$_last_line" | grep -q '|META|outcome|info|completed:'; then
+    RESUME_STEP="done"
   # Phase order: APPRAISE → REPRODUCE → EXEC → GATE → IMPLEMENT → VERIFY → PR-REVIEW → MAINTENANCE → REPORT
   # Check from latest phase backward.
-  if grep -q '^[^|]*|MAINTENANCE|maintenance|done|' "$LOG_FILE"; then
+  elif grep -q '^[^|]*|MAINTENANCE|maintenance|done|' "$LOG_FILE"; then
     RESUME_STEP="STEP_6"
   elif grep -q '^[^|]*|MAINTENANCE|maintenance|fail|' "$LOG_FILE"; then
     RESUME_STEP="STEP_6"

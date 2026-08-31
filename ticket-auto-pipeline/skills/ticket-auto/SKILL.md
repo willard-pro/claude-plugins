@@ -529,11 +529,15 @@ Primary: Derive the repo(s) this ticket touches from the project CLAUDE.md codeb
 ```bash
 _derive_slug() { basename "$repo" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g'; }
 
-# Deterministic enumeration of all repos under REPOS_ROOT
+# Deterministic enumeration of all repos under REPOS_ROOT.
+# -type d excludes git-worktree ".git" *files* (worktree pointer files, e.g.
+# under .ticket-auto/worktrees/**), which would otherwise resolve to bogus
+# ancestor paths. %h is already the repo root (parent of the matched ".git"
+# dir) — do not dirname() it again, that walks one level too high.
 REPOS=()
-while IFS= read -r -d '' gitdir; do
-  REPOS+=("$(dirname "$gitdir")")
-done < <(find "$REPOS_ROOT" -maxdepth 3 -name ".git" -printf '%h\0' 2>/dev/null || true)
+while IFS= read -r -d '' repo_dir; do
+  REPOS+=("$repo_dir")
+done < <(find "$REPOS_ROOT" -maxdepth 3 -name ".git" -type d -printf '%h\0' 2>/dev/null || true)
 
 # If no repos found, skip prescan entirely (nothing to scan)
 if [ ${#REPOS[@]} -eq 0 ]; then

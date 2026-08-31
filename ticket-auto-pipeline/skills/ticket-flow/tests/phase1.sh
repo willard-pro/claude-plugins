@@ -705,6 +705,78 @@ test_flow_from_precondition_logic() {
   rm -rf "$tmpdir"
 }
 
+# ── test_flow_implement_outcome_logs_line ────────────────────────────────────
+# flow.sh's implement-outcome trigger must write the dedicated
+# IMPLEMENT|implement-outcome|info| line itself, so outcome-label-check.sh's
+# guard can never drift from the actual Linear label mutation (issue #165).
+
+_stub_lib_dir() {
+  # Builds a temp CLAUDE_SKILLS_LIB with a network-free linear-api.sh stub
+  # plus the real heartbeat.sh/epic-precondition.sh (pure bash/jq, no network)
+  # flow.sh unconditionally sources.
+  local dir="$1"
+  local marker="$2"
+  mkdir -p "$dir"
+  cp "$PLUGIN_DIR/lib/heartbeat.sh" "$dir/"
+  cp "$PLUGIN_DIR/lib/epic-precondition.sh" "$dir/"
+  cat >"$dir/linear-api.sh" <<STUBEOF
+get_issue() {
+  if [ -f "$marker" ]; then
+    jq -n '{id:"issue-1",identifier:"WIL-99",team:{id:"team-1",name:"Test"},state:{id:"state-1",name:"Ready"},labels:{nodes:[{id:"lbl-hard",name:"Hard"}]},project:null,parent:null}'
+  else
+    jq -n '{id:"issue-1",identifier:"WIL-99",team:{id:"team-1",name:"Test"},state:{id:"state-1",name:"Ready"},labels:{nodes:[]},project:null,parent:null}'
+  fi
+}
+get_team() {
+  jq -n '{states:[{id:"state-1",name:"Ready"}],labels:[{id:"lbl-hard",name:"Hard"},{id:"lbl-smooth",name:"Smooth"},{id:"lbl-rough",name:"Rough"}]}'
+}
+update_issue() {
+  touch "$marker"
+  jq -n '{success:true,issue:{id:"issue-1",identifier:"WIL-99"}}'
+}
+get_me() { jq -n '{id:"me-1",name:"Test"}'; }
+STUBEOF
+}
+
+test_flow_implement_outcome_logs_line_on_mutation() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs" "$tmpdir/lib"
+  local marker="$tmpdir/mutated.marker"
+  _stub_lib_dir "$tmpdir/lib" "$marker"
+
+  local log="$tmpdir/logs/WIL-99-pipeline.log"
+  FLEET_FENCE_ENFORCE=false CLAUDE_SKILLS_LIB="$tmpdir/lib" LOG_FILE="$log" \
+    TICKET_FLOW_LOCK_DIR="$tmpdir/logs" \
+    "$FLOW_SH" WIL-99 implement-outcome --data outcome=Hard >/dev/null 2>&1
+  local rc=$?
+
+  local found=1
+  grep -q '^[^|]*|IMPLEMENT|implement-outcome|info|Hard$' "$log" 2>/dev/null && found=0
+  rm -rf "$tmpdir"
+  [ "$rc" -eq 0 ] && [ "$found" -eq 0 ]
+}
+
+test_flow_implement_outcome_logs_line_when_idempotent() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs" "$tmpdir/lib"
+  local marker="$tmpdir/mutated.marker"
+  touch "$marker" # label already present from the first get_issue call — idempotent path
+  _stub_lib_dir "$tmpdir/lib" "$marker"
+
+  local log="$tmpdir/logs/WIL-99-pipeline.log"
+  FLEET_FENCE_ENFORCE=false CLAUDE_SKILLS_LIB="$tmpdir/lib" LOG_FILE="$log" \
+    TICKET_FLOW_LOCK_DIR="$tmpdir/logs" \
+    "$FLOW_SH" WIL-99 implement-outcome --data outcome=Hard >/dev/null 2>&1
+  local rc=$?
+
+  local found=1
+  grep -q '^[^|]*|IMPLEMENT|implement-outcome|info|Hard$' "$log" 2>/dev/null && found=0
+  rm -rf "$tmpdir"
+  [ "$rc" -eq 0 ] && [ "$found" -eq 0 ]
+}
+
 # ── test_state_machine_single_source ───────────────────────────────────────
 
 test_state_machine_single_source() {
@@ -751,6 +823,8 @@ for fn in \
   test_detect_resume_no_step3 \
   test_detect_resume_pr_number_from_checkout_only \
   test_flow_from_precondition_logic \
+  test_flow_implement_outcome_logs_line_on_mutation \
+  test_flow_implement_outcome_logs_line_when_idempotent \
   test_state_machine_single_source \
   test_ticket_dir_disambiguation \
   test_gen_mermaid_roundtrip; do
