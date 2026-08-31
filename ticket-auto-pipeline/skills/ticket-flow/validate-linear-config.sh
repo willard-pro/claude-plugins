@@ -42,7 +42,8 @@ mapfile -t EXPECTED_LABELS < <(jq -r '
     (.triggers | to_entries[] | .value | (.adds[]?, .removes[]?) | select(. != null)),
     (.well_known_labels[]? // empty)
   ] | unique | sort[]' "$SM" | sed \
-  's/{complexity}/simple\n{complexity_complex}/g; s/{complexity_complex}/complex/g;
+  's/{complexity-opposite}/simple\n{complexity_complex}/g;
+     s/{complexity}/simple\n{complexity_complex}/g; s/{complexity_complex}/complex/g;
      s/{outcome}/Smooth\n{outcome_rough}\n{outcome_hard}/g;
      s/{outcome_rough}/Rough/g; s/{outcome_hard}/Hard/g' | sort -u)
 
