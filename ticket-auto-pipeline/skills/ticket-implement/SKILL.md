@@ -35,6 +35,8 @@ If `--from-auto` is present in the arguments, follow the auto-pipeline preamble 
 | `code-review` | Step 5 (commit/push) | — |
 | `commit-push` | End — skill already complete | — |
 
+**Concurrency guard:** if you need to check whether another worker is already implementing this ticket, never grep the process table (`ps`/`pgrep`) for markers matching your own launch prompt or skill name — a self-checking agent's own process (and its own `spawn_agent_pre` shell) will always match those markers, producing a guaranteed false positive that aborts real work. Use file-based signals instead: an existing worktree/branch with commits already on it, a lockfile whose PID is not in your own ancestry, or a terminal `IMPLEMENT|implement|done|`/`|fail|` line already present in `$LOG_FILE` for this ticket.
+
 ---
 
 ## Step 0.6 — Create task tracker
@@ -385,10 +387,10 @@ if [ "$_rc" -ne 0 ]; then
     "{\"trigger\":\"implement-outcome\",\"exit_code\":\"${_rc}\",\"ticket\":\"{TICKET-ID}\"}"
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|flow-error|fail|exit ${_rc}: implement-outcome" >> {LOG_FILE}
 fi
-# Write outcome to pipeline log so post-implement guards can verify it.
-# outcome-label-check.sh reads this dedicated entry — not the general
-# implement|done| line which may contain prose like "2 files changed".
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|implement-outcome|info|{Smooth|Rough|Hard}" >> {LOG_FILE}
+# flow.sh's implement-outcome trigger itself writes the dedicated
+# IMPLEMENT|implement-outcome|info| entry that outcome-label-check.sh reads —
+# so the Linear label and the pipeline log can never drift apart. No manual
+# log write needed here.
 
 ### Post-implement: Record verifier result (Phase 0 RLVR)
 

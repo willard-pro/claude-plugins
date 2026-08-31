@@ -369,6 +369,9 @@ IDEMPOTENT=false
 if ! $STATE_CHANGED && ! $LABELS_CHANGED && [ "$SET_ASSIGNEE_ME" = "false" ]; then
   IDEMPOTENT=true
   hb_gate "idempotent-skip" "ok" "no mutation needed, desired state matches current" '{"trigger":"'"$TRIGGER"'"}'
+  if [ "$TRIGGER" = "implement-outcome" ] && [ -n "${DATA[outcome]:-}" ]; then
+    _log "IMPLEMENT|implement-outcome|info|${DATA[outcome]}"
+  fi
   exit 0
 fi
 
@@ -468,6 +471,10 @@ if ! $IDEMPOTENT; then
       break
     fi
   done
+fi
+
+if [ "$TRIGGER" = "implement-outcome" ] && [ -n "${DATA[outcome]:-}" ]; then
+  _log "IMPLEMENT|implement-outcome|info|${DATA[outcome]}"
 fi
 
 echo "$RESULT" | jq -c '.'

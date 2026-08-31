@@ -68,6 +68,19 @@ Capture:
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|fetch-ticket|done|Fetched" >> "$LOG_FILE"
 
+**Resolve the ticket workspace directory** — the same directory every other pipeline
+phase (`ticket-appraise`, `ticket-implement`, `ticket-verify`) already created and
+wrote to. Never recompute a slug from the ticket title or branch name — it will not
+match the directory created at appraise time:
+
+```bash
+find . -type d -name "{TICKET-ID}*"
+```
+
+This is `{ticket-dir}` for the rest of this skill (Step 0.6's trace file, and any
+build-output log in Step 4). If not found, fall back to `resolve_ticket_dir` in
+`~/.claude/skills/lib/ticket-dir.sh`.
+
 ---
 
 ## Step 2 — Extract requirements
@@ -140,6 +153,8 @@ Call `mcp__gitnexus__detect_changes` with `scope: "compare"` and `base_ref: "{ba
 - Run pre-flight health check: `mcp__gitnexus__list_repos` (5s timeout). If unreachable, log: `gitnexus-health|fail|unreachable` in heartbeat.
 - Note that changed files have no indexed execution flows (shell scripts, config, docs — expected for some repos)
 - Log a warning and proceed — never block on GitNexus availability
+
+**If GitNexus's structural diff is unreliable for this repo** (e.g. the local clone isn't checked out on the PR branch, so `detect_changes --scope compare` would diff unrelated noise) and you fall back to running the project's own test command directly as manual verification: redirect that command's stdout/stderr to `{ticket-dir}/pr-review-build-{repo-slug}.log`, never to `$LOG_FILE`. `$LOG_FILE` only ever gets one structured summary line (pass/fail, test counts), e.g. `[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|manual-verify|done|{repo}: {pass|fail}, {N} tests" >> "$LOG_FILE"`. Every consumer of the pipeline log (`detect-resume.sh`, `gate-check.sh`) parses strict `ISO|PHASE|STEP|STATUS|MSG` rows — raw build console output breaks that contract even though current parsers happen to skip unmatched lines.
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|gitnexus-impact|done|{N} affected flows, risk: {highest-risk}" >> "$LOG_FILE"
 

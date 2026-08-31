@@ -339,6 +339,52 @@ test_gate_gate_done_still_advances_past_gate_held() {
   [ "$resume_step" = "STEP_4" ]
 }
 
+# ── Terminal "done" state (#168) ────────────────────────────────────────────
+
+test_resume_step_done_on_completed_outcome() {
+  # pipeline-finalize.sh's tail-guarded "completed: STEP_6" line means the
+  # run genuinely finished. Without a terminal check, a naive re-run of
+  # /ticket-auto would fall through to the ordinary backward-scan and route
+  # right back into STEP_6 forever.
+  local out
+  out=$(_detect_resume_with_log "GH-168-1" \
+    "2026-08-31T10:00:00Z|META|schema|info|2" \
+    "2026-08-31T10:00:01Z|APPRAISE|appraise|done|complexity=simple" \
+    "2026-08-31T10:00:02Z|MAINTENANCE|maintenance|done|clean" \
+    "2026-08-31T10:00:03Z|META|outcome|info|completed: STEP_6")
+  [ "$(_field "$out" RESUME_STEP)" = "done" ]
+}
+
+test_resume_step_not_done_on_held_outcome() {
+  # pipeline-finalize.sh also writes an outcome line when the router exits
+  # on a gate hold ("held: gate") — that is NOT a terminal state, and must
+  # still resolve to GATE_HELD/GATE_STILL_HELD via the normal backward-scan,
+  # not short-circuit to "done".
+  local out
+  out=$(_detect_resume_with_log "GH-168-2" \
+    "2026-08-31T10:00:00Z|META|schema|info|2" \
+    "2026-08-31T10:00:01Z|APPRAISE|appraise|done|complexity=complex" \
+    "2026-08-31T10:00:02Z|GATE|gate|fail|held" \
+    "2026-08-31T10:00:03Z|META|outcome|info|held: gate")
+  local resume_step
+  resume_step=$(_field "$out" RESUME_STEP)
+  [ "$resume_step" != "done" ]
+}
+
+test_resume_step_not_done_on_stopped_outcome() {
+  # A gate-stop/exhaustion outcome ("stopped: ...") is terminal-but-failed,
+  # not terminal-but-complete — it must not be reported as "done" either.
+  local out
+  out=$(_detect_resume_with_log "GH-168-3" \
+    "2026-08-31T10:00:00Z|META|schema|info|2" \
+    "2026-08-31T10:00:01Z|APPRAISE|appraise|done|complexity=simple" \
+    "2026-08-31T10:00:02Z|IMPLEMENT|implement|done|Hard, branch: gh-168-3--fix" \
+    "2026-08-31T10:00:03Z|META|outcome|info|stopped: VERIFY_EXHAUSTED")
+  local resume_step
+  resume_step=$(_field "$out" RESUME_STEP)
+  [ "$resume_step" != "done" ]
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -451,7 +497,10 @@ for fn in \
   test_branch_context_survives_resume \
   test_branch_context_carries_uat_policy \
   test_uat_policy_defaults_on_log_without_field \
-  test_branch_context_empty_on_legacy_log; do
+  test_branch_context_empty_on_legacy_log \
+  test_resume_step_done_on_completed_outcome \
+  test_resume_step_not_done_on_held_outcome \
+  test_resume_step_not_done_on_stopped_outcome; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done
