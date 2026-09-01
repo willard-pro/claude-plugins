@@ -1412,6 +1412,93 @@ test_entry_one_missing_prereq_no_abort() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Check 2.8c: manual-mode complex + approved override (issue #186)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# 40. Complex + manual + approved label + Ready state → Check 2.8c overrides Check 3 (exit 0)
+test_entry_complex_manual_approved_ready_passes() {
+  _setup
+  _scaffold_exec_done "complex" "manual" "openspec" "${_ws}/openspec-change.md"
+  _fake_issue='{"id":"CRE-47","title":"Test","state":{"name":"Ready"},"labels":{"nodes":[{"name":"approved"},{"name":"bug"}]}}'
+
+  _gate_entry
+  local rc=$?
+
+  local overridden_line
+  overridden_line=$(grep 'manual mode overridden' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0 (Check 2.8c override), got $rc"
+    return 1
+  }
+  [ -n "$overridden_line" ] || {
+    echo "expected Check 2.8c override log entry"
+    return 1
+  }
+}
+
+# 41. Complex + manual + NOT approved → still held on Check 3 (regression guard)
+test_entry_complex_manual_not_approved_still_held() {
+  _setup
+  _scaffold_exec_done "complex" "manual" "openspec" "${_ws}/openspec-change.md"
+  _fake_issue='{"id":"CRE-47","title":"Test","state":{"name":"Backlog"},"labels":{"nodes":[{"name":"bug"}]}}'
+
+  _gate_entry
+  local rc=$?
+
+  _teardown
+  [ "$rc" -eq 1 ] || {
+    echo "expected exit 1 (held: complex ticket), got $rc"
+    return 1
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Cross-validation browser-mode guard (issue #186)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Helper: build-only artifact — build command + BUILD SUCCESS outcome, no browser signals
+_scaffold_artifact_build_only() {
+  local path="${1:-${_ws}/simple-fix.md}"
+  cat >"$path" <<'ARTEOF'
+# Simple Fix — Test
+
+## Summary
+Migrate circuit breaker library from Hystrix to Resilience4j.
+
+## How to implement
+1. Run `mvn clean install`
+2. Confirm BUILD SUCCESS in CI logs
+ARTEOF
+}
+
+# 42. Build-only ticket + critique flags nav gap → cross-val skipped (nav path is meaningless, no UI exists)
+test_cross_val_build_only_nav_gap_not_held() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _scaffold_context_md 2 "feature" "true"
+  _scaffold_critique_with_findings 65 "WARNINGS" "- [WARNING] No navigation path specified. Verifier will need to discover the feature location from code."
+  _scaffold_artifact_build_only "${_ws}/simple-fix.md"
+
+  _gate_entry
+  local rc=$?
+
+  local held_line
+  held_line=$(grep 'cross-validation failed' "$LOG_FILE" 2>/dev/null || true)
+
+  _teardown
+  [ "$rc" -eq 0 ] || {
+    echo "expected exit 0 (build-only ticket, nav gap not applicable), got $rc"
+    return 1
+  }
+  [ -z "$held_line" ] || {
+    echo "unexpected cross-validation hold: nav path is meaningless for build-only tickets"
+    return 1
+  }
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Dispatcher
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -1457,7 +1544,10 @@ for fn in \
   test_cross_val_skipped_without_critique \
   test_tightened_regex_bare_should_not_counted \
   test_tightened_regex_proper_context_counted \
-  test_entry_one_missing_prereq_no_abort; do
+  test_entry_one_missing_prereq_no_abort \
+  test_entry_complex_manual_approved_ready_passes \
+  test_entry_complex_manual_not_approved_still_held \
+  test_cross_val_build_only_nav_gap_not_held; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

@@ -417,31 +417,38 @@ _gate_entry() {
     # Uses gate_td (ticket workspace) — td was reassigned in Check 2.6.
     # NOTE: bare ((x++)) exits 1 when x=0 (post-increment evaluates as falsy),
     # triggering set -e. Use || true or $((x+1)) to avoid this.
-    local critique_nav_gap critique_user_gap critique_repro_gap cross_failures
-    cross_failures=0
-    if get_critique_has_finding "$gate_td" 'No navigation path' 2>/dev/null; then
-      critique_nav_gap="true"
-      if [ "${plan_has_nav_path:-0}" = "0" ]; then
+    # Browser-only: nav_path/test_user gaps are meaningless for build-only/api-only
+    # tickets (no UI exists to navigate, no test user to log in as) — mirrors the
+    # mode-aware missing_count check above. Without this guard, a critique correctly
+    # flagging "no navigation path" on a build-only ticket held it forever, since the
+    # plan can never supply a navigation path that doesn't exist.
+    if [ "$_ticket_mode" = "browser" ]; then
+      local critique_nav_gap critique_user_gap critique_repro_gap cross_failures
+      cross_failures=0
+      if get_critique_has_finding "$gate_td" 'No navigation path' 2>/dev/null; then
+        critique_nav_gap="true"
+        if [ "${plan_has_nav_path:-0}" = "0" ]; then
+          cross_failures=$((cross_failures + 1))
+        fi
+      fi
+      if get_critique_has_finding "$gate_td" 'No test user' 2>/dev/null; then
+        critique_user_gap="true"
+        if [ "${plan_has_test_user:-0}" = "0" ]; then
+          cross_failures=$((cross_failures + 1))
+        fi
+      fi
+      # Repro steps are special: they can't be derived by the LLM. If the critique flagged
+      # no repro steps, the ticket author must provide them — no plan can compensate.
+      if get_critique_has_finding "$gate_td" 'Bug without repro steps' 2>/dev/null; then
+        critique_repro_gap="true"
         cross_failures=$((cross_failures + 1))
       fi
-    fi
-    if get_critique_has_finding "$gate_td" 'No test user' 2>/dev/null; then
-      critique_user_gap="true"
-      if [ "${plan_has_test_user:-0}" = "0" ]; then
-        cross_failures=$((cross_failures + 1))
-      fi
-    fi
-    # Repro steps are special: they can't be derived by the LLM. If the critique flagged
-    # no repro steps, the ticket author must provide them — no plan can compensate.
-    if get_critique_has_finding "$gate_td" 'Bug without repro steps' 2>/dev/null; then
-      critique_repro_gap="true"
-      cross_failures=$((cross_failures + 1))
-    fi
 
-    if [ "$cross_failures" -ge 1 ] 2>/dev/null; then
-      _plog "$LOG_FILE" "GATE" "gate" "fail" "held: critique-plan cross-validation failed — $cross_failures critique gap(s) still unaddressed (nav_gap=${critique_nav_gap:-false} user_gap=${critique_user_gap:-false} repro_gap=${critique_repro_gap:-false})"
-      hb_gate "entry-gate" "fail" "held: critique-plan cross-validation failed" "{\"nav_gap\":\"${critique_nav_gap:-false}\",\"user_gap\":\"${critique_user_gap:-false}\",\"repro_gap\":\"${critique_repro_gap:-false}\",\"cross_failures\":\"$cross_failures\"}"
-      return 1
+      if [ "$cross_failures" -ge 1 ] 2>/dev/null; then
+        _plog "$LOG_FILE" "GATE" "gate" "fail" "held: critique-plan cross-validation failed — $cross_failures critique gap(s) still unaddressed (nav_gap=${critique_nav_gap:-false} user_gap=${critique_user_gap:-false} repro_gap=${critique_repro_gap:-false})"
+        hb_gate "entry-gate" "fail" "held: critique-plan cross-validation failed" "{\"nav_gap\":\"${critique_nav_gap:-false}\",\"user_gap\":\"${critique_user_gap:-false}\",\"repro_gap\":\"${critique_repro_gap:-false}\",\"cross_failures\":\"$cross_failures\"}"
+        return 1
+      fi
     fi
   fi
 
@@ -525,6 +532,25 @@ _gate_entry() {
       hb_gate "entry-gate" "done" "complex auto-approved" "{\"complexity\":\"$complexity\",\"autonomy\":\"$autonomy\",\"approved\":true}"
       _write_gate_verdict PASS
       # Pass through to verify flow.sh's post-trigger assertion still holds
+      return 0
+    fi
+  fi
+
+  # Check 2.8c: Complex + manual + approved label + Ready state → pass.
+  # Mirrors 2.8b for manual autonomy. Without this, Check 3 below ("complex
+  # tickets are always held") unconditionally intercepts every complex ticket
+  # before Check 4 (manual mode's own approved+Ready override) ever runs —
+  # Check 4's condition was unreachable for any complex ticket in manual mode,
+  # contradicting 2.8b's own comment ("manual has its own check at Check 4").
+  if [ "$complexity" = "complex" ] && [ "$autonomy" = "manual" ]; then
+    local _c28c_json _c28c_state _c28c_approved
+    _c28c_json=$(get_issue "$TICKET_ID" 2>/dev/null || echo 'null')
+    _c28c_state=$(echo "$_c28c_json" | jq -r '.state.name // empty' 2>/dev/null || true)
+    _c28c_approved=$(echo "$_c28c_json" | jq -r '[.labels.nodes[]?.name? // empty | ascii_downcase] | index("approved") != null' 2>/dev/null || echo 'false')
+    if [ "$_c28c_state" = "Ready" ] && [ "$_c28c_approved" = "true" ]; then
+      _plog "$LOG_FILE" "GATE" "gate" "done" "manual mode overridden: approved label + Ready state confirmed in Linear (complex ticket)"
+      hb_gate "entry-gate" "ok" "manual mode overridden by Linear approval (complex)" "{\"autonomy\":\"manual\",\"complexity\":\"complex\",\"linear_state\":\"$_c28c_state\"}"
+      _write_gate_verdict PASS
       return 0
     fi
   fi
