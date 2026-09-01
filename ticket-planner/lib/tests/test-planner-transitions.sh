@@ -98,7 +98,7 @@ echo "--- 1h: legal transitions honored ---"
 # Verify every legal adjacent transition works
 phase_sequence=(
   "Appraisal" "Discovery" "Architecture" "Specify" "Review" "Consensus"
-  "EpicGen" "TicketGen" "Completed"
+  "Crosscheck" "EpicGen" "TicketGen" "Completed"
 )
 all_legal_ok=true
 for ((i = 0; i < ${#phase_sequence[@]} - 1; i++)); do
@@ -110,9 +110,9 @@ for ((i = 0; i < ${#phase_sequence[@]} - 1; i++)); do
   fi
 done
 if $all_legal_ok; then
-  pass "all 11 legal adjacent transitions accepted"
+  pass "all 9 legal adjacent transitions accepted"
 else
-  fail "all 11 legal adjacent transitions accepted" "at least one legal transition rejected"
+  fail "all 9 legal adjacent transitions accepted" "at least one legal transition rejected"
 fi
 
 echo "--- 1i: same-phase transition (resume) ---"

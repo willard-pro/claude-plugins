@@ -26,7 +26,7 @@ The planner is a separate plugin from `ticket-auto-pipeline` and `fleet-controll
 /ticket-planner plan "Add real-time collaboration to the document editor"
 ```
 
-The planner initializes a state directory under `${REPOS_ROOT}/.ticket-auto/initiatives/{ID}/`, writes the idea to the state log, and begins the 9-phase state machine. Each phase runs as an isolated Claude agent. The router advances sequentially through phases with no inline reasoning between them.
+The planner initializes a state directory under `${REPOS_ROOT}/.ticket-auto/initiatives/{ID}/`, writes the idea to the state log, and begins the 10-phase state machine. Each phase runs as an isolated Claude agent, except Crosscheck, which is deterministic bash. The router advances sequentially through phases with no inline reasoning between them.
 
 ### What auto-dispatch does
 
@@ -67,11 +67,11 @@ Shows the current phase, initiative metadata, and the last few state log entries
 
 ## State Machine
 
-9 phases, strictly linear. Each phase runs as an isolated Claude agent. The router is bash — it reads the state log, derives position, and dispatches phases. It performs no reasoning of its own.
+10 phases, strictly linear. Every phase but one runs as an isolated Claude agent; Crosscheck is deterministic bash. The router is bash — it reads the state log, derives position, and dispatches phases. It performs no reasoning of its own.
 
 ```
 Appraisal → Discovery → Architecture → Specify → Review → Consensus →
-EpicGen → TicketGen → Completed
+Crosscheck → EpicGen → TicketGen → Completed
 ```
 
 ### Phase Details
@@ -84,11 +84,12 @@ EpicGen → TicketGen → Completed
 | 4 | **Specify** | Synthesizes proposal + writes per-ticket spec files with signals in a single pass | `proposal.md`, spec files in `artifacts/specs/` | — |
 | 5 | **Review** | Critiques the proposal for gaps, risks, and feasibility | Review findings | — |
 | 6 | **Consensus** | Resolves review findings into a settled, actionable plan | Finalized proposal | — |
-| 7 | **EpicGen** | Creates the initiative epic in Linear | Linear epic with `INIT-{id}` and `epic` labels | Idempotency: records intent before creation, checks existence by initiative ID |
-| 8 | **TicketGen** | Creates planned child tickets in Backlog with full labels and Planner Context blocks, validates dependency DAG, sets `state:execution` on epic | Linear tickets, `state:execution` label on epic | `planner-deps-check.sh` (acyclicity), `planner-context-gen.sh` (block format), `planned-ticket-check.sh` (validation before creation) |
-| 9 | **Completed** | Terminal phase — writes completion summary, no further transitions permitted | Completed state log entry, `COMPLETED.md` | Phase transition validator rejects any transition from Completed |
+| 7 | **Crosscheck** | *(not an agent — bash)* Runs the citation ([#172](https://github.com/willard-pro/claude-plugins/issues/172)) and cross-ticket propagation ([#173](https://github.com/willard-pro/claude-plugins/issues/173)) linters against the settled artifacts and the live repo | `META|crosscheck` findings in state.log | Blocking finding halts the dispatch loop before the create gate is even checked ([#178](https://github.com/willard-pro/claude-plugins/issues/178)) |
+| 8 | **EpicGen** | Creates the initiative epic in Linear | Linear epic with `INIT-{id}` and `epic` labels | Idempotency: records intent before creation, checks existence by initiative ID |
+| 9 | **TicketGen** | Creates planned child tickets in Backlog with full labels and Planner Context blocks, validates dependency DAG, sets `state:execution` on epic | Linear tickets, `state:execution` label on epic | `planner-deps-check.sh` (acyclicity), `planner-context-gen.sh` (block format), `planned-ticket-check.sh` (validation before creation) |
+| 10 | **Completed** | Terminal phase — writes completion summary, no further transitions permitted | Completed state log entry, `COMPLETED.md` | Phase transition validator rejects any transition from Completed |
 
-**Phase merge notes:** The original 12-phase design separated Proposal, OpenSpec, StoryGen, and Execution as standalone phases. These were merged into Specify (Proposal + OpenSpec) and TicketGen (StoryGen + Execution labelling) to reduce phase count from 12 to 9. The merged phases handle all the same work — no capability was removed.
+**Phase merge notes:** The original 12-phase design separated Proposal, OpenSpec, StoryGen, and Execution as standalone phases. These were merged into Specify (Proposal + OpenSpec) and TicketGen (StoryGen + Execution labelling) to reduce phase count from 12 to 9. The merged phases handle all the same work — no capability was removed. Crosscheck (#178) was added later as phase 7, bringing the count to 10 — it is not a merge artifact, it is new deterministic validation the original design didn't have.
 
 ### Failure handling
 
@@ -343,16 +344,20 @@ The router never reasons about content. Phases never mutate state directly (they
 
 ### The create gate and stop conditions
 
-Phases 1–6 write only to disk. Epic Gen (phase 7) is the first Linear write, and the
+Phases 1–7 write only to disk. Epic Gen (phase 8) is the first Linear write, and the
 dispatch loop **stops on that boundary unless the initiative has been explicitly
 authorized to cross it**. That default is a constant, not runtime state: there is no
 flag whose absence permits creation, and nothing that has to propagate correctly for
 the safe outcome to hold.
 
+Crosscheck (phase 7) runs unconditionally regardless of authorization — it's
+artifact-only, so there's nothing for the gate to protect there — and a blocking
+finding halts the loop before the gate is even reached (see [Phase Details](#phase-details)).
+
 Crossing the boundary takes a separate invocation:
 
 ```
-/ticket-planner plan "…"                  # → Appraisal … Consensus, nothing in Linear
+/ticket-planner plan "…"                  # → Appraisal … Crosscheck, nothing in Linear
 /ticket-planner resume INIT-42 --create   # → Epic Gen, Ticket Gen, Completed
 ```
 
@@ -373,7 +378,7 @@ the default and needs no variable.
 
 Both controls resolve through a single function, `planner_stop_phase <initiative_id>`,
 which returns the **earliest** applicable stop point — `--until TicketGen` on an
-unauthorized initiative still stops at Consensus. There is one stop condition in the
+unauthorized initiative still stops at Crosscheck. There is one stop condition in the
 dispatch loop, not several, so the forms cannot diverge.
 
 Two further guards sit under the stop check, because the failure being prevented is

@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Claude Code plugin marketplace (`willard-pro-claude-plugins`). Ships five plugins:
 
-- **`ticket-planner`** — 9-phase autonomous planner turning business ideas into dependency-ordered planned tickets. Sits upstream of ticket-auto. Appraisal → Discovery → Architecture → Specify → Review → Consensus → Epic Gen → Ticket Gen → Completed. Generates Branch Directives for shared epic branches.
+- **`ticket-planner`** — 10-phase autonomous planner turning business ideas into dependency-ordered planned tickets. Sits upstream of ticket-auto. Appraisal → Discovery → Architecture → Specify → Review → Consensus → Crosscheck → Epic Gen → Ticket Gen → Completed. Generates Branch Directives for shared epic branches.
 - **`ticket-auto-pipeline`** — fully autonomous Linear ticket pipeline that appraises, implements, verifies, and merges tickets with zero user input. Consumes planner output via the `planned` label + Planner Context block.
 - **`fleet-controller`** — parent orchestrator above ticket-planner and ticket-auto. Dispatches planned tickets from initiative epics, monitors pipeline health via 12 detection engines, manages epic branch lifecycle (create, sync, GC), aggregates execution feedback back to the planner. Bash-only, zero Claude agents.
 - **`knowledge-curator`** — durable cross-project knowledge tracking. Captures ideas, decisions, lessons, and discoveries with automatic resurfacing.
@@ -49,7 +49,7 @@ ticket-auto-pipeline/
   pipeline-log-format.md           # Shared log schema (ISO|PHASE|STEP|STATUS|MSG)
   pipeline-heartbeat-format.md     # Heartbeat log schema
   docs/ticket-auto-pipeline-diagram.html  # Interactive state diagram (ticket-auto, GitHub Pages)
-  docs/ticket-planner-pipeline-diagram.html  # 9-phase planning diagram (ticket-planner, GitHub Pages)
+  docs/ticket-planner-pipeline-diagram.html  # 10-phase planning diagram (ticket-planner, GitHub Pages)
   skills/ticket-flow/validate-linear-config.sh  # Validates Linear team states/labels match state machine
   install.sh                       # Post-install migration from host-side skills
 ```

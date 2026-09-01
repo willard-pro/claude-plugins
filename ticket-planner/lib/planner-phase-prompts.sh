@@ -192,7 +192,7 @@ INTENT
 
   cat <<AGENT_PROMPT
 You are the **Appraisal** phase agent for the ticket-planner. Your job is to
-interpret a business idea and establish initiative scope. You are phase 1 of 9
+interpret a business idea and establish initiative scope. You are phase 1 of 10
 in an autonomous planning pipeline.
 
 ## Initiative
@@ -270,7 +270,7 @@ planner_prompt_discovery() {
   cat <<AGENT_PROMPT
 You are the **Discovery** phase agent for the ticket-planner. Your job is to
 explore affected repositories and gather concrete context: code paths, symbols,
-API contracts, and existing patterns. You are phase 2 of 9.
+API contracts, and existing patterns. You are phase 2 of 10.
 
 ## Initiative
 - **ID:** ${initiative_id}
@@ -334,7 +334,7 @@ planner_prompt_architecture() {
   cat <<AGENT_PROMPT
 You are the **Architecture** phase agent for the ticket-planner. Your job is to
 determine the technical approach: evaluate alternatives, choose the path, and
-document the decision. You are phase 3 of 9.
+document the decision. You are phase 3 of 10.
 
 ## Initiative
 - **ID:** ${initiative_id}
@@ -402,7 +402,7 @@ planner_prompt_specify() {
   cat <<AGENT_PROMPT
 You are the **Specify** phase agent for the ticket-planner. Your job is to
 synthesize all upstream analysis into a proposal AND produce per-ticket spec files
-in a single pass. You are phase 4 of 9 — the last content-producing phase before
+in a single pass. You are phase 4 of 10 — the last content-producing phase before
 review.
 
 ## Initiative
@@ -505,7 +505,7 @@ planner_prompt_review() {
   cat <<AGENT_PROMPT
 You are the **Review** phase agent for the ticket-planner. Your job is to
 critique the proposal — find gaps, risks, and infeasibilities before we commit
-to building. You are phase 5 of 9. You are a skeptic; your job is to find
+to building. You are phase 5 of 10. You are a skeptic; your job is to find
 what's wrong.
 
 ## Initiative
@@ -579,7 +579,10 @@ planner_prompt_consensus() {
 You are the **Consensus** phase agent for the ticket-planner. Your job is to
 resolve review findings into a settled, actionable plan. You don't re-litigate
 the proposal — you address the specific findings from Review and produce the
-final version. You are phase 6 of 9.
+final version. You are phase 6 of 10. The next phase, Crosscheck, is a
+deterministic linter that greps consensus.md and every spec file for citations
+and cross-ticket propagation — write plain prose, not something a keyword
+sweep would misread.
 
 ## Initiative
 - **ID:** ${initiative_id}
@@ -629,7 +632,7 @@ On failure, write \`fail\` instead of \`done\`.
 AGENT_PROMPT
 }
 
-# ── Phase 7: Epic Generation ────────────────────────────────────────────────────
+# ── Phase 8: Epic Generation (phase 7, Crosscheck, has no prompt — see planner-crosscheck.sh) ──
 
 planner_prompt_epicgen() {
   local initiative_id="$1" idea="$2" state_dir="$3"
@@ -653,7 +656,7 @@ planner_prompt_epicgen() {
 
   cat <<AGENT_PROMPT
 You are the **Epic Generation** phase agent for the ticket-planner. Your job is
-to create the Linear epic that represents this initiative. You are phase 7 of 9.
+to create the Linear epic that represents this initiative. You are phase 8 of 10.
 
 ## Initiative
 - **ID:** ${initiative_id}
@@ -915,7 +918,7 @@ independently of the \`create\` step so status and replan can read it.
 AGENT_PROMPT
 }
 
-# ── Phase 8: Ticket Generation ───────────────────────────────────────────────────
+# ── Phase 9: Ticket Generation ───────────────────────────────────────────────────
 
 planner_prompt_ticketgen() {
   local initiative_id="$1" idea="$2" state_dir="$3"
@@ -939,7 +942,7 @@ planner_prompt_ticketgen() {
 
   cat <<AGENT_PROMPT
 You are the **Ticket Generation** phase agent for the ticket-planner. Your job is
-to create planned child tickets in Linear. You are phase 8 of 9 — the main
+to create planned child tickets in Linear. You are phase 9 of 10 — the main
 entity-creation phase that produces what the pipeline consumes.
 
 ## Initiative
@@ -1152,7 +1155,7 @@ planner_state_write "${initiative_id}" "TicketGen" "generate" "done" "N tickets 
 AGENT_PROMPT
 }
 
-# ── Phase 9: Completed ───────────────────────────────────────────────────────────
+# ── Phase 10: Completed ──────────────────────────────────────────────────────────
 
 planner_prompt_completed() {
   local initiative_id="$1" idea="$2" state_dir="$3"
@@ -1165,7 +1168,7 @@ planner_prompt_completed() {
 
   cat <<AGENT_PROMPT
 You are the **Completed** phase agent for the ticket-planner. This is the
-terminal phase (9 of 9). No further transitions are permitted after this.
+terminal phase (10 of 10). No further transitions are permitted after this.
 
 ## Initiative
 - **ID:** ${initiative_id}

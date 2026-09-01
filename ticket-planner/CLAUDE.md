@@ -4,7 +4,7 @@ Plugin-level guidance for Claude Code when working inside this plugin directory.
 
 ## Plugin purpose
 
-Autonomous 9-phase planner that turns business ideas into dependency-ordered planned tickets the existing `ticket-auto` pipeline consumes without special-casing. Sits upstream of `ticket-auto` and `fleet-controller` — plans, then hands off.
+Autonomous 10-phase planner that turns business ideas into dependency-ordered planned tickets the existing `ticket-auto` pipeline consumes without special-casing. Sits upstream of `ticket-auto` and `fleet-controller` — plans, then hands off.
 
 Produces against frozen consumption-side contracts: Planner Context block schema, `planned`/`pre-approved`/`Type` labels, artifact plane, and feedback aggregation. Does not re-specify them.
 
@@ -23,7 +23,7 @@ ticket-planner/
 
 ### Shared docs (repo root)
 
-  docs/ticket-planner-pipeline-diagram.html  # Interactive 9-phase diagram (GitHub Pages)
+  docs/ticket-planner-pipeline-diagram.html  # Interactive 10-phase diagram (GitHub Pages)
 ```
 
 ### `.ticket-auto/` artifact layout (on disk, outside source repos)
@@ -55,18 +55,20 @@ ${REPOS_ROOT}/.ticket-auto/initiatives/{INITIATIVE_ID}/
 
 | Skill | Type | Purpose |
 |-------|------|---------|
-| [ticket-planner](skills/ticket-planner/SKILL.md) | Pipeline | 9-phase autonomous planner — turns business ideas into dependency-ordered planned tickets. Modes: `plan`, `resume`, `status`, `replan`. |
+| [ticket-planner](skills/ticket-planner/SKILL.md) | Pipeline | 10-phase autonomous planner — turns business ideas into dependency-ordered planned tickets. Modes: `plan`, `resume`, `status`, `replan`. |
 
 The planner is a single-skill plugin. The skill SKILL.md serves as both the user-facing slash-command documentation and the agent procedure reference. Architecture documentation lives in `docs/ticket-planner.md` — the skill file references it but does not duplicate it.
 
-## 9-phase state machine
+## 10-phase state machine
 
 ```
 Appraisal → Discovery → Architecture → Specify → Review → Consensus →
-EpicGen → TicketGen → Completed
+Crosscheck → EpicGen → TicketGen → Completed
 ```
 
-Each phase runs as an isolated agent. State lives in a durable append-only log under `${REPOS_ROOT}/.ticket-auto/initiatives/{ID}/`. The router reads the log to derive position — no state held in memory. Resume re-derives position by re-reading the log.
+Each phase runs as an isolated agent — except Crosscheck, which is deterministic bash (see below). State lives in a durable append-only log under `${REPOS_ROOT}/.ticket-auto/initiatives/{ID}/`. The router reads the log to derive position — no state held in memory. Resume re-derives position by re-reading the log.
+
+Crosscheck sits between Consensus and EpicGen: the last artifact-only phase, and the phase that gates the first Linear write (`PLANNER_DRY_RUN_PHASE` / `PLANNER_CREATE_GATE_PHASE` — see `planner-router.sh`). It wires in the citation ([#172](https://github.com/willard-pro/claude-plugins/issues/172)) and propagation ([#173](https://github.com/willard-pro/claude-plugins/issues/173)) linters, writing every finding to state.log as `META|crosscheck|fail|<CODE> <message>` and halting the dispatch loop on a blocking one ([#178](https://github.com/willard-pro/claude-plugins/issues/178)).
 
 ## Key design decisions
 
@@ -76,7 +78,8 @@ Each phase runs as an isolated agent. State lives in a durable append-only log u
 - **Confidence per ticket from concrete signals.** Derived from services identified, symbols resolved, prior art found — never a uniform constant.
 - **Dependencies as `blocked-by` labels, validated acyclic.** Cycle detection before any ticket is created.
 - **Auto-dispatch wired at the detector, approval gate untouched.** Dispatches without human command; still stops every ticket at the human approval gate.
-- **The safe state is the default; creating is the deliberate act.** `plan` ends at Consensus and writes nothing to Linear — a constant in the phase sequence, not a flag that could fail to take effect. Crossing the write boundary takes a separate `resume <ID> --create`, which persists `META|create-authorized|done` before the loop starts. Three disk-backed guards enforce it: the stop check, `planner_create_gate_check` before dispatch, and a re-check inside the Epic Gen and Ticket Gen agents.
+- **The safe state is the default; creating is the deliberate act.** `plan` ends at Crosscheck and writes nothing to Linear — a constant in the phase sequence, not a flag that could fail to take effect. Crossing the write boundary takes a separate `resume <ID> --create`, which persists `META|create-authorized|done` before the loop starts. Three disk-backed guards enforce it: the stop check, `planner_create_gate_check` before dispatch, and a re-check inside the Epic Gen and Ticket Gen agents.
+- **Crosscheck is the one phase that is not an agent.** Every other phase in `planner_phase_sequence` is dispatched by spawning a Claude agent with a prompt from `planner_prompt_for_phase`. Crosscheck has no prompt — SKILL.md's dispatch loop special-cases it (step 1a) and calls `planner_crosscheck_run` as plain bash instead. A blocking finding is treated as an immediate stop, not a retry: the check is deterministic, so re-running it against unedited artifacts cannot produce a different result. Only editing the artifacts and issuing `resume` can.
 - **Invocation config crosses the loop on disk, never in the environment.** The dispatch loop spans one process per phase with an Agent tool call between, so `export` does not reach the next iteration. Flags are parsed once and written to the state log; every consumer reads them back with `planner_config_get`. This is the same rule that governs position and retry counts, and the same defect class as #138 and #144.
 - **Regenerate is an explicit flag.** Feedback ingested only when `Regenerate` label is present. Undispatched Backlog tickets only — in-flight work untouched.
 - **`planned-entry-gate` stays dormant by decision.** Specified but deliberately unimplemented. Confidence ≥ 0.85 + `pre-approved` would bypass human approval gate. Revisit only after: ≥ 10 completed initiatives with real feedback data, drift consistently ≤ 0.10 at confidence ≥ 0.85, zero incidents from auto-approved tickets, and explicit operator opt-in. See `docs/ticket-planner.md#planned-entry-gate-dormancy`.
@@ -103,9 +106,10 @@ The router is bash; phases are Claude agents. The router never reasons about con
 | `planner-linear-api.sh` | Linear GraphQL API client with retry (3 attempts, exponential backoff). Wraps curl. `planner_linear_graphql`, `planner_linear_create_issue`, `planner_linear_get_issue`. Pure payload builder `planner_linear_build_issue_input` (unit-testable, no network). Name→id resolution: `planner_linear_resolve_label_ids` (hard-fails on an unknown label), `planner_linear_resolve_team_id` (ref → `LINEAR_TEAM_ID` → the only team; ambiguity is an error), `planner_linear_resolve_project`, `planner_linear_resolve_milestone`. |
 | `planner-lib-root.sh` | Plugin-root resolution for prompt preambles and SKILL.md: `planner_resolve_lib_root` (four-level search), `planner_require_lib_root` (hard stop with every path tried). Sibling-resolvable via `BASH_SOURCE` — the one lookup that cannot depend on `CLAUDE_PLUGIN_ROOT`. |
 | `planner-intent-gate.sh` | Pre-flight intent file gate. `_resolve_grill_seal` (three-level fallback → grill-seal.sh), `planner_intent_gate <path>` (validate seal + recommendation), `planner_intent_gate_check_require` (PLANNER_REQUIRE_INTENT check). Resolves grill-me plugin's seal verifier — no bundled copy. |
-| `planner-spec-validate.sh` | Deterministic spec file validation gate. `planner_spec_validate_all`, `planner_spec_validate_one`. Checks required sections + parseable Signals JSON — structural only, not semantic. |
-| `planner-crosscheck-citations.sh` | Deterministic citation + precedent linter (Crosscheck Check A, [#172](https://github.com/willard-pro/claude-plugins/issues/172)). `planner_crosscheck_citations`, `planner_crosscheck_citations_one`. Verifies every `path:line` citation and `symbol:path:line` Signals.TargetSymbols entry resolves against `REPOS_ROOT`, and that "mirrors the existing `X`"-style precedent claims name a symbol that actually exists in the repo. Not wired into the router yet — see #178 for the Crosscheck phase that will call it. |
-| `planner-crosscheck-propagation.sh` | Deterministic cross-ticket propagation linter (Crosscheck check, [#173](https://github.com/willard-pro/claude-plugins/issues/173)). `planner_crosscheck_propagation`, plus the three sub-checks `planner_crosscheck_consensus_propagation`, `planner_crosscheck_forward_references`, `planner_crosscheck_carve_scope`. A term-overlap heuristic (backtick identifiers, or significant words when none exist), not true semantic diffing — see the file header for why. Not wired into the router yet — see #178. |
+| `planner-spec-validate.sh` | Deterministic spec file validation gate. `planner_spec_validate_all`, `planner_spec_validate_one`. Checks required sections + parseable Signals JSON — structural only, not semantic. Not wired into the router — no call site invokes it yet. |
+| `planner-crosscheck-citations.sh` | Deterministic citation + precedent linter (Crosscheck Check A, [#172](https://github.com/willard-pro/claude-plugins/issues/172)). `planner_crosscheck_citations`, `planner_crosscheck_citations_one`. Verifies every `path:line` citation and `symbol:path:line` Signals.TargetSymbols entry resolves against `REPOS_ROOT`, and that "mirrors the existing `X`"-style precedent claims name a symbol that actually exists in the repo. Wired into the router via `planner-crosscheck.sh` ([#178](https://github.com/willard-pro/claude-plugins/issues/178)). |
+| `planner-crosscheck-propagation.sh` | Deterministic cross-ticket propagation linter (Crosscheck check, [#173](https://github.com/willard-pro/claude-plugins/issues/173)). `planner_crosscheck_propagation`, plus the three sub-checks `planner_crosscheck_consensus_propagation`, `planner_crosscheck_forward_references`, `planner_crosscheck_carve_scope`. A term-overlap heuristic (backtick identifiers, or significant words when none exist), not true semantic diffing — see the file header for why. Wired into the router via `planner-crosscheck.sh` ([#178](https://github.com/willard-pro/claude-plugins/issues/178)). |
+| `planner-crosscheck.sh` | Crosscheck phase orchestrator ([#178](https://github.com/willard-pro/claude-plugins/issues/178)). `planner_crosscheck_run <initiative_id>` — runs the citation and propagation check families above, writes each finding to state.log as `META|crosscheck|fail|<CODE> <message>` (the shape `ticket-retro` reads, [#176](https://github.com/willard-pro/claude-plugins/issues/176)/[#177](https://github.com/willard-pro/claude-plugins/issues/177)), and writes the phase's own `Crosscheck|check|{start,done,fail}` progress markers. Called directly by SKILL.md's dispatch loop (bash, not an agent spawn) — see `PLANNER_CROSSCHECK_WARN_CODES` for the (currently empty) warn-vs-block split; #174/#175 are separate, unimplemented check families. |
 
 ## State log format
 
@@ -115,7 +119,7 @@ Pipe-delimited, same convention as ticket-auto's pipeline log. Full spec: [state
 ISO|PHASE|STEP|STATUS|MSG
 ```
 
-Statuses: `start`, `done`, `fail`, `skip`. Phases: Appraisal, Discovery, Architecture, Specify, Review, Consensus, EpicGen, TicketGen, Completed. `META` pseudo-phase for metadata (`schema`, `title`, `initiative-id`, `idea`, `intent`, `replan`) and for durable invocation config (`create-authorized`, `stop-after`, `linear-project`, `linear-milestone`, `linear-project-id`, `linear-milestone-id`, `branch-override`). Schema version `1` — declared as first line.
+Statuses: `start`, `done`, `fail`, `skip`. Phases: Appraisal, Discovery, Architecture, Specify, Review, Consensus, Crosscheck, EpicGen, TicketGen, Completed. `META` pseudo-phase for metadata (`schema`, `title`, `initiative-id`, `idea`, `intent`, `replan`), for Crosscheck findings (`crosscheck` step, status `fail` for a blocking finding or `warn` for a non-blocking one — see [#176](https://github.com/willard-pro/claude-plugins/issues/176)), and for durable invocation config (`create-authorized`, `stop-after`, `linear-project`, `linear-milestone`, `linear-project-id`, `linear-milestone-id`, `branch-override`). Schema version `1` — declared as first line.
 
 ## Known sharp edges
 
@@ -126,7 +130,7 @@ Statuses: `start`, `done`, `fail`, `skip`. Phases: Appraisal, Discovery, Archite
 - **Nothing may read a flag variable after argument parsing.** `PLANNER_UNTIL`, `PLANNER_REVIEW_HOLD`, `LINEAR_PROJECT`, `LINEAR_PROJECT_MILESTONE` and the branch flags are read exactly once, in the shell that parses arguments, and persisted there. A `${LINEAR_PROJECT:-}` reintroduced into the router or a phase prompt reads empty in production and breaks nothing visibly — `test-planner-config-durability.sh` greps for it, and is the only thing that will notice.
 - **Same-process tests cannot see the dispatch-loop boundary.** A suite that sets a variable and reads it back in the same shell will pass while the feature is entirely broken in production; that is exactly how #141 shipped with 25 passing tests. Anything that has to survive between phases belongs in `test-planner-config-durability.sh`, which runs each step in a separate `bash -c`.
 - **Phase concurrency lock:** `planner_phase_lock` uses a PID-based lock file. If the lock holder crashes without cleanup, a stale lock blocks resume until manually removed or until the PID is no longer alive. `planner_state_init` auto-removes stale locks, but `planner_phase_lock` itself does not.
-- **Prompt phase indices:** The 9 agent prompt functions embed their phase position as "phase N of 9". If the phase sequence changes (new phase inserted, phase removed), every prompt function's index must be updated. There is no centralized constant — each function hardcodes its index. A mismatch would confuse agents about their position in the pipeline.
+- **Prompt phase indices:** The 9 agent prompt functions (Crosscheck has none — it's bash, not an agent) embed their phase position as "phase N of 10". If the phase sequence changes (new phase inserted, phase removed), every prompt function's index must be updated. There is no centralized constant — each function hardcodes its index. A mismatch would confuse agents about their position in the pipeline.
 - **Prompt-embedded bash is escaped by hand, and it cuts both ways.** The 9 phase prompts are unquoted heredocs, so `${x}` interpolates the *generator's* `x` while `\${x}` emits a reference to the *agent's* `x`. Identical syntax, opposite meaning, and both directions fail silently:
   - **Under-escaped:** the expression runs at generation time and lands in the prompt as an empty assignment. This is how the TicketGen confidence block came to hand a bash-only decision back to the LLM.
   - **Over-escaped:** a variable that only exists in the generating function (`state_dir`, `initiative_id`, `safe_idea`, the config refs) reaches the agent's shell, where it is unset and expands to empty. `"\${state_dir}/state.log"` became `"/state.log"`, so TicketGen's `EPIC_ID` lookup returned nothing and the phase hard-exited on every run.

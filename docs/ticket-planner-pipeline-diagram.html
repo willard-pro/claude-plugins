@@ -167,7 +167,7 @@
 
 <header class="app">
   <span class="dot"></span>
-  <h1>ticket-planner · 9-phase pipeline</h1>
+  <h1>ticket-planner · 10-phase pipeline</h1>
   <span class="sub">business idea → planned tickets</span>
 </header>
 
@@ -311,10 +311,30 @@
   </div>
   <div class="arrow"><svg viewBox="0 0 24 24"><polyline points="8,4 18,12 8,20"/></svg></div>
 
-  <!-- Phase 7: EpicGen -->
-  <div class="phase agent" onclick="showDetail('epicgen')">
+  <!-- Phase 7: Crosscheck -->
+  <div class="phase gate" onclick="showDetail('crosscheck')">
     <div class="phase-card">
       <div class="phase-num">Phase 7</div>
+      <div class="phase-name">Crosscheck</div>
+      <div class="phase-role">Citation + cross-ticket propagation checks against the artifacts and the live repo</div>
+      <div class="phase-section">
+        <div class="phase-section-title">Checks (bash)</div>
+        <div class="item">Citation + precedent resolution (#172)</div>
+        <div class="item">Cross-ticket propagation (#173)</div>
+      </div>
+      <div class="phase-section">
+        <div class="phase-section-title">Output</div>
+        <div class="item mono">META|crosscheck findings in state.log</div>
+      </div>
+      <span class="gate-badge bash">Deterministic bash — no agent</span>
+    </div>
+  </div>
+  <div class="arrow"><svg viewBox="0 0 24 24"><polyline points="8,4 18,12 8,20"/></svg></div>
+
+  <!-- Phase 8: EpicGen -->
+  <div class="phase agent" onclick="showDetail('epicgen')">
+    <div class="phase-card">
+      <div class="phase-num">Phase 8</div>
       <div class="phase-name">EpicGen</div>
       <div class="phase-role">Create Linear epic representing the initiative</div>
       <div class="phase-section">
@@ -331,10 +351,10 @@
   </div>
   <div class="arrow"><svg viewBox="0 0 24 24"><polyline points="8,4 18,12 8,20"/></svg></div>
 
-  <!-- Phase 8: TicketGen -->
+  <!-- Phase 9: TicketGen -->
   <div class="phase gate" onclick="showDetail('ticketgen')">
     <div class="phase-card">
-      <div class="phase-num">Phase 8</div>
+      <div class="phase-num">Phase 9</div>
       <div class="phase-name">TicketGen</div>
       <div class="phase-role">Create planned tickets with full labels + Planner Context</div>
       <div class="phase-section">
@@ -355,10 +375,10 @@
   </div>
   <div class="arrow"><svg viewBox="0 0 24 24"><polyline points="8,4 18,12 8,20"/></svg></div>
 
-  <!-- Phase 9: Completed -->
+  <!-- Phase 10: Completed -->
   <div class="phase terminal" onclick="showDetail('completed')">
     <div class="phase-card">
-      <div class="phase-num">Phase 9</div>
+      <div class="phase-num">Phase 10</div>
       <div class="phase-name">Completed</div>
       <div class="phase-role">Terminal — write summary, verify handoff readiness</div>
       <div class="phase-section">
@@ -393,15 +413,15 @@
 </footer>
 <footer class="notes">
   <strong>Phase merge:</strong> The original 12-phase design separated Proposal, OpenSpec, StoryGen, and Execution as standalone phases.
-  These were merged into Specify (Proposal + OpenSpec) and TicketGen (StoryGen + Execution labelling) — same capabilities, fewer context boundaries.<br>
-  <strong>Determinism boundary:</strong> Phases 1–6, 9 are LLM agents. Phase 7 has bash idempotency guards. Phase 8 is bash-gated (DAG, confidence, validation, verification all deterministic).
-  <strong>Planned:</strong> PLANNER_REVIEW_HOLD, PLANNER_CONSENSUS_HOLD, and PLANNER_MAX_PHASE_RETRIES are specified but not yet wired into the router dispatch loop.
+  These were merged into Specify (Proposal + OpenSpec) and TicketGen (StoryGen + Execution labelling) — same capabilities, fewer context boundaries. Crosscheck (phase 7) was added later as new deterministic validation, not a merge.<br>
+  <strong>Determinism boundary:</strong> Phases 1–6, 10 are LLM agents. Phase 7 (Crosscheck) is deterministic bash with no agent at all. Phase 8 has bash idempotency guards. Phase 9 is bash-gated (DAG, confidence, validation, verification all deterministic).
+  <strong>Planned:</strong> PLANNER_REVIEW_HOLD and PLANNER_MAX_PHASE_RETRIES are specified but not yet wired into the router dispatch loop. PLANNER_CONSENSUS_HOLD was removed — stopping before the first Linear write (now at Crosscheck) is the default and needs no variable.
 </footer>
 
 <script>
 const DETAILS = {
   appraisal: {
-    title: "Appraisal — Phase 1 of 9",
+    title: "Appraisal — Phase 1 of 10",
     meta: "prompt: planner_prompt_appraisal  ·  artifact: appraisal.md  ·  gate: none",
     rows: [
       ["Agent role", "Interprets the business idea, establishes initiative scope, identifies affected repositories"],
@@ -412,7 +432,7 @@ const DETAILS = {
     ]
   },
   discovery: {
-    title: "Discovery — Phase 2 of 9",
+    title: "Discovery — Phase 2 of 10",
     meta: "prompt: planner_prompt_discovery  ·  artifact: discovery.md  ·  gate: none",
     rows: [
       ["Agent role", "Explores affected repositories, traces code paths, gathers concrete context on symbols and APIs"],
@@ -423,7 +443,7 @@ const DETAILS = {
     ]
   },
   architecture: {
-    title: "Architecture — Phase 3 of 9",
+    title: "Architecture — Phase 3 of 10",
     meta: "prompt: planner_prompt_architecture  ·  artifact: architecture.md  ·  gate: none",
     rows: [
       ["Agent role", "Determines technical approach, evaluates 2-3 alternatives, selects recommended path"],
@@ -434,7 +454,7 @@ const DETAILS = {
     ]
   },
   specify: {
-    title: "Specify — Phase 4 of 9 (merged Proposal + OpenSpec)",
+    title: "Specify — Phase 4 of 10 (merged Proposal + OpenSpec)",
     meta: "prompt: planner_prompt_specify  ·  artifacts: proposal.md, specs/*.md, specs/INDEX.md  ·  gate: none",
     rows: [
       ["Agent role", "Synthesizes all upstream analysis into a proposal AND produces per-ticket spec files in a single pass"],
@@ -446,7 +466,7 @@ const DETAILS = {
     ]
   },
   review: {
-    title: "Review — Phase 5 of 9",
+    title: "Review — Phase 5 of 10",
     meta: "prompt: planner_prompt_review  ·  artifact: review.md  ·  gate: none (hold planned but unimplemented)",
     rows: [
       ["Agent role", "Skeptical critique of the proposal — finds gaps, risks, and infeasibilities before committing to build"],
@@ -457,7 +477,7 @@ const DETAILS = {
     ]
   },
   consensus: {
-    title: "Consensus — Phase 6 of 9",
+    title: "Consensus — Phase 6 of 10",
     meta: "prompt: planner_prompt_consensus  ·  artifacts: proposal.md (overwritten), consensus.md  ·  gate: none (hold planned but unimplemented)",
     rows: [
       ["Agent role", "Resolves review findings into a settled, actionable plan — doesn't re-litigate, addresses specific findings"],
@@ -467,8 +487,19 @@ const DETAILS = {
       ["Constraint", "If a blocker finding cannot be resolved, mark readiness as blocked — don't force through a broken plan. Deferred items are a conscious choice, not an omission."],
     ]
   },
+  crosscheck: {
+    title: "Crosscheck — Phase 7 of 10",
+    meta: "runner: planner_crosscheck_run (lib/planner-crosscheck.sh)  ·  no prompt, no agent  ·  gate: blocks EpicGen",
+    rows: [
+      ["Role", "Deterministic bash — not an agent. Runs the citation/precedent linter (#172) and the cross-ticket propagation linter (#173) against the settled artifacts and the live repo."],
+      ["Output", "One META|crosscheck|fail|<CODE> line per blocking finding in state.log (META|crosscheck|warn|info for non-blocking codes, none exist yet)"],
+      ["Input", "consensus.md + every spec in specs/*.md + REPOS_ROOT (the live repo)"],
+      ["Gate", "A blocking finding halts the dispatch loop immediately — before the create gate is even checked, since Crosscheck runs unconditionally as the last artifact-only phase."],
+      ["Resume", "NOT the phase-retry budget. The check is deterministic: re-running it against unedited artifacts can't change the answer. Fix the cited artifact, then resume — Crosscheck re-runs and advances once clean."],
+    ]
+  },
   epicgen: {
-    title: "EpicGen — Phase 7 of 9",
+    title: "EpicGen — Phase 8 of 10",
     meta: "prompt: planner_prompt_epicgen  ·  creates: Linear epic  ·  gate: bash idempotency",
     rows: [
       ["Agent role", "Creates the Linear epic that represents this initiative"],
@@ -479,7 +510,7 @@ const DETAILS = {
     ]
   },
   ticketgen: {
-    title: "TicketGen — Phase 8 of 9",
+    title: "TicketGen — Phase 9 of 10",
     meta: "prompt: planner_prompt_ticketgen  ·  creates: Linear tickets  ·  gates: 5 deterministic bash checks",
     rows: [
       ["Agent role", "Creates planned child tickets in Linear Backlog with full labels and Planner Context blocks"],
@@ -493,7 +524,7 @@ const DETAILS = {
     ]
   },
   completed: {
-    title: "Completed — Phase 9 of 9 (terminal)",
+    title: "Completed — Phase 10 of 10 (terminal)",
     meta: "prompt: planner_prompt_completed  ·  artifact: COMPLETED.md  ·  gate: terminal (no further transitions)",
     rows: [
       ["Agent role", "Writes completion summary and verifies handoff readiness"],

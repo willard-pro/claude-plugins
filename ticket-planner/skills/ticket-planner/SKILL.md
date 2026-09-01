@@ -1,12 +1,12 @@
 ---
 name: ticket-planner
-description: 9-phase autonomous planner — turns a business idea into dependency-ordered planned tickets. Phases: Appraisal → Discovery → Architecture → Specify → Review → Consensus → Epic Gen → Ticket Gen → Completed. Produces against frozen Planner Context and labels contracts.
+description: 10-phase autonomous planner — turns a business idea into dependency-ordered planned tickets. Phases: Appraisal → Discovery → Architecture → Specify → Review → Consensus → Crosscheck → Epic Gen → Ticket Gen → Completed. Produces against frozen Planner Context and labels contracts.
 allowed-tools: Bash, Read, Agent
 ---
 
 # Ticket Planner — Idea-to-Tickets Pipeline
 
-Autonomous 9-phase planner that turns business ideas into Linear initiatives, epics, and dependency-ordered planned tickets the existing `ticket-auto` pipeline consumes without special-casing.
+Autonomous 10-phase planner that turns business ideas into Linear initiatives, epics, and dependency-ordered planned tickets the existing `ticket-auto` pipeline consumes without special-casing.
 
 Sits upstream of `ticket-auto` and `fleet-controller`. Produces against frozen consumption-side contracts — does not re-specify them.
 
@@ -30,12 +30,15 @@ Start a new planning run from a business idea. The planner initializes the state
 /ticket-planner plan "Add real-time collaboration to the document editor"
 ```
 
-**`plan` stops after Consensus and creates nothing in Linear.** Phases 1–6 write only
-to disk; Epic Gen (phase 7) is the first Linear write, and `plan` does not include it.
-This is not a flag that can be forgotten or fail to take effect — the phase sequence
-for `plan` simply ends at the write boundary. The run leaves the whole ticket set
-reviewable on disk (`proposal.md`, `review.md`, `consensus.md`, `specs/*.md`) and
-reports the command to continue.
+**`plan` stops after Crosscheck and creates nothing in Linear.** Phases 1–7 write only
+to disk; Epic Gen (phase 8) is the first Linear write, and `plan` does not include it.
+Crosscheck (phase 7) is the last of those artifact-only phases — a deterministic
+citation and cross-ticket propagation linter (see `### Crosscheck` below), not an
+agent — and it runs unconditionally, so a blocking finding is caught and reported
+before `plan` even reaches the create gate. This is not a flag that can be forgotten
+or fail to take effect — the phase sequence for `plan` simply ends at the write
+boundary. The run leaves the whole ticket set reviewable on disk (`proposal.md`,
+`review.md`, `consensus.md`, `specs/*.md`) and reports the command to continue.
 
 Or, pass a grill-me validated intent file (recommended):
 
@@ -74,11 +77,11 @@ both plans and creates would be the footgun this design exists to remove.
 
 ### The create gate
 
-Phases 1–6 are pure-artifact; phase 7 (Epic Gen) is the first Linear write. The loop
+Phases 1–7 are pure-artifact; phase 8 (Epic Gen) is the first Linear write. The loop
 stops on that boundary unless the initiative has been explicitly authorized to cross it:
 
 ```
-/ticket-planner plan ./intents/rt-collab.md     # → stops after Consensus
+/ticket-planner plan ./intents/rt-collab.md     # → stops after Crosscheck
 # read the artifacts…
 /ticket-planner resume INIT-42 --create         # → Epic Gen, Ticket Gen, Completed
 ```
@@ -96,7 +99,7 @@ initiative produces no Linear entities even if something dispatches them directl
 
 `--until <Phase>` narrows the stop further and is persisted the same way. When both
 apply the **earliest** wins — `--until TicketGen` without `--create` still stops at
-Consensus. `--until` accepts any phase name from `planner_phase_sequence`; an unknown
+Crosscheck. `--until` accepts any phase name from `planner_phase_sequence`; an unknown
 phase, or one the initiative has already passed, is rejected with the valid names (or
 the current position) in the message.
 
@@ -135,7 +138,7 @@ Re-plan an initiative that carries the `Regenerate` flag. Ingests aggregated fee
 /ticket-planner replan INIT-42
 ```
 
-## The 9 Phases
+## The 10 Phases
 
 | # | Phase | What it does | Output |
 |---|-------|-------------|--------|
@@ -145,9 +148,32 @@ Re-plan an initiative that carries the `Regenerate` flag. Ingests aggregated fee
 | 4 | Specify | Synthesizes proposal + writes per-ticket specs with signals | `proposal.md`, spec files |
 | 5 | Review | Critiques the proposal and specs (internal by default) | Review findings |
 | 6 | Consensus | Resolves review findings into a settled plan | Finalized proposal |
-| 7 | Epic Gen | Creates the initiative epic in Linear — **first Linear write, gated on `--create`** | Linear epic with `epic` label |
-| 8 | Ticket Gen | Creates planned child tickets, computes confidence, gate-dispatches | Linear tickets, `state:execution` on epic |
-| 9 | Completed | Terminal phase — no further transitions | Completed state |
+| 7 | Crosscheck | Deterministic bash — citation + cross-ticket propagation checks against the artifacts and the live repo | `META|crosscheck` events; gates Epic Gen on a blocking finding |
+| 8 | Epic Gen | Creates the initiative epic in Linear — **first Linear write, gated on `--create`** | Linear epic with `epic` label |
+| 9 | Ticket Gen | Creates planned child tickets, computes confidence, gate-dispatches | Linear tickets, `state:execution` on epic |
+| 10 | Completed | Terminal phase — no further transitions | Completed state |
+
+### Crosscheck
+
+Unlike every other phase, Crosscheck is not an agent — `planner_crosscheck_run` (in
+`lib/planner-crosscheck.sh`) is deterministic bash, so the dispatch loop calls it
+directly instead of spawning one (see step 7a below). It wires in two check families:
+
+- **Citation + precedent linter** ([#172](https://github.com/willard-pro/claude-plugins/issues/172)) — every `path:line` citation and Signals `TargetSymbols` entry must resolve against `REPOS_ROOT`; every "mirrors the existing `X`"-style precedent claim must name a symbol that actually exists in the repo.
+- **Cross-ticket propagation linter** ([#173](https://github.com/willard-pro/claude-plugins/issues/173)) — a Consensus resolution or in-spec forward reference naming 2+ tickets must actually reach all of them; a post-Specify ticket-count change is flagged for manual scope audit.
+
+Every finding is written to state.log as `META|crosscheck|fail|<CODE> <message>` — the
+shape `ticket-retro`'s failure-histogram parser already reads (see
+[#176](https://github.com/willard-pro/claude-plugins/issues/176),
+[#177](https://github.com/willard-pro/claude-plugins/issues/177)). A blocking finding
+halts the dispatch loop immediately, before the create gate is even checked — retrying
+a deterministic check against unchanged artifacts cannot produce a different answer, so
+this is not folded into the phase-retry budget. Fix the cited artifact and
+`/ticket-planner resume <INIT_ID>` re-runs Crosscheck; it proceeds once clean.
+
+`#174` (bypass sweep for guarded fields) and `#175` (cross-initiative contract check)
+are separate, not-yet-implemented check families — Crosscheck runs only the two above
+today.
 
 ## Contracts (frozen — the planner produces against these)
 
@@ -166,7 +192,7 @@ If a crash occurs mid-phase, the router resumes at that phase. Each entity-creat
 
 ## Determinism Boundary
 
-- **Bash side (deterministic):** State log parsing, position derivation, phase transition validation, entity idempotency checks, dependency acyclicity validation, `planned-ticket-check.sh` invocation.
+- **Bash side (deterministic):** State log parsing, position derivation, phase transition validation, entity idempotency checks, dependency acyclicity validation, `planned-ticket-check.sh` invocation, the Crosscheck phase itself (`planner-crosscheck.sh`).
 - **Agent side (LLM):** Per-phase content — appraisal, discovery, architecture, proposal, review, consensus, spec writing, ticket body generation.
 
 The router never reasons about content; phases never mutate state directly (they write log entries that the router reads).
@@ -198,7 +224,7 @@ no effect — re-invoke with the corresponding flag instead.
 default and needs no variable.
 
 When more than one stop point applies, the **earliest** wins — `PLANNER_REVIEW_HOLD=true`
-with `--until TicketGen` stops after Review, and an unauthorized run stops at Consensus
+with `--until TicketGen` stops after Review, and an unauthorized run stops at Crosscheck
 whatever `--until` says.
 
 ---
@@ -332,7 +358,7 @@ that a crash in between does not lose the authorization.
 if [ "$CREATE_FLAG" = "true" ]; then
   planner_authorize_create "$INITIATIVE_ID" "operator passed --create"
   # --create with no new --until clears a stop point an earlier invocation set,
-  # so `plan --until Consensus` does not keep stopping the authorized run.
+  # so `plan --until Crosscheck` does not keep stopping the authorized run.
   planner_stop_after_set "$INITIATIVE_ID" "$UNTIL_PHASE"
 elif [ -n "$UNTIL_PHASE" ]; then
   planner_stop_after_set "$INITIATIVE_ID" "$UNTIL_PHASE"
@@ -393,7 +419,7 @@ When mode is `plan`:
 5. Initialize state: `planner_state_init "$INITIATIVE_ID" "$IDEA"`
 6. **Persist the invocation config** — run step 2b now that `$INITIATIVE_ID` exists.
 7. **If an intent file was accepted:** Copy the verified file byte-identically to `${state_dir}/artifacts/intent.md` and write a `META|intent|done|${READINESS},${RECOMMENDATION},${HASH}` state log entry.
-8. Run the dispatch loop (see below). It ends after Consensus — `plan` creates nothing in Linear.
+8. Run the dispatch loop (see below). It ends after Crosscheck — `plan` creates nothing in Linear.
 
 ### 4. Resume mode
 
@@ -454,6 +480,29 @@ For each phase to run:
    This is a normal terminal outcome of a `plan` run, not a failure — report it as
    completion of the planning stage. Do not ask the user whether to proceed; `resume
    --create` is the continuation, and it is theirs to invoke after reading the specs.
+
+1a. **Crosscheck is not an agent phase.** If `$PHASE` is `Crosscheck`, run the check
+    directly and skip steps 2–5 entirely — there is no prompt for it in
+    `planner_prompt_for_phase`:
+
+    ```bash
+    source "${CLAUDE_PLUGIN_ROOT}/lib/planner-crosscheck.sh"
+    if ! planner_crosscheck_run "$INITIATIVE_ID"; then
+      echo "Crosscheck found blocking findings — fix the cited artifacts and resume."
+      echo "Findings:   grep 'META|crosscheck|fail' $(planner_state_log "$INITIATIVE_ID")"
+      echo "Artifacts:  ${STATE_DIR}/artifacts/"
+      echo "Resume:     /ticket-planner resume ${INITIATIVE_ID}"
+      exit 0
+    fi
+    ```
+
+    Do not fall through to step 5's retry-budget check on a Crosscheck failure — a
+    blocking finding is a content defect in the artifacts, not a transient agent
+    failure, and re-running the same deterministic check against unchanged artifacts
+    cannot produce a different answer. Stopping here (exit 0, a normal terminal
+    outcome, not an error) and waiting for `resume` after the operator edits the
+    artifacts is the correct response, exactly like the create gate. On success,
+    continue to step 6 (skip 2–5).
 
 2. **Get the prompt** for the current phase:
    ```bash
