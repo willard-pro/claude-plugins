@@ -75,6 +75,15 @@ fi
 # match) without needing a language-aware parser.
 PLANNER_CROSSCHECK_CONTRACTS_STRUCTURE_REGEX='^[A-Za-z_][A-Za-z0-9_.]{2,}(\(\))?$'
 
+# The structure regex's allowance for a dot (to admit dotted identifiers
+# like `ClassificationResult.confidence`) also admits the planner's own
+# artifact filenames (`intent.md`, `proposal.md`, `review.md`) whenever a
+# spec backtick-cites one — a doc filename is not a code structure and
+# treating it as one produced a live CONTRACT_MISMATCH false positive
+# ("`intent.md` borrowed by ... from ..."). Filter those extensions out
+# wherever a candidate is accepted.
+PLANNER_CROSSCHECK_CONTRACTS_NON_STRUCTURE_EXT_REGEX='\.(md|txt)$'
+
 # ── Small array helpers ──────────────────────────────────────────────────────
 
 # Usage: _planner_crosscheck_contracts_array_has <needle> <hay...>
@@ -117,7 +126,8 @@ _planner_crosscheck_contracts_structures_in_dir() {
     [ -f "$f" ] || continue
     [ "$(basename "$f")" = "INDEX.md" ] && continue
     grep -ohE '`[^`]+`' "$f" 2>/dev/null | sed -e 's/^`//' -e 's/`$//'
-  done | grep -E "$PLANNER_CROSSCHECK_CONTRACTS_STRUCTURE_REGEX" | sort -u
+  done | grep -E "$PLANNER_CROSSCHECK_CONTRACTS_STRUCTURE_REGEX" |
+    grep -viE "$PLANNER_CROSSCHECK_CONTRACTS_NON_STRUCTURE_EXT_REGEX" | sort -u
 }
 
 # List spec files in <specs_dir> whose text contains a literal backtick
@@ -142,6 +152,50 @@ _planner_crosscheck_contracts_first_block_with_structure() {
     fi
   done < <(_planner_crosscheck_bypass_blocks "$file")
   return 1
+}
+
+# ── Commodity-entity guard ───────────────────────────────────────────────────
+#
+# CONTRACT_MISMATCH and CONTRACT_CONSUMERS_UNNOTIFIED both treat "structure
+# S is backtick-quoted in two spec files" as evidence those two files are
+# bilateral contract partners over S. That assumption breaks for a widely-
+# shared foundational entity (a DB table like `documents`, a cross-cutting
+# log like `audit_log`): dozens of otherwise-unrelated tickets across many
+# epics legitimately mention it, each about a different column or aspect,
+# so "the other things mentioned nearby are disjoint" is the expected case,
+# not evidence of a contradiction — a live run across 7 sibling initiatives
+# produced 38 CONTRACT_MISMATCH findings on `documents`/`audit_log`/
+# `entity_id`-class identifiers alone, none a real defect. A structure named
+# in only a handful of files is far more likely to be an actual narrow,
+# bilateral contract (e.g. `parent_document_id` between two specific
+# tickets) worth comparing pairwise. Skip the pairwise checks once a
+# structure's spread exceeds this threshold; CONTRACT_UNDEFINED (warn-level,
+# no cross-initiative view) still runs over it regardless.
+PLANNER_CROSSCHECK_CONTRACTS_COMMODITY_FILE_THRESHOLD=4
+
+# Count distinct spec files (INDEX.md excluded), across every initiative
+# under <initiatives_root>, that backtick-mention <structure>.
+# Usage: _planner_crosscheck_contracts_structure_spread <initiatives_root> <structure>
+_planner_crosscheck_contracts_structure_spread() {
+  local initiatives_root="$1" structure="$2"
+  local init_dir
+  local -a hits=()
+  for init_dir in "$initiatives_root"/*/; do
+    [ -d "${init_dir}artifacts/specs" ] || continue
+    while IFS= read -r f; do
+      [ -n "$f" ] && hits+=("$f")
+    done < <(_planner_crosscheck_contracts_files_with_structure "${init_dir}artifacts/specs" "$structure")
+  done
+  echo "${#hits[@]}"
+}
+
+# Usage: _planner_crosscheck_contracts_is_commodity <initiatives_root> <structure>
+# Returns: 0 (true) if <structure>'s spread exceeds the commodity threshold.
+_planner_crosscheck_contracts_is_commodity() {
+  local initiatives_root="$1" structure="$2"
+  local spread
+  spread=$(_planner_crosscheck_contracts_structure_spread "$initiatives_root" "$structure")
+  [ "$spread" -gt "$PLANNER_CROSSCHECK_CONTRACTS_COMMODITY_FILE_THRESHOLD" ]
 }
 
 # ── Check A: undefined structure fields ──────────────────────────────────────
@@ -270,6 +324,7 @@ planner_crosscheck_contract_mismatch() {
       _planner_crosscheck_contracts_array_has "$s" "${sib_structures[@]}" || continue
       _planner_crosscheck_contracts_array_has "$s" "${self_slugs[@]}" && continue
       _planner_crosscheck_contracts_array_has "$s" "${sib_slugs[@]}" && continue
+      _planner_crosscheck_contracts_is_commodity "$initiatives_root" "$s" && continue
 
       local fileA
       while IFS= read -r fileA; do
@@ -327,6 +382,31 @@ planner_crosscheck_contract_mismatch() {
 
 PLANNER_CROSSCHECK_CONTRACTS_RETIRE_REGEX='retires?|retired|removes?|removed|deprecat|no longer|replaces?'
 
+# Words that, appearing shortly before a retire-phrase match, flip it from
+# an assertion that something IS being retired to a guard/invariant
+# asserting the opposite ("it is not silently replaced by ...", "no new
+# entity-level dedupe is introduced" — a preservation guarantee, not a
+# retirement). Observed live: this exact pattern produced false
+# CONTRACT_CONSUMERS_UNNOTIFIED findings against `audit_log`/`entity_id`
+# guard sentences that were reasserting an existing contract, not retiring
+# one.
+PLANNER_CROSSCHECK_CONTRACTS_NEGATION_REGEX='\b(not|never|isn.t|aren.t|doesn.t|won.t|without)\b'
+
+# True if <block> contains at least one retire-phrase match that is NOT
+# preceded within 5 words by a negator — i.e. a genuine retirement claim,
+# not a negated guard/invariant sentence.
+# Usage: _planner_crosscheck_contracts_genuine_retirement <block>
+_planner_crosscheck_contracts_genuine_retirement() {
+  local block="$1"
+  local flat ctx
+  flat=$(echo "$block" | tr '\n' ' ')
+  while IFS= read -r ctx; do
+    [ -z "$ctx" ] && continue
+    echo "$ctx" | grep -qiE "$PLANNER_CROSSCHECK_CONTRACTS_NEGATION_REGEX" || return 0
+  done < <(echo "$flat" | grep -oiE "([A-Za-z0-9_']+[[:space:]]+){0,5}(${PLANNER_CROSSCHECK_CONTRACTS_RETIRE_REGEX})")
+  return 1
+}
+
 # For every spec paragraph in this initiative that retires/removes/
 # deprecates/replaces a structure, check every OTHER spec file (in this
 # initiative or a sibling) that also mentions that structure was actually
@@ -366,6 +446,7 @@ planner_crosscheck_contract_consumers_unnotified() {
     while IFS= read -r -d '' block; do
       [ -z "$block" ] && continue
       echo "$block" | grep -qiE "$PLANNER_CROSSCHECK_CONTRACTS_RETIRE_REGEX" || continue
+      _planner_crosscheck_contracts_genuine_retirement "$block" || continue
 
       local -a structures
       mapfile -t structures < <(echo "$block" | grep -oE '`[^`]+`' | sed -e 's/^`//' -e 's/`$//' | sort -u)
@@ -377,6 +458,8 @@ planner_crosscheck_contract_consumers_unnotified() {
       local s
       for s in "${structures[@]}"; do
         echo "$s" | grep -qE "$PLANNER_CROSSCHECK_CONTRACTS_STRUCTURE_REGEX" || continue
+        echo "$s" | grep -qiE "$PLANNER_CROSSCHECK_CONTRACTS_NON_STRUCTURE_EXT_REGEX" && continue
+        _planner_crosscheck_contracts_is_commodity "$initiatives_root" "$s" && continue
 
         local dir
         for dir in "${other_spec_dirs[@]}"; do

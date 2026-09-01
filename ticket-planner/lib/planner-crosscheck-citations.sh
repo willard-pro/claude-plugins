@@ -52,7 +52,12 @@ PLANNER_CROSSCHECK_CITE_EXTENSIONS=$(
 # Directory components excluded from both file resolution and precedent grep.
 # .ticket-auto is the planner's own working directory (specs, proposals) —
 # searching it back would let a spec's own prose "resolve" its own claim.
-PLANNER_CROSSCHECK_EXCLUDE_DIRS=("node_modules" ".venv" ".git" ".ticket-auto")
+# .claude is excluded for the same reason planner-crosscheck-bypass.sh
+# excludes it: sibling repos under REPOS_ROOT (e.g. dotfiles) keep raw
+# Claude Code session transcripts under .claude/projects/**/tool-results/,
+# which can quote real code and false-positive-resolve a citation or
+# precedent search against cached prose instead of the actual codebase.
+PLANNER_CROSSCHECK_EXCLUDE_DIRS=("node_modules" ".venv" ".git" ".ticket-auto" ".claude")
 
 # How many lines on either side of a cited line a TargetSymbols symbol name
 # may appear in and still count as resolved (issue #172 suggests N=5).
@@ -83,6 +88,14 @@ _planner_crosscheck_resolve_path() {
   local repos_root="$1" rel_path="$2"
   local prune_expr
   prune_expr=$(_planner_crosscheck_find_prune_expr)
+
+  # A citation is sometimes written with a leading slash (e.g.
+  # "/upload/UploadPageClient.tsx", shorthand for an app-router path).
+  # Left in place, "*/${rel_path}" requires a literal double slash in the
+  # real path, which never occurs — every such citation fails to resolve
+  # even when the file exists. Strip leading slashes so the glob degrades
+  # to the same single-slash match a repo-relative citation gets.
+  rel_path="${rel_path#"${rel_path%%[!/]*}"}"
 
   # shellcheck disable=SC2086
   find "$repos_root" $prune_expr -prune -o -type f -path "*/${rel_path}" -print 2>/dev/null | head -1
@@ -130,6 +143,44 @@ _planner_crosscheck_split_token() {
   printf '%s\n%s\n%s\n' "$path_part" "$start_line" "$end_line"
 }
 
+# A TargetSymbols entry's name half sometimes carries a human-readable
+# annotation the spec author appended for clarity — "update_document_pg
+# (call site)", "batch-upload page (new)", "Sidebar nav entry" (no real
+# identifier at all). Literal-matching that whole string against source
+# text can never succeed; only the bare identifier can. `(new)` gets
+# special handling in the caller (it marks a file this ticket will create,
+# not one that should already exist) — strip it along with any other
+# parenthetical here so what remains is just the identifier to search for.
+# Usage: _planner_crosscheck_strip_symbol_annotation <symbol>
+_planner_crosscheck_strip_symbol_annotation() {
+  echo "$1" | sed -E 's/[[:space:]]*\([^)]*\)[[:space:]]*$//'
+}
+
+# True if <symbol>'s annotation marks it as a file this ticket will create,
+# not one that should already exist under REPOS_ROOT.
+# Usage: _planner_crosscheck_symbol_marked_new <symbol>
+_planner_crosscheck_symbol_marked_new() {
+  echo "$1" | grep -qiE '\(new\)[[:space:]]*$'
+}
+
+# Definition-line patterns tried, in order, against the whole resolved file
+# when the symbol isn't found within PLANNER_CROSSCHECK_SYMBOL_PROXIMITY
+# lines of the cited range. A citation naming a function and a range deep
+# inside its body (e.g. "uploadFile:UploadPageClient.tsx:363-374" where
+# `uploadFile` is defined at line 304) is a valid, common citation shape
+# the proximity check alone can't validate — it only looks near the cited
+# line, not back to the enclosing definition. Confirmed live against three
+# false positives (`uploadFile` x2, `POST`) before adding this.
+# Usage: _planner_crosscheck_find_definition_line <file> <symbol>
+# Output: the 1-based line number of the first match, or empty.
+_planner_crosscheck_find_definition_line() {
+  local file="$1" symbol="$2"
+  local esc
+  esc=$(printf '%s' "$symbol" | sed 's/[.[\*^$/]/\\&/g')
+  grep -nE "^[[:space:]]*(export[[:space:]]+)?(async[[:space:]]+)?(function|def|const|class)[[:space:]]+${esc}\\b" "$file" 2>/dev/null |
+    head -1 | cut -d: -f1
+}
+
 # Resolve + range-check one citation, optionally checking a symbol's
 # proximity to the cited line. Prints a finding line on failure.
 # Usage: _planner_crosscheck_check_citation <repos_root> <spec_file> <spec_line> <token> [<symbol>]
@@ -138,6 +189,12 @@ _planner_crosscheck_check_citation() {
   local repos_root="$1" spec_file="$2" spec_line="$3" token="$4" symbol="${5:-}"
   local path_part start_line end_line resolved total_lines
   local -a token_parts
+  local marked_new=0
+
+  if [ -n "$symbol" ] && _planner_crosscheck_symbol_marked_new "$symbol"; then
+    marked_new=1
+    symbol=$(_planner_crosscheck_strip_symbol_annotation "$symbol")
+  fi
 
   mapfile -t token_parts < <(_planner_crosscheck_split_token "$token")
   path_part="${token_parts[0]}"
@@ -146,22 +203,38 @@ _planner_crosscheck_check_citation() {
 
   resolved=$(_planner_crosscheck_resolve_path "$repos_root" "$path_part")
   if [ -z "$resolved" ]; then
+    [ "$marked_new" -eq 1 ] && return 0
     echo "planner-crosscheck-citations: CITATION_UNRESOLVED ${spec_file}:${spec_line} → ${token} (no file under REPOS_ROOT matches '${path_part}')"
     return 1
   fi
 
+  # The file already exists even though the spec called it "(new)" — no
+  # longer an unresolved-path question, fall through to the normal checks
+  # (a stale "(new)" tag on a file the ticket ended up not creating fresh
+  # is not this check's concern).
+
   total_lines=$(wc -l <"$resolved" | tr -d ' ')
-  if [ "$end_line" -gt "$total_lines" ] 2>/dev/null; then
+  if [ -n "$end_line" ] && [ "$end_line" -gt "$total_lines" ] 2>/dev/null; then
     echo "planner-crosscheck-citations: CITATION_LINE_OUT_OF_RANGE ${spec_file}:${spec_line} → ${token} (${resolved} has ${total_lines} lines)"
     return 1
   fi
 
-  if [ -n "$symbol" ]; then
+  # No line number in the citation at all (a bare `Name:path` entry) — there
+  # is nothing to anchor a proximity check to; a blank start/end previously
+  # defaulted to lines 1-5, which fails for any real symbol. File existence
+  # is all such a citation actually claims.
+  if [ -n "$symbol" ] && [ -n "$start_line" ]; then
+    symbol=$(_planner_crosscheck_strip_symbol_annotation "$symbol")
     local lo hi
     lo=$((start_line - PLANNER_CROSSCHECK_SYMBOL_PROXIMITY))
     [ "$lo" -lt 1 ] && lo=1
     hi=$((end_line + PLANNER_CROSSCHECK_SYMBOL_PROXIMITY))
     if ! sed -n "${lo},${hi}p" "$resolved" | grep -qF "$symbol"; then
+      local def_line
+      def_line=$(_planner_crosscheck_find_definition_line "$resolved" "$symbol")
+      if [ -n "$def_line" ] && [ "$def_line" -le "$start_line" ]; then
+        return 0
+      fi
       echo "planner-crosscheck-citations: CITATION_SYMBOL_MISMATCH ${spec_file}:${spec_line} → ${token} (symbol '${symbol}' not found within ${PLANNER_CROSSCHECK_SYMBOL_PROXIMITY} lines in ${resolved})"
       return 1
     fi

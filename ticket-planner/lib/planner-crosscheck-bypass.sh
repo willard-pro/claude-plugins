@@ -64,8 +64,12 @@ fi
 # Directory components excluded from repo-wide search — same rationale as
 # planner-crosscheck-citations.sh: .ticket-auto is the planner's own working
 # directory, searching it back would let a spec's prose "resolve" its own
-# claim.
-PLANNER_CROSSCHECK_BYPASS_EXCLUDE_DIRS=("node_modules" ".venv" ".git" ".ticket-auto")
+# claim. .claude is excluded because REPOS_ROOT commonly holds sibling repos
+# like dotfiles whose .claude/projects/**/tool-results/*.txt cache raw
+# Claude Code session transcripts — free text that can quote real code
+# verbatim (a pasted diff, a grepped SQL line) and false-positive as an
+# undisclosed second writer, even though it is not part of any codebase.
+PLANNER_CROSSCHECK_BYPASS_EXCLUDE_DIRS=("node_modules" ".venv" ".git" ".ticket-auto" ".claude")
 
 # Extensions a `path:line` citation token is recognized against.
 PLANNER_CROSSCHECK_BYPASS_CITE_EXT_LIST=(ts tsx js jsx py rb go java sql)
@@ -89,6 +93,15 @@ PLANNER_CROSSCHECK_BYPASS_GUARD_PHRASES=(
   "authoris(ed|ation)"
   "authoriz(ed|ation)"
 )
+
+# Path components that mark a file as a test file, not production source.
+# A test that calls a guarded function (e.g. `result = await
+# match_allowed_senders(...)`) matches the write-marker regex below — the
+# call looks exactly like an assignment — but a test invoking the cited
+# function is exercising the addressed site, not an undisclosed second
+# writer of it. Observed live: this pattern alone produced 7 of 15
+# BYPASS_PATH_UNADDRESSED findings against worker/tests/test_resolve.py.
+PLANNER_CROSSCHECK_BYPASS_TEST_PATH_REGEX='(^|/)(tests?|__tests__|spec)/|(^|/)test_[^/]+\.(py|rb)$|[^/]+_test\.(py|go)$|\.(test|spec)\.(ts|tsx|js|jsx)$'
 
 # Lines that look like a write or definition site — deliberately broad
 # (function/route/assignment/SQL-mutation shapes across common languages)
@@ -165,6 +178,7 @@ _planner_crosscheck_bypass_search_writers() {
   local file
   while IFS= read -r file; do
     [ -f "$file" ] || continue
+    echo "$file" | grep -qiE "$PLANNER_CROSSCHECK_BYPASS_TEST_PATH_REGEX" && continue
     local line_num_and_line line_num line t all_present
     while IFS=: read -r line_num line; do
       [ -z "$line" ] && continue
