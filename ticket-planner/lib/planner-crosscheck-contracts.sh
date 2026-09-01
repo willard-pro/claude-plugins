@@ -146,14 +146,21 @@ _planner_crosscheck_contracts_exists_in_repo() {
   for dir in "${PLANNER_CROSSCHECK_CONTRACTS_EXCLUDE_DIRS[@]}"; do
     exclude_args+=(--exclude-dir="$dir")
   done
-  # Two shapes: a keyworded definition (function/def/const/class NAME), or a
+  # Three shapes: a keyworded definition (function/def/const/class NAME), a
   # bare top-level assignment (NAME = ...) — the latter is how Python module
   # globals and FastAPI dependency aliases are conventionally defined
   # (`require_service_token = Depends(_verify_service_token)`), and has no
-  # keyword to anchor on. Exclude `==` so an equality check in an unrelated
+  # keyword to anchor on — or a quoted string literal ("NAME"/'NAME') for an
+  # existing enum-style value (a DLQ reason code, an event name) that two
+  # sibling specs both merely reference in prose, never define via any
+  # keyword or assignment. Without this third shape, two unrelated tickets
+  # both citing the same pre-existing constant (`llm_disabled`, already a
+  # member of worker/metrics.py's DLQ_REASONS list) read as one "defining" a
+  # structure the other "borrows" — a false CONTRACT_MISMATCH. Confirmed
+  # live on VS-5/VS-6. Exclude `==` so an equality check in an unrelated
   # line doesn't false-match.
   grep -rlE "${exclude_args[@]}" \
-    "^[[:space:]]*(export[[:space:]]+)?(async[[:space:]]+)?(function|def|const|class)[[:space:]]+${esc}\\b|^[[:space:]]*${esc}[[:space:]]*=[^=]" \
+    "^[[:space:]]*(export[[:space:]]+)?(async[[:space:]]+)?(function|def|const|class)[[:space:]]+${esc}\\b|^[[:space:]]*${esc}[[:space:]]*=[^=]|[\"']${esc}[\"']" \
     "$repos_root" >/dev/null 2>&1
 }
 

@@ -315,13 +315,32 @@ _planner_crosscheck_check_citation() {
     lo=$((start_line - PLANNER_CROSSCHECK_SYMBOL_PROXIMITY))
     [ "$lo" -lt 1 ] && lo=1
     hi=$((end_line + PLANNER_CROSSCHECK_SYMBOL_PROXIMITY))
-    if ! sed -n "${lo},${hi}p" "$resolved" | grep -qF "$symbol"; then
+
+    # A TargetSymbols name sometimes bundles two-or-more real, distinct
+    # identifiers the spec author considers related enough to cite together
+    # ("SessionUser/getCurrentUser", "can/requireRole") rather than writing
+    # one TargetSymbols entry per symbol. Treating the whole "X/Y" string as
+    # a single literal to grep for can never match real source — `/` isn't
+    # valid inside a JS/TS/Python identifier — so every such compound
+    # citation false-flagged even when both named symbols genuinely exist.
+    # Check each `/`-separated name independently (a bare symbol with no
+    # `/` is just a one-element list, so this subsumes the prior behavior);
+    # the citation only fails if at least one of them can't be found.
+    # Confirmed live on VS-5 (both examples above).
+    local -a subsymbols
+    IFS='/' read -ra subsymbols <<<"$symbol"
+    local subsym missing=""
+    for subsym in "${subsymbols[@]}"; do
+      [ -z "$subsym" ] && continue
+      sed -n "${lo},${hi}p" "$resolved" | grep -qF "$subsym" && continue
       local def_line
-      def_line=$(_planner_crosscheck_find_definition_line "$resolved" "$symbol")
-      if [ -n "$def_line" ] && [ "$def_line" -le "$start_line" ]; then
-        return 0
-      fi
-      echo "planner-crosscheck-citations: CITATION_SYMBOL_MISMATCH ${spec_file}:${spec_line} → ${token} (symbol '${symbol}' not found within ${PLANNER_CROSSCHECK_SYMBOL_PROXIMITY} lines in ${resolved})"
+      def_line=$(_planner_crosscheck_find_definition_line "$resolved" "$subsym")
+      [ -n "$def_line" ] && [ "$def_line" -le "$start_line" ] && continue
+      missing="${missing:+${missing}, }${subsym}"
+    done
+
+    if [ -n "$missing" ]; then
+      echo "planner-crosscheck-citations: CITATION_SYMBOL_MISMATCH ${spec_file}:${spec_line} → ${token} (symbol '${missing}' not found within ${PLANNER_CROSSCHECK_SYMBOL_PROXIMITY} lines in ${resolved})"
       return 1
     fi
   fi
