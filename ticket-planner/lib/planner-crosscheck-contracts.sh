@@ -77,12 +77,78 @@ PLANNER_CROSSCHECK_CONTRACTS_STRUCTURE_REGEX='^[A-Za-z_][A-Za-z0-9_.]{2,}(\(\))?
 
 # The structure regex's allowance for a dot (to admit dotted identifiers
 # like `ClassificationResult.confidence`) also admits the planner's own
-# artifact filenames (`intent.md`, `proposal.md`, `review.md`) whenever a
-# spec backtick-cites one — a doc filename is not a code structure and
-# treating it as one produced a live CONTRACT_MISMATCH false positive
-# ("`intent.md` borrowed by ... from ..."). Filter those extensions out
-# wherever a candidate is accepted.
-PLANNER_CROSSCHECK_CONTRACTS_NON_STRUCTURE_EXT_REGEX='\.(md|txt)$'
+# artifact filenames (`intent.md`, `proposal.md`, `review.md`) and any
+# source filename a spec backtick-cites for reference (`classify.py`,
+# `test_triage_flow.py`) — neither is a code structure, and treating either
+# as one produced live CONTRACT_MISMATCH false positives. Filter every
+# common source/doc extension out wherever a candidate is accepted.
+PLANNER_CROSSCHECK_CONTRACTS_NON_STRUCTURE_EXT_REGEX='\.(md|txt|py|ts|tsx|js|jsx|sh|json|yaml|yml|sql)$'
+
+# Common builtin/exception/base-type names across this repo's languages — no
+# spec ever introduces or contracts over `ValueError`, `Exception`,
+# `Promise`, etc.; a backtick mention is always incidental prose, never a
+# structure this initiative or a sibling defines the shape of.
+PLANNER_CROSSCHECK_CONTRACTS_BUILTIN_DENYLIST=(
+  ValueError TypeError KeyError AttributeError IndexError RuntimeError
+  ImportError NotImplementedError StopIteration Exception BaseException
+  FileNotFoundError PermissionError OSError IOError NotImplemented
+  Error Promise Array Object Map Set String Number Boolean
+  None True False null undefined
+)
+
+# Usage: _planner_crosscheck_contracts_is_builtin <token>
+# Returns: 0 (true) if <token> (parens stripped) is a known builtin/exception.
+_planner_crosscheck_contracts_is_builtin() {
+  local token="${1%()}"
+  local d
+  for d in "${PLANNER_CROSSCHECK_CONTRACTS_BUILTIN_DENYLIST[@]}"; do
+    [ "$token" = "$d" ] && return 0
+  done
+  return 1
+}
+
+# A bare word with no dot, underscore, camelCase hump (lowercase directly
+# followed by uppercase), or call-parens suffix, under 8 characters, reads as
+# an ordinary English/DB-type word co-opted into backticks for emphasis
+# ("source", "jsonb", "path") rather than a code structure. Anything
+# carrying real identifier shape (`update_document_pg`, `getCurrentUser()`,
+# `ClassificationResult.confidence`) passes through untouched.
+# Usage: _planner_crosscheck_contracts_is_generic_word <token>
+_planner_crosscheck_contracts_is_generic_word() {
+  local token="$1"
+  local bare="${token%()}"
+  case "$bare" in
+  *.* | *_*) return 1 ;;
+  esac
+  printf '%s' "$bare" | grep -qE '[a-z][A-Z]' && return 1
+  [ "${#bare}" -lt 8 ]
+}
+
+# Directories excluded from the repo-definition search — same convention as
+# planner-crosscheck-citations.sh's PLANNER_CROSSCHECK_EXCLUDE_DIRS.
+PLANNER_CROSSCHECK_CONTRACTS_EXCLUDE_DIRS=("node_modules" ".venv" ".git" ".ticket-auto" ".claude")
+
+# True if <symbol> already resolves to a real definition somewhere under
+# <repos_root> — i.e. it's an existing structure this initiative's specs are
+# referencing/reusing, not one they're newly defining. CONTRACT_MISMATCH
+# exists to police a structure's shape as two sibling initiatives' specs
+# each DEFINE it; a pre-existing shared helper multiple tickets merely CALL
+# (`getCurrentUser()`, `update_document_pg`) will legitimately have
+# different backtick terms co-mentioned at each call site — that's normal
+# call-context variation, not a contract disagreement.
+# Usage: _planner_crosscheck_contracts_exists_in_repo <repos_root> <symbol>
+_planner_crosscheck_contracts_exists_in_repo() {
+  local repos_root="$1" symbol="$2"
+  local bare="${symbol%()}"
+  local esc exclude_args=() dir
+  esc=$(printf '%s' "$bare" | sed 's/[.[\*^$/]/\\&/g')
+  for dir in "${PLANNER_CROSSCHECK_CONTRACTS_EXCLUDE_DIRS[@]}"; do
+    exclude_args+=(--exclude-dir="$dir")
+  done
+  grep -rlE "${exclude_args[@]}" \
+    "^[[:space:]]*(export[[:space:]]+)?(async[[:space:]]+)?(function|def|const|class)[[:space:]]+${esc}\\b" \
+    "$repos_root" >/dev/null 2>&1
+}
 
 # ── Small array helpers ──────────────────────────────────────────────────────
 
@@ -120,14 +186,20 @@ _planner_crosscheck_contracts_sibling_ids() {
 # Usage: _planner_crosscheck_contracts_structures_in_dir <specs_dir>
 _planner_crosscheck_contracts_structures_in_dir() {
   local specs_dir="$1"
-  local f
+  local f t
   [ -d "$specs_dir" ] || return 0
   for f in "$specs_dir"/*.md; do
     [ -f "$f" ] || continue
     [ "$(basename "$f")" = "INDEX.md" ] && continue
     grep -ohE '`[^`]+`' "$f" 2>/dev/null | sed -e 's/^`//' -e 's/`$//'
   done | grep -E "$PLANNER_CROSSCHECK_CONTRACTS_STRUCTURE_REGEX" |
-    grep -viE "$PLANNER_CROSSCHECK_CONTRACTS_NON_STRUCTURE_EXT_REGEX" | sort -u
+    grep -viE "$PLANNER_CROSSCHECK_CONTRACTS_NON_STRUCTURE_EXT_REGEX" | sort -u |
+    while IFS= read -r t; do
+      [ -z "$t" ] && continue
+      _planner_crosscheck_contracts_is_builtin "$t" && continue
+      _planner_crosscheck_contracts_is_generic_word "$t" && continue
+      echo "$t"
+    done
 }
 
 # List spec files in <specs_dir> whose text contains a literal backtick
@@ -325,6 +397,7 @@ planner_crosscheck_contract_mismatch() {
       _planner_crosscheck_contracts_array_has "$s" "${self_slugs[@]}" && continue
       _planner_crosscheck_contracts_array_has "$s" "${sib_slugs[@]}" && continue
       _planner_crosscheck_contracts_is_commodity "$initiatives_root" "$s" && continue
+      _planner_crosscheck_contracts_exists_in_repo "$repos_root" "$s" && continue
 
       local fileA
       while IFS= read -r fileA; do
@@ -390,21 +463,46 @@ PLANNER_CROSSCHECK_CONTRACTS_RETIRE_REGEX='retires?|retired|removes?|removed|dep
 # CONTRACT_CONSUMERS_UNNOTIFIED findings against `audit_log`/`entity_id`
 # guard sentences that were reasserting an existing contract, not retiring
 # one.
-PLANNER_CROSSCHECK_CONTRACTS_NEGATION_REGEX='\b(not|never|isn.t|aren.t|doesn.t|won.t|without)\b'
+PLANNER_CROSSCHECK_CONTRACTS_NEGATION_REGEX='\b(not|never|isn.t|aren.t|doesn.t|won.t|without|continue(s)? to|unchanged|excludes? changing|no changes? to|preserved|existing.{0,20}treatment)\b'
+
+# A structure re-mentioned this many times or more OUTSIDE the retiring
+# block, elsewhere in the same spec, is being actively read/reused — the
+# retire-phrase in this block is either about a different aspect of it or a
+# neighboring guard sentence the block-level negation check can't see.
+# Observed live: `preparation_metadata`/`unpreparable` referenced 7+ times
+# each while a nearby retire-word misfired CONTRACT_CONSUMERS_UNNOTIFIED.
+PLANNER_CROSSCHECK_CONTRACTS_REUSE_MENTION_THRESHOLD=3
 
 # True if <block> contains at least one retire-phrase match that is NOT
-# preceded within 5 words by a negator — i.e. a genuine retirement claim,
-# not a negated guard/invariant sentence.
-# Usage: _planner_crosscheck_contracts_genuine_retirement <block>
+# preceded within 5 words by a negator/preservation phrase — i.e. a genuine
+# retirement claim, not a negated guard/invariant sentence — AND (when
+# <file>/<structure> are given) <structure> isn't heavily re-referenced
+# elsewhere in <file>, which is itself strong evidence of ongoing reuse
+# rather than retirement.
+# Usage: _planner_crosscheck_contracts_genuine_retirement <block> [<file> <structure>]
 _planner_crosscheck_contracts_genuine_retirement() {
-  local block="$1"
-  local flat ctx
+  local block="$1" file="${2:-}" structure="${3:-}"
+  local flat ctx found_genuine=0
   flat=$(echo "$block" | tr '\n' ' ')
   while IFS= read -r ctx; do
     [ -z "$ctx" ] && continue
-    echo "$ctx" | grep -qiE "$PLANNER_CROSSCHECK_CONTRACTS_NEGATION_REGEX" || return 0
+    if ! echo "$ctx" | grep -qiE "$PLANNER_CROSSCHECK_CONTRACTS_NEGATION_REGEX"; then
+      found_genuine=1
+      break
+    fi
   done < <(echo "$flat" | grep -oiE "([A-Za-z0-9_']+[[:space:]]+){0,5}(${PLANNER_CROSSCHECK_CONTRACTS_RETIRE_REGEX})")
-  return 1
+
+  [ "$found_genuine" -eq 0 ] && return 1
+
+  if [ -n "$file" ] && [ -n "$structure" ] && [ -f "$file" ]; then
+    local total in_block outside
+    total=$(grep -oF "\`${structure}\`" "$file" 2>/dev/null | wc -l | tr -d ' ')
+    in_block=$(echo "$block" | grep -oF "\`${structure}\`" 2>/dev/null | wc -l | tr -d ' ')
+    outside=$((total - in_block))
+    [ "$outside" -ge "$PLANNER_CROSSCHECK_CONTRACTS_REUSE_MENTION_THRESHOLD" ] && return 1
+  fi
+
+  return 0
 }
 
 # For every spec paragraph in this initiative that retires/removes/
@@ -446,7 +544,6 @@ planner_crosscheck_contract_consumers_unnotified() {
     while IFS= read -r -d '' block; do
       [ -z "$block" ] && continue
       echo "$block" | grep -qiE "$PLANNER_CROSSCHECK_CONTRACTS_RETIRE_REGEX" || continue
-      _planner_crosscheck_contracts_genuine_retirement "$block" || continue
 
       local -a structures
       mapfile -t structures < <(echo "$block" | grep -oE '`[^`]+`' | sed -e 's/^`//' -e 's/`$//' | sort -u)
@@ -459,7 +556,10 @@ planner_crosscheck_contract_consumers_unnotified() {
       for s in "${structures[@]}"; do
         echo "$s" | grep -qE "$PLANNER_CROSSCHECK_CONTRACTS_STRUCTURE_REGEX" || continue
         echo "$s" | grep -qiE "$PLANNER_CROSSCHECK_CONTRACTS_NON_STRUCTURE_EXT_REGEX" && continue
+        _planner_crosscheck_contracts_is_builtin "$s" && continue
+        _planner_crosscheck_contracts_is_generic_word "$s" && continue
         _planner_crosscheck_contracts_is_commodity "$initiatives_root" "$s" && continue
+        _planner_crosscheck_contracts_genuine_retirement "$block" "$spec_file" "$s" || continue
 
         local dir
         for dir in "${other_spec_dirs[@]}"; do

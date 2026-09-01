@@ -121,16 +121,22 @@ _planner_crosscheck_precedent_search() {
     "\\<${identifier}\\>" "$repos_root" >/dev/null 2>&1
 }
 
-# Split a `path:line` or `path:line-line2` token into path/start/end.
+# Split a `path:line`, `path:line-line2`, or `path:~line` (approximate,
+# author-flagged-uncertain) token into path/start/end/approximate.
 # Usage: _planner_crosscheck_split_token <token>
-# Output (stdout, 3 lines): path, start_line, end_line
+# Output (stdout, 4 lines): path, start_line, end_line, approximate (0/1)
 _planner_crosscheck_split_token() {
   local token="$1"
-  local line_part path_part start_line end_line
+  local line_part path_part start_line end_line approximate=0
 
-  line_part=$(echo "$token" | grep -oE ':[0-9]+(-[0-9]+)?$')
+  line_part=$(echo "$token" | grep -oE ':~?[0-9]+(-[0-9]+)?$')
   path_part="${token%"$line_part"}"
   line_part="${line_part#:}"
+
+  if [[ "$line_part" == \~* ]]; then
+    approximate=1
+    line_part="${line_part#\~}"
+  fi
 
   if [[ "$line_part" == *-* ]]; then
     start_line="${line_part%%-*}"
@@ -140,7 +146,7 @@ _planner_crosscheck_split_token() {
     end_line="$line_part"
   fi
 
-  printf '%s\n%s\n%s\n' "$path_part" "$start_line" "$end_line"
+  printf '%s\n%s\n%s\n%s\n' "$path_part" "$start_line" "$end_line" "$approximate"
 }
 
 # A TargetSymbols entry's name half sometimes carries a human-readable
@@ -156,11 +162,16 @@ _planner_crosscheck_strip_symbol_annotation() {
   echo "$1" | sed -E 's/[[:space:]]*\([^)]*\)[[:space:]]*$//'
 }
 
-# True if <symbol>'s annotation marks it as a file this ticket will create,
-# not one that should already exist under REPOS_ROOT.
+# True if <symbol>'s annotation marks it as a file/route/endpoint this ticket
+# will create, not one that should already exist under REPOS_ROOT. Covers the
+# exact "(new)" suffix as well as looser author phrasing carrying the same
+# intent — "(new column, from 5.1)", "new route: POST /split/confirm".
 # Usage: _planner_crosscheck_symbol_marked_new <symbol>
 _planner_crosscheck_symbol_marked_new() {
-  echo "$1" | grep -qiE '\(new\)[[:space:]]*$'
+  local symbol="$1"
+  echo "$symbol" | grep -qiE '\([[:space:]]*new\b[^)]*\)[[:space:]]*$' && return 0
+  echo "$symbol" | grep -qiE '^[[:space:]]*new[[:space:]]+(route|endpoint|file)[[:space:]]*:' && return 0
+  return 1
 }
 
 # Definition-line patterns tried, in order, against the whole resolved file
@@ -187,7 +198,7 @@ _planner_crosscheck_find_definition_line() {
 # Returns: 0 if resolved cleanly, 1 otherwise.
 _planner_crosscheck_check_citation() {
   local repos_root="$1" spec_file="$2" spec_line="$3" token="$4" symbol="${5:-}"
-  local path_part start_line end_line resolved total_lines
+  local path_part start_line end_line resolved total_lines approximate
   local -a token_parts
   local marked_new=0
 
@@ -200,6 +211,7 @@ _planner_crosscheck_check_citation() {
   path_part="${token_parts[0]}"
   start_line="${token_parts[1]}"
   end_line="${token_parts[2]}"
+  approximate="${token_parts[3]:-0}"
 
   resolved=$(_planner_crosscheck_resolve_path "$repos_root" "$path_part")
   if [ -z "$resolved" ]; then
@@ -213,8 +225,12 @@ _planner_crosscheck_check_citation() {
   # (a stale "(new)" tag on a file the ticket ended up not creating fresh
   # is not this check's concern).
 
+  # An approximate ("~line") citation is the author's own flag that the line
+  # number is unverified — file/symbol existence still matters, but the
+  # precise line it points at does not, so both the range check and the
+  # proximity check below are skipped for it.
   total_lines=$(wc -l <"$resolved" | tr -d ' ')
-  if [ -n "$end_line" ] && [ "$end_line" -gt "$total_lines" ] 2>/dev/null; then
+  if [ "$approximate" -ne 1 ] && [ -n "$end_line" ] && [ "$end_line" -gt "$total_lines" ] 2>/dev/null; then
     echo "planner-crosscheck-citations: CITATION_LINE_OUT_OF_RANGE ${spec_file}:${spec_line} → ${token} (${resolved} has ${total_lines} lines)"
     return 1
   fi
@@ -223,7 +239,7 @@ _planner_crosscheck_check_citation() {
   # is nothing to anchor a proximity check to; a blank start/end previously
   # defaulted to lines 1-5, which fails for any real symbol. File existence
   # is all such a citation actually claims.
-  if [ -n "$symbol" ] && [ -n "$start_line" ]; then
+  if [ "$approximate" -ne 1 ] && [ -n "$symbol" ] && [ -n "$start_line" ]; then
     symbol=$(_planner_crosscheck_strip_symbol_annotation "$symbol")
     local lo hi
     lo=$((start_line - PLANNER_CROSSCHECK_SYMBOL_PROXIMITY))
@@ -291,9 +307,21 @@ _planner_crosscheck_scan_target_symbols() {
     symbol="${entry%%:*}"
     token="${entry#*:}"
 
-    if ! _planner_crosscheck_check_citation "$repos_root" "$spec_file" "$symbol_line" "$token" "$symbol"; then
-      failures=$((failures + 1))
-    fi
+    # A symbol can legitimately cite several supporting locations,
+    # comma-separated ("documents.status (existing, unchanged):worker/main.py:474,
+    # app/api/upload/route.ts:35, UploadPageClient.tsx:74") — check each
+    # path:line independently rather than passing the whole joined string to
+    # the single-citation checker, which can only ever resolve one path.
+    local -a subtokens
+    IFS=',' read -ra subtokens <<<"$token"
+    local subtoken
+    for subtoken in "${subtokens[@]}"; do
+      subtoken=$(echo "$subtoken" | sed -e 's/^ *//' -e 's/ *$//')
+      [ -z "$subtoken" ] && continue
+      if ! _planner_crosscheck_check_citation "$repos_root" "$spec_file" "$symbol_line" "$subtoken" "$symbol"; then
+        failures=$((failures + 1))
+      fi
+    done
   done
 
   return "$failures"
