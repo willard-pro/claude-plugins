@@ -17,6 +17,31 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.3 / ticket-auto-pipeline 0.29.7 (2026-09-01)
+
+Closes #190 — `_retry_classify` (and `_planner_retry_classify`, the same
+function duplicated in `planner-linear-api.sh`) ran its transient-keyword
+scan (`rate.limit|timeout|temporar`) against the raw response body on every
+call, including well-formed GraphQL successes. A Linear issue whose title or
+description legitimately mentions "timeout" (e.g. a Feign `connectTimeout`
+config fix) made `get_issue`/`flow.sh` misclassify the successful response as
+transient, burn all three retries, then hard-fail a call that had already
+worked — discarding the real response entirely.
+
+- Fix: both classifiers now short-circuit to `permanent` when the body
+  already parses as a well-formed GraphQL success response (top-level `data`
+  key present, `.errors` already ruled out above) — before reaching the
+  keyword scan. Same false-positive class the existing `429`-substring
+  exclusion above it already guards against, just via payload content
+  instead of an HTTP status code.
+- Found and fixed live in the Credit Network Biz workspace (CRE-66);
+  `ticket-planner`'s copy carried the identical latent bug though it was
+  never exercised in the original repro.
+- New regression tests in both `test-linear-api.sh` and
+  `test-planner-linear-api.sh` cover a success body containing "timeout" and
+  "temporary"/"rate.limit", plus (planner side) confirming a genuinely
+  non-GraphQL-success body still classifies as transient.
+
 ## ticket-planner 0.8.2 (2026-09-01)
 
 Closes #174 — a third Crosscheck check family, `planner-crosscheck-bypass.sh`.

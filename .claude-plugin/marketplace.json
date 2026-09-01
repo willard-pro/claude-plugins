@@ -9,7 +9,7 @@
   "plugins": [
     {
       "name": "ticket-planner",
-      "version": "0.8.2",
+      "version": "0.8.3",
       "source": "./ticket-planner",
       "description": "10-phase autonomous planner — turns business ideas into dependency-ordered planned tickets. Appraisal → Discovery → Architecture → Specify → Review → Consensus → Crosscheck → Epic Gen → Ticket Gen → Completed. Produces Planner Context blocks, Branch Directives for shared epic branches, and initiative epics with planned tickets ready for fleet-controller dispatch. Supports grill-me validated intent files as optional pre-flight gate."
     },
@@ -21,7 +21,7 @@
     },
     {
       "name": "ticket-auto-pipeline",
-      "version": "0.29.6",
+      "version": "0.29.7",
       "source": "./ticket-auto-pipeline",
       "description": "Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. Bundles 20+ skills, state machine config, pipeline safety gates, and retrospective analysis."
     },
