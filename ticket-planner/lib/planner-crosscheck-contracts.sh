@@ -145,8 +145,14 @@ _planner_crosscheck_contracts_exists_in_repo() {
   for dir in "${PLANNER_CROSSCHECK_CONTRACTS_EXCLUDE_DIRS[@]}"; do
     exclude_args+=(--exclude-dir="$dir")
   done
+  # Two shapes: a keyworded definition (function/def/const/class NAME), or a
+  # bare top-level assignment (NAME = ...) — the latter is how Python module
+  # globals and FastAPI dependency aliases are conventionally defined
+  # (`require_service_token = Depends(_verify_service_token)`), and has no
+  # keyword to anchor on. Exclude `==` so an equality check in an unrelated
+  # line doesn't false-match.
   grep -rlE "${exclude_args[@]}" \
-    "^[[:space:]]*(export[[:space:]]+)?(async[[:space:]]+)?(function|def|const|class)[[:space:]]+${esc}\\b" \
+    "^[[:space:]]*(export[[:space:]]+)?(async[[:space:]]+)?(function|def|const|class)[[:space:]]+${esc}\\b|^[[:space:]]*${esc}[[:space:]]*=[^=]" \
     "$repos_root" >/dev/null 2>&1
 }
 
@@ -473,6 +479,25 @@ PLANNER_CROSSCHECK_CONTRACTS_NEGATION_REGEX='\b(not|never|isn.t|aren.t|doesn.t|w
 # each while a nearby retire-word misfired CONTRACT_CONSUMERS_UNNOTIFIED.
 PLANNER_CROSSCHECK_CONTRACTS_REUSE_MENTION_THRESHOLD=3
 
+# True if <text> contains at least one retire-phrase match that is NOT
+# preceded within 5 words by a negator/preservation phrase — i.e. a genuine
+# retirement claim, not a negated guard/invariant sentence. Factored out of
+# _planner_crosscheck_contracts_genuine_retirement so the same windowed check
+# can be applied at line granularity (see its caller below) as well as at
+# whole-block granularity.
+# Usage: _planner_crosscheck_contracts_text_has_genuine_retire_phrase <text>
+_planner_crosscheck_contracts_text_has_genuine_retire_phrase() {
+  local text="$1" flat ctx
+  flat=$(echo "$text" | tr '\n' ' ')
+  while IFS= read -r ctx; do
+    [ -z "$ctx" ] && continue
+    if ! echo "$ctx" | grep -qiE "$PLANNER_CROSSCHECK_CONTRACTS_NEGATION_REGEX"; then
+      return 0
+    fi
+  done < <(echo "$flat" | grep -oiE "([A-Za-z0-9_']+[[:space:]]+){0,5}(${PLANNER_CROSSCHECK_CONTRACTS_RETIRE_REGEX})")
+  return 1
+}
+
 # True if <block> contains at least one retire-phrase match that is NOT
 # preceded within 5 words by a negator/preservation phrase — i.e. a genuine
 # retirement claim, not a negated guard/invariant sentence — AND (when
@@ -482,17 +507,8 @@ PLANNER_CROSSCHECK_CONTRACTS_REUSE_MENTION_THRESHOLD=3
 # Usage: _planner_crosscheck_contracts_genuine_retirement <block> [<file> <structure>]
 _planner_crosscheck_contracts_genuine_retirement() {
   local block="$1" file="${2:-}" structure="${3:-}"
-  local flat ctx found_genuine=0
-  flat=$(echo "$block" | tr '\n' ' ')
-  while IFS= read -r ctx; do
-    [ -z "$ctx" ] && continue
-    if ! echo "$ctx" | grep -qiE "$PLANNER_CROSSCHECK_CONTRACTS_NEGATION_REGEX"; then
-      found_genuine=1
-      break
-    fi
-  done < <(echo "$flat" | grep -oiE "([A-Za-z0-9_']+[[:space:]]+){0,5}(${PLANNER_CROSSCHECK_CONTRACTS_RETIRE_REGEX})")
 
-  [ "$found_genuine" -eq 0 ] && return 1
+  _planner_crosscheck_contracts_text_has_genuine_retire_phrase "$block" || return 1
 
   if [ -n "$file" ] && [ -n "$structure" ] && [ -f "$file" ]; then
     local total in_block outside
@@ -545,8 +561,27 @@ planner_crosscheck_contract_consumers_unnotified() {
       [ -z "$block" ] && continue
       echo "$block" | grep -qiE "$PLANNER_CROSSCHECK_CONTRACTS_RETIRE_REGEX" || continue
 
-      local -a structures
-      mapfile -t structures < <(echo "$block" | grep -oE '`[^`]+`' | sed -e 's/^`//' -e 's/`$//' | sort -u)
+      # Candidate structures are drawn only from lines that themselves carry
+      # a genuine retire-phrase — not every backtick-quoted name anywhere in
+      # the paragraph. A block is a blank-line-delimited paragraph, which can
+      # span several unrelated sentences (e.g. one bullet retiring stale copy
+      # on `FORMAT_BADGES`, a neighboring bullet preserving `RecentCard`
+      # unchanged); pulling structures from the whole block conflates the two
+      # and flags the untouched one as silently retired. Observed live: this
+      # over-association produced false CONTRACT_CONSUMERS_UNNOTIFIED on
+      # `RecentCard`/`preparation_metadata` from a retirement claim that was
+      # actually only about `FORMAT_BADGES`' copy text three lines away.
+      local -a structures=()
+      local block_line
+      while IFS= read -r block_line; do
+        _planner_crosscheck_contracts_text_has_genuine_retire_phrase "$block_line" || continue
+        while IFS= read -r s; do
+          [ -n "$s" ] && structures+=("$s")
+        done < <(echo "$block_line" | grep -oE '`[^`]+`' | sed -e 's/^`//' -e 's/`$//')
+      done <<<"$block"
+      if [ "${#structures[@]}" -gt 0 ]; then
+        mapfile -t structures < <(printf '%s\n' "${structures[@]}" | sort -u)
+      fi
       [ "${#structures[@]}" -eq 0 ] && continue
 
       local -a acknowledged

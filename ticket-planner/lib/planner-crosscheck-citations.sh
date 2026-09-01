@@ -170,7 +170,11 @@ _planner_crosscheck_strip_symbol_annotation() {
 _planner_crosscheck_symbol_marked_new() {
   local symbol="$1"
   echo "$symbol" | grep -qiE '\([[:space:]]*new\b[^)]*\)[[:space:]]*$' && return 0
-  echo "$symbol" | grep -qiE '^[[:space:]]*new[[:space:]]+(route|endpoint|file)[[:space:]]*:' && return 0
+  # By the time this is called, the caller has already split the TargetSymbols
+  # entry on its first ':' into symbol/token — the "new route: <path>" prefix's
+  # own colon is gone from $symbol, so the trailing ':' this regex used to
+  # require can never match. Anchor on the end of string instead.
+  echo "$symbol" | grep -qiE '^[[:space:]]*new[[:space:]]+(route|endpoint|file)[[:space:]]*$' && return 0
   return 1
 }
 
@@ -312,12 +316,23 @@ _planner_crosscheck_scan_target_symbols() {
     # app/api/upload/route.ts:35, UploadPageClient.tsx:74") — check each
     # path:line independently rather than passing the whole joined string to
     # the single-citation checker, which can only ever resolve one path.
+    #
+    # But a comma-separated part with no '/' is not a second path — it's a
+    # second line number in the SAME file ("worker/main.py:1830,2022"),
+    # naming two illustrative call sites. Reattach any such bare-number part
+    # to the last real path seen so it's checked against that file instead
+    # of being treated as an unresolvable path named "2022".
     local -a subtokens
     IFS=',' read -ra subtokens <<<"$token"
-    local subtoken
+    local subtoken last_path=""
     for subtoken in "${subtokens[@]}"; do
       subtoken=$(echo "$subtoken" | sed -e 's/^ *//' -e 's/ *$//')
       [ -z "$subtoken" ] && continue
+      if [[ "$subtoken" != */* && "$subtoken" =~ ^[0-9]+(-[0-9]+)?$ ]] && [ -n "$last_path" ]; then
+        subtoken="${last_path}:${subtoken}"
+      else
+        last_path="${subtoken%%:*}"
+      fi
       if ! _planner_crosscheck_check_citation "$repos_root" "$spec_file" "$symbol_line" "$subtoken" "$symbol"; then
         failures=$((failures + 1))
       fi

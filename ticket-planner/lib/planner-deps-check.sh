@@ -175,8 +175,28 @@ planner_branch_directive_recommend() {
     # Extract Signals JSON block (```json ... ```)
     signals=$(sed -n '/```json/,/```/p' "$spec_file" 2>/dev/null | sed '1d;$d' | jq -e . 2>/dev/null || echo "{}")
 
-    # Extract blocked_by, defaulting to empty array
+    # Extract blocked_by, defaulting to empty array. No Specify-phase output
+    # observed in practice ever populates Signals.blocked_by — the canonical,
+    # actually-authored dependency format is the spec's `## Labels` line, a
+    # comma-separated list including zero or more `blocked-by:<sibling-slug>`
+    # entries (the same format Ticket Gen reads to set the real Linear
+    # `blocked-by:{ID}` label). Falling back to that line when Signals is
+    # empty means this recommender sees the same dependency graph Ticket Gen
+    # will actually create — instead of a chain depth of 0 on every real
+    # initiative and a shared-branch directive that never fires.
     blocked_by=$(echo "$signals" | jq -r '.blocked_by // []' 2>/dev/null)
+    if [ "$blocked_by" = "[]" ] || [ -z "$blocked_by" ]; then
+      # The Labels line's own formatting is not consistent across initiatives
+      # — some wrap every entry in backticks (`` `blocked-by:vs-1a-...` ``),
+      # others don't (`blocked-by:5-1-...`) — so match the first non-empty
+      # line after the "## Labels" heading and strip optional backticks
+      # around each blocked-by token, rather than anchoring on either style.
+      local labels_line
+      labels_line=$(awk '/^## Labels/{f=1;next} f && NF{print; exit}' "$spec_file" 2>/dev/null)
+      blocked_by=$(echo "$labels_line" | grep -oE 'blocked-by:`?[A-Za-z0-9_-]+`?' |
+        sed -E 's/blocked-by:`?([A-Za-z0-9_-]+)`?/\1/' |
+        jq -R . | jq -sc . 2>/dev/null || echo "[]")
+    fi
 
     # Build JSON entry: {"id": "slug", "blocked_by": [...]}
     if [ "$count" -gt 1 ]; then
