@@ -206,6 +206,29 @@ planner_branch_directive_recommend() {
   done
   tickets_json+="]"
 
+  # A ticket's `blocked-by` reference isn't always the full spec-filename
+  # slug the way `id` above always is — VS-1/2/3 always wrote the full slug
+  # ("blocked-by:vs-3a-schema-driven-type-classification-and-field-
+  # extraction"), but VS-4's Specify phase wrote short-form references
+  # ("blocked-by:exc-1") instead. Left as-is, every such entry silently
+  # fails to match any `id` in the DP lookup below, capping every ticket's
+  # computed depth at 1 regardless of how deep the real chain is — VS-4's
+  # real depth-2 chain (exc-1 → exc-3 → exc-4) came back as 1, just under
+  # the ≥2 threshold, when a shared branch was actually warranted.
+  # Resolve each unmatched token against the known id set by unambiguous
+  # `-`-bounded prefix match; anything still unresolved is left as-is
+  # (matches prior — silently non-matching — behavior, not worse).
+  tickets_json=$(echo "$tickets_json" | jq '
+    ( [ .[].id ] ) as $ids
+    | map(.blocked_by |= map(
+        . as $tok
+        | if ($ids | index($tok)) then $tok
+          else ( [ $ids[] | select(. == $tok or startswith($tok + "-")) ] ) as $matches
+          | if ($matches | length) == 1 then $matches[0] else $tok end
+          end
+      ))
+  ' 2>/dev/null || echo "$tickets_json")
+
   # ── Condition 1: ticket count ─────────────────────────────────────────────
   if [ "$count" -lt 3 ]; then
     echo "{\"recommend\":false,\"reason\":\"insufficient ticket count: ${count} < 3\",\"ticket_count\":${count},\"chain_depth\":0}"

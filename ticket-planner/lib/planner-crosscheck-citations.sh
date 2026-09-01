@@ -255,6 +255,15 @@ _planner_crosscheck_check_citation() {
   end_line="${token_parts[2]}"
   approximate="${token_parts[3]:-0}"
 
+  # A bare `path:line` TargetSymbols entry (no `Name:` prefix — see the
+  # caller) sometimes glues the HTTP method directly onto the path instead
+  # of using it as a separate Name field ("PATCH /api/upload/[doc_id]/
+  # route.ts:11-120" rather than "PATCH:/api/upload/...:11-120"). Left in
+  # place, that space-separated verb makes the whole path_part unresolvable
+  # even though the file exists. Strip it — it carries no information
+  # `resolve_path` needs. Confirmed live on VS-4 (exc-2/exc-5/exc-7).
+  path_part=$(echo "$path_part" | sed -E 's/^(GET|POST|PUT|PATCH|DELETE)[[:space:]]+//')
+
   resolved=$(_planner_crosscheck_resolve_path "$repos_root" "$path_part")
   if [ -z "$resolved" ]; then
     [ "$marked_new" -eq 1 ] && return 0
@@ -290,7 +299,16 @@ _planner_crosscheck_check_citation() {
   # check above already validated the citation; skip the symbol-proximity
   # check rather than flag a mismatch no fix to the source or the spec's
   # wording could ever resolve.
+  # A Name field of the form "POST /triage" or "PATCH /api/upload" is an
+  # HTTP-method-plus-route annotation, not a literal source-code identifier
+  # — FastAPI/Next.js routes are declared via decorators/exports (`@app.
+  # post("/triage")`, `export function POST`), so the literal string
+  # "POST /triage" never appears verbatim in the file. Confirmed live on
+  # VS-4: exc-2's "POST /triage:worker/main.py:1444" false-flagged as
+  # CITATION_SYMBOL_MISMATCH. Same class of false positive as the
+  # hyphenated-label and own-path-segment guards just above.
   if [ "$approximate" -ne 1 ] && [ -n "$symbol" ] && [ -n "$start_line" ] && [[ "$symbol" != *-* ]] &&
+    ! [[ "$symbol" =~ ^(GET|POST|PUT|PATCH|DELETE)[[:space:]]+/ ]] &&
     ! _planner_crosscheck_symbol_is_own_path_segment "$symbol" "$path_part"; then
     symbol=$(_planner_crosscheck_strip_symbol_annotation "$symbol")
     local lo hi
@@ -365,8 +383,26 @@ _planner_crosscheck_scan_target_symbols() {
     entry=$(echo "$entry" | sed -e 's/^ *//' -e 's/ *$//')
     [ -z "$entry" ] && continue
 
-    symbol="${entry%%:*}"
-    token="${entry#*:}"
+    # A bare `path:line` entry (no `Name:` prefix) is easy to misparse if
+    # the split is done on the first colon unconditionally: for
+    # "worker/main.py:2267-2269" that reads symbol="worker/main.py",
+    # token="2267-2269" — a bare number then gets resolved as if it were
+    # a path, always failing ("no file under REPOS_ROOT matches
+    # '2267-2269'"). Confirmed live on VS-4 (exc-1/exc-2/exc-3/exc-5/exc-6):
+    # ~15 entries this shape, all false CITATION_UNRESOLVED/OUT_OF_RANGE.
+    # Strip the trailing `:line`/`:line-line2` suffix first — it is always
+    # unambiguous — then only treat what remains before it as a Name if a
+    # colon still separates it from a path.
+    local line_suffix rest
+    line_suffix=$(echo "$entry" | grep -oE ':~?[0-9]+(-[0-9]+)?$')
+    rest="${entry%"$line_suffix"}"
+    if [[ "$rest" == *:* ]]; then
+      symbol="${rest%%:*}"
+      token="${rest#*:}${line_suffix}"
+    else
+      symbol=""
+      token="$entry"
+    fi
 
     # A symbol can legitimately cite several supporting locations,
     # comma-separated ("documents.status (existing, unchanged):worker/main.py:474,

@@ -378,8 +378,16 @@ _planner_crosscheck_contracts_shape_terms() {
 # Usage: _planner_crosscheck_contracts_is_deferential <block>
 _planner_crosscheck_contracts_is_deferential() {
   local block="$1"
+  # "Follows the CHECK-enum discipline of `entities.status`" (exc-1) and
+  # "Following the exact precedent `entities.status`'s migration set..."
+  # (ebc-e) are both read-only citations of an unrelated, unmodified
+  # structure used to justify a design choice elsewhere — not a competing
+  # definition of `entities.status` itself. Confirmed live on VS-4: neither
+  # spec touches `entities.status` at all. Same false-positive shape as the
+  # other deferential phrasings below, just a phrasing this guard didn't
+  # cover yet.
   printf '%s' "$block" | grep -qiE \
-    "modeled on|'s conventions|not by this ticket|left (completely )?(untouched|unchanged)|leaves? .{0,40}(untouched|unchanged)"
+    "modeled on|'s conventions|not by this ticket|left (completely )?(untouched|unchanged)|leaves? .{0,40}(untouched|unchanged)|follow(s|ing)?( the)?( exact)? .{0,40}(discipline|precedent|pattern|convention)"
 }
 
 # Fixed shape-descriptor phrase pairs — the audit's actual contradiction
