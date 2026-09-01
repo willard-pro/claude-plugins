@@ -91,6 +91,17 @@ _retry_classify() {
     return
   fi
 
+  # A well-formed GraphQL success response (top-level "data" key, no .errors —
+  # already ruled out above) is terminal regardless of what its field content
+  # says. Skip the keyword scan below entirely, otherwise a ticket whose title
+  # or description legitimately mentions "timeout"/"temporary"/"rate limit"
+  # false-positives as transient on a request that already succeeded, burning
+  # all retries and then hard-failing a call that worked.
+  if echo "$body" | jq -e '.data' >/dev/null 2>&1; then
+    echo "permanent"
+    return
+  fi
+
   # HTTP-level transient messages in the body (non-GraphQL-error responses).
   # Rate-limit info embedded in a 200 response body, timeout/temporary keywords.
   # Use rate[.]limit to avoid the unescaped dot matching any character.

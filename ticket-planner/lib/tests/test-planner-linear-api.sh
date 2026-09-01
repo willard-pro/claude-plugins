@@ -369,5 +369,38 @@ else
 fi
 
 echo ""
+
+# ── _planner_retry_classify: success bodies must not scan-match keywords ────────
+#
+# Issue #190: the same false-positive class as ticket-auto-pipeline's
+# _retry_classify. A well-formed GraphQL success response (top-level "data",
+# no .errors) must classify as permanent even when field content legitimately
+# contains "timeout"/"temporar"/"rate.limit" — those keywords only apply to
+# non-GraphQL-success bodies (HTTP-level transient signals).
+
+echo "--- _planner_retry_classify: success-body false positives ---"
+
+got=$(_planner_retry_classify 0 200 '{"data":{"issue":{"title":"Fix Feign connectTimeout/readTimeout config"}}}')
+if [ "$got" = "permanent" ]; then
+  pass "a success body mentioning 'timeout' classifies as permanent"
+else
+  fail "a success body mentioning 'timeout' classifies as permanent" "got '$got'"
+fi
+
+got=$(_planner_retry_classify 0 200 '{"data":{"issue":{"description":"temporary workaround for rate.limit handling"}}}')
+if [ "$got" = "permanent" ]; then
+  pass "a success body mentioning 'temporary'/'rate.limit' classifies as permanent"
+else
+  fail "a success body mentioning 'temporary'/'rate.limit' classifies as permanent" "got '$got'"
+fi
+
+got=$(_planner_retry_classify 0 200 '{"weird":"body with timeout mentioned but no data key"}')
+if [ "$got" = "transient" ]; then
+  pass "a non-GraphQL-success body with 'timeout' still classifies as transient"
+else
+  fail "a non-GraphQL-success body with 'timeout' still classifies as transient" "got '$got'"
+fi
+
+echo ""
 echo "=== planner-linear-api.sh: ${PASS} passed, ${FAIL} failed ==="
 [ "$FAIL" -eq 0 ]

@@ -52,6 +52,21 @@ test_retry_classify_200_is_permanent() {
   [ "$result" = "permanent" ]
 }
 
+# Issue #190: a successful GraphQL response whose field content legitimately
+# mentions "timeout"/"temporar"/"rate.limit" must not be misclassified as
+# transient — the keyword scan only applies to non-GraphQL-success bodies.
+test_retry_classify_200_with_timeout_in_body_is_permanent() {
+  local result
+  result=$(bash -c "source $LIB_DIR/linear-api.sh; _retry_classify 0 200 '{\"data\":{\"issue\":{\"title\":\"Fix Feign connectTimeout/readTimeout config\"}}}'" 2>/dev/null)
+  [ "$result" = "permanent" ]
+}
+
+test_retry_classify_200_with_temporary_in_body_is_permanent() {
+  local result
+  result=$(bash -c "source $LIB_DIR/linear-api.sh; _retry_classify 0 200 '{\"data\":{\"issue\":{\"description\":\"temporary workaround for rate.limit handling\"}}}'" 2>/dev/null)
+  [ "$result" = "permanent" ]
+}
+
 # ── normalize_comments unit tests (no network) ───────────────────────────────
 
 test_normalize_passthrough_when_already_array() {
@@ -297,6 +312,8 @@ for fn in \
   test_retry_classify_5xx_is_transient \
   test_retry_classify_graphql_rate_limit_transient \
   test_retry_classify_200_is_permanent \
+  test_retry_classify_200_with_timeout_in_body_is_permanent \
+  test_retry_classify_200_with_temporary_in_body_is_permanent \
   test_normalize_passthrough_when_already_array \
   test_normalize_data_issue_comments_nodes_shape \
   test_normalize_data_issue_comments_shape \

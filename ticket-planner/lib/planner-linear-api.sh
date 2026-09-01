@@ -68,6 +68,16 @@ _planner_retry_classify() {
     return
   fi
 
+  # A well-formed GraphQL success response (top-level "data" key, no .errors —
+  # already ruled out above) is terminal regardless of what its field content
+  # says. Skip the keyword scan below entirely, otherwise a ticket whose title
+  # or description legitimately mentions "timeout"/"temporary"/"rate limit"
+  # false-positives as transient on a request that already succeeded.
+  if echo "$body" | jq -e '.data' >/dev/null 2>&1; then
+    echo "permanent"
+    return
+  fi
+
   # Body contains transient keywords (rate limit, timeout, temporary)
   if echo "$body" | grep -qiE 'rate[.]limit|timeout|temporar'; then
     echo "transient"
