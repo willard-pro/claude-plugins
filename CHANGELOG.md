@@ -17,6 +17,28 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.29.5 (2026-09-01)
+
+Closes #181 — prescan docs for repos outside a ticket's own scope sat
+permanently `decayed`/`missing`, because nothing proactively refreshed
+them independent of ticket dispatch. `/ticket-prescan` (bare, no repo
+argument) already walks every repo under `REPOS_ROOT` and refreshes
+anything non-fresh — but the only thing that ever invoked it that way
+was `ticket-auto`'s per-ticket "Prescan gate", competing with that
+ticket's own budget rather than running on a standing schedule.
+
+- Added `lib/prescan-sweep.sh`: a zero-LLM, zero-Agent-spawn freshness
+  sweep. Enumerates every repo under `REPOS_ROOT` the same way the
+  per-ticket safety net does, runs `prescan-check.sh` on each, and
+  reports counts by status plus a `needs_refresh` list (`--format
+  text|json`). Exit 0 all fresh, 1 refresh needed, 2 on error.
+- Documented (`skills/ticket-prescan/SKILL.md`) how to schedule bare
+  `/ticket-prescan` runs (via the `schedule` skill or cron) decoupled
+  from ticket dispatch, gated behind `prescan-sweep.sh` so a scheduled
+  run that finds nothing stale never has to spawn a Claude session.
+- 9 new tests in `test-prescan-sweep.sh` covering status counting, the
+  `needs_refresh` list, both output formats, and error paths.
+
 ## ticket-auto-pipeline 0.29.4 (2026-09-01)
 
 Closes #177 — `/ticket-retro` could not see `ticket-planner` runs at all.
