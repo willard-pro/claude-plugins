@@ -47,6 +47,7 @@ Parse the JSON output into the following variables:
 - `{COMPLEXITY_PREDICTIONS}` — array of `{ticket, declared, actual, actual_source}`
 - `{COMPLEXITY_ACCURACY}` — float 0–1
 - `{LOGS_SCANNED}`, `{LOGS_SKIPPED}`, `{LOGS_WITH_FAILURES}` — counts. `LOGS_SCANNED` counts only newly-scanned logs (not cursor-skipped). `LOGS_SKIPPED` counts logs that were skipped because their mtime matched the cursor.
+- `{LOGS_BY_SOURCE}` — object `{"ticket-auto": {scanned, skipped, with_failures}, "planner": {scanned, skipped, with_failures}}`. `ticket-auto` scans `./logs/*-pipeline.log`; `planner` scans `${REPOS_ROOT}/.ticket-auto/initiatives/*/state.log` ([#177](https://github.com/willard-pro/claude-plugins/issues/177)). Both sources feed the same `{FAILURE_HISTOGRAM}` — this field is purely for reporting where each count came from. `planner` counts are `0` when `REPOS_ROOT` is unset or no initiatives exist; nothing else about ticket-auto scanning changes in that case.
 - `{ERROR_DIAGNOSTICS}` — object with `total_errors`, `errors_by_ticket`, `error_category_histogram` (from heartbeat structured error events)
 
 If `{FAILURE_HISTOGRAM}` is empty (no failures), skip to Step 4 to write a short "clean window" report.
@@ -163,6 +164,19 @@ The template identifies which skill file(s) to inspect. Read the relevant sectio
 
 For the `complexity-drift` meta-code (accuracy < 0.5): inspect `ticket-appraise/SKILL.md`.
 
+**Planner Crosscheck findings** (`{FAILURE_HISTOGRAM}` entries surfaced from a `ticket-planner`-sourced log, [#177](https://github.com/willard-pro/claude-plugins/issues/177)): these are findings about the planner's own artifacts, so the implicated file is always in the **`ticket-planner`** plugin — never a `ticket-auto-pipeline` skill file, even though this SKILL.md lives in `ticket-auto-pipeline`.
+
+| Code | Primary File (in `ticket-planner`) |
+|------|-------------------|
+| `CITATION_UNRESOLVED` | `lib/planner-crosscheck-citations.sh`; root cause usually traces to the Specify prompt in `lib/planner-phase-prompts.sh` (`planner_prompt_specify`) |
+| `CITATION_LINE_OUT_OF_RANGE` | `lib/planner-crosscheck-citations.sh`; root cause usually traces to `lib/planner-phase-prompts.sh` (`planner_prompt_specify`) |
+| `CITATION_SYMBOL_MISMATCH` | `lib/planner-crosscheck-citations.sh`; root cause usually traces to `lib/planner-phase-prompts.sh` (`planner_prompt_specify`) |
+| `RESOLUTION_NOT_PROPAGATED` | `lib/planner-crosscheck-propagation.sh`; root cause usually traces to `lib/planner-phase-prompts.sh` (`planner_prompt_consensus`) |
+| `FORWARD_REF_UNFULFILLED` | `lib/planner-crosscheck-propagation.sh`; root cause usually traces to `lib/planner-phase-prompts.sh` (`planner_prompt_specify`) |
+| `CARVE_SCOPE_LOST` | `lib/planner-crosscheck-propagation.sh`; root cause usually traces to `lib/planner-phase-prompts.sh` (`planner_prompt_specify`) |
+
+Every diff proposed for one of these codes must target a `ticket-planner/...` path, not a `ticket-auto-pipeline/skills/...` one.
+
 ### 3b.5 — GitHub severity mapping (for --post-to-github)
 
 When `--post-to-github` is active, map each failure code to severity and type labels:
@@ -207,11 +221,15 @@ Markdown table of error codes and their frequencies, sorted descending:
 ```markdown
 ## Failure Histogram
 
+Sources scanned: ticket-auto {LOGS_BY_SOURCE.ticket-auto.scanned} log(s), planner {LOGS_BY_SOURCE.planner.scanned} log(s).
+
 | Code | Count |
 |------|-------|
 | EXEC_NO_ARTIFACT | 4 |
 | APPROVAL_REVOKED | 2 |
 ```
+
+Omit the "Sources scanned" line when `{LOGS_BY_SOURCE}.planner.scanned` is `0` and `.skipped` is also `0` — i.e. no planner logs were ever in play for this run, so the source breakdown adds nothing.
 
 ### Section: Complexity Prediction Accuracy
 
