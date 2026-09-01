@@ -222,6 +222,16 @@ _planner_crosscheck_symbol_is_own_path_segment() {
 _planner_crosscheck_find_definition_line() {
   local file="$1" symbol="$2"
   local esc
+  # A symbol cited with call-parens ("check_llm_allowed()") must have them
+  # stripped before building the regex below: a definition line never has a
+  # trailing "()" for the closing `\b` anchor to land on (there's a space or
+  # `->` after the real ")"), so leaving them in either no-ops past an empty
+  # regex group (GNU grep) or errors outright ("empty (sub)expression" —
+  # this environment's `grep` shells out to `ugrep -G -E`, confirmed live)
+  # — either way, every compound multi-range citation naming a "foo()"-style
+  # symbol false-flagged CITATION_SYMBOL_MISMATCH. Confirmed live on VS-6
+  # (`check_llm_allowed()/record_llm_usage():worker/llm/guard.py:58-87,89-115`).
+  symbol="${symbol%%(*}"
   esc=$(printf '%s' "$symbol" | sed 's/[.[\*^$/]/\\&/g')
   # `export default function X` — React's standard component-export form —
   # doesn't match without the optional `default` here. Confirmed live on
