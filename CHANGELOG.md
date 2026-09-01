@@ -17,6 +17,37 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.1 / ticket-auto-pipeline 0.29.3 (2026-09-01)
+
+Closes out the two remaining acceptance criteria on #176 that 0.8.0 left
+open: the retro histogram claim was unverified, and `status` mode didn't
+surface Crosscheck findings at all.
+
+- Fixed (ticket-auto-pipeline): `retro.sh`'s failure-histogram parser
+  bucketed every `META|crosscheck|fail` line under a single `"crosscheck"`
+  key (it used `$step` as the bucket, the same generic path every other
+  phase's fail line takes) instead of extracting the finding code the way
+  it already does for `gate-stop`. Every distinct finding
+  (`CITATION_UNRESOLVED`, `RESOLUTION_NOT_PROPAGATED`, ...) collapsed into
+  one undifferentiated count — running retro directly against a planner
+  `state.log`, as #176 AC2 asked, showed this immediately. Crosscheck now
+  gets its own branch mirroring `gate-stop`'s, plus two new JSON fields,
+  `crosscheck_blocking_total` and `crosscheck_warn_total`, so warn-level
+  findings (`info <CODE> <message>`) are counted separately and never land
+  in the blocking histogram (AC4). New test:
+  `lib/tests/test-retro-crosscheck.sh`.
+- New (ticket-planner): `planner_crosscheck_findings_summary
+  <initiative_id>` in `lib/planner-crosscheck.sh` — reads recorded
+  `META|crosscheck` entries back for `status` mode (#176 AC5), one
+  `<count> <blocking|warn> <CODE>` line per distinct code plus a `TOTAL:`
+  line. Scoped to the most recent Crosscheck attempt only (everything since
+  the last `Crosscheck|check|start` marker) — state.log is append-only, so
+  without that scoping a finding fixed by an earlier `resume` would report
+  as outstanding forever.
+- Changed: `SKILL.md` status mode now calls the new summary function and
+  reports a "Crosscheck findings" section when the most recent attempt left
+  any.
+
 ## ticket-planner 0.8.0 (2026-09-01)
 
 Crosscheck lands as phase 7 of the planner's state machine, between Consensus

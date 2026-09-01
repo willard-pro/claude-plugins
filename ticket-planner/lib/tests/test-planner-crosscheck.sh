@@ -131,6 +131,13 @@ else
   fail "clean run: position derive advances past Crosscheck" "still at Crosscheck"
 fi
 
+summary=$(planner_crosscheck_findings_summary "$INIT_ID")
+if [ -z "$summary" ]; then
+  pass "clean run: findings summary is empty"
+else
+  fail "clean run: findings summary is empty" "got: $summary"
+fi
+
 # ── Dirty run (fresh initiative, bad citation) ──────────────────────────────
 
 echo "--- dirty run ---"
@@ -182,6 +189,16 @@ else
   fail "dirty run: position derive stays at Crosscheck for retry" "got $(planner_position_derive "$INIT_ID2")"
 fi
 
+summary2=$(planner_crosscheck_findings_summary "$INIT_ID2")
+case "$summary2" in
+*"blocking CITATION_UNRESOLVED"*) pass "dirty run: findings summary lists CITATION_UNRESOLVED as blocking" ;;
+*) fail "dirty run: findings summary lists CITATION_UNRESOLVED as blocking" "got: $summary2" ;;
+esac
+case "$summary2" in
+*"TOTAL: 1 blocking, 0 warn"*) pass "dirty run: findings summary TOTAL line is correct" ;;
+*) fail "dirty run: findings summary TOTAL line is correct" "got: $summary2" ;;
+esac
+
 # Fix the artifact and re-run — resume should succeed and advance.
 cat >"${STATE_DIR2}/artifacts/specs/vs-b.md" <<'EOF'
 # vs-b
@@ -208,6 +225,16 @@ if [ "$pos" = "EpicGen" ]; then
   pass "resume after fix: position derive advances to EpicGen"
 else
   fail "resume after fix: position derive advances to EpicGen" "got '$pos'"
+fi
+
+# Findings summary is scoped to the latest attempt only — the earlier
+# CITATION_UNRESOLVED finding must not still report as outstanding once the
+# artifact was fixed and Crosscheck re-ran clean (#176 AC5).
+summary2_after_fix=$(planner_crosscheck_findings_summary "$INIT_ID2")
+if [ -z "$summary2_after_fix" ]; then
+  pass "resume after fix: findings summary is empty (scoped to latest attempt)"
+else
+  fail "resume after fix: findings summary is empty (scoped to latest attempt)" "got: $summary2_after_fix"
 fi
 
 echo ""

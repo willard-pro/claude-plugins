@@ -438,7 +438,14 @@ When mode is `status`:
 1. Extract the initiative ID from the second argument.
 2. Read the state log: `planner_state_read "$INITIATIVE_ID"`
 3. Run `planner_position_derive "$INITIATIVE_ID"` to get the current phase.
-4. Report: current phase, initiative metadata, last 10 log entries, artifact listing.
+4. Run `planner_crosscheck_findings_summary "$INITIATIVE_ID"` (source
+   `planner-crosscheck.sh` first if not already sourced). Empty output means no
+   Crosscheck findings recorded — omit the section. Otherwise report it as its
+   own "Crosscheck findings" section: the per-code lines and the trailing
+   `TOTAL:` line, and note whether the initiative is currently halted on a
+   blocking finding (blocking total > 0 and current phase is still
+   `Crosscheck`) — see #176.
+5. Report: current phase, initiative metadata, last 10 log entries, artifact listing.
 
 ### 6. Replan mode
 

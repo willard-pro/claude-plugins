@@ -160,3 +160,67 @@ planner_crosscheck_run() {
   echo "planner-crosscheck: clean (${total_warn} warn)"
   return 0
 }
+
+# Summarize recorded Crosscheck findings for status reporting (#176 AC5).
+# Scoped to the most recent Crosscheck attempt only (everything at or after
+# the last "Crosscheck|check|start" marker) — resume re-runs the phase after
+# the operator edits artifacts, and a fixed finding from an earlier attempt
+# must not keep reporting as outstanding forever just because state.log is
+# append-only. Reads directly from state.log; does not re-run the checks.
+#
+# Usage: planner_crosscheck_findings_summary <initiative_id>
+# Output (stdout): one "<count> <blocking|warn> <CODE>" line per distinct
+# code, sorted by count descending, followed by a "TOTAL: <n> blocking, <n>
+# warn" line. No output at all if Crosscheck has not run yet, or its most
+# recent run recorded no findings.
+planner_crosscheck_findings_summary() {
+  local initiative_id="$1"
+  local log
+  log=$(planner_state_log "$initiative_id")
+  [ -f "$log" ] || return 0
+
+  local start_line
+  start_line=$(grep -n '|Crosscheck|check|start|' "$log" | tail -1 | cut -d: -f1)
+  [ -z "$start_line" ] && return 0
+
+  local blocking_total=0 warn_total=0
+  declare -A _cc_counts=()
+  declare -A _cc_kind=()
+  local line phase step status msg code
+
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    IFS='|' read -r _ts phase step status msg <<<"$line"
+    [ "$phase" = "META" ] || continue
+    [ "$step" = "crosscheck" ] || continue
+
+    case "$status" in
+    fail)
+      code=$(echo "$msg" | awk '{print $1}')
+      [ -z "$code" ] && continue
+      _cc_counts["$code"]=$((${_cc_counts["$code"]:-0} + 1))
+      _cc_kind["$code"]="blocking"
+      blocking_total=$((blocking_total + 1))
+      ;;
+    warn)
+      # Warn findings are written as "info <CODE> <message>" — see
+      # _planner_crosscheck_emit_finding.
+      code=$(echo "$msg" | awk '{print $2}')
+      [ -z "$code" ] && continue
+      _cc_counts["$code"]=$((${_cc_counts["$code"]:-0} + 1))
+      _cc_kind["$code"]="warn"
+      warn_total=$((warn_total + 1))
+      ;;
+    esac
+  done < <(tail -n "+$((start_line + 1))" "$log")
+
+  if [ "$blocking_total" -eq 0 ] && [ "$warn_total" -eq 0 ]; then
+    return 0
+  fi
+
+  for code in "${!_cc_counts[@]}"; do
+    echo "${_cc_counts[$code]} ${_cc_kind[$code]} ${code}"
+  done | sort -rn
+
+  echo "TOTAL: ${blocking_total} blocking, ${warn_total} warn"
+}

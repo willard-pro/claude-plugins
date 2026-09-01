@@ -189,6 +189,8 @@ fi
 declare -A FAILURE_COUNT=()
 GATE_STOP_TOTAL=0
 GATE_WARN_TOTAL=0
+CROSSCHECK_BLOCKING_TOTAL=0
+CROSSCHECK_WARN_TOTAL=0
 LOGS_SCANNED=0
 LOGS_WITH_FAILURES=0
 
@@ -244,6 +246,22 @@ for log_file in "${LOG_FILES[@]}"; do
       # separate from GATE_STOP_TOTAL/FAILURE_COUNT since these never halt
       # the pipeline; counted so Phase 2 can measure the false-positive rate.
       GATE_WARN_TOTAL=$((GATE_WARN_TOTAL + 1))
+    elif [ "$step" = "crosscheck" ] && [ "$status" = "fail" ]; then
+      # ticket-planner Crosscheck blocking finding (#176). Histogram by CODE
+      # like gate-stop, not by step name — "crosscheck" alone would collapse
+      # every distinct finding code (CITATION_UNRESOLVED, RESOLUTION_NOT_-
+      # PROPAGATED, ...) into one bucket and lose the signal #176 wants.
+      CROSSCHECK_BLOCKING_TOTAL=$((CROSSCHECK_BLOCKING_TOTAL + 1))
+      code=$(echo "$msg" | awk '{print $1}')
+      FAILURE_COUNT["$code"]=$((${FAILURE_COUNT["$code"]:-0} + 1))
+      local_has_failure=1
+    elif [ "$step" = "crosscheck" ] && [ "$status" = "warn" ]; then
+      # Non-blocking Crosscheck finding, written as "info <CODE> <message>"
+      # (see planner-crosscheck.sh:_planner_crosscheck_emit_finding) — code
+      # is the second token, not the first. Counted separately, never in
+      # FAILURE_COUNT, so it can't be mistaken for a blocking finding (#176
+      # AC4).
+      CROSSCHECK_WARN_TOTAL=$((CROSSCHECK_WARN_TOTAL + 1))
     elif [ "$status" = "fail" ] && [ "$step" != "schema" ] && [ "$step" != "migration" ]; then
       FAILURE_COUNT["$step"]=$((${FAILURE_COUNT["$step"]:-0} + 1))
       local_has_failure=1
@@ -462,6 +480,8 @@ jq -n \
   --argjson logs_with_failures "$LOGS_WITH_FAILURES" \
   --argjson gate_stop_total "$GATE_STOP_TOTAL" \
   --argjson gate_warn_total "$GATE_WARN_TOTAL" \
+  --argjson crosscheck_blocking_total "$CROSSCHECK_BLOCKING_TOTAL" \
+  --argjson crosscheck_warn_total "$CROSSCHECK_WARN_TOTAL" \
   --argjson complexity_accuracy "$ACCURACY" \
   --arg histogram_str "$HISTOGRAM_JSON" \
   --arg predictions_str "$PREDICTIONS_JSON" \
@@ -481,6 +501,8 @@ jq -n \
     failure_histogram: ($histogram_str | fromjson),
     gate_stop_total: $gate_stop_total,
     gate_warn_total: $gate_warn_total,
+    crosscheck_blocking_total: $crosscheck_blocking_total,
+    crosscheck_warn_total: $crosscheck_warn_total,
     complexity_predictions: ($predictions_str | fromjson),
     complexity_accuracy: $complexity_accuracy,
     heartbeat: {
