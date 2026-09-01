@@ -149,6 +149,12 @@ source "$LIBS_DIR/notes-parse.sh" 2>/dev/null || {
 
 WINDOW_DAYS="${WINDOW%d}"
 LOGS_DIR="./logs"
+# ticket-planner writes its own append-only state.log (same ISO|PHASE|STEP|STATUS|MSG
+# convention) to a different root, filename, and identity key than ticket-auto's
+# pipeline logs — see GitHub #177. PLANNER_INITIATIVES_DIR is overridable for tests;
+# in production it's derived the same way the planner itself derives it
+# (ticket-planner/lib/planner-state.sh:planner_initiative_dir).
+PLANNER_INITIATIVES_DIR="${PLANNER_INITIATIVES_DIR:-${REPOS_ROOT:-$HOME/repos}/.ticket-auto/initiatives}"
 
 # ── Cursor file for deduplication ────────────────────────────────────────
 CURSOR_FILE="${CURSOR_FILE:-$HOME/.claude/state/ticket-retro/retro-cursor.json}"
@@ -168,14 +174,29 @@ fi
 # ── Log file discovery ───────────────────────────────────────────────────
 
 declare -a LOG_FILES=()
+declare -a LOG_SOURCES=() # index-aligned with LOG_FILES: "ticket-auto" | "planner"
 
 if [ -n "$POSITIONAL_LOG" ]; then
-  [ -f "$POSITIONAL_LOG" ] && LOG_FILES=("$POSITIONAL_LOG")
+  if [ -f "$POSITIONAL_LOG" ]; then
+    LOG_FILES=("$POSITIONAL_LOG")
+    LOG_SOURCES=("ticket-auto")
+  fi
 else
   if [ -d "$LOGS_DIR" ]; then
     while IFS= read -r -d '' log; do
       LOG_FILES+=("$log")
+      LOG_SOURCES+=("ticket-auto")
     done < <(find "$LOGS_DIR" -name '*-pipeline.log' -mtime -"$WINDOW_DAYS" -print0 2>/dev/null || true)
+  fi
+  # ticket-planner source (#177) — same discovery shape, different root/glob.
+  # Guarded on directory existence so a host with no planner runs (or
+  # REPOS_ROOT unset/nonexistent) never touches this branch — ticket-auto-only
+  # behaviour stays exactly as before.
+  if [ -d "$PLANNER_INITIATIVES_DIR" ]; then
+    while IFS= read -r -d '' log; do
+      LOG_FILES+=("$log")
+      LOG_SOURCES+=("planner")
+    done < <(find "$PLANNER_INITIATIVES_DIR" -mindepth 2 -maxdepth 2 -name 'state.log' -mtime -"$WINDOW_DAYS" -print0 2>/dev/null || true)
   fi
 fi
 
@@ -193,6 +214,9 @@ CROSSCHECK_BLOCKING_TOTAL=0
 CROSSCHECK_WARN_TOTAL=0
 LOGS_SCANNED=0
 LOGS_WITH_FAILURES=0
+declare -A LOGS_SCANNED_BY_SOURCE=(["ticket-auto"]=0 [planner]=0)
+declare -A LOGS_SKIPPED_BY_SOURCE=(["ticket-auto"]=0 [planner]=0)
+declare -A LOGS_WITH_FAILURES_BY_SOURCE=(["ticket-auto"]=0 [planner]=0)
 
 # Build predictions as a JSON array string, one element at a time
 PREDICTIONS_JSON="["
@@ -203,32 +227,54 @@ TOTAL_PAIRS=0
 
 # ── Process each log ─────────────────────────────────────────────────────
 
-for log_file in "${LOG_FILES[@]}"; do
+for _i in "${!LOG_FILES[@]}"; do
+  log_file="${LOG_FILES[$_i]}"
+  log_source="${LOG_SOURCES[$_i]}"
   local_has_failure=0
 
-  stem=$(basename "$log_file" .log)
-  ticket_id="${stem%-pipeline}"
+  if [ "$log_source" = "planner" ]; then
+    # Planner state.log lives at initiatives/{INIT_ID}/state.log — the
+    # initiative id is the parent directory name, not derivable from the
+    # (fixed) filename the way ticket-auto's "{ID}-pipeline.log" is.
+    ticket_id=$(basename "$(dirname "$log_file")")
+  else
+    stem=$(basename "$log_file" .log)
+    ticket_id="${stem%-pipeline}"
+  fi
 
   # ── Cursor dedup: skip if log hasn't changed since last scan ──────────
+  # Keyed by ticket_id alone (no source prefix): ticket-auto ids (CRE-47) and
+  # planner initiative ids (INIT-...) are disjoint namespaces by construction
+  # (planner-state.sh:PLANNER_ID_PATTERN), so they can't collide — a flat key
+  # already dedupes each source independently without a cursor-format change.
   log_mtime=$(stat -c %Y "$log_file" 2>/dev/null || echo 0)
   if [ "$FORCE_RESCAN" -eq 0 ] && [ -n "${CURSOR_MTIMES[$ticket_id]:-}" ]; then
     stored_mtime="${CURSOR_MTIMES[$ticket_id]}"
     if [ "$log_mtime" -eq "$stored_mtime" ] 2>/dev/null; then
       LOGS_SKIPPED=$((LOGS_SKIPPED + 1))
+      LOGS_SKIPPED_BY_SOURCE["$log_source"]=$((${LOGS_SKIPPED_BY_SOURCE[$log_source]:-0} + 1))
       continue
     fi
   fi
   LOGS_SCANNED=$((LOGS_SCANNED + 1))
+  LOGS_SCANNED_BY_SOURCE["$log_source"]=$((${LOGS_SCANNED_BY_SOURCE[$log_source]:-0} + 1))
   SCANNED_MTIMES["$ticket_id"]="$log_mtime"
 
-  # Resolve ticket directory from the log's notes artifact line
+  # Resolve ticket/artifact directory
   ticket_dir=""
-  notes_line=$(grep '|META|artifact|info|notes:' "$log_file" 2>/dev/null | tail -1 || true)
-  if [ -n "$notes_line" ]; then
-    notes_path=$(echo "$notes_line" | cut -d'|' -f5 | sed 's/^notes://')
-    [ -n "$notes_path" ] && [ -f "$notes_path" ] && ticket_dir=$(dirname "$notes_path")
+  if [ "$log_source" = "planner" ]; then
+    # Planner artifacts live at a fixed path relative to state.log — no
+    # notes.md marker to grep for (that's ticket-auto's convention).
+    _planner_artifact_dir="$(dirname "$log_file")/artifacts"
+    [ -d "$_planner_artifact_dir" ] && ticket_dir="$_planner_artifact_dir"
+  else
+    notes_line=$(grep '|META|artifact|info|notes:' "$log_file" 2>/dev/null | tail -1 || true)
+    if [ -n "$notes_line" ]; then
+      notes_path=$(echo "$notes_line" | cut -d'|' -f5 | sed 's/^notes://')
+      [ -n "$notes_path" ] && [ -f "$notes_path" ] && ticket_dir=$(dirname "$notes_path")
+    fi
+    [ -z "$ticket_dir" ] && ticket_dir=$(find . -type d -name "${ticket_id}*" -print -quit 2>/dev/null || true)
   fi
-  [ -z "$ticket_dir" ] && ticket_dir=$(find . -type d -name "${ticket_id}*" -print -quit 2>/dev/null || true)
 
   # ── Scan for failures ─────────────────────────────────────────────────
   while IFS= read -r line; do
@@ -268,7 +314,16 @@ for log_file in "${LOG_FILES[@]}"; do
     fi
   done <"$log_file"
 
-  [ "$local_has_failure" -eq 1 ] && LOGS_WITH_FAILURES=$((LOGS_WITH_FAILURES + 1))
+  if [ "$local_has_failure" -eq 1 ]; then
+    LOGS_WITH_FAILURES=$((LOGS_WITH_FAILURES + 1))
+    LOGS_WITH_FAILURES_BY_SOURCE["$log_source"]=$((${LOGS_WITH_FAILURES_BY_SOURCE[$log_source]:-0} + 1))
+  fi
+
+  # Complexity-prediction accuracy (declared vs. actual) is ticket-auto-
+  # specific — planner initiatives have no notes.md complexity score or
+  # Smooth/Rough/Hard outcome label. Its analogous quality signal is the
+  # Crosscheck finding rate, already reported via crosscheck_*_total (#177).
+  [ "$log_source" = "planner" ] && continue
 
   # ── Complexity prediction pair ─────────────────────────────────────────
   declared="null"
@@ -334,7 +389,11 @@ _build_error_event() {
     '{category: $category, event: $event, message: $message, timestamp: $timestamp, detail: $detail}'
 }
 
-for log_file in "${LOG_FILES[@]}"; do
+for _i in "${!LOG_FILES[@]}"; do
+  log_file="${LOG_FILES[$_i]}"
+  # Heartbeat logs are a ticket-auto-only convention (${ticket_id}-heartbeat.log
+  # alongside the pipeline log) — the planner has no heartbeat stream.
+  [ "${LOG_SOURCES[$_i]}" = "planner" ] && continue
   stem=$(basename "$log_file" .log)
   ticket_id="${stem%-pipeline}"
   hb_file="$(dirname "$log_file")/${ticket_id}-heartbeat.log"
@@ -471,6 +530,20 @@ if [ "$TOTAL_PAIRS" -gt 0 ]; then
   ACCURACY=$(awk "BEGIN { printf \"%.3f\", $CORRECT_COUNT / $TOTAL_PAIRS }")
 fi
 
+# ── Build per-source counts (#177 AC1) ────────────────────────────────────
+
+LOGS_BY_SOURCE_JSON=$(jq -n \
+  --argjson ta_scanned "${LOGS_SCANNED_BY_SOURCE["ticket-auto"]:-0}" \
+  --argjson ta_skipped "${LOGS_SKIPPED_BY_SOURCE["ticket-auto"]:-0}" \
+  --argjson ta_failures "${LOGS_WITH_FAILURES_BY_SOURCE["ticket-auto"]:-0}" \
+  --argjson pl_scanned "${LOGS_SCANNED_BY_SOURCE[planner]:-0}" \
+  --argjson pl_skipped "${LOGS_SKIPPED_BY_SOURCE[planner]:-0}" \
+  --argjson pl_failures "${LOGS_WITH_FAILURES_BY_SOURCE[planner]:-0}" \
+  '{
+    "ticket-auto": {scanned: $ta_scanned, skipped: $ta_skipped, with_failures: $ta_failures},
+    "planner": {scanned: $pl_scanned, skipped: $pl_skipped, with_failures: $pl_failures}
+  }')
+
 # ── Emit final JSON ──────────────────────────────────────────────────────
 
 jq -n \
@@ -478,6 +551,7 @@ jq -n \
   --argjson logs_scanned "$LOGS_SCANNED" \
   --argjson logs_skipped "$LOGS_SKIPPED" \
   --argjson logs_with_failures "$LOGS_WITH_FAILURES" \
+  --argjson logs_by_source "$LOGS_BY_SOURCE_JSON" \
   --argjson gate_stop_total "$GATE_STOP_TOTAL" \
   --argjson gate_warn_total "$GATE_WARN_TOTAL" \
   --argjson crosscheck_blocking_total "$CROSSCHECK_BLOCKING_TOTAL" \
@@ -498,6 +572,7 @@ jq -n \
     logs_scanned: $logs_scanned,
     logs_skipped: $logs_skipped,
     logs_with_failures: $logs_with_failures,
+    logs_by_source: $logs_by_source,
     failure_histogram: ($histogram_str | fromjson),
     gate_stop_total: $gate_stop_total,
     gate_warn_total: $gate_warn_total,

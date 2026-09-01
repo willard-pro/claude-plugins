@@ -17,6 +17,43 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.29.4 (2026-09-01)
+
+Closes #177 — `/ticket-retro` could not see `ticket-planner` runs at all.
+`retro.sh`'s directory-mode log discovery was hardcoded to ticket-auto's
+`./logs/*-pipeline.log` shape; the planner's `state.log` lives at a
+different root (`${REPOS_ROOT}/.ticket-auto/initiatives/{INIT_ID}/state.log`),
+under a fixed filename, keyed by initiative id rather than a `-pipeline.log`
+stem.
+
+- Fixed (ticket-auto-pipeline): `retro.sh` now discovers both log sources in
+  `--window` mode — ticket-auto's `./logs/*-pipeline.log` and the planner's
+  `${REPOS_ROOT}/.ticket-auto/initiatives/*/state.log` — tagging each
+  discovered log with its source and reporting per-source
+  scanned/skipped/with_failures counts in a new `logs_by_source` JSON field.
+  Guarded on `PLANNER_INITIATIVES_DIR` existing, so a host with no planner
+  runs (or `REPOS_ROOT` unset) sees byte-identical ticket-auto-only
+  behaviour.
+- Complexity-prediction accuracy (declared vs. actual) stays ticket-auto-only
+  — planner initiatives have no `notes.md` score or outcome label, so
+  planner-sourced logs are excluded from `complexity_predictions` rather
+  than padding it with nulls. The planner's analogous quality signal
+  (Crosscheck finding rate) is already reported via `crosscheck_*_total`.
+- Cursor dedup (`retro-cursor.json`) works unmodified across both sources:
+  ticket-auto ids (`CRE-47`) and planner initiative ids (`INIT-...`) are
+  disjoint namespaces by construction, so a flat ticket-id key already
+  dedupes each source independently.
+- Added six planner Crosscheck codes (`CITATION_UNRESOLVED`,
+  `CITATION_LINE_OUT_OF_RANGE`, `CITATION_SYMBOL_MISMATCH`,
+  `RESOLUTION_NOT_PROPAGATED`, `FORWARD_REF_UNFULFILLED`,
+  `CARVE_SCOPE_LOST`) to `ticket-retro/SKILL.md`'s code→skill-file mapping
+  and per-code templates, so a proposal generated from a planner finding
+  names `ticket-planner/lib/...` files as implicated — not a
+  `ticket-auto-pipeline` skill.
+- Added `ticket-auto-pipeline/lib/tests/test-retro-planner-source.sh` (6
+  tests) covering multi-source discovery, per-source counts, cursor dedup,
+  and ticket-auto-only backward compatibility.
+
 ## ticket-planner 0.8.1 / ticket-auto-pipeline 0.29.3 (2026-09-01)
 
 Closes out the two remaining acceptance criteria on #176 that 0.8.0 left
