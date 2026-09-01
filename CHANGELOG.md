@@ -17,6 +17,47 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.29.8 (2026-09-01)
+
+Closes #189 — `ticket-pr-review` Step 6b merged any PR with a ✅ verdict
+directly via the GitHub REST API, with no awareness of the pipeline's own
+`autonomy` setting or an epic's Branch Directive `Merge Policy`. The router's
+own auto-merge logic (in `ticket-auto/SKILL.md`) correctly gates merge on
+`{ autonomy=auto || autonomy=semi-auto } && complexity=simple` and never fires
+in `manual` mode — but that gate runs *after* `STEP_4_6`, by which point
+`ticket-pr-review` had already merged the PR itself. Confirmed live on CRE-22
+(`autonomy=manual`, epic `Merge Policy: manual`): two child PRs were merged
+with zero human sign-off the moment review passed.
+
+- Fix: `resolve_branch_context` (`lib/branch-resolve.sh`) now also resolves
+  and emits `MERGE_POLICY` from the parent epic's Branch Directive, mirroring
+  the existing `UAT_POLICY` field — but, unlike `UAT_POLICY`, absence stays
+  empty rather than materialising a default: "no epic opinion" and "epic
+  requires manual merge" must stay distinguishable. New standalone
+  `resolve_merge_policy <TICKET_ID>` helper mirrors `resolve_uat_policy` for
+  invocations outside a pipeline run.
+- `spawn_write_env` (`lib/spawn-helper.sh`) now accepts and exports `AUTONOMY`
+  and `MERGE_POLICY` into the per-ticket agent env file — neither was plumbed
+  through at all before this change, so `ticket-pr-review` had no way to see
+  either signal even if it had checked.
+- `ticket-auto/SKILL.md` Step 0.5 resolves and writes both fields (including
+  on crash-resume rehydration), and `detect-resume.sh` parses `merge-policy`
+  from the `META|branch-context` log line so a resumed pipeline doesn't lose
+  the epic's policy.
+- `ticket-pr-review/SKILL.md` Step 6b now checks `AUTONOMY`/`MERGE_POLICY`
+  before spending any CI/conflict-check API calls: a non-`auto`/`semi-auto`
+  autonomy or a declared epic `Merge Policy` (both existing enum values
+  require a human — there is no `auto` value) skips the direct merge and
+  reports the PR as ready for a human to merge instead. A standalone
+  `/ticket-pr-review` invocation outside a pipeline run has neither env var
+  set and falls back to resolving `MERGE_POLICY` directly (so it still
+  honours an epic directive); `AUTONOMY` has no standalone meaning and stays
+  non-blocking for that case, preserving existing interactive behaviour.
+- New/updated tests: `test-branch-resolve.sh` (+7), `test-detect-resume.sh`
+  (+2), `test-spawn-helper.sh` (+1 new, plus `AUTONOMY`/`MERGE_POLICY`
+  assertions added to the existing all-fields test) covering resolution,
+  defaulting, and env-file plumbing for both fields.
+
 ## ticket-planner 0.8.3 / ticket-auto-pipeline 0.29.7 (2026-09-01)
 
 Closes #190 — `_retry_classify` (and `_planner_retry_classify`, the same

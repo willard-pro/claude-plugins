@@ -279,7 +279,48 @@ This adds `reviewed` or `rejected`, keeping all other labels.
 
 If the verdict has ⚠️ or ❌, skip this step entirely.
 
-If the verdict is ✅, **first check that all GitHub build checks have passed** before merging:
+If the verdict is ✅, **first determine merge authorization** — before spending any API calls on
+CI/conflict checks. This skill's own merge is a *direct* merge (no human in the loop); it must
+never fire when the pipeline's autonomy is `manual`, nor when the ticket's epic has declared a
+Branch Directive `Merge Policy` (both existing values, `manual` and `on-all-children-done`,
+require a human to merge — there is no `auto` value):
+
+```bash
+source ~/.claude/skills/lib/branch-resolve.sh
+
+# AUTONOMY/MERGE_POLICY are exported by the agent env file (--from-auto runs
+# only). A standalone invocation outside a pipeline run has neither set —
+# resolve MERGE_POLICY directly so a standalone review still honours an epic
+# directive; AUTONOMY has no standalone meaning (there is no pipeline autonomy
+# to speak of), so it stays empty and does not block a human-driven run.
+autonomy="${AUTONOMY:-}"
+merge_policy="${MERGE_POLICY:-}"
+if [ -z "$autonomy" ] && [ -z "$merge_policy" ]; then
+  merge_policy=$(resolve_merge_policy "{TICKET-ID}" 2>/dev/null)
+fi
+
+_merge_blocked_reason=""
+if [ -n "$autonomy" ] && [ "$autonomy" != "auto" ] && [ "$autonomy" != "semi-auto" ]; then
+  _merge_blocked_reason="pipeline autonomy=${autonomy} requires human merge"
+elif [ -n "$merge_policy" ]; then
+  _merge_blocked_reason="epic Branch Directive Merge Policy: ${merge_policy} requires human merge"
+fi
+```
+
+**If `_merge_blocked_reason` is non-empty:** do NOT merge. Report to the user:
+
+```
+✅ PR #{number} passed review and is ready to merge, but requires a human: {_merge_blocked_reason}.
+
+Merge it yourself once you're ready:
+gh pr merge {number} --repo {owner}/{repo} --squash
+```
+
+Post the same message as a PR comment.
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|PR-REVIEW|merge-decision|done|skipped: $_merge_blocked_reason" >> "$LOG_FILE"
+
+**If `_merge_blocked_reason` is empty**, check that all GitHub build checks have passed before merging:
 
 ```bash
 gh pr checks {number} --repo {owner}/{repo} --json name,status,conclusion

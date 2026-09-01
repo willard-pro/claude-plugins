@@ -156,6 +156,15 @@ resolve_branch_context() {
   local uat_policy
   uat_policy=$(_uat_policy_from_description "$parent_description")
 
+  # ── Resolve merge policy ──────────────────────────────────────────────────
+  # Same reasoning as UAT policy above: it is a property of the epic, read
+  # from the parent directive regardless of which precedence rule chose the
+  # branch. Unlike UAT policy, absence has no normalised default — a ticket
+  # with no epic directive has no Merge Policy opinion at all, and callers
+  # must not treat empty as "auto" (that would defeat the point of the field).
+  local merge_policy
+  merge_policy=$(_merge_policy_from_description "$parent_description")
+
   # ── Emit result block ─────────────────────────────────────────────────────
   cat <<EOF
 BRANCH_CONTEXT_RESULT
@@ -165,6 +174,7 @@ BRANCH_CONTEXT_RESULT
   EPIC_ID:              ${parent_id:-}
   BRANCH_SOURCE:        ${branch_source}
   UAT_POLICY:           ${uat_policy}
+  MERGE_POLICY:         ${merge_policy}
 END_BRANCH_CONTEXT_RESULT
 EOF
 
@@ -197,6 +207,32 @@ resolve_uat_policy() {
   parent_description=$(echo "$issue_json" | jq -r '.parent.description // ""' 2>/dev/null)
 
   _uat_policy_from_description "$parent_description"
+}
+
+# resolve_merge_policy <TICKET_ID>
+# Standalone resolution of a ticket's epic Merge Policy, for skills invoked
+# outside a pipeline run and therefore without an agent environment file.
+# Echoes the declared policy (`manual` | `on-all-children-done`), or an empty
+# string when the ticket has no parent epic or the parent has no directive.
+#
+# Mirrors resolve_uat_policy — same parent-description read, same directive
+# parser — so the standalone and pipeline answers cannot diverge.
+#
+# On fetch failure it echoes nothing and returns 1: a caller that checks the
+# status can react, one that does not gets an empty (non-blocking) policy.
+resolve_merge_policy() {
+  local ticket_id="$1"
+
+  local issue_json
+  issue_json=$(get_issue "$ticket_id" 2>/dev/null) || {
+    echo "branch-resolve: failed to fetch ticket $ticket_id for Merge Policy" >&2
+    return 1
+  }
+
+  local parent_description
+  parent_description=$(echo "$issue_json" | jq -r '.parent.description // ""' 2>/dev/null)
+
+  _merge_policy_from_description "$parent_description"
 }
 
 # uat_decide_trigger [--policy <policy>] [--uat-url <url>] [--ticket <TICKET_ID>]
@@ -293,6 +329,26 @@ _uat_policy_from_description() {
   fi
 
   echo "${policy:-per-ticket}"
+}
+
+# _merge_policy_from_description <description>
+# Echoes the Merge Policy declared by an epic description's Branch Directive,
+# or an empty string when no directive is present or the directive omits the
+# field. Unlike UAT policy, there is no normalised default: "no epic opinion"
+# and "epic requires manual merge" must stay distinguishable to callers, so a
+# malformed/absent directive is not diagnosed here either — resolve_branch_
+# context already gate-stops on it before reaching this point when the
+# directive is load-bearing for branch selection.
+_merge_policy_from_description() {
+  local description="$1"
+  local directive_output="" policy=""
+
+  if [ -n "$description" ]; then
+    directive_output=$(check_branch_directive_description "$description" 2>/dev/null) || directive_output=""
+    policy=$(echo "$directive_output" | sed -n "s/^BRANCH_DIRECTIVE_MERGE_POLICY='\\(.*\\)'$/\\1/p")
+  fi
+
+  echo "$policy"
 }
 
 # _generate_branch_name <ticket-id> <title>
