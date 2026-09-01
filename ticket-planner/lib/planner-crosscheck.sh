@@ -7,15 +7,15 @@
 # isolation. It is deterministic bash, not an agent — nothing here reasons
 # about content, it runs the existing linters and records what they found.
 #
-# Wires in the two check families that exist today:
+# Wires in the check families that exist today:
 #   - planner-crosscheck-citations.sh   (#172 — citation + precedent grep)
 #   - planner-crosscheck-propagation.sh (#173 — cross-ticket propagation)
+#   - planner-crosscheck-bypass.sh      (#174 — bypass sweep + discovery gap)
 #
-# #174 (bypass sweep) and #175 (cross-initiative contracts) are separate,
-# unimplemented issues — planner_crosscheck_run calls only the two check
-# families above. Adding a check later means adding one more call in
-# planner_crosscheck_run and, if it can emit a non-blocking finding, adding
-# its codes to PLANNER_CROSSCHECK_WARN_CODES below.
+# #175 (cross-initiative contracts) is a separate, unimplemented issue.
+# Adding a check later means adding one more call in planner_crosscheck_run
+# and, if it can emit a non-blocking finding, adding its codes to
+# PLANNER_CROSSCHECK_WARN_CODES below.
 #
 # Every finding is written to state.log as its own line, in the format #176
 # specifies:
@@ -52,18 +52,22 @@ _planner_crosscheck_source_if_missing "planner_crosscheck_citations" \
   "${_PLANNER_CROSSCHECK_LIB_DIR}/planner-crosscheck-citations.sh"
 _planner_crosscheck_source_if_missing "planner_crosscheck_propagation" \
   "${_PLANNER_CROSSCHECK_LIB_DIR}/planner-crosscheck-propagation.sh"
+_planner_crosscheck_source_if_missing "planner_crosscheck_bypass" \
+  "${_PLANNER_CROSSCHECK_LIB_DIR}/planner-crosscheck-bypass.sh"
 _planner_crosscheck_source_if_missing "planner_state_write" \
   "${_PLANNER_CROSSCHECK_LIB_DIR}/planner-state.sh"
 
 # Codes that must NOT halt the run — logged as META|crosscheck|warn|info
-# instead of META|crosscheck|fail|<code> (#176 AC4). Empty today: every code
-# either check family can currently emit (CITATION_UNRESOLVED,
+# instead of META|crosscheck|fail|<code> (#176 AC4). Every code the
+# citation/propagation families emit (CITATION_UNRESOLVED,
 # CITATION_LINE_OUT_OF_RANGE, CITATION_SYMBOL_MISMATCH, PRECEDENT_NOT_FOUND,
-# RESOLUTION_NOT_PROPAGATED, FORWARD_REF_UNFULFILLED, CARVE_SCOPE_LOST) blocks
-# EpicGen per #176's table. #174's DISCOVERY_GAP_UNRESOLVED and #175's
-# CONTRACT_UNDEFINED are warn-level in that table — add them here when those
-# checks land.
-PLANNER_CROSSCHECK_WARN_CODES=""
+# RESOLUTION_NOT_PROPAGATED, FORWARD_REF_UNFULFILLED, CARVE_SCOPE_LOST) and
+# #174's BYPASS_PATH_UNADDRESSED blocks EpicGen per #176's table.
+# DISCOVERY_GAP_UNRESOLVED is warn-level: a declared exploration gap is a
+# prompt for human judgment, not by itself proof of a defect. #175's
+# CONTRACT_UNDEFINED is warn-level in that table too — add it here when that
+# check lands.
+PLANNER_CROSSCHECK_WARN_CODES="DISCOVERY_GAP_UNRESOLVED"
 
 # Is <code> a warn-level code?
 # Usage: _planner_crosscheck_is_warn_code <code>
@@ -138,13 +142,17 @@ planner_crosscheck_run() {
   local total_blocking=0 total_warn=0
   local b w
 
-  planner_state_write "$initiative_id" "Crosscheck" "check" "start" "running citation + propagation checks"
+  planner_state_write "$initiative_id" "Crosscheck" "check" "start" "running citation + propagation + bypass checks"
 
   read -r b w < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_citations "$initiative_id")
   total_blocking=$((total_blocking + b))
   total_warn=$((total_warn + w))
 
   read -r b w < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_propagation "$initiative_id")
+  total_blocking=$((total_blocking + b))
+  total_warn=$((total_warn + w))
+
+  read -r b w < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_bypass "$initiative_id")
   total_blocking=$((total_blocking + b))
   total_warn=$((total_warn + w))
 
