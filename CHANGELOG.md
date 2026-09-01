@@ -17,6 +17,34 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.29.6 (2026-09-01)
+
+Closes #186 — `gate-check.sh`'s entry gate had two false-hold bugs, both
+found live while running CRE-22 (a complex, build-only, manual-autonomy
+ticket) through the pipeline.
+
+- **Manual-mode complex tickets could never clear the entry gate.**
+  `_gate_entry`'s Check 3 ("complex tickets are always held")
+  unconditionally returned before Check 4 — the check specifically
+  designed to override the hold once a human approves in Linear
+  (`approved` label + `Ready` state) — ever ran, but Check 4 only fires
+  for `autonomy=manual`. Check 2.8b already handled the equivalent case
+  for `auto`/`semi-auto`; its own comment ("manual has its own check at
+  Check 4") described intent the code never implemented. Added Check
+  2.8c, evaluated before Check 3, mirroring 2.8b for manual autonomy.
+- **Build-only/API-only tickets could be held forever by an
+  unsatisfiable nav-path critique finding.** The critique-plan
+  cross-validation block ran unconditionally, unlike the mode-aware
+  `missing_count` check just above it, which correctly skips
+  browser-only prerequisites (nav path, test user) for tickets with no
+  UI. A critique correctly flagging "no navigation path" on a
+  build-only ticket held it indefinitely, since no plan can supply a
+  navigation path that doesn't exist. Gated the whole block on
+  `_ticket_mode = browser`.
+- 3 new tests in `test-gate-check.sh`: manual+complex+approved passes,
+  manual+complex+unapproved still holds (regression guard), and
+  build-only cross-validation is skipped.
+
 ## ticket-auto-pipeline 0.29.5 (2026-09-01)
 
 Closes #181 — prescan docs for repos outside a ticket's own scope sat
