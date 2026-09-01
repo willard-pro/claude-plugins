@@ -58,6 +58,51 @@ with zero human sign-off the moment review passed.
   assertions added to the existing all-fields test) covering resolution,
   defaulting, and env-file plumbing for both fields.
 
+## ticket-planner 0.8.4 (2026-09-01)
+
+Closes #175 — the fourth and final Crosscheck check family,
+`planner-crosscheck-contracts.sh`. Every planner phase is scoped to one
+initiative, so nothing ever checked whether a structure one initiative's
+specs borrow from a sibling initiative's specs actually has the shape the
+borrowing epic assumes. The August 31 audit found two live instances in
+`INIT-1788116082-4791` (Evidence-Based Confidence): a dependent epic
+inherited the wrong one of two contradictory upstream shapes for
+`ClassificationResult`/`_llm_classify()` confidence reporting (per-field vs.
+top-level), and a dependent epic retired `ValidationOutcome` mentioning only
+its own call site while three upstream VS-6 tickets still gated on it.
+
+- New: `planner_crosscheck_contract_undefined` — a spec paragraph declaring
+  a structure "gains/adds fields for ..." in prose only, with no other
+  backtick-quoted identifier anywhere in the paragraph, leaves the shape
+  undefined for whoever reads it next. Code: `CONTRACT_UNDEFINED`
+  (warn-level — an ambiguous upstream shape is a prompt for human judgment,
+  not by itself proof of a defect). Needs no cross-initiative view.
+- New: `planner_crosscheck_contract_mismatch` — for every backtick-quoted
+  structure this initiative's specs share with a sibling initiative's specs
+  under `${REPOS_ROOT}/.ticket-auto/initiatives/*/artifacts/specs`, compares
+  the other backtick-quoted terms co-mentioned with it in each side's
+  paragraph. A disjoint term set, or one side describing it as per-field and
+  the other as top-level/document-level, is reported quoting both
+  paragraphs. Code: `CONTRACT_MISMATCH` (blocking).
+- New: `planner_crosscheck_contract_consumers_unnotified` — a paragraph that
+  retires/removes/deprecates/replaces a structure without naming (by ticket
+  slug) every other spec — in this initiative or a sibling — that still
+  mentions that structure. Code: `CONTRACT_CONSUMERS_UNNOTIFIED` (blocking).
+- True cross-language structural diffing needs a parser per language and a
+  resolved symbol table — out of reach for a planner that only reads prose
+  specs. This is the same bounded, backtick-identifier heuristic tradeoff
+  `planner-crosscheck-bypass.sh` and `planner-crosscheck-propagation.sh`
+  already make, documented in the file header. Reuses
+  `planner-crosscheck-propagation.sh`'s known-slug helpers and
+  `planner-crosscheck-bypass.sh`'s paragraph splitter rather than
+  duplicating them.
+- Wired into `planner-crosscheck.sh`'s orchestrator alongside the citation,
+  propagation, and bypass families; `CONTRACT_UNDEFINED` added to
+  `PLANNER_CROSSCHECK_WARN_CODES`.
+- New test suite `test-planner-crosscheck-contracts.sh` (19 tests) covering
+  all three checks plus the public entry point and the no-cross-initiative-
+  references fast no-op (issue AC3).
+
 ## ticket-planner 0.8.3 / ticket-auto-pipeline 0.29.7 (2026-09-01)
 
 Closes #190 — `_retry_classify` (and `_planner_retry_classify`, the same

@@ -11,8 +11,8 @@
 #   - planner-crosscheck-citations.sh   (#172 — citation + precedent grep)
 #   - planner-crosscheck-propagation.sh (#173 — cross-ticket propagation)
 #   - planner-crosscheck-bypass.sh      (#174 — bypass sweep + discovery gap)
+#   - planner-crosscheck-contracts.sh   (#175 — cross-initiative contract shape)
 #
-# #175 (cross-initiative contracts) is a separate, unimplemented issue.
 # Adding a check later means adding one more call in planner_crosscheck_run
 # and, if it can emit a non-blocking finding, adding its codes to
 # PLANNER_CROSSCHECK_WARN_CODES below.
@@ -54,6 +54,8 @@ _planner_crosscheck_source_if_missing "planner_crosscheck_propagation" \
   "${_PLANNER_CROSSCHECK_LIB_DIR}/planner-crosscheck-propagation.sh"
 _planner_crosscheck_source_if_missing "planner_crosscheck_bypass" \
   "${_PLANNER_CROSSCHECK_LIB_DIR}/planner-crosscheck-bypass.sh"
+_planner_crosscheck_source_if_missing "planner_crosscheck_contracts" \
+  "${_PLANNER_CROSSCHECK_LIB_DIR}/planner-crosscheck-contracts.sh"
 _planner_crosscheck_source_if_missing "planner_state_write" \
   "${_PLANNER_CROSSCHECK_LIB_DIR}/planner-state.sh"
 
@@ -61,13 +63,13 @@ _planner_crosscheck_source_if_missing "planner_state_write" \
 # instead of META|crosscheck|fail|<code> (#176 AC4). Every code the
 # citation/propagation families emit (CITATION_UNRESOLVED,
 # CITATION_LINE_OUT_OF_RANGE, CITATION_SYMBOL_MISMATCH, PRECEDENT_NOT_FOUND,
-# RESOLUTION_NOT_PROPAGATED, FORWARD_REF_UNFULFILLED, CARVE_SCOPE_LOST) and
-# #174's BYPASS_PATH_UNADDRESSED blocks EpicGen per #176's table.
-# DISCOVERY_GAP_UNRESOLVED is warn-level: a declared exploration gap is a
-# prompt for human judgment, not by itself proof of a defect. #175's
-# CONTRACT_UNDEFINED is warn-level in that table too — add it here when that
-# check lands.
-PLANNER_CROSSCHECK_WARN_CODES="DISCOVERY_GAP_UNRESOLVED"
+# RESOLUTION_NOT_PROPAGATED, FORWARD_REF_UNFULFILLED, CARVE_SCOPE_LOST),
+# #174's BYPASS_PATH_UNADDRESSED, and #175's CONTRACT_MISMATCH /
+# CONTRACT_CONSUMERS_UNNOTIFIED block EpicGen per #176's table.
+# DISCOVERY_GAP_UNRESOLVED and CONTRACT_UNDEFINED are warn-level: a declared
+# exploration gap or an ambiguous upstream shape is a prompt for human
+# judgment, not by itself proof of a defect.
+PLANNER_CROSSCHECK_WARN_CODES="DISCOVERY_GAP_UNRESOLVED CONTRACT_UNDEFINED"
 
 # Is <code> a warn-level code?
 # Usage: _planner_crosscheck_is_warn_code <code>
@@ -142,7 +144,7 @@ planner_crosscheck_run() {
   local total_blocking=0 total_warn=0
   local b w
 
-  planner_state_write "$initiative_id" "Crosscheck" "check" "start" "running citation + propagation + bypass checks"
+  planner_state_write "$initiative_id" "Crosscheck" "check" "start" "running citation + propagation + bypass + contracts checks"
 
   read -r b w < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_citations "$initiative_id")
   total_blocking=$((total_blocking + b))
@@ -153,6 +155,10 @@ planner_crosscheck_run() {
   total_warn=$((total_warn + w))
 
   read -r b w < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_bypass "$initiative_id")
+  total_blocking=$((total_blocking + b))
+  total_warn=$((total_warn + w))
+
+  read -r b w < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_contracts "$initiative_id")
   total_blocking=$((total_blocking + b))
   total_warn=$((total_warn + w))
 
