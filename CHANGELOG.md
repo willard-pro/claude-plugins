@@ -17,6 +17,40 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.2 (2026-09-01)
+
+Closes #174 — a third Crosscheck check family, `planner-crosscheck-bypass.sh`.
+An August 31 audit of all seven existing initiatives found the planner
+reasons forward from "what shall we build" and never asks "what already
+exists that contradicts it": a pre-existing writer of the same guarded data
+can silently defeat an epic's central guarantee while every spec in the set
+stays internally correct.
+
+- New: `planner_crosscheck_bypass_sweep` — for every spec paragraph that
+  both names a backtick-quoted resource and matches a guard-declaration
+  phrase ("derived from", "never overwritten", "hand-set", "only ... may",
+  "must be audited/locked"), searches `REPOS_ROOT` for other file:line sites
+  naming that resource on a line that looks like a write or definition site,
+  excluding every file already cited anywhere in the spec set. Code:
+  `BYPASS_PATH_UNADDRESSED` (blocking). True cross-runtime concept matching
+  (the audit's `buildStorageKey` / `_build_classified_key` example — two
+  functions with no shared name) needs an LLM; this is the bounded,
+  deterministic slice of it, same tradeoff `planner-crosscheck-propagation.sh`
+  already makes for term-only prose.
+- New: `planner_crosscheck_discovery_gap` — a discovery.md self-declared
+  exploration limitation ("quick-scan", "did not trace", "not explored",
+  "assumed", ...) must have its substance recorded in proposal.md's Out of
+  Scope section, or later phases reason confidently over a region the
+  pipeline itself flagged as unexamined. Code: `DISCOVERY_GAP_UNRESOLVED`
+  (warn) — a declared gap is a prompt for human judgment, not by itself
+  proof of a defect.
+- Changed: `planner-crosscheck.sh` wires the new family into
+  `planner_crosscheck_run` alongside citation and propagation, and adds
+  `DISCOVERY_GAP_UNRESOLVED` to `PLANNER_CROSSCHECK_WARN_CODES`.
+- New test: `lib/tests/test-planner-crosscheck-bypass.sh` (11 assertions).
+
+#175 (cross-initiative contract checking) remains separate and unimplemented.
+
 ## ticket-auto-pipeline 0.29.6 (2026-09-01)
 
 Closes #186 — `gate-check.sh`'s entry gate had two false-hold bugs, both

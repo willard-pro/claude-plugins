@@ -106,6 +106,7 @@ test-planner:
 	bash ticket-planner/lib/tests/test-branch-directive-gen.sh
 	bash ticket-planner/lib/tests/test-planner-crosscheck-citations.sh
 	bash ticket-planner/lib/tests/test-planner-crosscheck-propagation.sh
+	bash ticket-planner/lib/tests/test-planner-crosscheck-bypass.sh
 	bash ticket-planner/lib/tests/test-planner-crosscheck.sh
 
 test-planner-intent-gate:
