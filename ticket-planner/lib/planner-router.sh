@@ -106,10 +106,15 @@ planner_run() {
 
 # ── Stop conditions and the create gate ────────────────────────────────────────
 #
-# Phases 1-6 write only to disk; EpicGen (phase 7) is the first Linear write. The
-# planner therefore stops after Consensus *by default* — that is a constant, not
+# Phases 1-7 write only to disk; EpicGen (phase 8) is the first Linear write. The
+# planner therefore stops after Crosscheck *by default* — that is a constant, not
 # runtime state, so there is nothing that can fail to propagate and no flag whose
 # absence silently authorizes creation.
+#
+# Crosscheck (#178) is the last artifact-only phase, not Consensus — it runs
+# unconditionally, authorized or not, because it only reads and cross-references
+# artifacts already on disk. A blocking finding halts the dispatch loop right
+# there (see planner-crosscheck.sh), before this gate is even reached.
 #
 # Proceeding past that boundary takes a separate, deliberate invocation:
 #
@@ -122,16 +127,16 @@ planner_run() {
 #
 # `--until <Phase>` narrows the stop further and is persisted the same way. When
 # both apply the earliest wins: `--until TicketGen` without `--create` still
-# stops at Consensus.
+# stops at Crosscheck.
 #
 # Nothing here reads the environment. An `export` at argument-parsing time is
 # gone by the next phase iteration — that was #144.
 
 # Last artifact-only phase. EpicGen, the phase after it, is the first Linear write.
-PLANNER_DRY_RUN_PHASE="Consensus"
+PLANNER_DRY_RUN_PHASE="Crosscheck"
 
 # The phase after which creation must be explicitly authorized.
-PLANNER_CREATE_GATE_PHASE="Consensus"
+PLANNER_CREATE_GATE_PHASE="Crosscheck"
 
 # Phases that create or mutate Linear entities. Gated on create-authorization.
 PLANNER_LINEAR_WRITE_PHASES="EpicGen TicketGen"

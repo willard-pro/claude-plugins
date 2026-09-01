@@ -198,7 +198,7 @@ Complex tickets **always** wait for a human. Full detail: [autonomy modes](ticke
 /ticket-planner plan "Add real-time collaboration to the document editor"
 ```
 
-The planner runs 9 phases (Appraisal → Discovery → Architecture → Specify → Review → Consensus → EpicGen → TicketGen → Completed) and produces a Linear epic plus dependency-ordered tickets, each carrying a `Planner Context` block that lets the pipeline skip re-investigation.
+The planner runs 10 phases (Appraisal → Discovery → Architecture → Specify → Review → Consensus → Crosscheck → EpicGen → TicketGen → Completed) and produces a Linear epic plus dependency-ordered tickets, each carrying a `Planner Context` block that lets the pipeline skip re-investigation.
 
 Then execute them:
 

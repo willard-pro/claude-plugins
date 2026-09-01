@@ -17,6 +17,42 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.0 (2026-09-01)
+
+Crosscheck lands as phase 7 of the planner's state machine, between Consensus
+and Epic Gen — the last artifact-only phase, and the first point anything
+compares the settled artifacts against each other and the live repo rather
+than validating one file at a time. It wires in the two deterministic linters
+built in 0.7.2/0.7.3 (citation resolution + precedent grep, and cross-ticket
+propagation), which existed but had no call site (#178, closing out #176 for
+the two check families that are implemented; #174/#175 remain separate,
+unimplemented issues).
+
+- New: `lib/planner-crosscheck.sh` — `planner_crosscheck_run <initiative_id>`
+  runs both linters, writes every finding to state.log as
+  `META|crosscheck|fail|<CODE> <message>` (the shape `ticket-retro`'s
+  failure-histogram parser already reads, once #177 points it at planner
+  logs), and writes the phase's own `Crosscheck|check|{start,done,fail}`
+  progress markers.
+- Changed: `planner_phase_sequence` gains `Crosscheck` between `Consensus`
+  and `EpicGen` (9 phases → 10). `PLANNER_DRY_RUN_PHASE` and
+  `PLANNER_CREATE_GATE_PHASE` move from `Consensus` to `Crosscheck` — `plan`
+  now runs Crosscheck unconditionally (it's artifact-only, so authorization
+  doesn't gate it) before stopping at the create-gate boundary.
+  `planner_position_derive`, the retry budget, and `--until` validation need
+  no changes — they're all derived from `planner_phase_sequence`.
+- Changed: Crosscheck is dispatched as plain bash from SKILL.md's dispatch
+  loop, not an Agent spawn — the only phase where that's true. A blocking
+  finding stops the loop immediately (not folded into the phase-retry
+  budget): the check is deterministic, so re-running it against unedited
+  artifacts can't produce a different answer. Fixing the cited artifact and
+  running `resume` re-runs Crosscheck and proceeds once clean.
+- Docs: every phase-count/phase-sequence reference across the plugin
+  (`CLAUDE.md` ×2, `SKILL.md`, `plugin-overview.md`, `docs/ticket-planner.md`,
+  `state-log-format.md`, both `README.md`s, `plugin.json`,
+  `marketplace.json`) updated 9→10 phases together, to avoid the "12-phase
+  vs 9-phase" doc-drift bug class from the 0.21.2 entry below.
+
 ## fleet-controller 0.7.0 (2026-08-19)
 
 `fleet_dispatch_initiative` becomes the single repeatable campaign command:

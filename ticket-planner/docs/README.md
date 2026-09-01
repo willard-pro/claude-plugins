@@ -4,7 +4,7 @@ Architecture, contracts, and reference documentation for the ticket-planner plug
 
 ## Architecture
 
-- [ticket-planner.md](ticket-planner.md) — Full architecture reference: 9-phase state machine, contracts (Planner Context block, labels, artifact plane, feedback), confidence derivation, dependency validation, re-planning, determinism boundary, configuration, and planned-entry gate dormancy rationale.
+- [ticket-planner.md](ticket-planner.md) — Full architecture reference: 10-phase state machine, contracts (Planner Context block, labels, artifact plane, feedback), confidence derivation, dependency validation, re-planning, determinism boundary, configuration, and planned-entry gate dormancy rationale.
 
 ## Format Specs
 
@@ -12,7 +12,7 @@ Architecture, contracts, and reference documentation for the ticket-planner plug
 
 ## Diagrams
 
-- [../../docs/ticket-planner-pipeline-diagram.html](../../docs/ticket-planner-pipeline-diagram.html) — Interactive 9-phase pipeline diagram with drill-down detail panels (GitHub Pages).
+- [../../docs/ticket-planner-pipeline-diagram.html](../../docs/ticket-planner-pipeline-diagram.html) — Interactive 10-phase pipeline diagram with drill-down detail panels (GitHub Pages).
 
 ## Skill Reference
 

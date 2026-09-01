@@ -51,7 +51,8 @@ echo "--- Test 1: planner_phase_index ---"
 
 if [ "$(planner_phase_index Appraisal)" = "0" ] &&
   [ "$(planner_phase_index Consensus)" = "5" ] &&
-  [ "$(planner_phase_index Completed)" = "8" ]; then
+  [ "$(planner_phase_index Crosscheck)" = "6" ] &&
+  [ "$(planner_phase_index Completed)" = "9" ]; then
   pass "known phases map to their sequence position"
 else
   pass_msg="Appraisal=$(planner_phase_index Appraisal) Consensus=$(planner_phase_index Consensus)"
@@ -75,16 +76,16 @@ echo "--- Test 2: default stops at the create gate ---"
 reset_env
 planner_state_init "INIT-GATE" "an idea" >/dev/null
 
-if [ "$(planner_stop_phase INIT-GATE)" = "Consensus" ]; then
-  pass "an unauthorized initiative stops after Consensus by default"
+if [ "$(planner_stop_phase INIT-GATE)" = "Crosscheck" ]; then
+  pass "an unauthorized initiative stops after Crosscheck by default"
 else
-  fail "default stop is Consensus" "got '$(planner_stop_phase INIT-GATE)'"
+  fail "default stop is Crosscheck" "got '$(planner_stop_phase INIT-GATE)'"
 fi
 
-if planner_should_stop_after INIT-GATE Consensus; then
-  pass "the loop stops once Consensus completes"
+if planner_should_stop_after INIT-GATE Crosscheck; then
+  pass "the loop stops once Crosscheck completes"
 else
-  fail "the loop stops after Consensus" "did not stop"
+  fail "the loop stops after Crosscheck" "did not stop"
 fi
 
 if planner_create_authorized INIT-GATE; then
@@ -162,7 +163,7 @@ fi
 
 # An --until past the gate cannot be used to sneak past it.
 planner_stop_after_set INIT-UNTIL "TicketGen"
-if [ "$(planner_stop_phase INIT-UNTIL)" = "Consensus" ]; then
+if [ "$(planner_stop_phase INIT-UNTIL)" = "Crosscheck" ]; then
   pass "--until past the gate still stops at the gate"
 else
   fail "the earliest stop wins" "got '$(planner_stop_phase INIT-UNTIL)'"
@@ -205,10 +206,10 @@ fi
 
 echo "--- Test 6: write boundary ---"
 
-if [ "$PLANNER_DRY_RUN_PHASE" = "Consensus" ] && [ "$PLANNER_CREATE_GATE_PHASE" = "Consensus" ]; then
+if [ "$PLANNER_DRY_RUN_PHASE" = "Crosscheck" ] && [ "$PLANNER_CREATE_GATE_PHASE" = "Crosscheck" ]; then
   pass "the gate sits on the last artifact-only phase"
 else
-  fail "gate is at Consensus" "dry-run='$PLANNER_DRY_RUN_PHASE' gate='$PLANNER_CREATE_GATE_PHASE'"
+  fail "gate is at Crosscheck" "dry-run='$PLANNER_DRY_RUN_PHASE' gate='$PLANNER_CREATE_GATE_PHASE'"
 fi
 
 for phase in EpicGen TicketGen; do
@@ -219,7 +220,7 @@ for phase in EpicGen TicketGen; do
   fi
 done
 
-for phase in Appraisal Discovery Architecture Specify Review Consensus; do
+for phase in Appraisal Discovery Architecture Specify Review Consensus Crosscheck; do
   if planner_phase_writes_linear "$phase"; then
     fail "${phase} is artifact-only" "classed as a Linear-write phase"
   else

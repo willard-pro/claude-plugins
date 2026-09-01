@@ -1,6 +1,6 @@
 # ticket-planner
 
-Autonomous 9-phase planner that turns business ideas into dependency-ordered planned tickets. Sits upstream of `ticket-auto-pipeline` and `fleet-controller` — plans, then hands off.
+Autonomous 10-phase planner that turns business ideas into dependency-ordered planned tickets. Sits upstream of `ticket-auto-pipeline` and `fleet-controller` — plans, then hands off.
 
 ## Install
 
@@ -98,8 +98,8 @@ not reach the phase that needs it.
 ### What happens
 
 1. The planner initializes a state directory under `$REPOS_ROOT/.ticket-auto/initiatives/{ID}/`
-2. Each of the 9 phases runs as an isolated Claude agent: Appraisal → Discovery → Architecture → Specify → Review → Consensus → EpicGen → TicketGen → Completed
-3. `plan` stops after Consensus. EpicGen is the first Linear write, and it runs only once `resume --create` has authorized it — the authorization is recorded in the state log, so it survives a crash and a plain `resume` afterwards still proceeds
+2. Each of the 10 phases runs: Appraisal → Discovery → Architecture → Specify → Review → Consensus → Crosscheck → EpicGen → TicketGen → Completed — every one an isolated Claude agent except Crosscheck, a deterministic citation + cross-ticket propagation linter
+3. `plan` stops after Crosscheck. EpicGen is the first Linear write, and it runs only once `resume --create` has authorized it — the authorization is recorded in the state log, so it survives a crash and a plain `resume` afterwards still proceeds
 4. TicketGen creates planned Linear tickets with `## Planner Context` blocks, `planned`/`pre-approved`/`Type` labels, and validated acyclic dependencies
 5. The epic gets `state:execution` — fleet-controller auto-dispatches when `FLEET_AUTO_DISPATCH=true`
 6. `ticket-auto-pipeline` consumes the planned tickets via its fast-path (skips full investigation for `planned` + `pre-approved` tickets)

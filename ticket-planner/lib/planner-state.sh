@@ -304,7 +304,7 @@ planner_phase_sequence() {
   local -n _seq="$1"
   _seq=(
     "Appraisal" "Discovery" "Architecture" "Specify" "Review" "Consensus"
-    "EpicGen" "TicketGen" "Completed"
+    "Crosscheck" "EpicGen" "TicketGen" "Completed"
   )
 }
 

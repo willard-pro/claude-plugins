@@ -56,6 +56,9 @@ Each phase has one primary step. Agents may write additional `start`/`done` pair
 ### Consensus
 `resolve` — address review findings, finalize proposal
 
+### Crosscheck
+`check` — run the citation ([#172](https://github.com/willard-pro/claude-plugins/issues/172)) and cross-ticket propagation ([#173](https://github.com/willard-pro/claude-plugins/issues/173)) linters; `fail` means at least one blocking finding, not an agent crash (see `META|crosscheck` below)
+
 ### EpicGen
 `create` — create Linear epic with idempotency guard
 `branch-directive` — decide and optionally append shared-branch directive to epic description
@@ -79,6 +82,7 @@ Each phase has one primary step. Agents may write additional `start`/`done` pair
 | `idea` | The original business idea (pipes/newlines sanitized) |
 | `intent` | Accepted grill-me intent: readiness, recommendation, seal hash |
 | `replan` | Re-planning event: trigger, feedback runs, drift summary, counts |
+| `crosscheck` | One Crosscheck finding. `fail` = blocking (`{CODE} {message}`, blocks EpicGen — [#176](https://github.com/willard-pro/claude-plugins/issues/176)); `warn` = non-blocking (`info {CODE} {message}`). One entry per finding, written by `planner_crosscheck_run` in `lib/planner-crosscheck.sh` |
 
 ### Invocation config
 

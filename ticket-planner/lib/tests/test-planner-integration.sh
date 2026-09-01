@@ -55,10 +55,10 @@ assert_rc() {
   fi
 }
 
-# ── Test: Full 9-phase position derivation flow ───────────────────────────────
+# ── Test: Full 10-phase position derivation flow ──────────────────────────────
 
 test_full_9_phase_run() {
-  echo "=== test_full_9_phase_run ==="
+  echo "=== test_full_10_phase_run ==="
   local id="INIT-TEST-FULL-$$"
 
   # Init
@@ -72,7 +72,7 @@ test_full_9_phase_run() {
   assert_eq "fresh init starts at Appraisal" "Appraisal" "$pos"
 
   # Simulate each phase completing
-  for phase in "Appraisal" "Discovery" "Architecture" "Specify" "Review" "Consensus" "EpicGen" "TicketGen" "Completed"; do
+  for phase in "Appraisal" "Discovery" "Architecture" "Specify" "Review" "Consensus" "Crosscheck" "EpicGen" "TicketGen" "Completed"; do
     planner_state_write "$id" "$phase" "main" "start" "Starting $phase"
     planner_state_write "$id" "$phase" "main" "done" "Completed $phase"
   done
@@ -173,7 +173,7 @@ test_cycle_detection() {
   echo ""
 }
 
-# ── Test: Phase sequence is exactly 9 phases ─────────────────────────────────
+# ── Test: Phase sequence is exactly 10 phases ────────────────────────────────
 
 test_phase_sequence_length() {
   echo "=== test_phase_sequence_length ==="
@@ -181,12 +181,13 @@ test_phase_sequence_length() {
   planner_phase_sequence phases
 
   local count="${#phases[@]}"
-  assert_eq "phase sequence has 9 phases" "9" "$count"
+  assert_eq "phase sequence has 10 phases" "10" "$count"
 
   # Verify specific positions
   assert_eq "phase[0] is Appraisal" "Appraisal" "${phases[0]}"
   assert_eq "phase[3] is Specify" "Specify" "${phases[3]}"
-  assert_eq "phase[8] is Completed" "Completed" "${phases[8]}"
+  assert_eq "phase[6] is Crosscheck" "Crosscheck" "${phases[6]}"
+  assert_eq "phase[9] is Completed" "Completed" "${phases[9]}"
 
   # Verify Story Gen and Execution are not present
   local found_storygen=0 found_execution=0
