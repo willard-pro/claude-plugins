@@ -94,6 +94,7 @@ PLANNER_CROSSCHECK_CONTRACTS_BUILTIN_DENYLIST=(
   FileNotFoundError PermissionError OSError IOError NotImplemented
   Error Promise Array Object Map Set String Number Boolean
   None True False null undefined
+  console.log console.error console.warn console.info console.debug
 )
 
 # Usage: _planner_crosscheck_contracts_is_builtin <token>
@@ -126,7 +127,7 @@ _planner_crosscheck_contracts_is_generic_word() {
 
 # Directories excluded from the repo-definition search — same convention as
 # planner-crosscheck-citations.sh's PLANNER_CROSSCHECK_EXCLUDE_DIRS.
-PLANNER_CROSSCHECK_CONTRACTS_EXCLUDE_DIRS=("node_modules" ".venv" ".git" ".ticket-auto" ".claude")
+PLANNER_CROSSCHECK_CONTRACTS_EXCLUDE_DIRS=("node_modules" ".venv" ".git" ".ticket-auto" ".claude" "ledgerly" "tickets")
 
 # True if <symbol> already resolves to a real definition somewhere under
 # <repos_root> — i.e. it's an existing structure this initiative's specs are
@@ -226,6 +227,28 @@ _planner_crosscheck_contracts_first_block_with_structure() {
     [ -z "$block" ] && continue
     if echo "$block" | grep -qF "\`${structure}\`"; then
       printf '%s' "$block"
+      return 0
+    fi
+  done < <(_planner_crosscheck_bypass_blocks "$file")
+  return 1
+}
+
+# True if ANY paragraph in <file> mentioning literal backtick <structure> —
+# not just the first one `_first_block_with_structure` compares shapes
+# against — reads as deferential (see `_is_deferential` above). A spec
+# often first mentions a shared structure while describing today's
+# behavior (no deference language yet — that paragraph looks like a
+# competing definition) and only states "left untouched"/"not by this
+# ticket's own X" in a later paragraph. Confirmed live on VS-3:
+# vs-3c's `documents.status` mention at the top of its Description reads
+# as a plain description of existing behavior; the actual ownership
+# disclaimer is in a paragraph further down.
+# Usage: _planner_crosscheck_contracts_any_block_deferential <file> <structure>
+_planner_crosscheck_contracts_any_block_deferential() {
+  local file="$1" structure="$2" block
+  while IFS= read -r -d '' block; do
+    [ -z "$block" ] && continue
+    if echo "$block" | grep -qF "\`${structure}\`" && _planner_crosscheck_contracts_is_deferential "$block"; then
       return 0
     fi
   done < <(_planner_crosscheck_bypass_blocks "$file")
@@ -343,6 +366,22 @@ _planner_crosscheck_contracts_shape_terms() {
     done | sort -u
 }
 
+# True if <block> reads as deferring to / crediting another spec's existing
+# shape of a structure rather than independently (re)defining it — e.g. "not
+# by this ticket's own field_reconciliation table", "modeled on ... 's
+# conventions", "left completely untouched". Observed live on VS-3: a block
+# that only credits or explicitly disclaims ownership of a structure still
+# got compared against the defining spec's co-mentioned terms as if it were
+# a second, competing definition, producing CONTRACT_MISMATCH on structures
+# no spec actually contests the shape of (`console.log`, `documents.status`,
+# `ClassificationResult.confidence`, `entity_required_artifacts`).
+# Usage: _planner_crosscheck_contracts_is_deferential <block>
+_planner_crosscheck_contracts_is_deferential() {
+  local block="$1"
+  printf '%s' "$block" | grep -qiE \
+    "modeled on|'s conventions|not by this ticket|left (completely )?(untouched|unchanged)|leaves? .{0,40}(untouched|unchanged)"
+}
+
 # Fixed shape-descriptor phrase pairs — the audit's actual contradiction
 # ("return per-field confidence, not one document-level score" vs "a single
 # top-level confidence key"). Prints a space-joined subset of
@@ -416,6 +455,11 @@ planner_crosscheck_contract_mismatch() {
           [ -z "$fileB" ] && continue
           local blockB
           blockB=$(_planner_crosscheck_contracts_first_block_with_structure "$fileB" "$s") || continue
+
+          _planner_crosscheck_contracts_is_deferential "$blockA" && continue
+          _planner_crosscheck_contracts_is_deferential "$blockB" && continue
+          _planner_crosscheck_contracts_any_block_deferential "$fileA" "$s" && continue
+          _planner_crosscheck_contracts_any_block_deferential "$fileB" "$s" && continue
 
           local -a shapeA shapeB
           mapfile -t shapeA < <(_planner_crosscheck_contracts_shape_terms "$blockA" "$s" "${self_slugs[@]}" "${sib_slugs[@]}")

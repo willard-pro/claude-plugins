@@ -57,7 +57,7 @@ PLANNER_CROSSCHECK_CITE_EXTENSIONS=$(
 # Claude Code session transcripts under .claude/projects/**/tool-results/,
 # which can quote real code and false-positive-resolve a citation or
 # precedent search against cached prose instead of the actual codebase.
-PLANNER_CROSSCHECK_EXCLUDE_DIRS=("node_modules" ".venv" ".git" ".ticket-auto" ".claude")
+PLANNER_CROSSCHECK_EXCLUDE_DIRS=("node_modules" ".venv" ".git" ".ticket-auto" ".claude" "ledgerly" "tickets")
 
 # How many lines on either side of a cited line a TargetSymbols symbol name
 # may appear in and still count as resolved (issue #172 suggests N=5).
@@ -97,8 +97,17 @@ _planner_crosscheck_resolve_path() {
   # to the same single-slash match a repo-relative citation gets.
   rel_path="${rel_path#"${rel_path%%[!/]*}"}"
 
+  # `find -path` treats `[` `]` as a glob character class, not literal
+  # brackets — a genuinely-existing Next.js dynamic-route file like
+  # `app/api/account/entities/[entityId]/route.ts` then never matches its
+  # own real path (the class `[entityId]` matches one of e/n/t/i/y/d, not
+  # the six-character literal). Escape them so the glob treats the segment
+  # as literal text, same as any other path component.
+  local escaped_rel_path
+  escaped_rel_path=$(printf '%s' "$rel_path" | sed 's/\[/\\[/g; s/\]/\\]/g')
+
   # shellcheck disable=SC2086
-  find "$repos_root" $prune_expr -prune -o -type f -path "*/${rel_path}" -print 2>/dev/null | head -1
+  find "$repos_root" $prune_expr -prune -o -type f -path "*/${escaped_rel_path}" -print 2>/dev/null | head -1
 }
 
 # Search REPOS_ROOT for a whole-word occurrence of an identifier, excluding
@@ -188,11 +197,40 @@ _planner_crosscheck_symbol_marked_new() {
 # false positives (`uploadFile` x2, `POST`) before adding this.
 # Usage: _planner_crosscheck_find_definition_line <file> <symbol>
 # Output: the 1-based line number of the first match, or empty.
+# True if <symbol> is literally one of <path>'s `/`-delimited directory
+# segments (case-insensitive) — a route file named by its own feature/
+# report-type folder (`app/api/professional/vat/route.ts`,
+# `.../offshore/route.ts`, `.../cosec/route.ts`) has no top-level export
+# matching that name (the real export is `GET`/`POST`/etc), so a
+# TargetSymbols entry using the folder name as the "symbol" is a route
+# label, not a code identifier, the same class of false positive as a
+# hyphenated label — just single-worded so `[[ "$symbol" != *-* ]]` alone
+# doesn't catch it. Confirmed live on VS-3 (`vat`, `offshore`, `cosec`):
+# each citation's line is generic boilerplate shared across all these
+# routes, not a definition site for the label.
+# Usage: _planner_crosscheck_symbol_is_own_path_segment <symbol> <path>
+_planner_crosscheck_symbol_is_own_path_segment() {
+  local symbol_lc path="$2" seg
+  symbol_lc=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  IFS='/' read -ra segs <<<"$path"
+  for seg in "${segs[@]}"; do
+    [ "$(printf '%s' "$seg" | tr '[:upper:]' '[:lower:]')" = "$symbol_lc" ] && return 0
+  done
+  return 1
+}
+
 _planner_crosscheck_find_definition_line() {
   local file="$1" symbol="$2"
   local esc
   esc=$(printf '%s' "$symbol" | sed 's/[.[\*^$/]/\\&/g')
-  grep -nE "^[[:space:]]*(export[[:space:]]+)?(async[[:space:]]+)?(function|def|const|class)[[:space:]]+${esc}\\b" "$file" 2>/dev/null |
+  # `export default function X` — React's standard component-export form —
+  # doesn't match without the optional `default` here. Confirmed live on
+  # VS-3: every "component cited N lines into its own body" false positive
+  # (DocumentPreviewPanel, ProvisionalTaxView, …) was this, not a bad
+  # citation — each file genuinely defines the symbol via `export default
+  # function`, just further above the cited line than the plain
+  # `export function` form this regex originally only recognized.
+  grep -nE "^[[:space:]]*(export[[:space:]]+)?(default[[:space:]]+)?(async[[:space:]]+)?(function|def|const|class)[[:space:]]+${esc}\\b" "$file" 2>/dev/null |
     head -1 | cut -d: -f1
 }
 
@@ -243,7 +281,17 @@ _planner_crosscheck_check_citation() {
   # is nothing to anchor a proximity check to; a blank start/end previously
   # defaulted to lines 1-5, which fails for any real symbol. File existence
   # is all such a citation actually claims.
-  if [ "$approximate" -ne 1 ] && [ -n "$symbol" ] && [ -n "$start_line" ]; then
+  # A hyphenated TargetSymbols name (`afs-export`, `tax-pack-export`) is a
+  # human route/feature label, not a code identifier — JS/TS/Python
+  # identifiers never contain `-`, so it can never literally appear in the
+  # cited source regardless of how the file is written. Confirmed live on
+  # VS-3: seven such labels for API route files whose real exports are
+  # `GET`/`POST`/etc, not the label. File existence and the line-range
+  # check above already validated the citation; skip the symbol-proximity
+  # check rather than flag a mismatch no fix to the source or the spec's
+  # wording could ever resolve.
+  if [ "$approximate" -ne 1 ] && [ -n "$symbol" ] && [ -n "$start_line" ] && [[ "$symbol" != *-* ]] &&
+    ! _planner_crosscheck_symbol_is_own_path_segment "$symbol" "$path_part"; then
     symbol=$(_planner_crosscheck_strip_symbol_annotation "$symbol")
     local lo hi
     lo=$((start_line - PLANNER_CROSSCHECK_SYMBOL_PROXIMITY))
@@ -270,7 +318,16 @@ _planner_crosscheck_check_citation() {
 _planner_crosscheck_scan_prose_citations() {
   local repos_root="$1" spec_file="$2"
   local failures=0
-  local citation_regex="[A-Za-z0-9_./-]+\.(${PLANNER_CROSSCHECK_CITE_EXTENSIONS}):[0-9]+(-[0-9]+)?"
+  # Character class must admit `[` `]` (Next.js dynamic route segments like
+  # `[entityId]`) and `(` `)` (route groups like `app/(app)/...`) or grep
+  # truncates the match to whatever remains after the disallowed character,
+  # e.g. "app/api/account/entities/[entityId]/route.ts:11-126" collapses to
+  # "/route.ts:11-126" — a citation that then resolves to the wrong file
+  # entirely (first `route.ts` match anywhere in the repo) instead of
+  # failing loudly. `]` must sit immediately after the opening `[` to be
+  # read as a literal member of the bracket expression rather than closing
+  # it early.
+  local citation_regex="[]A-Za-z0-9_./()[-]+\.(${PLANNER_CROSSCHECK_CITE_EXTENSIONS}):[0-9]+(-[0-9]+)?"
   local hit spec_line token
 
   while IFS= read -r hit; do

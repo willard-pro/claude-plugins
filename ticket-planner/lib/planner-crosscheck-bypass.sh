@@ -69,7 +69,7 @@ fi
 # Claude Code session transcripts — free text that can quote real code
 # verbatim (a pasted diff, a grepped SQL line) and false-positive as an
 # undisclosed second writer, even though it is not part of any codebase.
-PLANNER_CROSSCHECK_BYPASS_EXCLUDE_DIRS=("node_modules" ".venv" ".git" ".ticket-auto" ".claude")
+PLANNER_CROSSCHECK_BYPASS_EXCLUDE_DIRS=("node_modules" ".venv" ".git" ".ticket-auto" ".claude" "ledgerly" "tickets")
 
 # Extensions a `path:line` citation token is recognized against.
 PLANNER_CROSSCHECK_BYPASS_CITE_EXT_LIST=(ts tsx js jsx py rb go java sql)
