@@ -404,6 +404,46 @@ Partial multi-repo failure is non-fatal. A failed repo scan emits `failed` and l
 
 ---
 
+## Standalone maintenance sweep (proactive, ticket-independent)
+
+Running `/ticket-prescan` with **no repo argument** already enumerates every
+repo under `REPOS_ROOT` (Step 0) and, for each `stale`/`decayed`/`missing`
+one, runs full cadence-dependent doc generation (Step 4) — it is not
+scoped to any single ticket. That makes it the correct mechanism for
+proactively refreshing repos a ticket never happens to touch. The gap is
+that nothing invokes it this way: the only caller in the pipeline is
+`ticket-auto`'s per-ticket "Prescan gate" (Phase 2), which runs the same
+enumeration but does so once per ticket dispatch — competing with that
+ticket's own budget and priorities, not on a standing schedule. In
+practice most repos under `REPOS_ROOT` sit `decayed`/`missing`
+indefinitely unless a ticket happens to name them directly.
+
+To close that gap, schedule `/ticket-prescan` (bare) to run periodically,
+decoupled from ticket dispatch — e.g. via the `schedule` skill or a cron
+entry, at a cadence matched to `PRESCAN_DECAY_AGE_DAYS` (default 30 days).
+Because a bare run always fans out a full multi-persona `Agent` spawn per
+non-fresh repo, gate the (expensive) Claude invocation behind the
+zero-token `prescan-sweep.sh` pre-check so a scheduled run that finds
+nothing stale costs nothing beyond a few bash calls:
+
+```bash
+# Cheap, deterministic, no Agent/Claude session spawned:
+bash lib/prescan-sweep.sh --repos-root "$REPOS_ROOT"
+# exit 0 → everything fresh, nothing to do
+# exit 1 → NEEDS_REFRESH lists repos needing a scan; only then invoke:
+#   claude -p "/ticket-prescan"
+```
+
+`prescan-sweep.sh` enumerates repos the same way Step 0 does and calls
+`prescan-check.sh` per repo (see that script's own freshness rules) —
+it performs no doc generation itself, so it never contends for the
+per-repo `.lock` used by an actual scan. `--format json` emits
+`{total, fresh, stale, decayed, missing, needs_refresh}` for programmatic
+callers (e.g. a fleet-controller detection engine deciding whether a
+maintenance dispatch is worth spawning).
+
+---
+
 ## Concurrency
 
 Before writing to `REPOS_ROOT/.ticket-auto/<repo-slug>/`, acquire an exclusive lock:
