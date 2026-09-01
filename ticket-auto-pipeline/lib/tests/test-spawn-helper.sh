@@ -114,6 +114,8 @@ test_write_env_exports_all_fields() {
     INTEGRATION_BRANCH=epic/test-x \
     TICKET_BRANCH=feat/TEST-42-fix-auth \
     UAT_POLICY=epic \
+    AUTONOMY=semi-auto \
+    MERGE_POLICY=manual \
     WORKTREE_ROOT=/home/user/worktrees/TEST-42 >/dev/null 2>&1
   local f=/tmp/ticket-auto-TEST-42-env.sh
   grep -q 'export TICKET_ID="TEST-42"' "$f" &&
@@ -125,6 +127,8 @@ test_write_env_exports_all_fields() {
     grep -q 'export INTEGRATION_BRANCH="epic/test-x"' "$f" &&
     grep -q 'export TICKET_BRANCH="feat/TEST-42-fix-auth"' "$f" &&
     grep -q 'export UAT_POLICY="epic"' "$f" &&
+    grep -q 'export AUTONOMY="semi-auto"' "$f" &&
+    grep -q 'export MERGE_POLICY="manual"' "$f" &&
     grep -q 'export WORKTREE_ROOT="/home/user/worktrees/TEST-42"' "$f"
 }
 
@@ -136,6 +140,18 @@ test_write_env_uat_policy_defaults_to_per_ticket() {
   spawn_write_env TICKET_ID=TEST-UP-DEF \
     REPOS_ROOT=/repos ISSUE_PREFIX=TEST BE_SERVICES=svc1 >/dev/null 2>&1
   grep -q 'export UAT_POLICY="per-ticket"' /tmp/ticket-auto-TEST-UP-DEF-env.sh
+}
+
+test_write_env_merge_policy_defaults_to_empty() {
+  # Unlike UAT_POLICY, omitting MERGE_POLICY must NOT materialise a default —
+  # a ticket with no epic directive has no merge-policy opinion at all, and an
+  # empty string is exactly the "unrestricted" signal ticket-pr-review's merge
+  # gate checks for. Defaulting it to anything non-empty would block every
+  # merge for tickets that were never under a directive in the first place.
+  source "$LIB_DIR/spawn-helper.sh"
+  spawn_write_env TICKET_ID=TEST-MP-DEF \
+    REPOS_ROOT=/repos ISSUE_PREFIX=TEST BE_SERVICES=svc1 >/dev/null 2>&1
+  grep -q 'export MERGE_POLICY=""' /tmp/ticket-auto-TEST-MP-DEF-env.sh
 }
 
 test_write_env_appends_linear_key_when_set() {
@@ -1284,6 +1300,7 @@ for fn in \
   test_write_env_empty_integration_branch \
   test_write_env_empty_worktree_root \
   test_write_env_uat_policy_defaults_to_per_ticket \
+  test_write_env_merge_policy_defaults_to_empty \
   test_write_env_appends_linear_key_when_set \
   test_write_env_does_not_append_linear_key_when_unset \
   test_write_env_rejects_empty_ticket_id \

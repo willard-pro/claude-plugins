@@ -126,18 +126,23 @@ spawn. Records the branch decisions for this run so crash-resume can recover the
 re-resolving.
 
 ```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|branch-context|info|base=develop;integration=;source=default;ticket=feat/CRE-123-fix-auth;uat-policy=per-ticket" >> "$LOG_FILE"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|branch-context|info|base=develop;integration=;source=default;ticket=feat/CRE-123-fix-auth;uat-policy=per-ticket;merge-policy=" >> "$LOG_FILE"
 ```
 
 `MSG` grammar: semicolon-delimited key=value pairs. Keys: `base` (always present),
 `integration` (empty when base=integration), `source` (flag|epic-directive|default),
-`ticket` (always present), `uat-policy` (per-ticket|epic). Values MUST NOT contain `|` per the
-pipe-delimited format constraint. Branch names are already validated to exclude `;` and `|` by
-`_validate_branch_name`, so the semicolon grammar is safe.
+`ticket` (always present), `uat-policy` (per-ticket|epic), `merge-policy`
+(manual|on-all-children-done|empty). Values MUST NOT contain `|` per the pipe-delimited format
+constraint. Branch names are already validated to exclude `;` and `|` by `_validate_branch_name`,
+so the semicolon grammar is safe.
 
-`uat-policy` is appended **last**, so a log written before the key existed remains a valid
-prefix and still parses. `detect-resume.sh` resolves the absent key to `per-ticket` rather than
-leaving it empty, so no consumer re-derives the default.
+`uat-policy` and `merge-policy` are appended in the order they were added, so a log written
+before either key existed remains a valid prefix and still parses. `detect-resume.sh` resolves
+an absent `uat-policy` to `per-ticket` rather than leaving it empty, so no consumer re-derives
+the default — but resolves an absent `merge-policy` to empty, not a default: empty means the
+ticket has no epic directive at all, which is a different signal from an epic explicitly
+declaring `manual`. `ticket-pr-review` Step 6b reads `merge-policy` (alongside the pipeline's
+`autonomy`) to decide whether it may merge a passing PR directly.
 
 ### UAT policy decision entry
 

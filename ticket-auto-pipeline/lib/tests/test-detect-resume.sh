@@ -449,6 +449,45 @@ test_uat_policy_defaults_on_log_without_field() {
   }
 }
 
+test_branch_context_carries_merge_policy() {
+  local out
+  out=$(_detect_resume_with_log "TEST-MP" \
+    "2026-07-25T10:00:00Z|META|schema|info|1" \
+    "2026-07-25T10:00:01Z|META|title|info|TEST-MP: Fix auth" \
+    "2026-07-25T10:00:02Z|META|branch-context|info|base=epic/test-x;integration=epic/test-x;source=epic-directive;ticket=feat/TEST-MP-fix-auth;uat-policy=per-ticket;merge-policy=manual" \
+    "2026-07-25T10:00:03Z|APPRAISE|setup-workspace|start|")
+  [ "$(_field "$out" MERGE_POLICY)" = "manual" ] || {
+    echo "MERGE_POLICY mismatch: $(_field "$out" MERGE_POLICY)" >&2
+    return 1
+  }
+  # Appending the field must not disturb the keys parsed before it.
+  [ "$(_field "$out" UAT_POLICY)" = "per-ticket" ] || {
+    echo "UAT_POLICY broken by merge-policy suffix: $(_field "$out" UAT_POLICY)" >&2
+    return 1
+  }
+  [ "$(_field "$out" BRANCH_SOURCE)" = "epic-directive" ] || {
+    echo "BRANCH_SOURCE broken by merge-policy suffix: $(_field "$out" BRANCH_SOURCE)" >&2
+    return 1
+  }
+}
+
+test_merge_policy_empty_on_log_without_field() {
+  # A branch-context line written before the field existed, or a ticket with no
+  # epic directive at all — unlike UAT_POLICY, this must stay empty, not
+  # materialise a default. Empty means "no epic opinion", which is a different
+  # signal from "manual"; defaulting it would block every merge.
+  local out
+  out=$(_detect_resume_with_log "TEST-MPOLD" \
+    "2026-07-25T10:00:00Z|META|schema|info|1" \
+    "2026-07-25T10:00:01Z|META|title|info|TEST-MPOLD: Fix auth" \
+    "2026-07-25T10:00:02Z|META|branch-context|info|base=develop;integration=;source=default;ticket=feat/TEST-MPOLD-fix;uat-policy=per-ticket" \
+    "2026-07-25T10:00:03Z|APPRAISE|setup-workspace|start|")
+  [ -z "$(_field "$out" MERGE_POLICY)" ] || {
+    echo "expected empty MERGE_POLICY on legacy field, got: $(_field "$out" MERGE_POLICY)" >&2
+    return 1
+  }
+}
+
 test_branch_context_empty_on_legacy_log() {
   local out
   out=$(_detect_resume_with_log "TEST-LEGACY" \
@@ -497,6 +536,8 @@ for fn in \
   test_branch_context_survives_resume \
   test_branch_context_carries_uat_policy \
   test_uat_policy_defaults_on_log_without_field \
+  test_branch_context_carries_merge_policy \
+  test_merge_policy_empty_on_log_without_field \
   test_branch_context_empty_on_legacy_log \
   test_resume_step_done_on_completed_outcome \
   test_resume_step_not_done_on_held_outcome \

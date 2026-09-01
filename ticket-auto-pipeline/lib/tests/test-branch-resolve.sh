@@ -507,6 +507,120 @@ test_result_block_has_uat_policy() {
 }
 _run "result block carries UAT_POLICY" test_result_block_has_uat_policy
 
+# ── Merge policy on the branch-context rail ──────────────────────────────────
+
+test_merge_policy_from_directive() {
+  local output parsed
+  output=$(resolve_branch_context "CRE-123" \
+    --title "Fix auth bug" \
+    --parent-json "$VALID_DIRECTIVE_PARENT" 2>/dev/null) || return 1
+  parsed=$(echo "$output" | _parse_result)
+  eval "$parsed"
+
+  [ "$MERGE_POLICY" = "manual" ] || {
+    echo "  expected MERGE_POLICY=manual, got '$MERGE_POLICY'" >&2
+    return 1
+  }
+  return 0
+}
+_run "MERGE_POLICY resolved from parent directive" test_merge_policy_from_directive
+
+test_merge_policy_no_parent_is_empty() {
+  # Unlike UAT_POLICY, absence must stay empty — a ticket with no epic
+  # directive has no merge-policy opinion at all, not an implicit "manual".
+  local output parsed
+  output=$(resolve_branch_context "CRE-123" --title "Fix auth bug" 2>/dev/null) || return 1
+  parsed=$(echo "$output" | _parse_result)
+  eval "$parsed"
+
+  [ -z "${MERGE_POLICY:-}" ] || {
+    echo "  expected empty MERGE_POLICY for a ticket with no parent, got '$MERGE_POLICY'" >&2
+    return 1
+  }
+  return 0
+}
+_run "ticket outside a directive-bearing epic resolves empty MERGE_POLICY" test_merge_policy_no_parent_is_empty
+
+test_merge_policy_parent_without_directive_is_empty() {
+  local output parsed
+  output=$(resolve_branch_context "CRE-123" \
+    --title "Fix auth bug" \
+    --parent-json "$NO_DIRECTIVE_PARENT" 2>/dev/null) || return 1
+  parsed=$(echo "$output" | _parse_result)
+  eval "$parsed"
+
+  [ -z "${MERGE_POLICY:-}" ] || {
+    echo "  expected empty MERGE_POLICY, got '$MERGE_POLICY'" >&2
+    return 1
+  }
+  return 0
+}
+_run "parent without directive resolves empty MERGE_POLICY" test_merge_policy_parent_without_directive_is_empty
+
+test_merge_policy_survives_branch_override() {
+  # --branch retargets the branch; it does not detach the ticket from its
+  # epic's Merge Policy any more than it does for UAT policy.
+  local output parsed
+  output=$(resolve_branch_context "CRE-123" \
+    --branch "epic/override-x" \
+    --title "Fix auth bug" \
+    --parent-json "$VALID_DIRECTIVE_PARENT" 2>/dev/null) || return 1
+  parsed=$(echo "$output" | _parse_result)
+  eval "$parsed"
+
+  [ "$BRANCH_SOURCE" = "flag" ] || {
+    echo "  expected BRANCH_SOURCE=flag, got '$BRANCH_SOURCE'" >&2
+    return 1
+  }
+  [ "$MERGE_POLICY" = "manual" ] || {
+    echo "  --branch override dropped the epic Merge Policy, got '$MERGE_POLICY'" >&2
+    return 1
+  }
+  return 0
+}
+_run "MERGE_POLICY survives an explicit --branch override" test_merge_policy_survives_branch_override
+
+test_result_block_has_merge_policy() {
+  local output
+  output=$(resolve_branch_context "CRE-123" --title "Fix auth" 2>/dev/null) || return 1
+  echo "$output" | grep -q "MERGE_POLICY:" || {
+    echo "  result block is missing the MERGE_POLICY field" >&2
+    return 1
+  }
+  return 0
+}
+_run "result block carries MERGE_POLICY" test_result_block_has_merge_policy
+
+# ── resolve_merge_policy (standalone) ───────────────────────────────────────
+
+test_resolve_merge_policy_standalone() {
+  get_issue() {
+    echo '{"id":"CRE-999","title":"Test ticket","parent":{"description":"## Branch Directive\n**Schema-Version:** 1\n**Branch:** epic/x\n**Base:** develop\n**Merge Policy:** manual\n**Sync Policy:** none\n**Created:** 2026-07-25T10:00:00Z"}}'
+  }
+  local got
+  got=$(resolve_merge_policy "CRE-999" 2>/dev/null)
+  [ "$got" = "manual" ] || {
+    echo "  expected manual, got '$got'" >&2
+    return 1
+  }
+  return 0
+}
+_run "resolve_merge_policy: standalone resolution from a directive" test_resolve_merge_policy_standalone
+
+test_resolve_merge_policy_standalone_no_parent() {
+  get_issue() {
+    echo '{"id":"CRE-999","title":"Test ticket","parent":null}'
+  }
+  local got
+  got=$(resolve_merge_policy "CRE-999" 2>/dev/null)
+  [ -z "$got" ] || {
+    echo "  expected empty policy for a ticket with no parent, got '$got'" >&2
+    return 1
+  }
+  return 0
+}
+_run "resolve_merge_policy: standalone resolution with no parent stays empty" test_resolve_merge_policy_standalone_no_parent
+
 # ── uat_decide_trigger ───────────────────────────────────────────────────────
 
 test_trigger_epic_policy_goes_done() {

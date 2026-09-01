@@ -262,19 +262,20 @@ BASE_BRANCH=$(echo "$BRANCH_OUTPUT" | sed -n 's/^[[:space:]]*BASE_BRANCH:[[:spac
 INTEGRATION_BRANCH=$(echo "$BRANCH_OUTPUT" | sed -n 's/^[[:space:]]*INTEGRATION_BRANCH:[[:space:]]*//p')
 BRANCH_SOURCE=$(echo "$BRANCH_OUTPUT" | sed -n 's/^[[:space:]]*BRANCH_SOURCE:[[:space:]]*//p')
 UAT_POLICY=$(echo "$BRANCH_OUTPUT" | sed -n 's/^[[:space:]]*UAT_POLICY:[[:space:]]*//p')
+MERGE_POLICY=$(echo "$BRANCH_OUTPUT" | sed -n 's/^[[:space:]]*MERGE_POLICY:[[:space:]]*//p')
 ```
 
 ### 0.5b — Write branch-context to pipeline log
 
 Write immediately after resolution, before any agent spawn. The semicolon grammar
-(`base=<>;integration=<>;source=<>;ticket=<>;uat-policy=<>`) is parsed by `detect-resume.sh`
-on crash-resume. `uat-policy` is appended last so logs written before this field existed still
-parse — the older four-key form remains a valid prefix.
+(`base=<>;integration=<>;source=<>;ticket=<>;uat-policy=<>;merge-policy=<>`) is parsed by
+`detect-resume.sh` on crash-resume. Each field is appended in the order it was added so logs
+written before that field existed still parse — every older prefix form remains valid.
 
 ```bash
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|branch-context|info|base=${BASE_BRANCH};integration=${INTEGRATION_BRANCH};source=${BRANCH_SOURCE};ticket=${TICKET_BRANCH};uat-policy=${UAT_POLICY}" >> {LOG_FILE}
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|branch-context|info|base=${BASE_BRANCH};integration=${INTEGRATION_BRANCH};source=${BRANCH_SOURCE};ticket=${TICKET_BRANCH};uat-policy=${UAT_POLICY};merge-policy=${MERGE_POLICY}" >> {LOG_FILE}
 hb_gate "branch-context" "ok" "branch decision recorded" \
-  "{\"base\":\"${BASE_BRANCH}\",\"integration\":\"${INTEGRATION_BRANCH}\",\"source\":\"${BRANCH_SOURCE}\",\"ticket\":\"${TICKET_BRANCH}\",\"uat_policy\":\"${UAT_POLICY}\"}"
+  "{\"base\":\"${BASE_BRANCH}\",\"integration\":\"${INTEGRATION_BRANCH}\",\"source\":\"${BRANCH_SOURCE}\",\"ticket\":\"${TICKET_BRANCH}\",\"uat_policy\":\"${UAT_POLICY}\",\"merge_policy\":\"${MERGE_POLICY}\"}"
 ```
 
 ### 0.5c — Detect project context
@@ -302,10 +303,12 @@ spawn_write_env \
   BASE_BRANCH="${BASE_BRANCH}" \
   INTEGRATION_BRANCH="${INTEGRATION_BRANCH}" \
   TICKET_BRANCH="${TICKET_BRANCH}" \
-  UAT_POLICY="${UAT_POLICY}"
+  UAT_POLICY="${UAT_POLICY}" \
+  AUTONOMY="{AUTONOMY}" \
+  MERGE_POLICY="${MERGE_POLICY}"
 ```
 
-This MUST run before Step 0.6 (pipeline log init) and before Step 1 (first agent spawn). The env file is needed by every `spawn_agent_pre` call — sub-agents source it via `source /tmp/ticket-auto-{TICKET_ID}-env.sh`.
+This MUST run before Step 0.6 (pipeline log init) and before Step 1 (first agent spawn). The env file is needed by every `spawn_agent_pre` call — sub-agents source it via `source /tmp/ticket-auto-{TICKET_ID}-env.sh`. `AUTONOMY` and `MERGE_POLICY` are what `ticket-pr-review` Step 6b reads to decide whether it may merge a passing PR directly or must leave it for a human — see [Auto-merge logic](#auto-merge-logic) below, which applies the same `AUTONOMY` rule at the router level.
 
 ---
 
@@ -451,7 +454,7 @@ DETECT_OUTPUT=$(bash "$DETECT_SH" "{TICKET_ID}")
 ```
 
 Parse the `DETECT_RESUME_RESULT` block and set all routing variables:
-`{RESUME_STEP}`, `{APPRAISE_FROM}`, `{REPRODUCE_FROM}`, `{EXEC_FROM}`, `{IMPLEMENT_FROM}`, `{MAINTENANCE_FROM}`, `{DOCUMENT_FROM}`, `{VERIFY_FROM}`, `{PR_REVIEW_FROM}`, `{PR_ITERATE_FROM}`, `{TICKET_DIR}`, `{COMPLEXITY}`, `{AUTONOMY}`, `{ARTIFACT_TYPE}`, `{BRANCH}`, `{BASE_BRANCH}`, `{INTEGRATION_BRANCH}`, `{BRANCH_SOURCE}`, `{TICKET_TITLE}`, `{VERIFY_ATTEMPTS}`, `{VERIFY_LAST}`, `{ITERATION}`, `{RECONCILE_CYCLE}`, `{PR_FEEDBACK_CYCLE}`.
+`{RESUME_STEP}`, `{APPRAISE_FROM}`, `{REPRODUCE_FROM}`, `{EXEC_FROM}`, `{IMPLEMENT_FROM}`, `{MAINTENANCE_FROM}`, `{DOCUMENT_FROM}`, `{VERIFY_FROM}`, `{PR_REVIEW_FROM}`, `{PR_ITERATE_FROM}`, `{TICKET_DIR}`, `{COMPLEXITY}`, `{AUTONOMY}`, `{ARTIFACT_TYPE}`, `{BRANCH}`, `{BASE_BRANCH}`, `{INTEGRATION_BRANCH}`, `{BRANCH_SOURCE}`, `{MERGE_POLICY}`, `{TICKET_TITLE}`, `{VERIFY_ATTEMPTS}`, `{VERIFY_LAST}`, `{ITERATION}`, `{RECONCILE_CYCLE}`, `{PR_FEEDBACK_CYCLE}`.
 
 **If `RESUME_STEP = SCHEMA_MISMATCH`:**
 Report the schema mismatch with log vs expected version numbers. Stop here.
@@ -465,7 +468,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|recovery|info|Resuming from {RESUME_ST
 ```
 
 **Before the recovery log entry, rehydrate the branch env vars from `detect-resume.sh` output** — on a crash-recovery the router does not re-run `resolve_branch_context`. The branch decisions were written to `META|branch-context` at Step 0.5b and are now in the `DETECT_RESUME_RESULT` block as `BASE_BRANCH`, `INTEGRATION_BRANCH`, `BRANCH_SOURCE`,
-`UAT_POLICY`. Write them back to the env file so sub-agents see branch vars even on resume:
+`UAT_POLICY`, `MERGE_POLICY`. Write them back to the env file so sub-agents see branch vars even on resume — `AUTONOMY` is rehydrated too, from the same `DETECT_RESUME_RESULT` block (it comes from `META|autonomy|info|`, not branch-context, but needs the same resume-time re-export or a resumed pipeline's `ticket-pr-review` spawn would merge unconditionally):
 
 ```bash
 if [ -n "{BASE_BRANCH}" ] || [ -n "{TICKET_BRANCH}" ]; then
@@ -486,7 +489,9 @@ if [ -n "{BASE_BRANCH}" ] || [ -n "{TICKET_BRANCH}" ]; then
     BASE_BRANCH="{BASE_BRANCH}" \
     INTEGRATION_BRANCH="{INTEGRATION_BRANCH}" \
     TICKET_BRANCH="{TICKET_BRANCH}" \
-    UAT_POLICY="{UAT_POLICY}"
+    UAT_POLICY="{UAT_POLICY}" \
+    AUTONOMY="{AUTONOMY}" \
+    MERGE_POLICY="{MERGE_POLICY}"
 fi
 ```
 

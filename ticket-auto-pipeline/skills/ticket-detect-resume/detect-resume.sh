@@ -350,6 +350,7 @@ BASE_BRANCH=""
 INTEGRATION_BRANCH=""
 BRANCH_SOURCE=""
 UAT_POLICY=""
+MERGE_POLICY=""
 TICKET_TITLE=""
 VERIFY_ATTEMPTS=0
 VERIFY_LAST=""
@@ -367,6 +368,7 @@ if [ -s "$LOG_FILE" ]; then
     INTEGRATION_BRANCH=$(echo "$_branch_ctx" | sed -n 's/.*integration=\([^;]*\).*/\1/p')
     BRANCH_SOURCE=$(echo "$_branch_ctx" | sed -n 's/.*source=\([^;]*\).*/\1/p')
     UAT_POLICY=$(echo "$_branch_ctx" | sed -n 's/.*uat-policy=\([^;]*\).*/\1/p')
+    MERGE_POLICY=$(echo "$_branch_ctx" | sed -n 's/.*merge-policy=\([^;]*\).*/\1/p')
   fi
 fi
 
@@ -448,6 +450,10 @@ fi
 #   BRANCH_SOURCE     — flag|epic-directive|default (from META|branch-context; empty on legacy logs)
 #   UAT_POLICY        — per-ticket|epic (from META|branch-context; 'per-ticket' on legacy logs
 #                       that predate the field, so consumers never re-derive the default)
+#   MERGE_POLICY      — manual|on-all-children-done|'' (from META|branch-context; empty on
+#                       legacy logs and on tickets with no epic directive — empty means no
+#                       epic opinion, NOT "auto", so it must not be defaulted to a non-empty
+#                       value the way UAT_POLICY is)
 #   TICKET_TITLE      — human-readable ticket title
 #   VERIFY_ATTEMPTS   — count of terminal verify fail entries in pipeline log (PASS excluded)
 #   VERIFY_LAST       — "fail" if the last terminal VERIFY event is a fail with no
@@ -478,6 +484,7 @@ DETECT_RESUME_RESULT
   INTEGRATION_BRANCH: ${INTEGRATION_BRANCH:-}
   BRANCH_SOURCE:      ${BRANCH_SOURCE:-}
   UAT_POLICY:         ${UAT_POLICY:-per-ticket}
+  MERGE_POLICY:       ${MERGE_POLICY:-}
   TICKET_TITLE:       ${TICKET_TITLE:-}
   VERIFY_ATTEMPTS:    ${VERIFY_ATTEMPTS}
   VERIFY_LAST:        ${VERIFY_LAST:-}
