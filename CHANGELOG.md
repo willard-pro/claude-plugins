@@ -17,6 +17,26 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.29.10 (2026-09-02)
+
+Closes #202 — `ticket-implement` Step 4b's code-review fix-and-re-review loop had no
+iteration cap and treated every finding, at any severity, as a blocker. Every other
+retry loop in the pipeline (verify retry, PR iteration, PR feedback reconciliation) is
+capped at 3 with the counter tracked in the pipeline log; this one was not. Combined
+with "all findings are blockers," a reviewer that reliably returns a low-severity nit
+on each pass never converges — the phase spins until something external kills it.
+
+- Fix: the loop is now capped at 3 cycles, tracked via a `cycle#N` log marker on the
+  `IMPLEMENT|code-review` terminal line (same convention as PR feedback
+  reconciliation's `PR_FEEDBACK_CYCLE`).
+- Fix: only `medium` severity and above findings are blockers now. `low`-severity
+  findings (style preferences, naming opinions) are appended to notes.md under a
+  `## Code Review — Deferred Findings` heading and never gate the commit.
+- New gate-stop code `CODE_REVIEW_EXHAUSTED`: reaching cycle 3 with medium+ findings
+  still open halts the pipeline for human review instead of looping forever.
+- Docs: `pipeline-log-format.md` documents the new cycle marker and gate-stop code;
+  `ticket-auto-pipeline/CLAUDE.md`'s gate-stop code count and list updated (14 → 15).
+
 ## ticket-planner 0.8.6 (2026-09-02)
 
 Closes #219 — the `TargetSymbols` citation grammar the Crosscheck linter

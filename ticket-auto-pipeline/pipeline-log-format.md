@@ -98,6 +98,19 @@ already run, capped at 3 (`PR_FEEDBACK_EXHAUSTED` gate-stop, see below):
 echo "...|PR-REVIEW|pr-reconcile|done|cycle#2 reconciled" >> "$LOG_FILE"
 ```
 
+### Code review cycle marker
+
+`IMPLEMENT`'s `code-review` terminal entry carries a `cycle#N` counter in `MSG`, same
+convention as PR feedback reconciliation. The fix-and-re-review loop is capped at 3 cycles;
+only `medium`-severity-and-above findings are blockers and drive re-spawns, `low`-severity
+findings are recorded to notes.md but never gate the commit. Exhausting all 3 cycles with
+medium+ findings still open is a gate-stop (`CODE_REVIEW_EXHAUSTED`, see below):
+
+```bash
+echo "...|IMPLEMENT|code-review|done|cycle#1 clean" >> "$LOG_FILE"
+echo "...|IMPLEMENT|code-review|fail|cycle#3 CODE_REVIEW_EXHAUSTED" >> "$LOG_FILE"
+```
+
 ## META entries
 
 Non-phase metadata. `STEP` is the key, `MSG` is the value:
@@ -375,6 +388,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|<CODE>" >> "$LOG_FILE"
 | `REPRO_BLOCKED` | Reproduce skill blocked — insufficient detail in ticket (Step 1.5) |
 | `PR_FEEDBACK_EXHAUSTED` | `PR_FEEDBACK_CYCLE` reached 3 — reconciliation cycle capped, needs human review (Step 5.5) |
 | `BRANCH_DIRECTIVE_INVALID` | Parent epic has a malformed `## Branch Directive` block — gate-stop, no fallback (Step 0.5) |
+| `CODE_REVIEW_EXHAUSTED` | Code-review fix-and-re-review loop reached 3 cycles with medium+ severity findings still open (Step 4b) |
 
 ## Ordering guarantees
 
