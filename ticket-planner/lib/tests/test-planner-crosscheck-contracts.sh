@@ -277,6 +277,79 @@ else
   fail "no consumers: returns 0" "$(cat /tmp/ccu-noop.txt)"
 fi
 
+echo "--- negation separated from its retire-phrase by a wrapped line does not fire (#225) ---"
+REPOS_C4="${TMPDIR}/c4/repos"
+INITS_C4="${REPOS_C4}/.ticket-auto/initiatives"
+SELF_C4="${INITS_C4}/INIT-EBC/artifacts/specs"
+SIB_C4="${INITS_C4}/INIT-VS6/artifacts/specs"
+mkdir -p "$SELF_C4" "$SIB_C4"
+
+cat >"${SIB_C4}/vs6-b.md" <<'EOF'
+## Description
+
+Gates escalation on reading `ValidationOutcome`.valid.
+EOF
+
+# Wrap A: the structure's own negation ("is not / retired") straddles the line
+# break, so the physical line carrying `ValidationOutcome` also carries the
+# preceding sentence's genuine retire-phrase.
+cat >"${SELF_C4}/ebc-c.md" <<'EOF'
+## Description
+
+Once the deterministic validator lands, the interim shim module is retired. `ValidationOutcome` itself is not
+retired. What is retired is the interim module's content.
+EOF
+
+out=$(planner_crosscheck_contract_consumers_unnotified "INIT-EBC" "$SELF_C4" "$REPOS_C4")
+case "$out" in
+*"ValidationOutcome"*) fail "wrapped negation (A): not flagged" "got: $out" ;;
+*) pass "wrapped negation (A): not flagged" ;;
+esac
+
+# Wrap B: same prose, re-wrapped so the negated sentence shares a physical
+# line with the *next* sentence's genuine retire-phrase instead. Line-scoped
+# detection flags this one too; sentence-scoped detection flags neither.
+cat >"${SELF_C4}/ebc-c.md" <<'EOF'
+## Description
+
+Once the deterministic validator lands, the interim shim module is retired.
+`ValidationOutcome` itself is not retired. What is retired is the interim module's content.
+EOF
+
+out=$(planner_crosscheck_contract_consumers_unnotified "INIT-EBC" "$SELF_C4" "$REPOS_C4")
+case "$out" in
+*"ValidationOutcome"*) fail "wrapped negation (B): not flagged" "got: $out" ;;
+*) pass "wrapped negation (B): not flagged" ;;
+esac
+
+echo "--- a genuine retirement wrapped across a line break still fires (#225) ---"
+cat >"${SELF_C4}/ebc-c.md" <<'EOF'
+## Description
+
+This ticket retires
+`ValidationOutcome`, replacing lib/legacy.py's own call site with the new type.
+EOF
+
+out=$(planner_crosscheck_contract_consumers_unnotified "INIT-EBC" "$SELF_C4" "$REPOS_C4")
+case "$out" in
+*"CONTRACT_CONSUMERS_UNNOTIFIED"*"ValidationOutcome"*"vs6-b"*) pass "wrapped retirement: still flagged" ;;
+*) fail "wrapped retirement: still flagged" "got: $out" ;;
+esac
+
+echo "--- a neighboring bullet preserving a structure is not joined into the retiring one ---"
+cat >"${SELF_C4}/ebc-c.md" <<'EOF'
+## Description
+
+- Retires the stale copy on `FORMAT_BADGES` once the new renderer lands
+- `ValidationOutcome` is preserved unchanged by this ticket
+EOF
+
+out=$(planner_crosscheck_contract_consumers_unnotified "INIT-EBC" "$SELF_C4" "$REPOS_C4")
+case "$out" in
+*"ValidationOutcome"*) fail "neighboring bullet: preserved structure not flagged" "got: $out" ;;
+*) pass "neighboring bullet: preserved structure not flagged" ;;
+esac
+
 # ═══════════════════════════════════════════════════════════════════════════
 # planner_crosscheck_contracts (public entry point)
 # ═══════════════════════════════════════════════════════════════════════════

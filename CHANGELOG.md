@@ -108,6 +108,40 @@ detection precisely in the retry loops it exists to catch.
 - New test fixture: an early `done` followed by a stalled `waiting` for
   the same phase/step now correctly returns KILL severity.
 
+## ticket-planner 0.8.14 (2026-09-02)
+
+Closes #225 — `CONTRACT_CONSUMERS_UNNOTIFIED`'s structure extraction scoped
+its retire-phrase and negation search to *physical* markdown lines, so a
+retirement claim was attributed to whatever backtick-quoted name happened to
+share a line with a retire word after word-wrap. Found on the Evidence-Based
+initiative's `ebc-c` spec: "…the interim shim module is retired.
+`ValidationOutcome` itself is not / retired." put a genuine retire-phrase and
+an unrelated structure on one physical line while that structure's own
+negation wrapped onto the next, false-flagging `ValidationOutcome` as
+silently retired. Re-wrapping the same prose only moved the problem — the
+other arrangement puts the *next* sentence's retire-phrase on the negated
+line. Distinct from the negation-word-order fix on VS-4 (`65ec29e`): that one
+was about word order within a line, this one about the line being the wrong
+unit.
+
+- Fix (`lib/planner-crosscheck-contracts.sh`, new
+  `_planner_crosscheck_contracts_sentences`): a paragraph's wrapped lines are
+  joined and re-split into logical sentences on `.`/`!`/`?` + whitespace.
+  Both the retire-phrase search and the negation-proximity window in
+  `_planner_crosscheck_contracts_text_has_genuine_retire_phrase`, and the
+  candidate-structure extraction in
+  `planner_crosscheck_contract_consumers_unnotified`, now scope to the
+  sentence. Structural line starts (list items, headings, table rows,
+  blockquotes) stay boundaries, so a neighbouring bullet is still a separate
+  claim — the over-association fixed in 0.8.13's bundle is preserved.
+- Also fixes the mirror-image false *negative*: a genuine retirement whose
+  retire word and structure name were split by a line break ("This ticket
+  retires / `ValidationOutcome`, …") was previously missed entirely.
+- New regression tests in `test-planner-crosscheck-contracts.sh`: both wrap
+  arrangements of the `ebc-c` prose stay clean, a wrapped genuine retirement
+  still fires, and a neighbouring bullet preserving a structure is not joined
+  into the retiring one.
+
 ## ticket-planner 0.8.13 (2026-09-02)
 
 Closes #224 — a compound two-symbol citation with two distinct line numbers

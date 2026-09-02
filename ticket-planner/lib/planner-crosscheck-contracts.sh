@@ -538,22 +538,69 @@ PLANNER_CROSSCHECK_CONTRACTS_NEGATION_REGEX='\b(not|never|isn.t|aren.t|doesn.t|w
 # each while a nearby retire-word misfired CONTRACT_CONSUMERS_UNNOTIFIED.
 PLANNER_CROSSCHECK_CONTRACTS_REUSE_MENTION_THRESHOLD=3
 
+# Markdown line starts that begin a new logical unit rather than continuing a
+# word-wrapped sentence: list items (bulleted or ordered), headings, table
+# rows and blockquotes. Every other line break inside a paragraph is treated
+# as a wrap artifact and joined.
+PLANNER_CROSSCHECK_CONTRACTS_LINE_START_REGEX='^[[:space:]]*([-*+>|#]|[0-9]+[.)][[:space:]])'
+
+# Split <text> into logical sentences. A physical line break inside a
+# paragraph is a word-wrap artifact of whatever column width the spec was
+# written at, not a semantic boundary — scoping the retire-phrase search to
+# physical lines attributes a retirement claim to whichever backtick-quoted
+# name happens to share a line with a retire word. Observed live on the
+# Evidence-Based initiative's `ebc-c` spec: "the interim shim module is
+# retired. `ValidationOutcome` itself is not / retired." put a genuine retire
+# phrase and an unrelated structure on one physical line while that
+# structure's own negation wrapped onto the next, producing a false
+# CONTRACT_CONSUMERS_UNNOTIFIED (#225). Wrapped lines are joined and the
+# result split on ./!/? + whitespace; structural line starts stay boundaries,
+# since a neighboring bullet is a separate claim rather than a continuation.
+# Usage: _planner_crosscheck_contracts_sentences <text>
+# Output: one sentence per line, trimmed; empty lines dropped.
+_planner_crosscheck_contracts_sentences() {
+  local text="$1"
+  echo "$text" | awk -v start_re="$PLANNER_CROSSCHECK_CONTRACTS_LINE_START_REGEX" '
+    function flush(   s, n, i, parts, p) {
+      if (buf == "") return
+      s = buf
+      gsub(/[.!?][")'"'"'`]*[[:space:]]+/, "&\n", s)
+      n = split(s, parts, "\n")
+      for (i = 1; i <= n; i++) {
+        p = parts[i]
+        sub(/^[[:space:]]+/, "", p)
+        sub(/[[:space:]]+$/, "", p)
+        if (p != "") print p
+      }
+      buf = ""
+    }
+    /^[[:space:]]*$/ { flush(); next }
+    $0 ~ start_re { flush() }
+    { buf = (buf == "" ? $0 : buf " " $0) }
+    END { flush() }
+  '
+}
+
 # True if <text> contains at least one retire-phrase match that is NOT
 # preceded within 5 words by a negator/preservation phrase — i.e. a genuine
 # retirement claim, not a negated guard/invariant sentence. Factored out of
 # _planner_crosscheck_contracts_genuine_retirement so the same windowed check
-# can be applied at line granularity (see its caller below) as well as at
-# whole-block granularity.
+# can be applied at sentence granularity (see its caller below) as well as at
+# whole-block granularity. The window is evaluated per logical sentence, so a
+# negator can neither leak across a sentence boundary nor be separated from
+# its own retire phrase by a wrapped line break (#225).
 # Usage: _planner_crosscheck_contracts_text_has_genuine_retire_phrase <text>
 _planner_crosscheck_contracts_text_has_genuine_retire_phrase() {
-  local text="$1" flat ctx
-  flat=$(echo "$text" | tr '\n' ' ')
-  while IFS= read -r ctx; do
-    [ -z "$ctx" ] && continue
-    if ! echo "$ctx" | grep -qiE "$PLANNER_CROSSCHECK_CONTRACTS_NEGATION_REGEX"; then
-      return 0
-    fi
-  done < <(echo "$flat" | grep -oiE "([A-Za-z0-9_']+[[:space:]]+){0,5}(${PLANNER_CROSSCHECK_CONTRACTS_RETIRE_REGEX})")
+  local text="$1" sentence ctx
+  while IFS= read -r sentence; do
+    [ -z "$sentence" ] && continue
+    while IFS= read -r ctx; do
+      [ -z "$ctx" ] && continue
+      if ! echo "$ctx" | grep -qiE "$PLANNER_CROSSCHECK_CONTRACTS_NEGATION_REGEX"; then
+        return 0
+      fi
+    done < <(echo "$sentence" | grep -oiE "([A-Za-z0-9_']+[[:space:]]+){0,5}(${PLANNER_CROSSCHECK_CONTRACTS_RETIRE_REGEX})")
+  done < <(_planner_crosscheck_contracts_sentences "$text")
   return 1
 }
 
@@ -620,24 +667,27 @@ planner_crosscheck_contract_consumers_unnotified() {
       [ -z "$block" ] && continue
       echo "$block" | grep -qiE "$PLANNER_CROSSCHECK_CONTRACTS_RETIRE_REGEX" || continue
 
-      # Candidate structures are drawn only from lines that themselves carry
-      # a genuine retire-phrase — not every backtick-quoted name anywhere in
-      # the paragraph. A block is a blank-line-delimited paragraph, which can
-      # span several unrelated sentences (e.g. one bullet retiring stale copy
-      # on `FORMAT_BADGES`, a neighboring bullet preserving `RecentCard`
-      # unchanged); pulling structures from the whole block conflates the two
-      # and flags the untouched one as silently retired. Observed live: this
-      # over-association produced false CONTRACT_CONSUMERS_UNNOTIFIED on
-      # `RecentCard`/`preparation_metadata` from a retirement claim that was
-      # actually only about `FORMAT_BADGES`' copy text three lines away.
+      # Candidate structures are drawn only from sentences that themselves
+      # carry a genuine retire-phrase — not every backtick-quoted name
+      # anywhere in the paragraph. A block is a blank-line-delimited
+      # paragraph, which can span several unrelated sentences (e.g. one
+      # bullet retiring stale copy on `FORMAT_BADGES`, a neighboring bullet
+      # preserving `RecentCard` unchanged); pulling structures from the whole
+      # block conflates the two and flags the untouched one as silently
+      # retired. Observed live: this over-association produced false
+      # CONTRACT_CONSUMERS_UNNOTIFIED on `RecentCard`/`preparation_metadata`
+      # from a retirement claim that was actually only about `FORMAT_BADGES`'
+      # copy text three lines away. The unit is the logical sentence, not the
+      # physical markdown line — see
+      # _planner_crosscheck_contracts_sentences for why (#225).
       local -a structures=()
-      local block_line
-      while IFS= read -r block_line; do
-        _planner_crosscheck_contracts_text_has_genuine_retire_phrase "$block_line" || continue
+      local sentence
+      while IFS= read -r sentence; do
+        _planner_crosscheck_contracts_text_has_genuine_retire_phrase "$sentence" || continue
         while IFS= read -r s; do
           [ -n "$s" ] && structures+=("$s")
-        done < <(echo "$block_line" | grep -oE '`[^`]+`' | sed -e 's/^`//' -e 's/`$//')
-      done <<<"$block"
+        done < <(echo "$sentence" | grep -oE '`[^`]+`' | sed -e 's/^`//' -e 's/`$//')
+      done < <(_planner_crosscheck_contracts_sentences "$block")
       if [ "${#structures[@]}" -gt 0 ]; then
         mapfile -t structures < <(printf '%s\n' "${structures[@]}" | sort -u)
       fi
