@@ -17,6 +17,18 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.29.18 (2026-09-02)
+
+Closes #206 — `ticket-retro`'s heartbeat aggregation only counted
+`category=fallback` events when `status=fired`, silently dropping the
+majority of real-world fallback statuses (`ok`, `info`) observed in the log
+corpus. Whether a fallback path fires at all is the trending signal worth
+tracking; the outcome status is a secondary detail, not a reason to exclude
+the event from the count.
+
+- Fix: `retro.sh` now counts every `category=fallback` heartbeat event
+  regardless of `status`.
+
 ## ticket-auto-pipeline 0.29.17 (2026-09-02)
 
 Closes #201 — `RECONCILE_CYCLE` was computed by `detect-resume.sh`, emitted

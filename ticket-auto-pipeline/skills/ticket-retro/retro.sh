@@ -420,7 +420,10 @@ for _i in "${!LOG_FILES[@]}"; do
 
     [ "$category" = "META" ] && continue
 
-    if [ "$category" = "fallback" ] && [ "$status" = "fired" ]; then
+    # Count every fallback event regardless of status — an "ok"/"info" fallback
+    # (a graceful, correct fallback) is still signal for trending how often a
+    # given fallback path fires, not just the degraded ("fired"/"warn") ones.
+    if [ "$category" = "fallback" ]; then
       HB_FALLBACK_COUNT["$event"]=$((${HB_FALLBACK_COUNT["$event"]:-0} + 1))
       local_has_hb=1
     elif [ "$category" = "decision" ] && [ "$status" = "fired" ]; then

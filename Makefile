@@ -58,6 +58,7 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-retro-outcome-parse.sh
 	bash ticket-auto-pipeline/lib/tests/test-retro-crosscheck.sh
 	bash ticket-auto-pipeline/lib/tests/test-retro-planner-source.sh
+	bash ticket-auto-pipeline/lib/tests/test-retro-fallback-status.sh
 	# ticket-audit tests
 	bash ticket-auto-pipeline/lib/tests/test-ticket-audit-split-detection.sh
 	bash ticket-auto-pipeline/lib/tests/test-ticket-audit-drift.sh
