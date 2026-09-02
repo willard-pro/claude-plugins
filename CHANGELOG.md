@@ -17,6 +17,20 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.29.13 (2026-09-02)
+
+Closes #210 — `detect-resume.sh`'s schema-v1 warning write was unconditional: every
+call against a schema-v1 log appended a fresh `META|schema|warn|` line, with no
+"already written" guard. A naive re-invocation of `/ticket-auto` immediately after a
+pipeline reached its terminal `META|outcome|info|completed:` line would push that
+outcome line off the tail via a fresh warning line, permanently breaking the
+tail-only `done` detection for every subsequent call — regressing the exact
+naive-re-run-loops-forever failure mode #168 was fixed to prevent.
+
+- Fix: the schema-v1 warning write is now guarded by the same whole-file grep
+  idempotency pattern used elsewhere in this codebase (e.g. `pipeline-finalize.sh`,
+  `pipeline-postmortem.sh`) — written once, early, and never again.
+
 ## ticket-auto-pipeline 0.29.12 (2026-09-02)
 
 Closes #195 — `detect-resume.sh`'s gate-reconcile branch matched on the shared
