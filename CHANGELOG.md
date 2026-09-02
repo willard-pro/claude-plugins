@@ -37,6 +37,43 @@ on each pass never converges — the phase spins until something external kills 
 - Docs: `pipeline-log-format.md` documents the new cycle marker and gate-stop code;
   `ticket-auto-pipeline/CLAUDE.md`'s gate-stop code count and list updated (14 → 15).
 
+## ticket-planner 0.8.7 (2026-09-02)
+
+Closes #217 — the Crosscheck citation linter (`planner-crosscheck-citations.sh`,
+#172) resolved every `path:line` citation against whatever branch the shared
+`REPOS_ROOT` checkout happened to be on at the moment Crosscheck ran, not the
+ref Discovery actually explored. On two initiatives (VS-2, VS-3) the live
+checkout moved to a different branch between Discovery and Crosscheck —
+another terminal, another initiative's pipeline — and genuine per-branch file
+differences (`worker/metrics.py` existing only on `develop`; a file with a
+different line count on each branch) produced `CITATION_UNRESOLVED` /
+`CITATION_LINE_OUT_OF_RANGE` findings indistinguishable from a hallucinated
+citation. Both times it was worked around by hand with a throwaway worktree.
+
+- Discovery's phase prompt (`planner_prompt_discovery` in
+  `lib/planner-phase-prompts.sh`) now records the ref it explored for every
+  repo it touches: `META|discovery|repo-ref|<repo>@<branch>@<sha>`.
+- New `lib/planner-crosscheck-repo-ref.sh`: `planner_crosscheck_repo_refs`
+  reads those entries back; `planner_crosscheck_repo_ref_ensure` /
+  `planner_crosscheck_repo_ref_setup` create an isolated `git worktree`
+  alongside a REPOS_ROOT repo whose live checkout no longer matches the
+  pinned sha, and hand back the live dir's basename for exclusion. The live
+  checkout is never mutated — no `git checkout`/`switch`/`reset` anywhere in
+  this path.
+- `planner_crosscheck_citations` (`lib/planner-crosscheck-citations.sh`) now
+  calls the setup helper before resolving any citation, temporarily excluding
+  a stale live repo copy in favor of its pinned-ref worktree, then restores
+  the exclude list afterward. Best-effort: a repo with no recorded ref, or a
+  worktree-creation failure, falls back to the live checkout exactly as
+  before — this never turns into a new way for Crosscheck to block.
+- Documented the hard rule in `skills/ticket-planner/SKILL.md`'s Crosscheck
+  section and in Discovery's own prompt: the planner never runs `git
+  checkout`, `git switch`, or `git reset` against a REPOS_ROOT repo — read
+  only, or a worktree alongside it.
+- New `lib/tests/test-planner-crosscheck-repo-ref.sh` (11 tests): read-back,
+  worktree creation/reuse, live-checkout-untouched, non-git-dir no-op, and an
+  end-to-end citation resolving through the pinned-ref worktree.
+
 ## ticket-planner 0.8.6 (2026-09-02)
 
 Closes #219 — the `TargetSymbols` citation grammar the Crosscheck linter

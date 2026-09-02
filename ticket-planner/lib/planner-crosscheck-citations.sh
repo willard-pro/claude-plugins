@@ -63,6 +63,16 @@ PLANNER_CROSSCHECK_EXCLUDE_DIRS=("node_modules" ".venv" ".git" ".ticket-auto" ".
 # may appear in and still count as resolved (issue #172 suggests N=5).
 PLANNER_CROSSCHECK_SYMBOL_PROXIMITY=5
 
+_PLANNER_CROSSCHECK_CITATIONS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Resolving against a Discovery-pinned ref (#217) is optional — a bare
+# planner_crosscheck_citations_one call (e.g. from a test, or a caller that
+# only has a file + repos_root) still works with no repo-ref lib available.
+if ! declare -f planner_crosscheck_repo_ref_setup >/dev/null 2>&1; then
+  [ -f "${_PLANNER_CROSSCHECK_CITATIONS_LIB_DIR}/planner-crosscheck-repo-ref.sh" ] &&
+    source "${_PLANNER_CROSSCHECK_CITATIONS_LIB_DIR}/planner-crosscheck-repo-ref.sh"
+fi
+
 # ── Internal helpers ────────────────────────────────────────────────────────
 
 # Build the `find`/`grep` prune arguments for PLANNER_CROSSCHECK_EXCLUDE_DIRS.
@@ -551,6 +561,18 @@ planner_crosscheck_citations() {
     return 1
   fi
 
+  # #217: resolve against the ref Discovery actually explored, not whatever
+  # the live REPOS_ROOT checkout happens to be on right now. A no-op when
+  # Discovery recorded no repo-ref, or the live checkout already matches.
+  local -a _pcc_orig_exclude_dirs=("${PLANNER_CROSSCHECK_EXCLUDE_DIRS[@]}")
+  if declare -f planner_crosscheck_repo_ref_setup >/dev/null 2>&1; then
+    local _pcc_overrides _pcc_excl
+    _pcc_overrides=$(planner_crosscheck_repo_ref_setup "$initiative_id" "$repos_root")
+    for _pcc_excl in $_pcc_overrides; do
+      PLANNER_CROSSCHECK_EXCLUDE_DIRS+=("$_pcc_excl")
+    done
+  fi
+
   local total=0 passed=0 failed=0
   local target_file
 
@@ -577,6 +599,8 @@ planner_crosscheck_citations() {
       fi
     done
   fi
+
+  PLANNER_CROSSCHECK_EXCLUDE_DIRS=("${_pcc_orig_exclude_dirs[@]}")
 
   echo "planner-crosscheck-citations: $passed passed, $failed failed out of $total files"
   return $((failed > 0 ? 1 : 0))

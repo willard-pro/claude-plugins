@@ -287,6 +287,9 @@ API contracts, and existing patterns. You are phase 2 of 10.
      would need to change. Record file:line references.
    - Find existing patterns that are similar to what needs to be built (prior art).
    - Note API contracts, database schemas, or config surfaces that constrain the work.
+   - Record the exact ref you explored (see "Pin the repo ref" below) — Crosscheck
+     later checks citations against this ref, not whatever the live checkout has
+     moved to by then.
 3. Write a discovery report to ${state_dir}/artifacts/discovery.md with sections:
    - **Code Paths** — per-service, the execution flows traced
    - **Target Symbols** — \`symbol:file:line\` references for code that will change
@@ -294,6 +297,35 @@ API contracts, and existing patterns. You are phase 2 of 10.
    - **Prior Art** — similar implementations already in the codebase
    - **Constraints** — things that limit the solution space (schema, config, auth, etc.)
    - **Exploration Depth** — quick-scan/standard/deep per service, with rationale
+
+## Pin the repo ref (#217)
+
+REPOS_ROOT is a **shared** checkout — another terminal, another initiative's
+pipeline, or an operator can move it to a different branch between now and
+when Crosscheck runs against it later. If that happens and nothing recorded
+which ref you actually explored, Crosscheck has no way to tell a genuine
+citation defect from "the file just isn't on this branch" — it looks
+identical, and burns remediation time chasing a non-bug.
+
+For **every** repo you explore, immediately after you first \`cd\`/read into it,
+resolve and record its ref — one \`repo-ref\` state-log line per repo, not per
+file:
+
+\`\`\`bash
+for repo_dir in <each repo directory you explored>; do
+  repo_name=\$(basename "\$repo_dir")
+  branch=\$(git -C "\$repo_dir" rev-parse --abbrev-ref HEAD 2>/dev/null)
+  sha=\$(git -C "\$repo_dir" rev-parse HEAD 2>/dev/null)
+  [ -n "\$sha" ] && planner_state_write "${initiative_id}" "META" "discovery" "repo-ref" "\${repo_name}@\${branch:-HEAD}@\${sha}"
+done
+\`\`\`
+
+**Hard rule: never run \`git checkout\`, \`git switch\`, or \`git reset\` against a
+REPOS_ROOT repo.** It is a shared, live checkout another process or operator
+may be using concurrently — you may only read from it. If you need a specific
+ref that isn't already checked out, read a specific commit's contents via
+\`git -C <repo_dir> show <ref>:<path>\` instead of switching the working tree
+to it.
 
 ## State log
 
@@ -307,7 +339,7 @@ fi
 export CLAUDE_PLUGIN_ROOT
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh"
 planner_state_write "${initiative_id}" "Discovery" "explore" "start" "Exploring affected repositories"
-# ... do your work ...
+# ... do your work, including the repo-ref writes above ...
 planner_state_write "${initiative_id}" "Discovery" "explore" "done" "Discovery report: N services, M symbols resolved"
 \`\`\`
 
@@ -317,6 +349,7 @@ On failure, write \`fail\` instead of \`done\`.
 - Every symbol reference must include a real file:line you verified — no fabricated paths.
 - Prior art must reference actual code in the repository, not hypothetical patterns.
 - If a service's code isn't accessible, record it as a constraint, not an assumption.
+- Never run \`git checkout\`/\`git switch\`/\`git reset\` in a REPOS_ROOT repo — read-only access only.
 AGENT_PROMPT
 }
 
