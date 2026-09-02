@@ -17,6 +17,37 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.6 (2026-09-02)
+
+Closes #219 — the `TargetSymbols` citation grammar the Crosscheck linter
+(`planner-crosscheck-citations.sh`, #172) actually enforces existed only
+implicitly, encoded in its regexes. It had never been written down anywhere
+the Specify prompt or a human author could read. Root-caused the majority of
+findings across every initiative to date: 17 of 22 raw findings on one
+initiative were annotations placed on the *path* side of `Name:path` instead
+of the *Name* side; a similar share recurred on later initiatives. Each
+remediation round was effectively re-deriving the grammar from checker
+failures, one finding at a time, instead of following a spec.
+
+- Added a `## Target Symbols Grammar` section to
+  `skills/ticket-planner/SKILL.md` documenting the grammar as a formal
+  production plus worked examples, verified against the linter's actual
+  behavior (not just the issue's description of it) with live fixtures:
+  annotations belong on the `Name` side only; `(new ...)` skips the
+  unresolved-path check alone; a compound `Name1()/Name2()` entry with two
+  distinct line ranges checks *every* name against *every* range rather than
+  pairing them positionally, so it silently passes or fails depending on how
+  close the two symbols happen to sit — write one entry per symbol instead;
+  non-file concepts (a migration description, a sibling initiative's slug)
+  aren't citable and belong in prose.
+- Inlined a condensed version of the same grammar directly into the Specify
+  phase prompt (`planner_prompt_specify` in `lib/planner-phase-prompts.sh`),
+  right after the Signals JSON block, so the agent has it in-context before
+  writing `TargetSymbols` entries rather than only self-linting after the
+  fact ([#237](https://github.com/willard-pro/claude-plugins/issues/237)).
+- No change to `planner-crosscheck-citations.sh` itself — this is
+  documentation of existing enforced behavior, not a behavior change.
+
 ## ticket-planner 0.8.5 (2026-09-02)
 
 Closes #218 — the citation + precedent linter (`planner-crosscheck-citations.sh`,

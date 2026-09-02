@@ -459,6 +459,30 @@ function — do NOT compute Confidence or Pre-approved yourself.
 }
 \`\`\`
 
+#### TargetSymbols grammar (the citation linter parses this literally)
+
+\`\`\`
+entry    := Name ':' location (',' location)*  |  Name ':' path
+Name     := identifier ['(' annotation ')']  |  identifier '/' identifier ...
+location := [path ':'] line ['-' line2]
+\`\`\`
+
+- Annotations go on the \`Name\` side, never the path side —
+  \`uploadFile (new):file.tsx:304-310\`, not \`uploadFile:file.tsx (new):304-310\`
+  (the latter folds the annotation into the literal filename, which never
+  resolves). This one mistake alone caused the majority of Crosscheck
+  findings across prior initiatives.
+- \`(new ...)\` on the Name side skips the unresolved-path check only — it
+  does not skip line-range or symbol-proximity checks once the file exists.
+- Do not cite two symbols against two different line ranges in one compound
+  \`Name1()/Name2()\` entry — write two independent entries instead
+  (\`fnA():f.py:10-20;fnB():f.py:30-40\`). A compound name sharing one single
+  location is fine.
+- A migration description, a sibling initiative's slug, or any other
+  non-file concept is not a \`TargetSymbols\` entry — say it in prose instead.
+
+Full grammar with worked examples: SKILL.md § Target Symbols Grammar.
+
 ### Part 3: Write spec index
 
 Write ${state_dir}/artifacts/specs/INDEX.md listing every ticket spec with
