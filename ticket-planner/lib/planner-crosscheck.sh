@@ -39,6 +39,20 @@
 # retrying a deterministic check against unchanged artifacts cannot produce a
 # different answer; only editing the artifacts and resuming can.
 #
+# A genuine-and-expected blocking finding (e.g. a documented ticket-count
+# rescope already recorded in consensus.md, not a checker bug) is the one
+# case retrying a deterministic check *can* legitimately change the outcome
+# for — not by re-running the same linter, but by the operator recording an
+# explicit override first. `resume <ID> --accept CODE:"reason"` (#222) writes
+# META|crosscheck|accepted|<CODE> <reason> to state.log via
+# planner_crosscheck_accept_set (SKILL.md step 2b, before the loop reaches
+# Crosscheck again); _planner_crosscheck_emit_finding checks that record and
+# treats a matching code as non-blocking on every subsequent run, recording
+# each still-occurring instance as its own META|crosscheck|accepted entry so
+# the audit trail — and the Completed phase's COMPLETED.md Warnings section,
+# which reads the whole log — shows *why* it was allowed through, distinct
+# from an automated pass.
+#
 # Sourceable library — no set -euo pipefail.
 
 _PLANNER_CROSSCHECK_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -87,6 +101,51 @@ _planner_crosscheck_is_warn_code() {
   esac
 }
 
+# Codes the operator has explicitly accepted as genuine-and-expected for this
+# initiative via `resume <ID> --accept CODE:"reason"` (#222) — e.g. a
+# documented ticket-count rescope already recorded in consensus.md, not a
+# checker bug. Persisted as META|crosscheck|accepted|<CODE> <reason> the
+# moment the flag is parsed, before the dispatch loop reaches Crosscheck
+# again (SKILL.md step 2b) — same disk-backed pattern as --create and
+# --until, and the same governing principle from #144: nothing survives the
+# dispatch loop's process boundary except what is written to the state log.
+# A code accepted once stays accepted for the life of the initiative; there
+# is no un-accept.
+#
+# Usage: planner_crosscheck_accept_set <initiative_id> <code> <reason>
+planner_crosscheck_accept_set() {
+  local initiative_id="$1" code="$2" reason="$3"
+  planner_state_write "$initiative_id" "META" "crosscheck" "accepted" "${code} ${reason}"
+}
+
+# Usage: _planner_crosscheck_accepted_codes <initiative_id>
+# Output (stdout): every accepted code, one per line, deduplicated.
+_planner_crosscheck_accepted_codes() {
+  local initiative_id="$1" log
+  log=$(planner_state_log "$initiative_id")
+  [ -f "$log" ] || return 0
+
+  local line phase step status msg code
+  while IFS='|' read -r _ts phase step status msg; do
+    [ "$phase" = "META" ] || continue
+    [ "$step" = "crosscheck" ] || continue
+    [ "$status" = "accepted" ] || continue
+    code=$(echo "$msg" | awk '{print $1}')
+    [ -n "$code" ] && echo "$code"
+  done <"$log" | sort -u
+}
+
+# Is <code> accepted for <initiative_id>?
+# Usage: _planner_crosscheck_code_accepted <initiative_id> <code>
+_planner_crosscheck_code_accepted() {
+  local initiative_id="$1" code="$2" accepted
+  accepted=$(_planner_crosscheck_accepted_codes "$initiative_id" | tr '\n' ' ')
+  case " ${accepted}" in
+  *" ${code} "*) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
 # Parse one finding line from a check family's stdout and write it to
 # state.log in #176's format. The check families print:
 #   planner-crosscheck-<family>: <CODE> <rest of message...>
@@ -95,7 +154,8 @@ _planner_crosscheck_is_warn_code() {
 # a real code is always upper-snake-case, which no summary line's first word
 # is, so that's the discriminator.
 # Usage: _planner_crosscheck_emit_finding <initiative_id> <finding_line>
-# Returns: 0 if the finding was blocking, 1 if warn, 2 if not a finding line.
+# Returns: 0 if the finding was blocking, 1 if warn, 2 if not a finding line,
+# 3 if the code was operator-accepted (#222).
 _planner_crosscheck_emit_finding() {
   local initiative_id="$1" finding_line="$2"
   local body code message
@@ -114,6 +174,11 @@ _planner_crosscheck_emit_finding() {
     return 1
   fi
 
+  if _planner_crosscheck_code_accepted "$initiative_id" "$code"; then
+    planner_state_write "$initiative_id" "META" "crosscheck" "accepted" "${code} ${message}"
+    return 3
+  fi
+
   planner_state_write "$initiative_id" "META" "crosscheck" "fail" "${code} ${message}"
   return 0
 }
@@ -121,11 +186,11 @@ _planner_crosscheck_emit_finding() {
 # Run one check family, emitting a state-log event for every finding line it
 # printed to stdout.
 # Usage: _planner_crosscheck_run_family <initiative_id> <check_fn> [<check_fn_args...>]
-# Output (stdout): "<blocking_count> <warn_count>"
+# Output (stdout): "<blocking_count> <warn_count> <accepted_count>"
 _planner_crosscheck_run_family() {
   local initiative_id="$1"
   shift
-  local blocking=0 warn=0
+  local blocking=0 warn=0 accepted=0
   local line rc
 
   while IFS= read -r line; do
@@ -135,10 +200,11 @@ _planner_crosscheck_run_family() {
     case "$rc" in
     0) blocking=$((blocking + 1)) ;;
     1) warn=$((warn + 1)) ;;
+    3) accepted=$((accepted + 1)) ;;
     esac
   done < <("$@" 2>/dev/null)
 
-  echo "$blocking $warn"
+  echo "$blocking $warn $accepted"
 }
 
 # Run the full Crosscheck phase for an initiative: both wired check families,
@@ -148,45 +214,51 @@ _planner_crosscheck_run_family() {
 # Returns: 0 if clean (or warn-only), 1 if any blocking finding was reported.
 planner_crosscheck_run() {
   local initiative_id="$1"
-  local total_blocking=0 total_warn=0
-  local b w
+  local total_blocking=0 total_warn=0 total_accepted=0
+  local b w a
 
   planner_state_write "$initiative_id" "Crosscheck" "check" "start" "running citation + propagation + bypass + contracts + signals + deps checks"
 
-  read -r b w < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_citations "$initiative_id")
+  read -r b w a < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_citations "$initiative_id")
   total_blocking=$((total_blocking + b))
   total_warn=$((total_warn + w))
+  total_accepted=$((total_accepted + a))
 
-  read -r b w < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_propagation "$initiative_id")
+  read -r b w a < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_propagation "$initiative_id")
   total_blocking=$((total_blocking + b))
   total_warn=$((total_warn + w))
+  total_accepted=$((total_accepted + a))
 
-  read -r b w < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_bypass "$initiative_id")
+  read -r b w a < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_bypass "$initiative_id")
   total_blocking=$((total_blocking + b))
   total_warn=$((total_warn + w))
+  total_accepted=$((total_accepted + a))
 
-  read -r b w < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_contracts "$initiative_id")
+  read -r b w a < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_contracts "$initiative_id")
   total_blocking=$((total_blocking + b))
   total_warn=$((total_warn + w))
+  total_accepted=$((total_accepted + a))
 
-  read -r b w < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_signals "$initiative_id")
+  read -r b w a < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_signals "$initiative_id")
   total_blocking=$((total_blocking + b))
   total_warn=$((total_warn + w))
+  total_accepted=$((total_accepted + a))
 
-  read -r b w < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_deps "$initiative_id")
+  read -r b w a < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_deps "$initiative_id")
   total_blocking=$((total_blocking + b))
   total_warn=$((total_warn + w))
+  total_accepted=$((total_accepted + a))
 
   if [ "$total_blocking" -gt 0 ]; then
     planner_state_write "$initiative_id" "Crosscheck" "check" "fail" \
-      "${total_blocking} blocking finding(s), ${total_warn} warn — see META|crosscheck entries"
-    echo "planner-crosscheck: ${total_blocking} blocking finding(s), ${total_warn} warn" >&2
+      "${total_blocking} blocking finding(s), ${total_warn} warn, ${total_accepted} accepted — see META|crosscheck entries"
+    echo "planner-crosscheck: ${total_blocking} blocking finding(s), ${total_warn} warn, ${total_accepted} accepted" >&2
     return 1
   fi
 
   planner_state_write "$initiative_id" "Crosscheck" "check" "done" \
-    "clean (${total_warn} warn)"
-  echo "planner-crosscheck: clean (${total_warn} warn)"
+    "clean (${total_warn} warn, ${total_accepted} accepted)"
+  echo "planner-crosscheck: clean (${total_warn} warn, ${total_accepted} accepted)"
   return 0
 }
 
@@ -198,10 +270,10 @@ planner_crosscheck_run() {
 # append-only. Reads directly from state.log; does not re-run the checks.
 #
 # Usage: planner_crosscheck_findings_summary <initiative_id>
-# Output (stdout): one "<count> <blocking|warn> <CODE>" line per distinct
-# code, sorted by count descending, followed by a "TOTAL: <n> blocking, <n>
-# warn" line. No output at all if Crosscheck has not run yet, or its most
-# recent run recorded no findings.
+# Output (stdout): one "<count> <blocking|warn|accepted> <CODE>" line per
+# distinct code, sorted by count descending, followed by a "TOTAL: <n>
+# blocking, <n> warn, <n> accepted" line. No output at all if Crosscheck has
+# not run yet, or its most recent run recorded no findings.
 planner_crosscheck_findings_summary() {
   local initiative_id="$1"
   local log
@@ -212,7 +284,7 @@ planner_crosscheck_findings_summary() {
   start_line=$(grep -n '|Crosscheck|check|start|' "$log" | tail -1 | cut -d: -f1)
   [ -z "$start_line" ] && return 0
 
-  local blocking_total=0 warn_total=0
+  local blocking_total=0 warn_total=0 accepted_total=0
   declare -A _cc_counts=()
   declare -A _cc_kind=()
   local line phase step status msg code
@@ -240,10 +312,20 @@ planner_crosscheck_findings_summary() {
       _cc_kind["$code"]="warn"
       warn_total=$((warn_total + 1))
       ;;
+    accepted)
+      # Operator-accepted findings (#222) are written as "<CODE> <message>",
+      # same shape as `fail` — see _planner_crosscheck_emit_finding and
+      # planner_crosscheck_accept_set.
+      code=$(echo "$msg" | awk '{print $1}')
+      [ -z "$code" ] && continue
+      _cc_counts["$code"]=$((${_cc_counts["$code"]:-0} + 1))
+      _cc_kind["$code"]="accepted"
+      accepted_total=$((accepted_total + 1))
+      ;;
     esac
   done < <(tail -n "+$((start_line + 1))" "$log")
 
-  if [ "$blocking_total" -eq 0 ] && [ "$warn_total" -eq 0 ]; then
+  if [ "$blocking_total" -eq 0 ] && [ "$warn_total" -eq 0 ] && [ "$accepted_total" -eq 0 ]; then
     return 0
   fi
 
@@ -251,5 +333,5 @@ planner_crosscheck_findings_summary() {
     echo "${_cc_counts[$code]} ${_cc_kind[$code]} ${code}"
   done | sort -rn
 
-  echo "TOTAL: ${blocking_total} blocking, ${warn_total} warn"
+  echo "TOTAL: ${blocking_total} blocking, ${warn_total} warn, ${accepted_total} accepted"
 }

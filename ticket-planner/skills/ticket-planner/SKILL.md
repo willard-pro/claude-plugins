@@ -60,6 +60,7 @@ process per phase and an `export` does not survive that (#144).
 | Flag | Effect |
 |------|--------|
 | `--create` | **`resume` only.** Authorize Linear creation, then run Epic Gen → Ticket Gen → Completed |
+| `--accept CODE:"reason"` | **`resume` only.** Mark a Crosscheck finding genuine-and-expected; non-blocking on the next Crosscheck run. Repeatable |
 | `--shared-branch` | Force a shared-branch directive on the epic regardless of the heuristic |
 | `--no-shared-branch` | Suppress the shared-branch directive regardless of the heuristic |
 | `--until <Phase>` | Stop the dispatch loop once `<Phase>` completes; `resume` continues |
@@ -103,6 +104,38 @@ Crosscheck. `--until` accepts any phase name from `planner_phase_sequence`; an u
 phase, or one the initiative has already passed, is rejected with the valid names (or
 the current position) in the message.
 
+### Accepting a genuine Crosscheck finding (`--accept`)
+
+Some blocking findings are correct about the artifacts but not defects — most often
+`CARVE_SCOPE_LOST` when a ticket count was deliberately rescoped after Specify and the
+rescope is already documented in `consensus.md` or a post-Consensus coverage-audit doc.
+Before this flag existed the only way to unblock the create gate was hand-writing a
+`META|crosscheck|accepted|...`-shaped line directly into `state.log` — undocumented,
+easy to get wrong, and indistinguishable from an automated pass unless you already knew
+to look for it (#222).
+
+```
+/ticket-planner resume INIT-42 --accept CARVE_SCOPE_LOST:"documented rescope, see consensus.md#tickets-6"
+```
+
+`--accept CODE:"reason"` is **`resume` only**, same restriction as `--create` — a
+finding can only be accepted after Crosscheck has reported it. It is parsed and
+persisted the same way `--create`/`--until` are: written to the state log as
+`META|crosscheck|accepted|<CODE> <reason>` the moment it is parsed, before the dispatch
+loop reaches Crosscheck again, so the decision survives the process boundary between
+phases (the governing principle from #144 — see [Plan flags](#plan-flags) above). The
+flag is repeatable — pass it once per code to accept more than one finding in the same
+`resume`.
+
+Once accepted, the code stays accepted for the life of the initiative; there is no
+un-accept. On the next Crosscheck run, `planner_crosscheck_run` treats a finding whose
+code was accepted as non-blocking — the create gate does not see it — but still writes
+it to the state log as `META|crosscheck|accepted|<CODE> <message>` every time it
+recurs, so it stays visible in `status` mode's Crosscheck findings section and in
+`COMPLETED.md`'s Warnings section exactly like an automated pass or fail, with the
+operator's reason attached. Only the code named survives — a new finding under a
+different code still blocks normally.
+
 ### Resume (`resume`)
 
 Continue an interrupted or paused run. The router reads the state log, finds the last incomplete phase, and resumes from there. Completed phases are skipped.
@@ -121,6 +154,9 @@ artifacts have been reviewed:
 `--create` is checked once, at the top of the invocation, and persisted immediately —
 see [The create gate](#the-create-gate). A bare `resume` never crosses the write
 boundary, so recovering a crashed Discovery phase cannot silently authorize Epic Gen.
+
+`resume` is also the only mode that accepts a genuine-but-expected Crosscheck finding —
+see [Accepting a genuine Crosscheck finding](#accepting-a-genuine-crosscheck-finding---accept).
 
 ### Status (`status`)
 
@@ -177,7 +213,10 @@ shape `ticket-retro`'s failure-histogram parser already reads (see
 halts the dispatch loop immediately, before the create gate is even checked — retrying
 a deterministic check against unchanged artifacts cannot produce a different answer, so
 this is not folded into the phase-retry budget. Fix the cited artifact and
-`/ticket-planner resume <INIT_ID>` re-runs Crosscheck; it proceeds once clean.
+`/ticket-planner resume <INIT_ID>` re-runs Crosscheck; it proceeds once clean. If the
+finding is genuine but expected rather than a defect (a documented rescope, say),
+`/ticket-planner resume <INIT_ID> --accept CODE:"reason"` is the supported alternative
+to fixing the artifact — see [Accepting a genuine Crosscheck finding](#accepting-a-genuine-crosscheck-finding---accept).
 
 `#174` (bypass sweep for guarded fields) and `#175` (cross-initiative contract check)
 are separate, not-yet-implemented check families — Crosscheck runs only the two above
@@ -383,6 +422,7 @@ UNTIL_PHASE=""
 TEAM_REF=""
 PROJECT_REF=""
 MILESTONE_REF=""
+ACCEPT_FLAGS=()
 
 # Env vars are the defaults for the corresponding flags, read once, here.
 UNTIL_PHASE="${PLANNER_UNTIL:-}"
@@ -399,6 +439,8 @@ while [ "$#" -gt 0 ]; do
     --dry-run) ;;   # redundant: stopping before the first Linear write is the default
     --until) shift; UNTIL_PHASE="${1:-}" ;;
     --until=*) UNTIL_PHASE="${1#*=}" ;;
+    --accept) shift; ACCEPT_FLAGS+=("${1:-}") ;;
+    --accept=*) ACCEPT_FLAGS+=("${1#*=}") ;;
     --team) shift; TEAM_REF="${1:-}" ;;
     --team=*) TEAM_REF="${1#*=}" ;;
     --project) shift; PROJECT_REF="${1:-}" ;;
@@ -422,6 +464,40 @@ if [ "$CREATE_FLAG" = "true" ] && [ "$MODE" = "plan" ]; then
   echo "       /ticket-planner resume <INIT_ID> --create" >&2
   exit 1
 fi
+
+# --accept, like --create, is only meaningful after Crosscheck has reported the
+# finding it accepts. Rejected in 'plan' for the same reason --create is (#222).
+if [ "${#ACCEPT_FLAGS[@]}" -gt 0 ] && [ "$MODE" = "plan" ]; then
+  echo "ERROR: --accept is not valid for 'plan'. Accept a finding only after Crosscheck reports it:" >&2
+  echo "       /ticket-planner resume <INIT_ID> --accept CODE:\"reason\"" >&2
+  exit 1
+fi
+
+# Validate every --accept CODE:"reason" pair up front — CODE must look like a
+# real Crosscheck code (upper-snake-case, same shape _planner_crosscheck_emit_finding
+# requires) and reason must be non-empty. Split on the first ':' only, so a reason
+# containing ':' (a URL, a doc anchor) is preserved intact.
+for _accept_arg in "${ACCEPT_FLAGS[@]}"; do
+  [ -z "$_accept_arg" ] && continue
+  case "$_accept_arg" in
+  *:*)
+    _accept_code="${_accept_arg%%:*}"
+    _accept_reason="${_accept_arg#*:}"
+    ;;
+  *)
+    echo "ERROR: --accept requires CODE:\"reason\" (got '${_accept_arg}')" >&2
+    exit 1
+    ;;
+  esac
+  if [[ ! "$_accept_code" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
+    echo "ERROR: --accept code '${_accept_code}' is not a valid Crosscheck code (expected upper-snake-case, e.g. CARVE_SCOPE_LOST)" >&2
+    exit 1
+  fi
+  if [ -z "$_accept_reason" ]; then
+    echo "ERROR: --accept requires a non-empty reason: CODE:\"reason\"" >&2
+    exit 1
+  fi
+done
 ```
 
 Validate `--until` against the canonical sequence before writing anything.
@@ -462,11 +538,24 @@ if [ "$SHARED_BRANCH_FLAG" = "true" ]; then
 elif [ "$NO_SHARED_BRANCH_FLAG" = "true" ]; then
   planner_config_set "$INITIATIVE_ID" "branch-override" "no-shared"
 fi
+
+# --accept CODE:"reason" (#222): recorded via planner_crosscheck_accept_set, not
+# planner_config_set — a set of accepted codes, not a single last-write-wins value.
+if [ "${#ACCEPT_FLAGS[@]}" -gt 0 ]; then
+  source "${CLAUDE_PLUGIN_ROOT}/lib/planner-crosscheck.sh"
+  for _accept_arg in "${ACCEPT_FLAGS[@]}"; do
+    [ -z "$_accept_arg" ] && continue
+    planner_crosscheck_accept_set "$INITIATIVE_ID" "${_accept_arg%%:*}" "${_accept_arg#*:}"
+  done
+fi
 ```
 
 Config is last-write-wins, so a later invocation overrides an earlier one — that is how
 `resume --create` lifts the stop point `plan` recorded. `planner_config_set` rejects any
-key outside `PLANNER_CONFIG_KEYS`; do not invent new ones inline.
+key outside `PLANNER_CONFIG_KEYS`; do not invent new ones inline. `--accept` is the one
+exception to the `planner_config_set` path — accepted codes accumulate rather than
+overwrite, so it goes straight to `planner_state_write` via `planner_crosscheck_accept_set`
+(see [Accepting a genuine Crosscheck finding](#accepting-a-genuine-crosscheck-finding---accept)).
 
 The team, project and milestone refs are recorded here as given. Epic Gen resolves them
 to UUIDs, records the resolved ids with `planner_config_set`, and Ticket Gen reads those

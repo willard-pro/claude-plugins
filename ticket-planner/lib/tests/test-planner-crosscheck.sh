@@ -195,7 +195,7 @@ case "$summary2" in
 *) fail "dirty run: findings summary lists CITATION_UNRESOLVED as blocking" "got: $summary2" ;;
 esac
 case "$summary2" in
-*"TOTAL: 1 blocking, 0 warn"*) pass "dirty run: findings summary TOTAL line is correct" ;;
+*"TOTAL: 1 blocking, 0 warn, 0 accepted"*) pass "dirty run: findings summary TOTAL line is correct" ;;
 *) fail "dirty run: findings summary TOTAL line is correct" "got: $summary2" ;;
 esac
 
@@ -236,6 +236,73 @@ if [ -z "$summary2_after_fix" ]; then
 else
   fail "resume after fix: findings summary is empty (scoped to latest attempt)" "got: $summary2_after_fix"
 fi
+
+# ── --accept override (#222) ────────────────────────────────────────────────
+
+echo "--- accept override ---"
+
+INIT_ID3="INIT-1700000002-9012"
+STATE_DIR3="${REPOS_ROOT}/.ticket-auto/initiatives/${INIT_ID3}"
+mkdir -p "${STATE_DIR3}/artifacts/specs"
+
+planner_state_init "$INIT_ID3" "test idea for accept override"
+for p in Appraisal Discovery Architecture Specify Review Consensus; do
+  planner_state_write "$INIT_ID3" "$p" "step" "done" "ok"
+done
+
+cat >"${STATE_DIR3}/artifacts/consensus.md" <<'EOF'
+# Consensus
+EOF
+
+cat >"${STATE_DIR3}/artifacts/specs/vs-c.md" <<'EOF'
+# vs-c
+
+## Description
+
+Cites a file that does not exist under REPOS_ROOT: lib/still-missing.ts:1.
+EOF
+
+log_file3=$(planner_state_log "$INIT_ID3")
+
+# Unaccepted: the finding blocks, same as the dirty run above.
+if planner_crosscheck_run "$INIT_ID3"; then
+  fail "accept: unaccepted CITATION_UNRESOLVED still blocks" "returned 0"
+else
+  pass "accept: unaccepted CITATION_UNRESOLVED still blocks"
+fi
+
+# Operator accepts the code — this is what `resume <ID> --accept CODE:"reason"`
+# persists in SKILL.md step 2b, before the dispatch loop reaches Crosscheck again.
+planner_crosscheck_accept_set "$INIT_ID3" "CITATION_UNRESOLVED" "documented in consensus.md, not a real citation"
+
+if grep -q '|META|crosscheck|accepted|CITATION_UNRESOLVED documented in consensus.md, not a real citation' "$log_file3"; then
+  pass "accept: planner_crosscheck_accept_set writes META|crosscheck|accepted"
+else
+  fail "accept: planner_crosscheck_accept_set writes META|crosscheck|accepted" "$(grep 'crosscheck' "$log_file3")"
+fi
+
+# Re-run: the same finding recurs (artifact unchanged) but is now non-blocking.
+if planner_crosscheck_run "$INIT_ID3"; then
+  pass "accept: accepted CITATION_UNRESOLVED is non-blocking on the next run"
+else
+  fail "accept: accepted CITATION_UNRESOLVED is non-blocking on the next run" "returned nonzero"
+fi
+
+if [ "$(planner_position_derive "$INIT_ID3")" = "EpicGen" ]; then
+  pass "accept: position derive advances past Crosscheck once accepted"
+else
+  fail "accept: position derive advances past Crosscheck once accepted" "got $(planner_position_derive "$INIT_ID3")"
+fi
+
+accept_summary=$(planner_crosscheck_findings_summary "$INIT_ID3")
+case "$accept_summary" in
+*"accepted CITATION_UNRESOLVED"*) pass "accept: findings summary lists CITATION_UNRESOLVED as accepted" ;;
+*) fail "accept: findings summary lists CITATION_UNRESOLVED as accepted" "got: $accept_summary" ;;
+esac
+case "$accept_summary" in
+*"TOTAL: 0 blocking, 0 warn, 1 accepted"*) pass "accept: findings summary TOTAL line counts the accepted finding" ;;
+*) fail "accept: findings summary TOTAL line counts the accepted finding" "got: $accept_summary" ;;
+esac
 
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
