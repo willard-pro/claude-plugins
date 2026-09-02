@@ -17,6 +17,56 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.29.22 (2026-09-02)
+
+Closes #272 — the token-tracker hooks (`token-tracker-start.sh` /
+`SubagentStart`, `token-tracker.sh` / `SubagentStop`) determined which
+pipeline run a firing subagent belonged to by scanning global `/tmp` state
+with `ls -t ... | head -1` — the newest file on the *entire host*, with no
+link back to the subagent that actually fired. Three consequences of that one
+resolution path:
+
+- **Cross-run/cross-session misattribution.** Any subagent stopping anywhere
+  on the host — including ones with no relationship to the pipeline —
+  resolved its identity from whichever `/tmp/ticket-auto-*` file happened to
+  be newest, including dormant test fixtures left over from injection-hardening
+  tests. `token-tracker-start.sh` additionally derived identity from the ctx
+  file while `token-tracker.sh` derived it from the spawn-meta file — two
+  different sources that disagree whenever a ctx file from a different phase
+  or ticket races ahead of the spawn-meta file, producing exactly the
+  guaranteed-miss glob that crashed as #271.
+  - Fix: `spawn_agent_pre` (`lib/spawn-helper.sh`) now stamps
+    `SESSION_ID=$CLAUDE_CODE_SESSION_ID` into the spawn-meta file it already
+    writes on every live spawn. Both hooks read `session_id` from their own
+    hook payload (a field common to all Claude Code hook events) and resolve
+    TICKET_ID/PHASE/LOG_FILE *only* from the spawn-meta file whose
+    `SESSION_ID` matches — never the globally newest file, never a ctx-file
+    fallback, never an `UNKNOWN` phase guess. No match → exit 0, nothing
+    written anywhere. Both hooks now derive identity from the same single
+    source, so they can no longer disagree.
+- **Token counts attributed to the wrong agent.** When the payload carried no
+  `agent_transcript_path` (the documented case for named `subagent_type`
+  spawns), `token-tracker.sh` fell back to the newest `.jsonl` in the project
+  directory — typically the *parent orchestrator's own* transcript, re-summed
+  on every subagent stop and logged as that phase's token cost, inflating
+  every downstream `META|tokens` aggregate.
+  - Fix: that fallback is removed. A missing `agent_transcript_path` now
+    skips token accounting entirely rather than guessing — a missing
+    measurement is recoverable, a wrong one silently corrupts every
+    downstream aggregate.
+- **Shell-to-Python injection.** The transcript path was interpolated
+  directly into a Python string literal inside a double-quoted shell heredoc;
+  a path containing a single quote would terminate that literal and execute
+  the remainder as Python.
+  - Fix: the transcript path is now passed as `sys.argv[1]` to a
+    single-quoted (non-interpolated) Python heredoc, so no value can ever be
+    parsed as Python source.
+
+`lib/tests/test-spawn-helper.sh` gained coverage for all three: session-match
+resolution, cross-session mismatch (no write), no-`session_id`-in-payload (no
+write), missing-transcript-path (no token line), and a transcript path
+containing a single quote (parses safely, tokens still summed correctly).
+
 ## ticket-auto-pipeline 0.29.21 (2026-09-02)
 
 Closes #271 — `token-tracker.sh` (the `SubagentStop` hook) and

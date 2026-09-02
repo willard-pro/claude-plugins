@@ -401,9 +401,9 @@ META
 # ── token-tracker phase resolution tests (Task 1.3) ────────────────────────────
 
 test_token_tracker_resolves_phase_from_spawn_meta() {
-  # Verify token-tracker.sh reads PHASE from spawn-meta file (not ctx file).
-  # Creates a spawn-meta with PHASE=APPRAISE and a minimal agent transcript,
-  # then pipes hook JSON to the tracker and checks the log output.
+  # Verify token-tracker.sh reads PHASE from the spawn-meta file whose
+  # SESSION_ID matches the hook payload's session_id, and writes the log
+  # entry under the correct phase.
   local tmpdir
   tmpdir=$(_mktemp_test_dir)
   local log_file="$tmpdir/test-tk.log"
@@ -414,7 +414,7 @@ test_token_tracker_resolves_phase_from_spawn_meta() {
   # Clean any prior run
   rm -f "$meta_file" "$start_file" "$log_file"
 
-  # Write spawn-meta with PHASE=APPRAISE
+  # Write spawn-meta with PHASE=APPRAISE and a session id
   cat >"$meta_file" <<'META'
 PHASE=APPRAISE
 STEP=appraise
@@ -422,6 +422,7 @@ TICKET_ID=TEST-TK01
 LOG_FILE=LOG_FILE_PLACEHOLDER
 HB_LOG_FILE=
 CLAUDE_LOG_FILE=
+SESSION_ID=sess-tk01
 META
   sed -i "s|LOG_FILE_PLACEHOLDER|$log_file|" "$meta_file"
 
@@ -436,8 +437,8 @@ JSONL
   # Create start timestamp file
   date +%s%N >"$start_file"
 
-  # Build hook JSON and pipe to token-tracker.sh
-  local hook_json="{\"agent_transcript_path\": \"$transcript\"}"
+  # Build hook JSON (matching session_id) and pipe to token-tracker.sh
+  local hook_json="{\"session_id\": \"sess-tk01\", \"agent_transcript_path\": \"$transcript\"}"
   local tracker="$LIB_DIR/../hooks/token-tracker.sh"
   if [ -f "$tracker" ]; then
     echo "$hook_json" | bash "$tracker" 2>/dev/null || true
@@ -455,95 +456,72 @@ JSONL
   return $result
 }
 
-test_token_tracker_fallback_to_ctx_file() {
-  # Verify token-tracker.sh falls back to ctx file when spawn-meta is absent.
-  # We must move aside ALL spawn-meta files so the fallback path is exercised.
+test_token_tracker_ignores_session_mismatch() {
+  # Verify token-tracker.sh writes NOTHING when the newest spawn-meta file
+  # belongs to a different session than the hook payload's — this is the
+  # cross-session misattribution issue #272 fixes: no ls -t fallback across
+  # sessions, no guessing.
   local tmpdir
   tmpdir=$(_mktemp_test_dir)
   local log_file="$tmpdir/test-tk2.log"
   local transcript="$tmpdir/transcript2.jsonl"
-  local ctx_file="/tmp/ticket-auto-TEST-TK02-ctx.txt"
+  local meta_file="/tmp/ticket-auto-TEST-TK02-spawn-meta.txt"
   local start_file="/tmp/ticket-auto-TEST-TK02-start-IMPLEMENT-$(date +%s%N).ts"
 
-  # Move aside all existing spawn-meta files
-  local saved_meta_dir="$tmpdir/saved-metas"
-  mkdir -p "$saved_meta_dir"
-  local found_any=false
-  for f in /tmp/ticket-auto-*-spawn-meta.txt; do
-    [ -f "$f" ] || continue
-    mv "$f" "$saved_meta_dir/" 2>/dev/null || true
-    found_any=true
-  done
+  rm -f "$meta_file" "$start_file" "$log_file"
 
-  # Ensure NO spawn-meta or ctx files exist for this ticket
-  rm -f "/tmp/ticket-auto-TEST-TK02-spawn-meta.txt" "$ctx_file" "$start_file" "$log_file"
+  # Spawn-meta belongs to a DIFFERENT session than the one in hook_json below.
+  cat >"$meta_file" <<'META'
+PHASE=IMPLEMENT
+STEP=implement
+TICKET_ID=TEST-TK02
+LOG_FILE=LOG_FILE_PLACEHOLDER
+SESSION_ID=sess-owner
+META
+  sed -i "s|LOG_FILE_PLACEHOLDER|$log_file|" "$meta_file"
+  touch "$meta_file"
 
-  # Write ctx file with PHASE=IMPLEMENT (legacy format)
-  echo "IMPLEMENT|$log_file" >"$ctx_file"
-  # Make it newest
-  touch "$ctx_file"
-
-  # Write a minimal agent transcript
   cat >"$transcript" <<'JSONL'
 {"type": "assistant", "message": {"usage": {"input_tokens": 200, "output_tokens": 100}}}
 JSONL
 
-  # Create start timestamp
   date +%s%N >"$start_file"
 
-  local hook_json="{\"agent_transcript_path\": \"$transcript\"}"
+  local hook_json="{\"session_id\": \"sess-unrelated\", \"agent_transcript_path\": \"$transcript\"}"
   local tracker="$LIB_DIR/../hooks/token-tracker.sh"
   if [ -f "$tracker" ]; then
     echo "$hook_json" | bash "$tracker" 2>/dev/null || true
   fi
 
+  # No matching spawn-meta for this session → nothing should be written.
   local result=0
-  if [ -f "$log_file" ]; then
-    grep -q '|META|tokens|info|IMPLEMENT:' "$log_file" || result=1
-  else
-    result=1
-  fi
+  [ -f "$log_file" ] && result=1
 
-  # Restore saved meta files
-  if [ "$found_any" = true ]; then
-    mv "$saved_meta_dir"/* /tmp/ 2>/dev/null || true
-  fi
-  rm -rf "$tmpdir" "$ctx_file" "$start_file" 2>/dev/null || true
+  rm -rf "$tmpdir" "$meta_file" "$start_file" 2>/dev/null || true
   return $result
 }
 
-test_token_tracker_defaults_to_unknown_when_no_files() {
-  # Verify token-tracker.sh defaults to UNKNOWN when meta file has empty PHASE
-  # and no ctx file exists. Must isolate from leftover ctx files from other tests.
+test_token_tracker_no_session_in_payload_writes_nothing() {
+  # Verify token-tracker.sh exits cleanly and writes nothing when the hook
+  # payload carries no session_id at all — there is no safe attribution
+  # target, so the hook must not guess (no UNKNOWN phase fallback).
   local tmpdir
   tmpdir=$(_mktemp_test_dir)
   local log_file="$tmpdir/test-tk3.log"
   local transcript="$tmpdir/transcript3.jsonl"
   local meta_file="/tmp/ticket-auto-TEST-TK03-spawn-meta.txt"
-  local start_file="/tmp/ticket-auto-TEST-TK03-start-UNKNOWN-$(date +%s%N).ts"
+  local start_file="/tmp/ticket-auto-TEST-TK03-start-APPRAISE-$(date +%s%N).ts"
 
-  # Clean all tracking files for this ticket
-  rm -f "$meta_file" "/tmp/ticket-auto-TEST-TK03-ctx.txt" "/tmp/ticket-auto-TEST-TK03-start-UNKNOWN-"*".ts" "$log_file"
+  rm -f "$meta_file" "$start_file" "$log_file"
 
-  # Move aside all existing ctx files (they interfere with fallback)
-  local saved_ctx_dir="$tmpdir/saved-ctx"
-  mkdir -p "$saved_ctx_dir"
-  local found_ctx=false
-  for f in /tmp/ticket-auto-*-ctx.txt; do
-    [ -f "$f" ] || continue
-    mv "$f" "$saved_ctx_dir/" 2>/dev/null || true
-    found_ctx=true
-  done
-
-  # Write spawn-meta WITHOUT PHASE (forces fallback to UNKNOWN)
-  cat >"$meta_file" <<META
-PHASE=
-STEP=unknown_step
+  cat >"$meta_file" <<'META'
+PHASE=APPRAISE
+STEP=appraise
 TICKET_ID=TEST-TK03
-LOG_FILE=$log_file
+LOG_FILE=LOG_FILE_PLACEHOLDER
+SESSION_ID=sess-tk03
 META
-
-  # Touch it to be newest
+  sed -i "s|LOG_FILE_PLACEHOLDER|$log_file|" "$meta_file"
   touch "$meta_file"
 
   cat >"$transcript" <<'JSONL'
@@ -558,19 +536,155 @@ JSONL
     echo "$hook_json" | bash "$tracker" 2>/dev/null || true
   fi
 
-  # The meta file had empty PHASE, no ctx file exists → should default to UNKNOWN
+  local result=0
+  [ -f "$log_file" ] && result=1
+
+  rm -rf "$tmpdir" "$meta_file" "$start_file" 2>/dev/null || true
+  return $result
+}
+
+test_token_tracker_skips_when_transcript_path_absent() {
+  # 2b: when agent_transcript_path is absent from the payload (subagent_type
+  # spawns omit it), token accounting must be skipped — never guessed from
+  # the newest jsonl in the project dir, which is typically the parent
+  # session's own transcript and would corrupt every downstream aggregate.
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local log_file="$tmpdir/test-tkb.log"
+  local meta_file="/tmp/ticket-auto-TEST-TKB-spawn-meta.txt"
+  local start_file="/tmp/ticket-auto-TEST-TKB-start-APPRAISE-$(date +%s%N).ts"
+
+  rm -f "$meta_file" "$start_file" "$log_file"
+
+  cat >"$meta_file" <<META
+PHASE=APPRAISE
+STEP=appraise
+TICKET_ID=TEST-TKB
+LOG_FILE=$log_file
+SESSION_ID=sess-tkb
+META
+  touch "$meta_file"
+  date +%s%N >"$start_file"
+
+  local hook_json="{\"session_id\": \"sess-tkb\"}"
+  local tracker="$LIB_DIR/../hooks/token-tracker.sh"
+  if [ -f "$tracker" ]; then
+    echo "$hook_json" | bash "$tracker" 2>/dev/null || true
+  fi
+
+  # No token line should be written — there's no transcript to attribute to.
   local result=0
   if [ -f "$log_file" ]; then
-    grep -q '|META|tokens|info|UNKNOWN:' "$log_file" || result=1
+    grep -q '|META|tokens|info|' "$log_file" && result=1
+  fi
+
+  rm -rf "$tmpdir" "$meta_file" "$start_file" 2>/dev/null || true
+  return $result
+}
+
+test_token_tracker_transcript_path_with_quote_is_safe() {
+  # 2c: AGENT_TRANSCRIPT must be passed as sys.argv, never interpolated into
+  # Python source. A path containing a single quote would have terminated
+  # the old string literal early; verify it's parsed correctly instead
+  # (proving no injection surface) and tokens are still summed.
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local quote_dir="$tmpdir/te'st"
+  mkdir -p "$quote_dir"
+  local transcript="$quote_dir/transcript.jsonl"
+  local log_file="$tmpdir/test-tkq.log"
+  local meta_file="/tmp/ticket-auto-TEST-TKQ-spawn-meta.txt"
+  local start_file="/tmp/ticket-auto-TEST-TKQ-start-APPRAISE-$(date +%s%N).ts"
+
+  rm -f "$meta_file" "$start_file" "$log_file"
+
+  cat >"$meta_file" <<META
+PHASE=APPRAISE
+STEP=appraise
+TICKET_ID=TEST-TKQ
+LOG_FILE=$log_file
+SESSION_ID=sess-tkq
+META
+  touch "$meta_file"
+
+  cat >"$transcript" <<'JSONL'
+{"type": "assistant", "message": {"usage": {"input_tokens": 7, "output_tokens": 3}}}
+JSONL
+
+  date +%s%N >"$start_file"
+
+  local hook_json="{\"session_id\": \"sess-tkq\", \"agent_transcript_path\": \"$transcript\"}"
+  local tracker="$LIB_DIR/../hooks/token-tracker.sh"
+  if [ -f "$tracker" ]; then
+    echo "$hook_json" | bash "$tracker" 2>/dev/null || true
+  fi
+
+  local result=0
+  if [ -f "$log_file" ]; then
+    grep -q '|META|tokens|info|APPRAISE:7/3/0' "$log_file" || result=1
   else
     result=1
   fi
 
-  # Restore saved ctx files
-  if [ "$found_ctx" = true ]; then
-    mv "$saved_ctx_dir"/* /tmp/ 2>/dev/null || true
-  fi
   rm -rf "$tmpdir" "$meta_file" "$start_file" 2>/dev/null || true
+  return $result
+}
+
+test_token_tracker_start_writes_timestamp_on_session_match() {
+  local ticket_id="TEST-TKS1"
+  local meta_file="/tmp/ticket-auto-${ticket_id}-spawn-meta.txt"
+  rm -f "$meta_file" /tmp/ticket-auto-${ticket_id}-start-APPRAISE-*.ts
+
+  cat >"$meta_file" <<META
+PHASE=APPRAISE
+STEP=appraise
+TICKET_ID=${ticket_id}
+LOG_FILE=/tmp/does-not-matter.log
+SESSION_ID=sess-tks1
+META
+  touch "$meta_file"
+
+  local hook_json="{\"session_id\": \"sess-tks1\"}"
+  local starter="$LIB_DIR/../hooks/token-tracker-start.sh"
+  if [ -f "$starter" ]; then
+    echo "$hook_json" | bash "$starter" 2>/dev/null || true
+  fi
+
+  local result=0
+  local found
+  found=$(ls /tmp/ticket-auto-${ticket_id}-start-APPRAISE-*.ts 2>/dev/null | head -1 || true)
+  [ -z "$found" ] && result=1
+
+  rm -f "$meta_file" /tmp/ticket-auto-${ticket_id}-start-APPRAISE-*.ts 2>/dev/null || true
+  return $result
+}
+
+test_token_tracker_start_ignores_session_mismatch() {
+  local ticket_id="TEST-TKS2"
+  local meta_file="/tmp/ticket-auto-${ticket_id}-spawn-meta.txt"
+  rm -f "$meta_file" /tmp/ticket-auto-${ticket_id}-start-APPRAISE-*.ts
+
+  cat >"$meta_file" <<META
+PHASE=APPRAISE
+STEP=appraise
+TICKET_ID=${ticket_id}
+LOG_FILE=/tmp/does-not-matter.log
+SESSION_ID=sess-owner
+META
+  touch "$meta_file"
+
+  local hook_json="{\"session_id\": \"sess-unrelated\"}"
+  local starter="$LIB_DIR/../hooks/token-tracker-start.sh"
+  if [ -f "$starter" ]; then
+    echo "$hook_json" | bash "$starter" 2>/dev/null || true
+  fi
+
+  local result=0
+  local found
+  found=$(ls /tmp/ticket-auto-${ticket_id}-start-APPRAISE-*.ts 2>/dev/null | head -1 || true)
+  [ -n "$found" ] && result=1
+
+  rm -f "$meta_file" /tmp/ticket-auto-${ticket_id}-start-APPRAISE-*.ts 2>/dev/null || true
   return $result
 }
 
@@ -1309,8 +1423,12 @@ FILTER="${1:-}"
 
 for fn in \
   test_token_tracker_resolves_phase_from_spawn_meta \
-  test_token_tracker_fallback_to_ctx_file \
-  test_token_tracker_defaults_to_unknown_when_no_files \
+  test_token_tracker_ignores_session_mismatch \
+  test_token_tracker_no_session_in_payload_writes_nothing \
+  test_token_tracker_skips_when_transcript_path_absent \
+  test_token_tracker_transcript_path_with_quote_is_safe \
+  test_token_tracker_start_writes_timestamp_on_session_match \
+  test_token_tracker_start_ignores_session_mismatch \
   test_write_env_creates_file \
   test_write_env_exports_ticket_id \
   test_write_env_exports_repos_root \

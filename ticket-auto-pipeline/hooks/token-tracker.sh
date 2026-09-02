@@ -1,94 +1,88 @@
 #!/bin/bash
 # SubagentStop hook — parses agent transcript, sums token usage, appends to pipeline log.
-# Resolves PHASE from spawn-meta file (/tmp/ticket-auto-{ID}-spawn-meta.txt) which is
-# a stable per-spawn snapshot — avoids the race where the ctx file is overwritten by
-# the next phase's spawn_agent_pre before this async hook fires.
+#
+# Identity resolution: every Claude Code hook payload carries the invoking
+# session's session_id (a common field across all hook events). spawn_agent_pre
+# stamps that same value (via $CLAUDE_CODE_SESSION_ID) into SESSION_ID= in the
+# spawn-meta file it writes for every live pipeline spawn
+# (/tmp/ticket-auto-{ID}-spawn-meta.txt). This hook only considers spawn-meta
+# files whose SESSION_ID matches the payload's — never the globally newest
+# file across /tmp, and never an UNKNOWN-phase guess. A subagent stopping with
+# no live pipeline spawn for its session resolves nothing and exits 0 without
+# writing anywhere. token-tracker-start.sh resolves identity the same way, so
+# the two hooks can no longer disagree about which spawn they belong to.
+#
+# Transcript path resolution: only the primary source is trusted —
+# agent_transcript_path from the hook payload. When it is absent (named
+# subagent_type spawns omit it), token accounting is skipped rather than
+# guessed — a missing measurement is recoverable, a wrong one silently
+# corrupts every downstream aggregate.
+#
 # Reads start timestamp written by token-tracker-start.sh to compute elapsed_ms.
-# Transcript path resolution:
-#   Primary: agent_transcript_path from hook payload (works for anonymous agents)
-#   Fallback: most recent JSONL in ~/.claude/projects/<cwd-slug>/ (needed for named
-#             agent types spawned via subagent_type — they omit agent_transcript_path)
 # -u (nounset) intentionally omitted: Claude Code shell snapshots inject
 # ZSH_VERSION references that trigger false-positive "unbound variable"
 # errors in this bash version when nounset is active.
 set -eo pipefail
 
 read -r hook_json
-AGENT_TRANSCRIPT=$(echo "$hook_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('agent_transcript_path',''))")
+SESSION_ID=$(echo "$hook_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('session_id',''))" 2>/dev/null || echo "")
+AGENT_TRANSCRIPT=$(echo "$hook_json" | python3 -c "import json,sys; print(json.load(sys.stdin).get('agent_transcript_path',''))" 2>/dev/null || echo "")
 
-# ── Resolve PHASE and LOG_FILE ───────────────────────────────────────────────
-# Priority: spawn-meta file (stable per-spawn snapshot) → ctx file (legacy) → UNKNOWN
+# No session identity on the payload — nothing to safely attribute to.
+[ -z "$SESSION_ID" ] && exit 0
+
+# ── Resolve PHASE / LOG_FILE / TICKET_ID from the one spawn-meta file whose
+# SESSION_ID matches this hook's own session. ls -t sorts newest-first so a
+# stale spawn-meta from an earlier phase in the same session never wins over
+# the current one. ────────────────────────────────────────────────────────
 PHASE=""
 LOG_FILE=""
 TICKET_ID=""
-
-# Try spawn-meta files first (written atomically by spawn_agent_pre, not overwritten
-# until the NEXT spawn_agent_pre — avoids the race where ctx file already shows next phase)
-META_FILE=$(ls -t /tmp/ticket-auto-*-spawn-meta.txt 2>/dev/null | head -1 || true)
-if [ -n "$META_FILE" ]; then
-  TICKET_ID=$(basename "$META_FILE" | sed 's/ticket-auto-\(.*\)-spawn-meta\.txt/\1/')
+for f in $(ls -t /tmp/ticket-auto-*-spawn-meta.txt 2>/dev/null || true); do
+  [ -f "$f" ] || continue
+  _phase="" _log="" _sid=""
   while IFS='=' read -r key val; do
     case "$key" in
-    PHASE) PHASE="$val" ;;
-    LOG_FILE) LOG_FILE="$val" ;;
+    PHASE) _phase="$val" ;;
+    LOG_FILE) _log="$val" ;;
+    SESSION_ID) _sid="$val" ;;
     esac
-  done <"$META_FILE"
-fi
-
-# Fallback: try legacy ctx file
-if [ -z "$PHASE" ] || [ -z "$LOG_FILE" ]; then
-  CTX_FILE=$(ls -t /tmp/ticket-auto-*-ctx.txt 2>/dev/null | head -1 || true)
-  if [ -n "$CTX_FILE" ]; then
-    IFS='|' read -r CTX_PHASE CTX_LOG_FILE <"$CTX_FILE"
-    [ -z "$PHASE" ] && PHASE="$CTX_PHASE"
-    [ -z "$LOG_FILE" ] && LOG_FILE="$CTX_LOG_FILE"
-    [ -z "$TICKET_ID" ] && TICKET_ID=$(basename "$CTX_FILE" | sed 's/ticket-auto-\(.*\)-ctx\.txt/\1/')
+  done <"$f"
+  if [ "$_sid" = "$SESSION_ID" ]; then
+    PHASE="$_phase"
+    LOG_FILE="$_log"
+    TICKET_ID=$(basename "$f" | sed 's/ticket-auto-\(.*\)-spawn-meta\.txt/\1/')
+    break
   fi
-fi
+done
 
-# Default: if still unresolved, use UNKNOWN
-[ -z "$PHASE" ] && PHASE="UNKNOWN"
+# No matching live pipeline spawn for this session — nothing to log.
+[ -z "$TICKET_ID" ] && exit 0
+[ -z "$PHASE" ] && exit 0
+[ -z "$LOG_FILE" ] && exit 0
 
-if [ -z "$LOG_FILE" ]; then
-  exit 0
-fi
-
-[ -z "$TICKET_ID" ] && TICKET_ID="unknown"
 # Pick the most recent start file for this phase. Unique suffixes per spawn
 # prevent sub-sub-agent overwrite races; ls -t ensures correct pairing.
 START_FILE=$(ls -t /tmp/ticket-auto-${TICKET_ID}-start-${PHASE}-*.ts 2>/dev/null | head -1 || true)
 
-# Fallback: named agent types (subagent_type) don't include agent_transcript_path in
-# SubagentStop payload. Derive project sessions dir from LOG_FILE path — it reliably
-# points to the orchestrator's CWD regardless of where phase agents cd to during execution.
-if [ -z "$AGENT_TRANSCRIPT" ] && [ -n "$LOG_FILE" ]; then
-  _LOG_DIR=$(dirname "$LOG_FILE")
-  _PROJECT_ROOT=$(dirname "$_LOG_DIR")
-  _PROJECT_SLUG=$(echo "$_PROJECT_ROOT" | sed 's|/|-|g; s|\.|-|g')
-  _PROJECT_DIR="$HOME/.claude/projects/${_PROJECT_SLUG}"
-  if [ -d "$_PROJECT_DIR" ]; then
-    AGENT_TRANSCRIPT=$(ls -t "$_PROJECT_DIR"/*.jsonl 2>/dev/null | head -1 || true)
-  fi
-fi
-
 if [ -n "$AGENT_TRANSCRIPT" ] && [ -f "$AGENT_TRANSCRIPT" ]; then
-  TOKENS=$(python3 -c "
+  TOKENS=$(python3 -c '
 import json, sys
 input_t = output_t = cache_read = cache_create = 0
-with open('$AGENT_TRANSCRIPT') as f:
+with open(sys.argv[1]) as f:
     for line in f:
         try:
             msg = json.loads(line)
-        except:
+        except Exception:
             continue
-        if msg.get('type') == 'assistant':
-            u = msg.get('message', {}).get('usage', {})
-            input_t += u.get('input_tokens', 0)
-            output_t += u.get('output_tokens', 0)
-            cache_read += u.get('cache_read_input_tokens', 0)
-            cache_create += u.get('cache_creation_input_tokens', 0)
-print(f'{input_t}/{output_t}/{cache_read + cache_create}')
-" 2>/dev/null)
+        if msg.get("type") == "assistant":
+            u = msg.get("message", {}).get("usage", {})
+            input_t += u.get("input_tokens", 0)
+            output_t += u.get("output_tokens", 0)
+            cache_read += u.get("cache_read_input_tokens", 0)
+            cache_create += u.get("cache_creation_input_tokens", 0)
+print(f"{input_t}/{output_t}/{cache_read + cache_create}")
+' "$AGENT_TRANSCRIPT" 2>/dev/null)
   if [ -n "$TOKENS" ]; then
     ELAPSED=""
     if [ -f "$START_FILE" ]; then
