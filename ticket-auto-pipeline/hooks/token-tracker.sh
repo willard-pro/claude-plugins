@@ -56,7 +56,7 @@ fi
 [ -z "$TICKET_ID" ] && TICKET_ID="unknown"
 # Pick the most recent start file for this phase. Unique suffixes per spawn
 # prevent sub-sub-agent overwrite races; ls -t ensures correct pairing.
-START_FILE=$(ls -t /tmp/ticket-auto-${TICKET_ID}-start-${PHASE}-*.ts 2>/dev/null | head -1)
+START_FILE=$(ls -t /tmp/ticket-auto-${TICKET_ID}-start-${PHASE}-*.ts 2>/dev/null | head -1 || true)
 
 # Fallback: named agent types (subagent_type) don't include agent_transcript_path in
 # SubagentStop payload. Derive project sessions dir from LOG_FILE path — it reliably
@@ -104,3 +104,6 @@ print(f'{input_t}/{output_t}/{cache_read + cache_create}')
     echo "tokens logged: ${PHASE} ${TOKENS}" >&2
   fi
 fi
+
+# Best-effort telemetry — never block the agent that triggered this hook.
+exit 0

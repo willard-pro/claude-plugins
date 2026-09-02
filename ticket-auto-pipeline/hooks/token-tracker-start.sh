@@ -9,7 +9,7 @@ set -eo pipefail
 read -r hook_json
 
 # Only track ticket-auto pipelines — ctx file is written exclusively by the ticket-auto orchestrator
-CTX_FILE=$(ls -t /tmp/ticket-auto-*-ctx.txt 2>/dev/null | head -1)
+CTX_FILE=$(ls -t /tmp/ticket-auto-*-ctx.txt 2>/dev/null | head -1 || true)
 if [ -z "$CTX_FILE" ]; then
   exit 0
 fi
@@ -24,3 +24,6 @@ TICKET_ID=$(basename "$CTX_FILE" | sed 's/ticket-auto-\(.*\)-ctx\.txt/\1/')
 # start timestamp. A second SubagentStart within the same phase writes a distinct
 # file so both elapsed_ms values survive to SubagentStop.
 date +%s%N >"/tmp/ticket-auto-${TICKET_ID}-start-${PHASE}-$(date +%s%N).ts"
+
+# Best-effort telemetry — never block the agent that triggered this hook.
+exit 0
