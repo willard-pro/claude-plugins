@@ -181,7 +181,7 @@ else
     # EXEC phase claimed done but artifact was never written — re-run EXEC
     RESUME_STEP="STEP_2"
     hb_gate "resume-point" "ok" "EXEC_NO_ARTIFACT detected — resuming at STEP_2 (re-run EXEC)"
-  elif grep -q '^[^|]*|EXEC|exec|done|' "$LOG_FILE"; then
+  elif grep -q '^[^|]*|EXEC|create-artifact|done|' "$LOG_FILE"; then
     RESUME_STEP="STEP_2_5"
   elif grep -q '^[^|]*|REPRODUCE|reproduce|' "$LOG_FILE" && ! grep -q '^[^|]*|REPRODUCE|reproduce|done|' "$LOG_FILE"; then
     RESUME_STEP="STEP_1_5"

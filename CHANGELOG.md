@@ -158,6 +158,21 @@ gate, caught it.
   blocking, same as the citation/propagation/bypass/contract findings.
 - New `lib/tests/test-planner-crosscheck-signals.sh` (10 tests).
 
+## ticket-auto-pipeline 0.29.14 (2026-09-02)
+
+Closes #196 — `detect-resume.sh`'s EXEC-done branch grepped `EXEC|exec|done|`, a
+marker no writer in the repo emits (the real terminal marker, written by
+`ticket-appraise-exec`, is `EXEC|create-artifact|done|{simple-fix|openspec}` — the
+one `gate-check.sh` already reads correctly). A pipeline that completed EXEC never
+resumed at `STEP_2_5`; it fell through to a later, wrong branch. Fifth site of this
+same dead-marker family — the archived `2026-07-25-ticket-auto-integrity-hardening`
+change fixed the other four but missed this one.
+
+- Fix: changed the grep pattern to the canonical `EXEC|create-artifact|done|` marker.
+- New regression test `test_resume_step_2_5_on_exec_create_artifact_done` in
+  `lib/tests/test-detect-resume.sh` asserting `RESUME_STEP` resolves to `STEP_2_5`
+  on a log ending in that marker.
+
 ## ticket-auto-pipeline 0.29.13 (2026-09-02)
 
 Closes #210 — `detect-resume.sh`'s schema-v1 warning write was unconditional: every
