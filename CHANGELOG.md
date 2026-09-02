@@ -17,6 +17,36 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.11 (2026-09-02)
+
+Closes #223 — Epic Gen's `issueCreate` for the Evidence-Based initiative
+(INIT-1788116082-4791) failed outright because its own `INIT-*` label did not
+exist yet: `planner_linear_resolve_label_ids` hard-fails on any label it
+cannot resolve, which is correct for the 4 static contract labels
+(`planned`/`epic`/`pre-approved`/`state:execution`, assumed pre-existing) but
+wrong for `INIT-{id}` and `blocked-by:{ID}` — labels that name a real Linear
+entity only knowable once this run creates it, so they can never be
+pre-seeded ahead of time. A human had to create the label by hand and retry;
+every initiative with intra-epic ticket dependencies hit the same one-off
+manual step during Ticket Gen.
+
+- New `planner_linear_ensure_label <team_id> <name> [color]`
+  (`lib/planner-linear-api.sh`) — idempotent create-if-missing for a single
+  dynamic label: resolves an existing id via the same lookup
+  `planner_linear_resolve_label_ids` uses (warming its shared per-team cache
+  on a hit), and only calls `issueLabelCreate` when genuinely absent.
+- Wired into the Epic Gen prompt for the initiative's own `INIT-{id}` label,
+  and into the Ticket Gen prompt for `INIT-{id}` and each
+  `blocked-by:{dep}` label as it becomes knowable — both `lib/planner-phase-prompts.sh`.
+  A failure to ensure a ticket's labels skips that ticket rather than aborting
+  the run, the same failure mode `issueCreate` already had.
+- Static contract labels are unchanged — still assumed pre-existing and still
+  a hard failure if missing; a preflight check for those is separate scope
+  (see the process-recommendations issue referenced from #223).
+- New tests in `lib/tests/test-planner-linear-api.sh` covering create-if-missing
+  end to end: an existing label resolves without a create call, a missing one
+  is created and cached, a second call for the same name is served from cache.
+
 ## ticket-planner 0.8.10 (2026-09-02)
 
 Closes #222 — three separate initiatives (VS-3, VS-4, VS-5) produced a genuine,
