@@ -389,6 +389,11 @@ spawn_agent_pre() {
   echo "AGENT_PROMPT=Run ${SKILL} ${TICKET_ID} ${FLAGS}. Before starting, run: ${env_prefix}. ${INSTRUCTIONS}"
 
   # 6. Store spawn metadata for spawn_agent_post
+  # SESSION_ID stamps the orchestrator's own session (CLAUDE_CODE_SESSION_ID,
+  # present in the env of every running Claude Code session) so the
+  # SubagentStart/SubagentStop hooks (token-tracker-start.sh, token-tracker.sh)
+  # can match a firing subagent back to THIS spawn by session identity instead
+  # of guessing via ls -t across all of /tmp.
   local meta_file="/tmp/ticket-auto-${TICKET_ID}-spawn-meta.txt"
   cat >"$meta_file" <<EOF
 PHASE=$PHASE
@@ -399,6 +404,7 @@ HB_LOG_FILE=$HB_LOG_FILE
 CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE
 PINGER_PID=$PINGER_PID
 WATCHDOG_PID=$WATCHDOG_PID
+SESSION_ID=${CLAUDE_CODE_SESSION_ID:-}
 EOF
 
   # F10: Append ATTEMPT to spawn-meta when router supplies it.
