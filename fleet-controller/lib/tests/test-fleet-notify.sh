@@ -151,6 +151,20 @@ test_worker_event_includes_last_assistant_message_when_present() {
   grep -q "need clarification" "$capture"
 }
 
+test_worker_event_renders_elapsed_from_started_at_run_file() {
+  # Regression for #199: the run file writes 'started_at' (supervisor.py),
+  # so the reader must read that key, not the nonexistent 'timestamp'.
+  local state_dir bindir capture
+  state_dir=$(_mktemp_test_dir)
+  bindir=$(_with_stub_path)
+  capture="$state_dir/.capture"
+  printf '{"tid": "TST-9", "pid": 123, "generation": 1, "started_at": "2000-01-01T00:00:00Z", "reason": "dispatch"}' \
+    >"$state_dir/TST-9-run.json"
+  SLACK_BOT_TOKEN="xoxb-test" SLACK_CHANNEL="#alerts" FAKE_CURL_CAPTURE="$capture" \
+    PATH="$bindir:$PATH" fleet_notify_worker_event "TST-9" "$state_dir" "dead-letter" "orphaned-after-max-restarts" >/dev/null 2>&1
+  ! grep -q "elapsed: unknown" "$capture" && grep -Eq 'elapsed: [0-9]+s' "$capture"
+}
+
 test_dead_letter_event_includes_reason() {
   local state_dir bindir capture
   state_dir=$(_mktemp_test_dir)
@@ -183,6 +197,7 @@ for fn in \
   test_transport_failure_message_never_leaks_bare_token \
   test_worker_event_includes_ticket_and_exit_fields \
   test_worker_event_includes_last_assistant_message_when_present \
+  test_worker_event_renders_elapsed_from_started_at_run_file \
   test_dead_letter_event_includes_reason \
   test_notify_call_site_is_scoped_to_dead_letter_branch; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue

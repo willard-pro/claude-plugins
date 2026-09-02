@@ -17,6 +17,20 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## fleet-controller 0.9.2 (2026-09-02)
+
+Closes #199 — `fleet-notify.sh`'s worker-event notifier read the run file's
+dispatch timestamp under the key `timestamp`, but the writer
+(`supervisor.py`, and every other reader/writer in the tree) uses
+`started_at`. The `.get()` default swallowed the mismatch silently, so
+`dispatched_at` always resolved to the empty string and elapsed time
+rendered as `unknown` in every Slack dead-letter and failure notification.
+
+- Fix: `fleet_notify_worker_event` now reads `started_at` from
+  `{tid}-run.json`, matching the writer.
+- New test: asserts a notification built from a real run-file (with
+  `started_at` set) renders a concrete elapsed value instead of `unknown`.
+
 ## fleet-controller 0.9.1 (2026-09-02)
 
 Closes #197 — `detect_zombies`'s terminal check (`fleet-detect.sh`)
