@@ -17,6 +17,28 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.9 (2026-09-02)
+
+Closes #221 — Crosscheck's citation and contract checkers never looked at
+`## Labels` dependency syntax at all, so a `blocked-by:<ref>` token that didn't
+resolve to a real sibling spec was invisible to Crosscheck entirely. On VS-3
+(INIT-1788079199-4192) all 5 specs used a short-form sibling reference in
+`## Labels` that didn't resolve to a real ticket id at Ticket Gen time — caught
+and fixed by hand before dispatch, but a dangling ref reaching Ticket Gen's
+`issueCreate` call unnoticed is a harder failure to recover from mid-dispatch
+(partial ticket creation) than catching it at the artifact-only gate.
+
+- New `lib/planner-crosscheck-deps.sh`: `planner_crosscheck_deps` extracts every
+  `blocked-by:<ref>` token from each spec's `## Labels` line (same
+  backtick-tolerant parsing `planner_branch_directive_recommend` in
+  `planner-deps-check.sh` already uses) and confirms `<ref>` resolves — as a
+  full sibling-spec slug or an unambiguous `-`-bounded prefix of exactly one —
+  to a real spec file in the same initiative's `artifacts/specs/`. A ref
+  matching zero or 2+ slugs reports `DANGLING_BLOCKED_BY`.
+- Wired into `planner-crosscheck.sh` as a sixth check family. `DANGLING_BLOCKED_BY`
+  is blocking, same as the citation/propagation/bypass/contract/signals findings.
+- New `lib/tests/test-planner-crosscheck-deps.sh` (14 tests).
+
 ## ticket-planner 0.8.8 (2026-09-02)
 
 Closes #220 — Crosscheck had no check for uniform per-ticket Signals blocks. On
