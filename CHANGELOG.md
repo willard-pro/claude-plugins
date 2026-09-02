@@ -175,6 +175,24 @@ gate, caught it.
   blocking, same as the citation/propagation/bypass/contract findings.
 - New `lib/tests/test-planner-crosscheck-signals.sh` (10 tests).
 
+## ticket-auto-pipeline 0.29.15 (2026-09-02)
+
+Closes #198 — three `ticket-audit` heuristics read raw ticket text without
+stripping the `## Planner Context` block, so planner-generated tickets tripped
+checks on metadata the planner is *required* to emit. `Affected Services`
+alone lists 3+ services on every planned ticket, which by construction fired
+the oversized-ticket wiki-service-count signal and the scope-match check on
+every planned ticket, while the block's own word count kept the empty-ticket
+check from ever firing on a genuinely empty planned ticket.
+
+- Fix: added `_strip_planner_context_block` (inverse of the existing
+  `_extract_planner_context_block`) to `lib/planned-ticket-check.sh`.
+- `skills/ticket-audit/SKILL.md` now strips the block from the description
+  once per ticket and uses the stripped text for the wiki-service-count split
+  signal, the scope-match check, and the empty-ticket word count.
+- New unit tests for `_strip_planner_context_block` in
+  `lib/tests/test-planned-ticket-check.sh`.
+
 ## ticket-auto-pipeline 0.29.14 (2026-09-02)
 
 Closes #196 — `detect-resume.sh`'s EXEC-done branch grepped `EXEC|exec|done|`, a
