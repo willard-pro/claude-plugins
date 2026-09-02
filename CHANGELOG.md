@@ -17,6 +17,38 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.10 (2026-09-02)
+
+Closes #222 — three separate initiatives (VS-3, VS-4, VS-5) produced a genuine,
+intentional `CARVE_SCOPE_LOST` finding (a documented N→M ticket rescope already
+recorded in consensus.md or a post-Consensus coverage-audit doc, not a checker
+bug), and each time the only way to unblock the create gate was hand-writing a
+`META|crosscheck|accepted|...`-shaped line directly into `state.log` —
+undocumented, easy to get wrong, and indistinguishable from an automated pass
+unless you already knew to look for it.
+
+- New `resume <INIT_ID> --accept CODE:"reason"` flag, parsed and persisted the
+  same way `--create`/`--until` are (disk-backed, survives the dispatch-loop
+  process boundary — the governing principle from #144). Rejected in `plan`
+  mode, same restriction as `--create`; repeatable to accept more than one
+  code in the same `resume`.
+- New `planner_crosscheck_accept_set` (`lib/planner-crosscheck.sh`) writes
+  `META|crosscheck|accepted|<CODE> <reason>` to the state log. A code accepted
+  once stays accepted for the life of the initiative — there is no un-accept.
+- `_planner_crosscheck_emit_finding` now checks the accepted-codes set before
+  writing a blocking `fail` entry: a matching code is treated as non-blocking
+  and re-recorded as `META|crosscheck|accepted|<CODE> <message>` every time it
+  still occurs, rather than silently dropped, so the override stays auditable.
+- `planner_crosscheck_findings_summary`'s `TOTAL:` line now reports
+  `<n> blocking, <n> warn, <n> accepted`, and the Completed phase prompt
+  instructs the agent to surface any `META|crosscheck|accepted` entry in
+  COMPLETED.md's Warnings section — same visibility as an automated pass or
+  fail.
+- New tests in `lib/tests/test-planner-crosscheck.sh` covering the override
+  end to end: a finding blocks unaccepted, `planner_crosscheck_accept_set`
+  records it, the same finding is non-blocking on the next run, and the
+  findings summary reports it as `accepted`.
+
 ## ticket-planner 0.8.9 (2026-09-02)
 
 Closes #221 — Crosscheck's citation and contract checkers never looked at

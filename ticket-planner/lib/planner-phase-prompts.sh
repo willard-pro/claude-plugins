@@ -1265,7 +1265,9 @@ terminal phase (10 of 10). No further transitions are permitted after this.
    - **Execution Status** — whether auto-dispatch was enabled
    - **Phase Timeline** — start/end ISO timestamps per phase
    - **Warnings** — anything the operator should know (e.g., tickets that
-     failed validation and were skipped)
+     failed validation and were skipped; any \`META|crosscheck|accepted\` entry
+     in the state log — report the code and the operator's reason, same as an
+     automated Crosscheck pass or fail)
 3. Record the terminal state log entry.
 
 ## State log
