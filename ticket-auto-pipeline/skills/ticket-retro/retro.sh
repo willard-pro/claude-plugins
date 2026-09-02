@@ -40,6 +40,7 @@ scan_claude_log_failures() {
     -e "could not" \
     -e "unable to" \
     -e "failed to" \
+    -e "|META|error|fail|" \
     "$claude_log" 2>/dev/null |
     head -200 >"$output"
   return 0
