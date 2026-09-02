@@ -48,8 +48,15 @@ if [ -s "$LOG_FILE" ]; then
     if [ "$log_version" = "$CURRENT_SCHEMA_VERSION" ]; then
       : # Current version — proceed
     elif [ "$log_version" = "1" ]; then
-      _plog "$LOG_FILE" "META" "schema" "warn" "Schema v1 detected — pipe-safe extraction not guaranteed"
-      hb_gate "schema-check" "warn" "schema v1 accepted with warning — pipe-safe extraction not guaranteed"
+      # Idempotency guard: without this, every detect-resume.sh call re-appends
+      # this line, which can land after pipeline-finalize.sh's terminal
+      # `META|outcome|info|completed:` line and break the tail-only "done"
+      # check a few lines below — reintroducing the exact naive-re-run-loops-
+      # forever failure mode #168 was fixed to prevent.
+      if ! grep -q '^[^|]*|META|schema|warn|Schema v1 detected' "$LOG_FILE" 2>/dev/null; then
+        _plog "$LOG_FILE" "META" "schema" "warn" "Schema v1 detected — pipe-safe extraction not guaranteed"
+        hb_gate "schema-check" "warn" "schema v1 accepted with warning — pipe-safe extraction not guaranteed"
+      fi
     else
       cat <<EOF
 DETECT_RESUME_RESULT

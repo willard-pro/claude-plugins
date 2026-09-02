@@ -419,6 +419,42 @@ test_resume_step_not_done_on_stopped_outcome() {
   [ "$resume_step" != "done" ]
 }
 
+test_schema_v1_warning_does_not_repollute_done_on_rerun() {
+  # #210: the schema-v1 warning write was unconditional — every detect-resume.sh
+  # call against a schema-v1 log re-appended META|schema|warn|. In a real
+  # pipeline that line is first written mid-run (the router calls
+  # detect-resume.sh before every dispatch decision, long before completion).
+  # Without an idempotency guard, the *next* call after pipeline-finalize.sh
+  # writes the terminal outcome line — e.g. a naive re-invocation of
+  # /ticket-auto right after completion — appends another warning that pushes
+  # the outcome line off the tail, breaking the tail-only "done" check above
+  # and regressing #168. Reproduce the real ordering: one call establishes the
+  # warning mid-run, then two calls happen after the terminal line is written,
+  # all against the SAME tmpdir (not the throwaway one
+  # _detect_resume_with_log tears down after a single call).
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs"
+  local log="$tmpdir/logs/GH-210-1-pipeline.log"
+  cat >"$log" <<'EOF'
+2026-08-31T09:00:00Z|META|schema|info|1
+2026-08-31T09:00:01Z|APPRAISE|appraise|done|complexity=simple
+EOF
+  (cd "$tmpdir" && bash "$DETECT_SH" "GH-210-1" >/dev/null 2>/dev/null)
+  {
+    echo "2026-08-31T10:00:02Z|MAINTENANCE|maintenance|done|clean"
+    echo "2026-08-31T10:00:03Z|META|outcome|info|completed: STEP_6"
+  } >>"$log"
+  local out1 out2 warn_count
+  out1=$(cd "$tmpdir" && bash "$DETECT_SH" "GH-210-1" 2>/dev/null)
+  out2=$(cd "$tmpdir" && bash "$DETECT_SH" "GH-210-1" 2>/dev/null)
+  warn_count=$(grep -c 'META|schema|warn' "$log")
+  rm -rf "$tmpdir"
+  [ "$(_field "$out1" RESUME_STEP)" = "done" ] || return 1
+  [ "$(_field "$out2" RESUME_STEP)" = "done" ] || return 1
+  [ "$warn_count" -eq 1 ] || return 1
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -577,7 +613,8 @@ for fn in \
   test_branch_context_empty_on_legacy_log \
   test_resume_step_done_on_completed_outcome \
   test_resume_step_not_done_on_held_outcome \
-  test_resume_step_not_done_on_stopped_outcome; do
+  test_resume_step_not_done_on_stopped_outcome \
+  test_schema_v1_warning_does_not_repollute_done_on_rerun; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done
