@@ -17,6 +17,23 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## fleet-controller 0.9.1 (2026-09-02)
+
+Closes #197 — `detect_zombies`'s terminal check (`fleet-detect.sh`)
+grepped the whole pipeline log for a matching `done`/`fail`/`skip`, with
+no constraint that it appear *after* the `waiting` line being evaluated.
+Any phase that runs more than once (verify retry, PR-review iteration, a
+resumed run) writes an earlier terminal line for the same `phase|step`
+pair; a later stalled `waiting` for that pair then found a match from the
+prior cycle and could never be classified a zombie — suppressing
+detection precisely in the retry loops it exists to catch.
+
+- Fix: `detect_zombies` now finds each `waiting` line's number
+  (`grep -n`) and scopes the terminal search to `tail -n +N+1` of the log,
+  so only lines after the waiting entry count.
+- New test fixture: an early `done` followed by a stalled `waiting` for
+  the same phase/step now correctly returns KILL severity.
+
 ## ticket-planner 0.8.12 (2026-09-02)
 
 Closes #232 — every planner prerequisite gap so far (`REPOS_ROOT` unset/wrong,
