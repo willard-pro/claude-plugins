@@ -342,6 +342,321 @@ EOF
   return "$ok"
 }
 
+# Same as _parse, but runs the parser under an explicit locale. Kept separate so
+# the ordinary tests keep exercising whatever locale the operator actually has.
+_parse_in_locale() {
+  local loc="$1" phase="$2" file="$3"
+  shift 3
+  set +e
+  _OUT=$(env LC_ALL="$loc" LANG="$loc" bash "$PARSER" --phase "$phase" \
+    --return-file "$_ws/$file" --log-file "$_ws/pipeline.log" "$@" 2>"$_ws/stderr.txt")
+  _RC=$?
+  set -e
+  _ERR=$(cat "$_ws/stderr.txt")
+}
+
+# First available non-C UTF-8 locale, or empty. Under such a locale bash's
+# `[A-Z]` also matches accented uppercase letters — the condition the key
+# charset check has to be immune to. CI images commonly carry only C/C.UTF-8,
+# where the defect cannot reproduce, which is precisely why it survived review.
+_utf8_locale() {
+  local l
+  for l in $(locale -a 2>/dev/null); do
+    case "$l" in
+    C | POSIX | C.* | c.*) continue ;;
+    *.utf8 | *.UTF-8 | *.utf-8 | *.UTF8)
+      printf '%s' "$l"
+      return 0
+      ;;
+    esac
+  done
+  return 1
+}
+
+test_non_ascii_key_rejected_in_every_locale() {
+  _setup
+  _write_ret ret.txt <<'EOF'
+=== PHASE_RESULT ===
+SCHEMA_VERSION: 1
+PHASE: VERIFY
+VERIFIER: playwright_uat
+VERDICT: PASS
+WÉIRD: value
+=== END PHASE_RESULT ===
+EOF
+  local ok=0 loc utf8
+  utf8=$(_utf8_locale || true)
+  for loc in C C.UTF-8 ${utf8:+"$utf8"}; do
+    _parse_in_locale "$loc" VERIFY ret.txt
+    _assert_unknown invalid || {
+      echo "  key charset check did not fire under LC_ALL=$loc" >&2
+      ok=1
+    }
+  done
+  _teardown
+  return "$ok"
+}
+
+# A repeated key is ambiguity about the claim, not a transport quirk. Silent
+# last-write-wins would let two individually well-formed lines coerce a FAIL
+# into a logged PASS — the coercion the closed VERDICT enum exists to prevent.
+test_duplicate_verdict_key_is_rejected() {
+  _setup
+  _write_ret ret.txt <<'EOF'
+=== PHASE_RESULT ===
+SCHEMA_VERSION: 1
+PHASE: VERIFY
+VERIFIER: playwright_uat
+VERDICT: FAIL
+EVIDENCE: 3 of 5 criteria failed
+VERDICT: PASS
+=== END PHASE_RESULT ===
+EOF
+  _parse VERIFY ret.txt
+  local ok=1
+  _assert_unknown invalid && [ "$(_json .parse_error)" = "duplicate field: VERDICT" ] && ok=0
+  _teardown
+  return "$ok"
+}
+
+# The guard must not be order-sensitive: PASS-then-FAIL is rejected too, so the
+# rule is "ambiguous claim", not "downgrade protection".
+test_duplicate_verdict_rejected_in_either_order() {
+  _setup
+  _write_ret ret.txt <<'EOF'
+=== PHASE_RESULT ===
+SCHEMA_VERSION: 1
+PHASE: VERIFY
+VERIFIER: playwright_uat
+VERDICT: PASS
+VERDICT: FAIL
+=== END PHASE_RESULT ===
+EOF
+  _parse VERIFY ret.txt
+  local ok=1
+  _assert_unknown invalid && ok=0
+  _teardown
+  return "$ok"
+}
+
+# Unknown fields are tolerated once (a future emitter must not break a current
+# parser) but a repeated unknown key is still an ambiguous record: `extra` is a
+# flat object, so last-write-wins would silently drop one of the two values.
+test_duplicate_unknown_key_is_rejected() {
+  _setup
+  _write_ret ret.txt <<'EOF'
+=== PHASE_RESULT ===
+SCHEMA_VERSION: 1
+PHASE: IMPLEMENT
+VERIFIER: implement_tests
+VERDICT: PASS
+FUTURE_FIELD: one
+FUTURE_FIELD: two
+=== END PHASE_RESULT ===
+EOF
+  _parse IMPLEMENT ret.txt
+  local ok=1
+  _assert_unknown invalid && ok=0
+  _teardown
+  return "$ok"
+}
+
+# Guard against over-correction: the duplicate rule is per-block, so the
+# documented "several appended attempts, last one wins" behaviour must survive.
+# Each attempt repeats every key — across blocks, not within one.
+test_repeated_keys_across_appended_blocks_still_parse() {
+  _setup
+  {
+    cat <<'EOF'
+=== PHASE_RESULT ===
+SCHEMA_VERSION: 1
+PHASE: VERIFY
+VERIFIER: playwright_uat
+VERDICT: FAIL
+ATTEMPT: 1
+=== END PHASE_RESULT ===
+EOF
+    cat <<'EOF'
+=== PHASE_RESULT ===
+SCHEMA_VERSION: 1
+PHASE: VERIFY
+VERIFIER: playwright_uat
+VERDICT: PASS
+ATTEMPT: 2
+=== END PHASE_RESULT ===
+EOF
+  } | _write_ret ret.txt
+  _parse VERIFY ret.txt
+  local ok=1
+  [ "$_RC" -eq 0 ] && [ "$(_json .claimed_verdict)" = "PASS" ] &&
+    [ "$(_json .attempt)" = "2" ] && ok=0
+  _teardown
+  return "$ok"
+}
+
+# ── envelope unwrapping ──────────────────────────────────────────────────────
+# fleetd already spawns workers with `--output-format json` (supervisor.py:1375),
+# which JSON-escapes every newline in the return. Without unwrapping, a perfectly
+# valid emission parses as `absent` — the failure is silent and total.
+
+_PR_BLOCK_TEXT='Verification complete.
+
+=== PHASE_RESULT ===
+SCHEMA_VERSION: 1
+PHASE: VERIFY
+VERIFIER: playwright_uat
+VERDICT: PASS
+CRITERIA_MET: 5
+CRITERIA_TOTAL: 5
+=== END PHASE_RESULT ==='
+
+test_output_format_json_envelope_is_unwrapped() {
+  _setup
+  jq -n --arg r "$_PR_BLOCK_TEXT" \
+    '{type:"result",subtype:"success",is_error:false,result:$r,session_id:"s1"}' \
+    >"$_ws/ret.txt"
+  _parse VERIFY ret.txt
+  local ok=1
+  [ "$_RC" -eq 0 ] && [ "$(_json .claimed_verdict)" = "PASS" ] &&
+    [ "$(_json .criteria_met)" = "5" ] && ok=0
+  _teardown
+  return "$ok"
+}
+
+test_stream_json_envelope_is_unwrapped() {
+  _setup
+  {
+    jq -nc '{type:"system",subtype:"init"}'
+    jq -nc '{type:"assistant",message:{content:"working"}}'
+    jq -nc --arg r "$_PR_BLOCK_TEXT" '{type:"result",result:$r}'
+  } >"$_ws/ret.txt"
+  _parse VERIFY ret.txt
+  local ok=1
+  [ "$_RC" -eq 0 ] && [ "$(_json .claimed_verdict)" = "PASS" ] && ok=0
+  _teardown
+  return "$ok"
+}
+
+# Plain stdout is still the common case and must not be routed through the
+# envelope path — this is the regression guard on the unwrap itself.
+test_plain_text_return_is_not_treated_as_envelope() {
+  _setup
+  printf '%s\n' "$_PR_BLOCK_TEXT" >"$_ws/ret.txt"
+  _parse VERIFY ret.txt
+  local ok=1
+  [ "$_RC" -eq 0 ] && [ "$(_json .claimed_verdict)" = "PASS" ] && ok=0
+  _teardown
+  return "$ok"
+}
+
+# An envelope carrying a return that never emitted a block is still `absent` —
+# unwrapping must not invent a claim, only reveal one that was already there.
+test_json_envelope_without_block_is_absent() {
+  _setup
+  jq -n --arg r 'I finished but forgot to emit anything.' \
+    '{type:"result",result:$r}' >"$_ws/ret.txt"
+  _parse VERIFY ret.txt
+  local ok=1
+  _assert_unknown absent && ok=0
+  _teardown
+  return "$ok"
+}
+
+# A JSON object that is not a claude envelope (no string .result) must fall
+# through to plain-text handling rather than silently yielding an empty body.
+test_unrelated_json_file_falls_through_to_text() {
+  _setup
+  printf '{"some":"object","result":42}\n' >"$_ws/ret.txt"
+  _parse VERIFY ret.txt
+  local ok=1
+  _assert_unknown absent && ok=0
+  _teardown
+  return "$ok"
+}
+
+# ── cross-file contract drift ────────────────────────────────────────────────
+# The enums live in three places: the parser (what is accepted), the schema doc
+# (the stated contract) and the skills (what agents are told to emit). Drift
+# between any two is silent — an agent emits what the preamble says and the
+# parser rejects it, degrading a real verdict to UNKNOWN with no error anywhere.
+
+# Verifier ids the schema doc's VERIFIER enum table declares.
+_doc_verifiers() {
+  sed -n '/^### VERIFIER enum/,/^## /p' "$LIB_DIR/../docs/phase-result-schema.md" |
+    sed -n 's/^| `\([a-z_][a-z0-9_]*\)` |.*/\1/p' | sort
+}
+
+# Verifier ids the parser actually accepts.
+_parser_verifiers() {
+  # shellcheck disable=SC1090
+  (
+    source "$PARSER" >/dev/null 2>&1
+    printf '%s\n' $_PR_VERIFIERS
+  ) | sort
+}
+
+test_verifier_enum_matches_schema_doc() {
+  local doc parser
+  doc=$(_doc_verifiers)
+  parser=$(_parser_verifiers)
+  if [ "$doc" != "$parser" ]; then
+    echo "  VERIFIER enum drift between parser and docs/phase-result-schema.md:" >&2
+    diff <(printf '%s\n' "$parser") <(printf '%s\n' "$doc") >&2 || true
+    return 1
+  fi
+  # Guard the guard: an empty extraction on both sides would compare equal.
+  [ "$(printf '%s\n' "$doc" | grep -c .)" -ge 10 ] || {
+    echo "  extracted only $(printf '%s\n' "$doc" | grep -c .) ids — extraction broke" >&2
+    return 1
+  }
+  return 0
+}
+
+# Every VERIFIER a loop-bearing skill is instructed to emit must be one the
+# parser accepts, or that phase's verdict is silently unrecoverable.
+test_skill_declared_verifiers_are_in_the_enum() {
+  local skills_dir="$LIB_DIR/../skills" id ok=0 accepted
+  accepted=$(_parser_verifiers)
+  for id in implement_tests playwright_uat build_only live_backend pr_review; do
+    printf '%s\n' "$accepted" | grep -qx "$id" || {
+      echo "  skill-declared verifier '$id' is not in the parser enum" >&2
+      ok=1
+    }
+    grep -rqF "$id" "$skills_dir/ticket-implement/SKILL.md" \
+      "$skills_dir/ticket-verify/SKILL.md" \
+      "$skills_dir/ticket-pr-review/SKILL.md" || {
+      echo "  verifier '$id' no longer appears in any loop-bearing SKILL.md" >&2
+      ok=1
+    }
+  done
+  return "$ok"
+}
+
+# The block grammar must exist in exactly one place. A SKILL.md that restates it
+# becomes a second source of truth that drifts from the parser unnoticed.
+#
+# Naming the marker in prose ("end your return with the `=== PHASE_RESULT ===`
+# block described in § 6") is a *reference* and is fine — that is how the skills
+# point at the preamble. What must not appear outside the preamble is the block
+# itself, which is identifiable by the closing marker or by the field lines.
+test_block_grammar_is_declared_only_in_the_preamble() {
+  local root="$LIB_DIR/.." f ok=0
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if grep -q '=== END PHASE_RESULT ===' "$f" ||
+      grep -qE '^[[:space:]]*(SCHEMA_VERSION|VERDICT|CRITERIA_TOTAL):' "$f"; then
+      echo "  block grammar restated outside the preamble: $f" >&2
+      ok=1
+    fi
+  done <<<"$(grep -rl 'PHASE_RESULT' "$root/skills" 2>/dev/null || true)"
+  # Guard the guard: the preamble must still be the one place that has it.
+  grep -q '=== END PHASE_RESULT ===' "$LIB_DIR/skill-preamble-auto.md" || {
+    echo "  preamble no longer carries the grammar" >&2
+    ok=1
+  }
+  return "$ok"
+}
+
 test_dashed_key_rejected() {
   _setup
   _write_ret ret.txt <<'EOF'
@@ -807,6 +1122,19 @@ TESTS=(
   test_malformed_line_without_colon
   test_lowercase_key_rejected
   test_dashed_key_rejected
+  test_non_ascii_key_rejected_in_every_locale
+  test_duplicate_verdict_key_is_rejected
+  test_duplicate_verdict_rejected_in_either_order
+  test_duplicate_unknown_key_is_rejected
+  test_repeated_keys_across_appended_blocks_still_parse
+  test_output_format_json_envelope_is_unwrapped
+  test_stream_json_envelope_is_unwrapped
+  test_plain_text_return_is_not_treated_as_envelope
+  test_json_envelope_without_block_is_absent
+  test_unrelated_json_file_falls_through_to_text
+  test_verifier_enum_matches_schema_doc
+  test_skill_declared_verifiers_are_in_the_enum
+  test_block_grammar_is_declared_only_in_the_preamble
   test_missing_required_field
   test_non_numeric_in_numeric_field
   test_invalid_verdict_enum_is_not_coerced

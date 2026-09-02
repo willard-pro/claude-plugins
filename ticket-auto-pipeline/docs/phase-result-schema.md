@@ -197,6 +197,62 @@ explicitly. Everything else on a rejected record is defaulted:
 `parse_status` is one of `ok`, `invalid` (a block was present but failed the contract) or
 `absent` (no block at all).
 
+## Capture — who writes the file the parser reads
+
+The parser reads a **file**. An agent cannot write its own return to a file, because the
+return is not complete until the agent stops. Capture is therefore always the **caller's**
+responsibility, and the caller differs by invocation model. The parser accepts all three
+shapes below without being told which one it holds.
+
+| Invocation | Who captures | What lands in the file |
+|---|---|---|
+| Router + sub-agent (today) | The router, via `spawn_capture … RESULT_FILE=<path>` → `capture_agent_result` → `./logs/{TID}-{phase}-agent.log` | Plain return text, one block appended per attempt |
+| One-shot `claude -p` per phase (target) | The **caller** redirects the worker's stdout to a file | Plain text, or a `--output-format json` / `stream-json` envelope |
+| Any other consumer | Whatever wrote the file | Any of the above |
+
+For the one-shot model the caller does exactly this, and nothing more:
+
+```bash
+claude -p "/ticket-verify {TID} …" --output-format json > "logs/{TID}-verify-agent.log"
+bash "$CLAUDE_SKILLS_LIB/phase-result-parse.sh" --phase VERIFY \
+  --return-file "logs/{TID}-verify-agent.log" --log-file "$LOG_FILE" || true
+```
+
+`--output-format json` wraps the return in a JSON object whose `.result` is a *string*, so
+every newline the block depends on becomes a literal `\n` escape. Line-oriented extraction
+would report `absent` on a perfectly valid emission. The parser unwraps a `.result` string
+itself (`_pr_unwrap`) — for the single-object `json` form and for the last `.result` in the
+`stream-json` line stream — so **no caller needs to know which output mode produced the
+file**. Plain text passes through untouched; a JSON file that is not a claude envelope is
+treated as plain text rather than rejected.
+
+Two channels in this repo **cannot** carry the block and must not be used for capture:
+
+- `hooks/stop-capture.sh`'s `last_assistant_message` head-truncates to 4000 characters,
+  which is exactly the tail the block occupies.
+- Any consumer that reads only the pipeline log's own `MSG` column — the block lives in the
+  agent's return, not in the log, until this parser puts a record there.
+
+## What the field set does not carry
+
+The intended end state is a deterministic supervisor that reproduces the ticket-auto
+router's decisions in code, invoking each phase as its own `claude -p` process. Audited
+against every post-agent branch the router takes, this field set is **not sufficient on its
+own**. A code supervisor needs the records below *plus* the channels named here:
+
+| Router decision | Where the input actually lives | Why it is not a phase-result field |
+|---|---|---|
+| Smooth / Rough / Hard outcome label | `IMPLEMENT\|implement-outcome\|info\|`, read by `lib/outcome-label-check.sh` | Difficulty is orthogonal to pass/fail. A phase can succeed roughly; `VERDICT` cannot express that. |
+| Auto-merge eligibility | `META\|outcome-label`, `PR-REVIEW\|checkout-pr\|done\|` (PR number), `AUTONOMY`, `COMPLEXITY`, and a live `gh pr view` | The highest-stakes decision in the pipeline deliberately depends on live repo state, not on a claim the agent wrote about itself. |
+| Implement completeness | `lib/return-completeness-check.sh` counting unchecked boxes | `CRITERIA_MET`/`CRITERIA_TOTAL` is the agent's *claim* about the same quantity. An independently computed number must never be replaced by a self-reported one. |
+| Mid-run crash resume | `VERIFY\|checkpoint\|done\|criterion-{N}-pass` | The block is terminal-only. An agent that crashes never emits one, which is exactly when resume matters. |
+| Retry / iteration caps | `VERIFY_ATTEMPTS`, `ITERATION`, `RECONCILE_CYCLE`, `PR_FEEDBACK_CYCLE` from `detect-resume.sh` | Counters are caller-owned state. `ATTEMPT` echoes the caller's number back for correlation; it is not the source of truth for it. |
+
+This is a deliberate boundary, not an oversight: everything above is either independently
+verifiable or caller-owned, and a self-reported field would be strictly weaker. The
+contract's job is to make the *agent's verdict* machine-readable, not to become the single
+source for decisions that already have better sources.
+
 ## Consumer fallback
 
 A consumer that routes on phase results and meets an absent or `UNKNOWN` claim **SHALL**

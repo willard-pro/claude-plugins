@@ -73,14 +73,50 @@ round-tripping.
 **New**: `docs/phase-result-schema.md` (source of truth — field table, the 14 verifier
 ids counted from real call sites, enums, worked valid/invalid examples),
 `lib/phase-result-parse.sh` (sourceable lib and standalone CLI, 0/1/2 exit idiom),
-`lib/tests/test-phase-result-parse.sh` (39 tests). Emission instructions live in exactly
+`lib/tests/test-phase-result-parse.sh` (52 tests). Emission instructions live in exactly
 one parameterized section of `lib/skill-preamble-auto.md`; no `SKILL.md` restates the
 grammar.
 
-**Deployment**: `lib/spawn-helper.sh`, `lib/phase-result-parse.sh` and
-`lib/skill-preamble-auto.md` must reach `${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}`,
-not only the repo — `spawn-helper.sh` sources and the router invokes by installed path.
-See `openspec/changes/rlvr-phase-result-contract/deployment.md`.
+**Fixes from a three-persona review of the above** (architect / QA / analyzer), each with
+a regression test:
+
+- **A duplicate `KEY: value` line silently won last.** `VERDICT: FAIL` followed by
+  `VERDICT: PASS` — two individually well-formed lines — logged a clean `PASS`. This is
+  the exact coercion the closed `VERDICT` enum exists to prevent, arriving through a path
+  the enum check never saw. A repeated key is now rejected as an ambiguous claim.
+- **The key charset check was locale-dependent.** Under a UTF-8 locale (which an
+  operator's shell carries and CI's `C` does not) bash's `[A-Z]` also matches accented
+  uppercase letters, so a key the contract forbids was accepted on a workstation and
+  rejected in CI. The check is now pinned to `C` collation. A contract rule that only
+  fires in CI is not a contract rule.
+- **The parser could not read the output format fleetd already uses.** `fleetd` spawns
+  workers with `--output-format json` (`supervisor.py:1375`), which JSON-escapes every
+  newline in the return, so line-oriented extraction reported `absent` on a *valid*
+  emission — silently, and 100% of the time. The parser now unwraps a `.result` string
+  from the `json` and `stream-json` envelopes itself, so no caller needs to know which
+  output mode produced the file it holds.
+- **`ATTEMPT` was self-reported with no ground truth.** Agents were told to emit it but
+  never given the value, so every retry would report `1` and a consumer counting retries
+  would read a loop that never advances. The router now passes `PHASE_RESULT_ATTEMPT` in
+  the spawn instructions, and the preamble says to omit the field rather than guess.
+- Parser call sites honour `CLAUDE_SKILLS_LIB` instead of hardcoding `~/.claude/skills/lib`.
+- `docs/phase-result-schema.md` gains **Capture — who writes the file the parser reads**
+  (an agent cannot capture its own return; the caller does, and the three supported shapes
+  are spelled out) and **What the field set does not carry** — the audited list of router
+  decisions this contract deliberately does not cover, because their inputs are
+  independently verifiable or caller-owned and a self-reported field would be weaker.
+- `pipeline-log-format.md` documents that a PR review ✅ is `OK` on the router's channel
+  and `PASS` on the phase-result channel — the one place the two vocabularies diverge.
+- Three cross-file drift guards added: the parser's `VERIFIER` enum must match the schema
+  doc, every verifier a loop-bearing skill declares must be in that enum, and no
+  `SKILL.md` may restate the block grammar.
+
+**Deployment**: no manual step. `lib/spawn-helper.sh`, `lib/phase-result-parse.sh` and
+`lib/skill-preamble-auto.md` are delivered to
+`${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}` by the plugin's existing `SessionStart`
+sync hook, whose `lib/*.sh` and `lib/*.md` globs cover all three — so they land together,
+version-locked, once the plugin cache carries this release. Updating the plugin is what
+deploys it.
 
 ## ticket-auto-pipeline 0.29.23 (2026-09-02)
 

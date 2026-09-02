@@ -65,6 +65,54 @@ _pr_in_list() {
   case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac
 }
 
+# Key charset check, forced to C collation.
+#
+# bash's [[ =~ ]] bracket expressions are locale-sensitive: under en_US.UTF-8
+# (or any UTF-8 locale an operator's shell happens to carry) `[A-Z]` also
+# matches accented uppercase letters, so `WEIRD` with an accented E would be
+# accepted as a well-formed key on a workstation and rejected in CI, which runs
+# under C. A contract rule that only fires in CI is not a contract rule.
+#
+# `local LC_ALL` is function-scoped and bash re-runs setlocale() both on the
+# assignment and on return, so the caller's locale is untouched.
+_pr_key_ok() {
+  local LC_ALL=C
+  [[ "$1" =~ ^[A-Z][A-Z0-9_]*$ ]]
+}
+
+# Reduce a capture file to the agent's return text, whatever envelope carries it.
+#
+# `claude -p --output-format json` — which is what fleetd already spawns workers
+# with (fleet-controller/fleetd/supervisor.py:1375) — wraps the return in a JSON
+# object whose `.result` is a *string*. Every newline the block depends on is
+# then a literal \n escape, so line-oriented extraction sees one long line and
+# reports `absent` on a perfectly valid emission. Unwrapping here rather than in
+# each caller is what keeps the parser usable unchanged from the router, from
+# fleet-controller, and from a bare `claude -p > file` redirect — none of them
+# has to know which output mode produced the file it holds.
+#
+# Plain text is the common case and passes through untouched; anything jq cannot
+# read as an envelope is treated as plain text rather than rejected.
+_pr_unwrap() {
+  local file="$1" out
+  # `--output-format json`: one object, `.result` holds the return.
+  out=$(jq -r 'if type == "object" and (.result | type) == "string"
+               then .result else empty end' <"$file" 2>/dev/null) || out=""
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  # `--output-format stream-json`: one object per line, the terminal one carries
+  # `.result`. Take the last, matching the "last block wins" rule below.
+  out=$(jq -sr '[.[] | select(type == "object" and (.result | type) == "string")
+                | .result] | last // empty' <"$file" 2>/dev/null) || out=""
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  cat -- "$file"
+}
+
 # Emit the canonical JSON record and append it to the pipeline log.
 # All values are bound as jq arguments — never interpolated into a JSON string.
 _pr_emit() {
@@ -181,7 +229,7 @@ parse_phase_result() {
   # block: capture_agent_result appends retried attempts to one file, and the
   # current attempt is the one at the end.
   local _extract_rc=0
-  body=$(tr -d '\r' <"$return_file" | awk -v mopen="$_PR_OPEN_MARKER" -v mclose="$_PR_CLOSE_MARKER" '
+  body=$(_pr_unwrap "$return_file" | tr -d '\r' | awk -v mopen="$_PR_OPEN_MARKER" -v mclose="$_PR_CLOSE_MARKER" '
     function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
     trim($0) == mopen  { collecting = 1; buf = ""; next }
     collecting && trim($0) == mclose { collecting = 0; closed = 1; last = buf; next }
@@ -247,15 +295,26 @@ parse_phase_result() {
       value="${value#"${value%%[![:space:]]*}"}"
       value="${value%"${value##*[![:space:]]}"}"
 
-      if ! [[ "$key" =~ ^[A-Z][A-Z0-9_]*$ ]]; then
+      if ! _pr_key_ok "$key"; then
         status="invalid"
         err="key '${key}' does not match [A-Z][A-Z0-9_]*"
         break
       fi
 
+      # A repeated key is ambiguity about the claim, not a transport quirk, so
+      # it is rejected rather than tolerated. Last-write-wins here would let
+      # `VERDICT: FAIL` followed by `VERDICT: PASS` log a clean PASS — the exact
+      # coercion the closed VERDICT enum exists to prevent, arriving through two
+      # individually well-formed lines instead of one malformed one.
+      if _pr_in_list "$key" "$seen_keys"; then
+        status="invalid"
+        err="duplicate field: ${key}"
+        break
+      fi
+      seen_keys="$seen_keys $key"
+
       if _pr_in_list "$key" "$_PR_KNOWN"; then
         fields["$key"]="$value"
-        seen_keys="$seen_keys $key"
       else
         # Unknown fields are recorded, never fatal — a future emitter adding a
         # field must not break a current parser.

@@ -77,6 +77,26 @@ human-readable summary it wants in `MSG`, but the token in front of it is guaran
 | `WARN`  | PR review verdict ⚠️ — gaps, iterate     | PR-REVIEW terminal |
 | `BLOCK` | PR review verdict ❌ — blocking issues   | PR-REVIEW terminal |
 
+### Relation to the phase-result `VERDICT` field
+
+These are the **router's** tokens, written by `spawn_agent_post`. The `VERDICT` inside a
+`=== PHASE_RESULT ===` block is the **agent's own** claim, on a different channel, and the
+two vocabularies are not identical. They line up like this:
+
+| Event | Router token (`spawn_agent_post`) | Phase-result `VERDICT` |
+|---|---|---|
+| VERIFY passed | `PASS` | `PASS` |
+| VERIFY failed | `FAIL` | `FAIL` |
+| PR review ✅ | **`OK`** | **`PASS`** |
+| PR review ⚠️ | `WARN` | `WARN` |
+| PR review ❌ | `BLOCK` | `BLOCK` |
+
+`OK` and `PASS` denote the same ✅ event. The router keeps `OK` because `detect-resume.sh`
+already counts on it; the phase-result enum keeps `PASS` because it is shared across all
+three loop-bearing phases and a phase-specific synonym would make the enum
+phase-dependent. A consumer correlating the two channels for the same run must apply this
+mapping — it is the one place their vocabularies diverge.
+
 Example:
 
 ```bash

@@ -28,6 +28,7 @@ When a skill says "Follow the auto-pipeline preamble with parameters: ...", use 
 | `{EMITS_PHASE_RESULT}` | Whether the agent appends a terminal `=== PHASE_RESULT ===` block | `false` |
 | `{PHASE_RESULT_TIER}` | `1` — loop-bearing phase, emission is mandatory. `2` — reserved for a future widening; not used yet. | `1` |
 | `{PHASE_RESULT_VERIFIER}` | Verifier id for the block's `VERIFIER` field. See `docs/phase-result-schema.md` § VERIFIER enum. | Required when `{EMITS_PHASE_RESULT}` is `true` |
+| `{PHASE_RESULT_ATTEMPT}` | The attempt number the caller is running, for the block's `ATTEMPT` field. The agent has no way to know this on its own — it is the caller's counter (`VERIFY_ATTEMPTS`/`ITERATION` + 1), and an agent left to guess it will report `1` on every retry. | Empty — omit `ATTEMPT` when not supplied |
 
 ---
 
@@ -210,7 +211,7 @@ VERIFIER: {PHASE_RESULT_VERIFIER}
 VERDICT: <PASS|FAIL|WARN|BLOCK>
 CRITERIA_MET: <integer>
 CRITERIA_TOTAL: <integer>
-ATTEMPT: <integer>
+ATTEMPT: {PHASE_RESULT_ATTEMPT}
 EVIDENCE: <one line: what you actually observed>
 UNADDRESSED: <one line: what you did not cover, or empty>
 === END PHASE_RESULT ===
@@ -231,6 +232,11 @@ Rules:
 - `EVIDENCE` names what you **observed** — a command you ran, a URL you exercised, a
   file you wrote. Not what you intended.
 - `UNADDRESSED` names what you knowingly left out. Leave it empty only when nothing was.
+- `ATTEMPT` is **given to you** as `{PHASE_RESULT_ATTEMPT}`. Emit that value verbatim. If
+  you were not given one, **omit the `ATTEMPT` line entirely** — do not write `1`, and do
+  not infer a number from context. A guessed attempt number is worse than a missing one:
+  every retry would report `1`, and a consumer counting retries from the log would read a
+  loop that never advances.
 
 `docs/phase-result-schema.md` is the source of truth for the field set and the enums.
 Do not restate the grammar anywhere else.

@@ -807,7 +807,7 @@ spawn_capture TICKET_ID={TICKET-ID} PHASE=IMPLEMENT RESULT_FILE=/tmp/ticket-auto
 # Exit 1 (absent or malformed block → claimed_verdict=UNKNOWN) is a NORMAL outcome,
 # not an error. Nothing routes on this channel in this increment, so a parser failure
 # cannot halt a run. Hence `|| true`.
-_prp_sh="${HOME}/.claude/skills/lib/phase-result-parse.sh"
+_prp_sh="${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}/phase-result-parse.sh"
 bash "$_prp_sh" --phase IMPLEMENT \
   --return-file "./logs/{TICKET_ID}-implement-agent.log" \
   --log-file "{LOG_FILE}" >/dev/null 2>&1 || true
@@ -951,7 +951,7 @@ fi
 STEP=verify PHASE=VERIFY SKILL=/ticket-verify FROM_STEP={VERIFY_FROM}
 EXTRA_FLAGS="--from-auto --mode extract"
 DESCRIPTION="Run Playwright UAT verification"
-INSTRUCTIONS="Follow the skill exactly. Use per-criterion checkpointing: after each criterion passes, write VERIFY|checkpoint|done|criterion-{N}-pass to LOG_FILE. If the agent crashes, resume from the last checkpoint — do not restart from criterion 1."
+INSTRUCTIONS="Follow the skill exactly. Use per-criterion checkpointing: after each criterion passes, write VERIFY|checkpoint|done|criterion-{N}-pass to LOG_FILE. If the agent crashes, resume from the last checkpoint — do not restart from criterion 1. PHASE_RESULT_ATTEMPT=$(({VERIFY_ATTEMPTS} + 1)) — emit this verbatim as the ATTEMPT field of your phase result block."
 NEXT_PHASE=VERIFY
 ```
 
@@ -973,7 +973,7 @@ spawn_capture TICKET_ID={TICKET-ID} PHASE=VERIFY \
 
 # Phase-result parse (advisory, observe-only) — see STEP_4 for the full rationale.
 # The parser takes the LAST block in the capture file, which is this attempt's.
-_prp_sh="${HOME}/.claude/skills/lib/phase-result-parse.sh"
+_prp_sh="${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}/phase-result-parse.sh"
 bash "$_prp_sh" --phase VERIFY \
   --return-file "./logs/{TICKET_ID}-verify-agent.log" \
   --log-file "{LOG_FILE}" >/dev/null 2>&1 || true
@@ -1039,7 +1039,7 @@ The router manages the pr-review→pr-iterate→re-implement→verify→pr-revie
 ```
 STEP=pr-review PHASE=PR-REVIEW SKILL=/ticket-pr-review
 DESCRIPTION="Review the PR for code quality and correctness"
-INSTRUCTIONS="Follow the skill exactly. Return verdict: ✅ ✅, ⚠️, or ❌."
+INSTRUCTIONS="Follow the skill exactly. Return verdict: ✅ ✅, ⚠️, or ❌. PHASE_RESULT_ATTEMPT=$(({ITERATION} + 1)) — emit this verbatim as the ATTEMPT field of your phase result block."
 NEXT_PHASE=PR-REVIEW
 ```
 
@@ -1062,7 +1062,7 @@ spawn_capture TICKET_ID={TICKET-ID} PHASE=PR-REVIEW \
 # Phase-result parse (advisory, observe-only) — see STEP_4 for the full rationale.
 # This is the last gate before merge, so it is the record most worth having; it is
 # still observe-only, and the router's VERDICT token below remains what routes.
-_prp_sh="${HOME}/.claude/skills/lib/phase-result-parse.sh"
+_prp_sh="${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}/phase-result-parse.sh"
 bash "$_prp_sh" --phase PR-REVIEW \
   --return-file "./logs/{TICKET_ID}-pr-review-agent.log" \
   --log-file "{LOG_FILE}" >/dev/null 2>&1 || true
