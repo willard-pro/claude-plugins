@@ -164,6 +164,41 @@ _planner_crosscheck_contracts_exists_in_repo() {
     "$repos_root" >/dev/null 2>&1
 }
 
+# ── Fenced-code filter ───────────────────────────────────────────────────────
+#
+# Every read below treats a spec as prose: a backtick span is a structure
+# reference, a blank-line-delimited paragraph is one claim about it. A
+# markdown fenced block breaks both premises — its content is structured data
+# or verbatim code, never a claim about a contract. The planner writes one
+# into every spec it generates (the `## Signals` JSON block, part of its own
+# machine-readable output format), so every initiative audited to date carried
+# CONTRACT_UNDEFINED warnings raised against that block itself: a prose-shaped
+# value ("... gains fields for ...") matched the undefined-fields regex while
+# the block's JSON keys, being unquoted, left no backtick-quoted canonical
+# name to satisfy it (#229). Strip fenced regions once, at the read boundary,
+# rather than teaching each check to recognize them.
+#
+# Fenced lines are replaced by empty lines rather than deleted so paragraph
+# boundaries — and therefore the blocks every check iterates — stay exactly
+# where they were. An unterminated fence blanks to end of file, which is what
+# markdown itself renders.
+# Usage: _planner_crosscheck_contracts_defenced <file>
+_planner_crosscheck_contracts_defenced() {
+  awk '
+    /^[[:space:]]*(```|~~~)/ { in_fence = !in_fence; print ""; next }
+    in_fence { print ""; next }
+    { print }
+  ' "$1" 2>/dev/null
+}
+
+# The blank-line-delimited paragraphs of <file>, fenced content removed — the
+# input every contract check reads. Reuses bypass.sh's splitter rather than
+# duplicating it.
+# Usage: _planner_crosscheck_contracts_blocks <file>
+_planner_crosscheck_contracts_blocks() {
+  _planner_crosscheck_bypass_blocks <(_planner_crosscheck_contracts_defenced "$1")
+}
+
 # ── Small array helpers ──────────────────────────────────────────────────────
 
 # Usage: _planner_crosscheck_contracts_array_has <needle> <hay...>
@@ -205,7 +240,7 @@ _planner_crosscheck_contracts_structures_in_dir() {
   for f in "$specs_dir"/*.md; do
     [ -f "$f" ] || continue
     [ "$(basename "$f")" = "INDEX.md" ] && continue
-    grep -ohE '`[^`]+`' "$f" 2>/dev/null | sed -e 's/^`//' -e 's/`$//'
+    _planner_crosscheck_contracts_defenced "$f" | grep -ohE '`[^`]+`' | sed -e 's/^`//' -e 's/`$//'
   done | grep -E "$PLANNER_CROSSCHECK_CONTRACTS_STRUCTURE_REGEX" |
     grep -viE "$PLANNER_CROSSCHECK_CONTRACTS_NON_STRUCTURE_EXT_REGEX" | sort -u |
     while IFS= read -r t; do
@@ -221,8 +256,14 @@ _planner_crosscheck_contracts_structures_in_dir() {
 # Usage: _planner_crosscheck_contracts_files_with_structure <specs_dir> <structure>
 _planner_crosscheck_contracts_files_with_structure() {
   local specs_dir="$1" structure="$2"
+  local f
   [ -d "$specs_dir" ] || return 0
-  grep -lF "\`${structure}\`" "$specs_dir"/*.md 2>/dev/null | grep -v '/INDEX\.md$'
+  for f in "$specs_dir"/*.md; do
+    [ -f "$f" ] || continue
+    [ "$(basename "$f")" = "INDEX.md" ] && continue
+    _planner_crosscheck_contracts_defenced "$f" | grep -qF "\`${structure}\`" && echo "$f"
+  done
+  return 0
 }
 
 # Print the first blank-line-delimited paragraph in <file> that mentions a
@@ -236,7 +277,7 @@ _planner_crosscheck_contracts_first_block_with_structure() {
       printf '%s' "$block"
       return 0
     fi
-  done < <(_planner_crosscheck_bypass_blocks "$file")
+  done < <(_planner_crosscheck_contracts_blocks "$file")
   return 1
 }
 
@@ -258,7 +299,7 @@ _planner_crosscheck_contracts_any_block_deferential() {
     if echo "$block" | grep -qF "\`${structure}\`" && _planner_crosscheck_contracts_is_deferential "$block"; then
       return 0
     fi
-  done < <(_planner_crosscheck_bypass_blocks "$file")
+  done < <(_planner_crosscheck_contracts_blocks "$file")
   return 1
 }
 
@@ -345,7 +386,7 @@ planner_crosscheck_contract_undefined() {
       snippet=$(echo "$block" | tr '\n' ' ' | cut -c1-160)
       echo "planner-crosscheck-contracts: CONTRACT_UNDEFINED ${spec_file} \`${structure}\` declares new fields without canonical names: \"${snippet}\""
       failures=$((failures + 1))
-    done < <(_planner_crosscheck_bypass_blocks "$spec_file")
+    done < <(_planner_crosscheck_contracts_blocks "$spec_file")
   done
 
   return $((failures > 0 ? 1 : 0))
@@ -721,7 +762,7 @@ planner_crosscheck_contract_consumers_unnotified() {
           done < <(_planner_crosscheck_contracts_files_with_structure "$dir" "$s")
         done
       done
-    done < <(_planner_crosscheck_bypass_blocks "$spec_file")
+    done < <(_planner_crosscheck_contracts_blocks "$spec_file")
   done
 
   return $((failures > 0 ? 1 : 0))
