@@ -22,6 +22,11 @@
 #   planner_linear_resolve_label_ids <team_id> <label_names_json>
 #     Maps label names to UUIDs. Hard-fails naming any unresolvable label.
 #
+#   planner_linear_ensure_label <team_id> <name> [color]
+#     Create-if-missing for a single dynamic label (INIT-*, blocked-by:*).
+#     Idempotent — resolves the existing id when present, otherwise creates it.
+#     Returns the label UUID on stdout.
+#
 #   planner_linear_resolve_team_id [name_key_or_id]
 #     Resolves the team to create on: explicit ref → $LINEAR_TEAM_ID → the only
 #     team. Ambiguity is an error, never a guess.
@@ -254,6 +259,63 @@ planner_linear_resolve_label_ids() {
   fi
 
   jq -cn --argjson names "$names_json" --argjson cache "$cache" '[$names[] as $n | $cache[$n]]'
+}
+
+# Ensure a Linear label exists for a team, creating it if missing.
+#
+# INIT-* (per-initiative) and blocked-by:* (per-ticket) labels are dynamic —
+# each names a real Linear entity (the initiative itself, or a sibling ticket)
+# that only gets an id once EpicGen/TicketGen creates it, so they can never be
+# pre-seeded in Linear ahead of a run. planner_linear_resolve_label_ids hard-fails
+# on an unresolvable name by design (see its own header) — correct for the
+# static contract labels (`planned`, `epic`, ...), which really are supposed to
+# exist ahead of time, but wrong for these: EpicGen's issueCreate for the
+# Evidence-Based initiative (INIT-1788116082-4791) failed outright because its
+# own INIT-* label did not exist yet, requiring a human to create it and retry
+# before Epic Gen could proceed.
+#
+# Idempotent: looks the name up first (via planner_linear_resolve_label_ids,
+# which populates the shared per-team cache on a hit) and only calls
+# issueLabelCreate when genuinely absent.
+#
+# Usage: planner_linear_ensure_label <team_id> <name> [color]
+# Output: label UUID on stdout. Returns 1 on failure.
+planner_linear_ensure_label() {
+  local team_id="$1" name="$2" color="${3:-}"
+
+  if [ -z "$name" ]; then
+    echo "planner-linear-api: planner_linear_ensure_label requires a name" >&2
+    return 1
+  fi
+
+  local ids
+  if ids=$(planner_linear_resolve_label_ids "$team_id" "$(jq -nc --arg n "$name" '[$n]')" 2>/dev/null); then
+    echo "$ids" | jq -r '.[0]'
+    return 0
+  fi
+
+  local query='mutation CreateLabel($input: IssueLabelCreateInput!) { issueLabelCreate(input: $input) { success issueLabel { id name } } }'
+  local input_json
+  input_json=$(jq -nc --arg name "$name" --arg teamId "$team_id" --arg color "$color" \
+    '{name: $name, teamId: $teamId} + (if $color == "" then {} else {color: $color} end)')
+  local payload resp id
+  payload=$(jq -nc --arg query "$query" --argjson input "$input_json" '{query: $query, variables: {input: $input}}')
+  resp=$(planner_linear_graphql "$payload") || {
+    echo "planner-linear-api: issueLabelCreate failed for '${name}'" >&2
+    return 1
+  }
+
+  id=$(echo "$resp" | jq -r '.data.issueLabelCreate.issueLabel.id // empty')
+  if [ -z "$id" ]; then
+    echo "planner-linear-api: issueLabelCreate returned no id for '${name}'" >&2
+    return 1
+  fi
+
+  local cache="${_PLANNER_LABEL_CACHE[$team_id]:-}"
+  [ -z "$cache" ] && cache="{}"
+  _PLANNER_LABEL_CACHE[$team_id]=$(echo "$cache" | jq -c --arg n "$name" --arg id "$id" '. + {($n): $id}')
+
+  echo "$id"
 }
 
 # Resolve a Linear project by name or id, scoped to a team.

@@ -836,11 +836,22 @@ if [ -n "\$PROJECT_REF" ]; then
     "project=\${RESOLVED_PROJECT_ID} milestone=\${RESOLVED_MILESTONE_ID:-none}"
 fi
 
+# The initiative's own INIT-* label only becomes knowable once this run assigns
+# the initiative id — it can never be pre-seeded in Linear ahead of time. Create
+# it if missing (idempotent) before referencing it by name below; do not let a
+# missing dynamic label hard-fail issueCreate the way it did for the
+# Evidence-Based initiative.
+INIT_LABEL="INIT-${initiative_id#INIT-}"
+planner_linear_ensure_label "\$TEAM_ID" "\$INIT_LABEL" >/dev/null || {
+  planner_state_write "${initiative_id}" "EpicGen" "label" "fail" "cannot ensure label '\${INIT_LABEL}'"
+  exit 1
+}
+
 EPIC_RESPONSE=\$(planner_linear_create_issue \\
   "\$TEAM_ID" \\
   "\$EPIC_TITLE" \\
   "\$EPIC_DESCRIPTION" \\
-  "\$(jq -nc --arg init "INIT-${initiative_id#INIT-}" '[\$init, "epic"]')" \\
+  "\$(jq -nc --arg init "\$INIT_LABEL" '[\$init, "epic"]')" \\
   "" \\
   "\$RESOLVED_PROJECT_ID" \\
   "\$RESOLVED_MILESTONE_ID") || {
@@ -1176,11 +1187,25 @@ fi
 # UUIDs IssueCreateInput.labelIds requires, and hard-fails on any it cannot find.
 # Never drop an unresolved label: a ticket without \`planned\` is invisible to the
 # ticket-auto fast-path.
-LABELS=\$(jq -nc --arg init "INIT-${initiative_id#INIT-}" --arg type "\$TYPE_LABEL" \\
+#
+# INIT-* and blocked-by:WIL-## are dynamic labels — blocked-by:\$dep only becomes
+# knowable once \$dep's real Linear ID exists, same as the epic's INIT-* label in
+# Epic Gen, so ensure (create-if-missing) rather than assume each one exists.
+INIT_LABEL="INIT-${initiative_id#INIT-}"
+planner_linear_ensure_label "\$TEAM_ID" "\$INIT_LABEL" >/dev/null || {
+  planner_state_write "${initiative_id}" "TicketGen" "label" "fail" "cannot ensure label '\${INIT_LABEL}'"
+  continue
+}
+LABELS=\$(jq -nc --arg init "\$INIT_LABEL" --arg type "\$TYPE_LABEL" \\
   '["planned", \$init, \$type]')
 [ "\$pre_approved" = "true" ] && LABELS=\$(echo "\$LABELS" | jq -c '. + ["pre-approved"]')
 for dep in \${TICKET_DEPS}; do
-  LABELS=\$(echo "\$LABELS" | jq -c --arg d "blocked-by:\$dep" '. + [\$d]')
+  DEP_LABEL="blocked-by:\$dep"
+  planner_linear_ensure_label "\$TEAM_ID" "\$DEP_LABEL" >/dev/null || {
+    planner_state_write "${initiative_id}" "TicketGen" "label" "fail" "cannot ensure label '\${DEP_LABEL}'"
+    continue 2
+  }
+  LABELS=\$(echo "\$LABELS" | jq -c --arg d "\$DEP_LABEL" '. + [\$d]')
 done
 
 TICKET_RESPONSE=\$(planner_linear_create_issue \\

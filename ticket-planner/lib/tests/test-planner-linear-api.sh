@@ -230,6 +230,80 @@ else
   fail "requested order preserved" "got '$got'"
 fi
 
+# ── Test 6c: create-if-missing for dynamic labels ───────────────────────────────
+#
+# INIT-* and blocked-by:* labels only become knowable once their referenced
+# entity's real Linear ID exists at creation time, so they can never be
+# pre-seeded — issue #223. planner_linear_ensure_label must resolve an existing
+# label without creating a duplicate, and create+cache a genuinely missing one.
+
+echo "--- Test 6c: planner_linear_ensure_label ---"
+
+unset _PLANNER_LABEL_CACHE
+declare -gA _PLANNER_LABEL_CACHE
+
+# planner_linear_ensure_label invokes planner_linear_graphql inside a command
+# substitution, so a counter the stub increments would live in a subshell and
+# never be visible here — log create calls to a file instead (same pattern as
+# QUERY_LOG in Test 6b).
+CREATE_LOG="$(mktemp)"
+planner_linear_graphql() {
+  local body="$1"
+  if echo "$body" | grep -q "issueLabelCreate"; then
+    local name
+    name=$(echo "$body" | jq -r '.variables.input.name')
+    echo "$name" >>"$CREATE_LOG"
+    echo "{\"data\":{\"issueLabelCreate\":{\"success\":true,\"issueLabel\":{\"id\":\"uuid-new-${name}\",\"name\":\"${name}\"}}}}"
+    return 0
+  fi
+  # issueLabels lookup — only "INIT-42" pre-exists; everything else is absent.
+  local names
+  names=$(echo "$body" | jq -c '.variables.names')
+  if echo "$names" | jq -e 'index("INIT-42")' >/dev/null; then
+    echo '{"data":{"issueLabels":{"nodes":[{"id":"uuid-init-42","name":"INIT-42","team":null}]}}}'
+  else
+    echo '{"data":{"issueLabels":{"nodes":[]}}}'
+  fi
+}
+
+# Cache persistence only matters in the shell that calls ensure_label directly —
+# exactly how the phase prompts invoke it (`planner_linear_ensure_label ... >/dev/null`,
+# never `$(...)`), since a command-substitution call would fork and its cache
+# write would vanish with the subshell. Capture via file redirect here instead of
+# `$()`, so this test exercises the same no-fork call shape as production.
+ENSURE_OUT="$(mktemp)"
+
+planner_linear_ensure_label "$TEAM_UUID" "INIT-42" >"$ENSURE_OUT"
+got=$(cat "$ENSURE_OUT")
+if [ "$got" = "uuid-init-42" ] && [ ! -s "$CREATE_LOG" ]; then
+  pass "an existing label resolves without calling issueLabelCreate"
+else
+  fail "existing label resolves without creating" "got '$got', creates=$(wc -l <"$CREATE_LOG")"
+fi
+
+planner_linear_ensure_label "$TEAM_UUID" "blocked-by:WIL-99" >"$ENSURE_OUT"
+got=$(cat "$ENSURE_OUT")
+if [ "$got" = "uuid-new-blocked-by:WIL-99" ] && [ "$(wc -l <"$CREATE_LOG")" = "1" ]; then
+  pass "a missing label is created via issueLabelCreate"
+else
+  fail "missing label is created" "got '$got', creates=$(wc -l <"$CREATE_LOG")"
+fi
+
+planner_linear_ensure_label "$TEAM_UUID" "blocked-by:WIL-99" >"$ENSURE_OUT"
+got=$(cat "$ENSURE_OUT")
+if [ "$got" = "uuid-new-blocked-by:WIL-99" ] && [ "$(wc -l <"$CREATE_LOG")" = "1" ]; then
+  pass "a second call for the same name is served from cache, no second create"
+else
+  fail "second call served from cache" "got '$got', creates=$(wc -l <"$CREATE_LOG")"
+fi
+rm -f "$CREATE_LOG" "$ENSURE_OUT"
+
+if err=$(planner_linear_ensure_label "$TEAM_UUID" "" 2>&1); then
+  fail "an empty name is rejected" "returned 0 with '$err'"
+else
+  pass "an empty name is rejected"
+fi
+
 # ── Test 7: end-to-end input, labels resolved ──────────────────────────────────
 
 echo "--- Test 7: create_issue builds a schema-valid input ---"
