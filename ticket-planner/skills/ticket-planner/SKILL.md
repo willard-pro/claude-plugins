@@ -183,6 +183,36 @@ this is not folded into the phase-retry budget. Fix the cited artifact and
 are separate, not-yet-implemented check families — Crosscheck runs only the two above
 today.
 
+#### Resolving against the ref Discovery explored, not whatever REPOS_ROOT is now ([#217](https://github.com/willard-pro/claude-plugins/issues/217))
+
+REPOS_ROOT is a shared checkout — it can move to a different branch between
+Discovery and Crosscheck (another terminal, another initiative's pipeline, an
+operator). Left unaddressed, the citation linter resolves against whatever the
+live checkout happens to be on *right now*, which produces
+`CITATION_UNRESOLVED`/`CITATION_LINE_OUT_OF_RANGE` findings indistinguishable
+from a genuinely bad citation — confirmed live on two initiatives (VS-2, VS-3),
+worked around both times by hand with a throwaway worktree.
+
+The fix: Discovery records the ref it actually explored per repo —
+`META|discovery|repo-ref|<repo>@<branch>@<sha>` — and `planner_crosscheck_citations`
+(`lib/planner-crosscheck-citations.sh`) reads it back via
+`planner_crosscheck_repo_ref_setup` (`lib/planner-crosscheck-repo-ref.sh`) before
+resolving any citation. For any repo whose live checkout no longer matches the
+pinned sha, it creates (or reuses) an isolated `git worktree` alongside the live
+repo — `<repos_root>/<repo>-crosscheck-<ref>-<short-sha>` — and excludes the live
+copy from resolution for the duration of that Crosscheck run, so citations
+resolve against the worktree instead. The live checkout is never touched. This is
+best-effort: a repo Discovery recorded no ref for, or one whose worktree creation
+fails, silently falls back to resolving against whatever the live checkout has.
+
+**Hard rule: the planner never runs `git checkout`, `git switch`, or `git reset`
+against a REPOS_ROOT repo — anywhere, in any phase.** It may only read from a
+REPOS_ROOT repo, or create a worktree alongside it. This is enforced by
+convention in every phase prompt that touches REPOS_ROOT (see Discovery's
+prompt in `planner-phase-prompts.sh`) since the planner's own agents are the
+only thing that could violate it — there is no live checkout mutation path in
+the deterministic bash libraries to guard against.
+
 ## Target Symbols Grammar
 
 The Signals `TargetSymbols` field — and any `path:line` citation in proposal.md
