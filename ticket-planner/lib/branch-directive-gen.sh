@@ -142,6 +142,85 @@ _resolve_branch_directive_checker() {
   return 1
 }
 
+# Resolve planned-ticket-check.sh — branch-directive-check.sh's own prerequisite.
+# It is the canonical home of the `_extract_md_section` / `_extract_field`
+# markdown helpers, which the Epic Gen phase prompt needs to read a Branch
+# Directive back out of an existing epic description (idempotent re-entry).
+#
+# Same three-level fallback as _resolve_branch_directive_checker above. The
+# level-2 path differs: ticket-auto-pipeline's SessionStart hook copies its
+# lib/*.sh flat into ~/.claude/skills/lib/, which is where planner-doctor.sh
+# and planner-ticket-validate.sh already look for this same file.
+#
+# Usage: _resolve_planned_ticket_check
+# Output: path to planned-ticket-check.sh, or empty string if not found.
+_resolve_planned_ticket_check() {
+  local checker script_dir
+
+  # Level 1: Plugin cache
+  checker=$(find "${HOME}/.claude/plugins/cache" -name "planned-ticket-check.sh" \
+    -path "*/ticket-auto-pipeline/*/lib/planned-ticket-check.sh" 2>/dev/null | sort | tail -1)
+  if [ -n "$checker" ] && [ -f "$checker" ]; then
+    echo "$checker"
+    return 0
+  fi
+
+  # Level 2: Skills lib (SessionStart hook copy / legacy installs)
+  checker="${HOME}/.claude/skills/lib/planned-ticket-check.sh"
+  if [ -f "$checker" ]; then
+    echo "$checker"
+    return 0
+  fi
+
+  # Level 3: Relative path (sibling in same repo)
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  checker="${script_dir}/../../ticket-auto-pipeline/lib/planned-ticket-check.sh"
+  if [ -f "$checker" ]; then
+    echo "$checker"
+    return 0
+  fi
+
+  # Not found
+  echo ""
+  return 1
+}
+
+# Make the `_extract_md_section` / `_extract_field` markdown helpers available in
+# the current shell. Idempotent — a no-op when both are already declared, so a
+# caller that has independently sourced planned-ticket-check.sh pays nothing.
+#
+# Callers must not assume these helpers exist: they are defined in
+# ticket-auto-pipeline, not here, and there is no bundled copy. Sourcing the
+# canonical file is what keeps the Epic Gen idempotency check reading a Branch
+# Directive block by exactly the rules the downstream validator writes it by.
+#
+# Usage: branch_directive_source_md_helpers
+# Returns: 0 when both helpers are declared, 1 when the source file is missing.
+branch_directive_source_md_helpers() {
+  if declare -f _extract_md_section >/dev/null 2>&1 &&
+    declare -f _extract_field >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local checker
+  checker=$(_resolve_planned_ticket_check)
+  if [ -z "$checker" ]; then
+    echo "branch-directive-gen: planned-ticket-check.sh not found — _extract_md_section/_extract_field unavailable (install ticket-auto-pipeline)" >&2
+    return 1
+  fi
+
+  # shellcheck source=/dev/null
+  source "$checker"
+
+  if ! declare -f _extract_md_section >/dev/null 2>&1 ||
+    ! declare -f _extract_field >/dev/null 2>&1; then
+    echo "branch-directive-gen: ${checker} sourced but did not define _extract_md_section/_extract_field" >&2
+    return 1
+  fi
+
+  return 0
+}
+
 # Generate a Branch Directive block from JSON input.
 # Usage: branch_directive_generate <directive_json>
 branch_directive_generate() {

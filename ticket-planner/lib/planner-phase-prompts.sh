@@ -930,8 +930,22 @@ fi
 
 \`\`\`bash
 if [ "\$EMIT_DIRECTIVE" = "true" ]; then
-  # Check idempotency: does the epic already have a directive block?
-  EXISTING_BLOCK=\$(echo "\$EPIC_DESCRIPTION" | _extract_md_section "Branch Directive" 2>/dev/null || true)
+  # _extract_md_section / _extract_field live in ticket-auto-pipeline's
+  # planned-ticket-check.sh, not in this plugin. Source them explicitly — they
+  # are NOT in scope just because branch-directive-gen.sh is sourced. Without
+  # this the idempotency check below silently reads empty and re-appends a
+  # duplicate directive block.
+  branch_directive_source_md_helpers || {
+    planner_state_write "${initiative_id}" "EpicGen" "branch-directive" "fail" \\
+      "planned-ticket-check.sh not found — cannot verify directive idempotency"
+    exit 1
+  }
+
+  # Check idempotency against the epic's LIVE description, not the one composed
+  # in this run: on a re-entry the directive was appended by the previous run and
+  # exists only in Linear.
+  EPIC_LIVE_DESCRIPTION=\$(planner_linear_get_issue "\$CREATED_EPIC_ID" | jq -r '.data.issue.description // ""')
+  EXISTING_BLOCK=\$(_extract_md_section "\$EPIC_LIVE_DESCRIPTION" "Branch Directive")
 
   if [ -n "\$EXISTING_BLOCK" ]; then
     planner_state_write "${initiative_id}" "EpicGen" "branch-directive" "done" \
@@ -958,8 +972,11 @@ if [ "\$EMIT_DIRECTIVE" = "true" ]; then
       planner_state_write "${initiative_id}" "EpicGen" "branch-directive" "fail" "Generator returned empty output"
     else
       # Append directive to epic description via Linear API
-      # (append to existing description, preserving what's already there)
-      NEW_DESCRIPTION="\${EPIC_DESCRIPTION}\n\n\${DIRECTIVE_BLOCK}"
+      # (append to the LIVE description fetched above, so nothing another writer
+      # added since the epic was created is clobbered)
+      NEW_DESCRIPTION="\${EPIC_LIVE_DESCRIPTION}
+
+\${DIRECTIVE_BLOCK}"
       # Use the Linear API to update the description
       # ... Linear API update call ...
 
@@ -1006,8 +1023,15 @@ independently of the \`create\` step so status and replan can read it.
 - The branch-directive step is **independent of epic creation** — re-entering the
   phase after a partial run (epic created, directive not appended) must append
   the directive without recreating the epic.
-- The directive block uses the existing \`_extract_md_section\` and \`_extract_field\`
-  helpers from \`planned-ticket-check.sh\` (via \`branch-directive-check.sh\`).
+- The idempotency check uses \`_extract_md_section\` and \`_extract_field\`, which are
+  defined in **ticket-auto-pipeline's** \`planned-ticket-check.sh\` — not in this
+  plugin, and not in scope by default. Step 5c calls
+  \`branch_directive_source_md_helpers\` (from \`branch-directive-gen.sh\`) to source
+  them first. Do not call either helper without that line, and do not reimplement
+  them inline: the downstream validator parses the block by exactly these rules.
+- \`_extract_md_section\` takes positional arguments — \`_extract_md_section "\$DESC"
+  "Branch Directive"\`. It does not read stdin. \`_extract_field\` is the opposite:
+  it reads the block on stdin and takes only the field name.
 AGENT_PROMPT
 }
 

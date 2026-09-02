@@ -17,6 +17,58 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.17 (2026-09-02)
+
+Closes #228 — the Epic Gen phase prompt's Branch Directive idempotency check
+called `_extract_md_section` and `_extract_field` without sourcing anything that
+defines them. Both live in ticket-auto-pipeline's `planned-ticket-check.sh`, not
+in this plugin, and nothing in the prompt's preamble brings them into scope. The
+call was wrapped in `2>/dev/null || true`, so the resulting `command not found`
+was swallowed: `EXISTING_BLOCK` read empty, the check concluded no directive was
+present, and a re-entering run would have appended a second one. The call was
+also passed the wrong way round — `_extract_md_section` takes the description and
+heading as positional arguments, not the description on stdin.
+
+An audit of all 10 phase prompts (helper references cross-checked against every
+function defined in `ticket-planner/lib`, `ticket-auto-pipeline/lib` and
+`grill-me/lib`, scoped to what each prompt actually sources) found these two the
+only unresolvable references; the missing `branch-directive-check.sh` /
+`planned-ticket-check.sh` files named in the issue exist and resolve — they are
+owned by ticket-auto-pipeline by design, and `/ticket-planner doctor` has
+reported on all three cross-plugin helpers since 0.8.13.
+
+- New in `lib/branch-directive-gen.sh`: `_resolve_planned_ticket_check` (the same
+  three-level plugin-cache → skills-lib → sibling-path fallback as
+  `_resolve_branch_directive_checker`) and `branch_directive_source_md_helpers`,
+  an idempotent sourcing wrapper that hard-fails with an install hint rather than
+  leaving the helpers undefined.
+- Epic Gen step 5c calls `branch_directive_source_md_helpers` before the check and
+  records `branch-directive|fail` if the helper file cannot be resolved — a
+  missing validator is a stop, not a silent skip of idempotency.
+- The check now reads the epic's **live** description via
+  `planner_linear_get_issue` rather than the description composed in this run. A
+  directive appended by an earlier run exists only in Linear, so the old check
+  could never have seen one. The append path uses the live description too, so a
+  concurrent edit is not clobbered (and the literal `\n` that would never have
+  expanded inside the double-quoted string is gone).
+- Epic Gen's Constraints section states where the helpers come from and documents
+  the two opposite calling conventions (`_extract_md_section` positional,
+  `_extract_field` on stdin).
+- `SKILL.md` gains a **Cross-plugin validators** subsection under Contracts: a
+  table of the three externally-owned scripts (`planned-ticket-check.sh`,
+  `branch-directive-check.sh`, `grill-seal.sh`), what each owns, and the planner
+  call site for each. It calls out that the zero-colon bare-path `Target Symbols`
+  rule lives only in `_validate_target_symbols` downstream — Crosscheck's citation
+  linter checks that an entry *resolves*, never its *shape* — so a malformed entry
+  surfaces as a late Ticket Gen creation failure, and a TargetSymbols grammar
+  change must be made in both validators.
+- `lib/tests/test-branch-directive-gen.sh` gains four cases: the resolver finds
+  the file, the sourcing wrapper declares both helpers, a generated directive
+  round-trips back out of a description by the exact call convention the prompt
+  uses (and an absent directive extracts empty), and a static guard that the
+  prompt sources the helpers before invoking them and never pipes a description
+  into `_extract_md_section`.
+
 ## ticket-planner 0.8.16 (2026-09-02)
 
 Closes #227 — a `blocked-by` target could only name a sibling spec inside the

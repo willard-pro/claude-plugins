@@ -366,6 +366,104 @@ else
   echo "SKIP: validator not available"
 fi
 
+# ── Markdown helper sourcing tests (#228) ────────────────────────────────────
+#
+# _extract_md_section / _extract_field are defined in ticket-auto-pipeline's
+# planned-ticket-check.sh, not here. The Epic Gen phase prompt used to call them
+# without sourcing anything that defines them, so its Branch Directive
+# idempotency check silently read empty and re-appended a duplicate block.
+
+echo ""
+echo "=== Markdown helper sourcing tests ==="
+
+# Test M1: the resolver finds planned-ticket-check.sh
+echo "--- M1: _resolve_planned_ticket_check resolves ---"
+PTC_PATH=$(_resolve_planned_ticket_check) || true
+if [ -n "$PTC_PATH" ] && [ -f "$PTC_PATH" ]; then
+  echo "PASS: resolved to $PTC_PATH"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL: planned-ticket-check.sh not resolved"
+  FAIL=$((FAIL + 1))
+fi
+
+# Test M2: sourcing helper makes both functions available
+echo "--- M2: branch_directive_source_md_helpers declares both helpers ---"
+if [ -n "$PTC_PATH" ]; then
+  M2_RC=0
+  branch_directive_source_md_helpers || M2_RC=$?
+  if [ "$M2_RC" -eq 0 ] &&
+    declare -f _extract_md_section >/dev/null 2>&1 &&
+    declare -f _extract_field >/dev/null 2>&1; then
+    echo "PASS: _extract_md_section and _extract_field are declared"
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL: helpers not declared after sourcing (rc=$M2_RC)"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "SKIP: planned-ticket-check.sh not available"
+fi
+
+# Test M3: round-trip — a generated directive is readable back out of a
+# description by exactly the call convention the Epic Gen prompt uses.
+# _extract_md_section takes positional args; _extract_field reads stdin.
+echo "--- M3: generated directive round-trips through the md helpers ---"
+if declare -f _extract_md_section >/dev/null 2>&1; then
+  M3_BLOCK=$(branch_directive_generate "$VALID")
+  M3_DESC="# Epic: Debt Collection
+
+Body text that must survive extraction.
+
+${M3_BLOCK}"
+  M3_SECTION=$(_extract_md_section "$M3_DESC" "Branch Directive")
+  M3_BRANCH=$(echo "$M3_SECTION" | _extract_field "Branch")
+  M3_EXPECTED=$(echo "$M3_BLOCK" | _extract_field "Branch")
+  if [ -n "$M3_BRANCH" ] && [ "$M3_BRANCH" = "$M3_EXPECTED" ]; then
+    echo "PASS: extracted Branch='$M3_BRANCH'"
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL: extracted='$M3_BRANCH' expected='$M3_EXPECTED'"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # A description with no directive must extract empty — this is the branch the
+  # idempotency check depends on to decide whether to append.
+  M3_EMPTY=$(_extract_md_section "# Epic: no directive here" "Branch Directive")
+  if [ -z "$M3_EMPTY" ]; then
+    echo "PASS: absent directive extracts empty"
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL: absent directive extracted '$M3_EMPTY'"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "SKIP: md helpers not available"
+fi
+
+# Test M4: the Epic Gen phase prompt sources the helpers before calling them,
+# and uses the positional call convention (not a stdin pipe).
+echo "--- M4: Epic Gen prompt sources helpers before use ---"
+PROMPTS="${LIB_DIR}/planner-phase-prompts.sh"
+SOURCE_LINE=$(grep -n 'branch_directive_source_md_helpers ||' "$PROMPTS" | head -1 | cut -d: -f1)
+# The invocation form only — prose and comments mentioning the name don't count.
+USE_LINE=$(grep -n '$(_extract_md_section' "$PROMPTS" | head -1 | cut -d: -f1)
+if [ -n "$SOURCE_LINE" ] && [ -n "$USE_LINE" ] && [ "$SOURCE_LINE" -lt "$USE_LINE" ]; then
+  echo "PASS: sourced at line $SOURCE_LINE, first used at line $USE_LINE"
+  PASS=$((PASS + 1))
+else
+  echo "FAIL: helpers used at line ${USE_LINE:-none} without a preceding source (${SOURCE_LINE:-none})"
+  FAIL=$((FAIL + 1))
+fi
+
+if grep -q '|[[:space:]]*_extract_md_section' "$PROMPTS"; then
+  echo "FAIL: _extract_md_section piped on stdin — it takes positional args"
+  FAIL=$((FAIL + 1))
+else
+  echo "PASS: no stdin-piped _extract_md_section call"
+  PASS=$((PASS + 1))
+fi
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""
