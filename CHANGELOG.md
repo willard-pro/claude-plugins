@@ -17,6 +17,25 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.29.12 (2026-09-02)
+
+Closes #195 — `detect-resume.sh`'s gate-reconcile branch matched on the shared
+`GATE|reconcile|done|` prefix that both of `ticket-gate-reconcile`'s terminal
+outcomes write, so a reconcile that deliberately **held** for human input was
+indistinguishable from one that came back **clean**. Both routed to `STEP_4`
+(Implement), meaning a held ticket resumed straight into implementation on the
+next run, bypassing the hold. The regex was originally widened to accept
+`reconcile` in 215822b (#146) to fix a `STEP_3_5` infinite loop — that fix was
+correct in intent but never discriminated on the message suffix.
+
+- Fix: the branch now splits on the message field — `GATE|gate|done|` and
+  `GATE|reconcile|done|clean` route to `STEP_4`; `GATE|reconcile|done|...held:`
+  routes to `GATE_HELD` instead. A later `clean` cycle in the same log still
+  wins over an earlier `held` cycle, preserving the #146 fix for the
+  multi-cycle re-approval case.
+- Tests: two new fixtures in `test-detect-resume.sh` cover the held-not-STEP_4
+  case and the clean-after-prior-held-cycle case.
+
 ## ticket-auto-pipeline 0.29.11 (2026-09-02)
 
 Closes #208 — `wiki-maintenance` Step 1's "no unresolved errata" branch stopped the
