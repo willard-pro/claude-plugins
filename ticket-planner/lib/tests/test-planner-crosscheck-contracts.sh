@@ -65,6 +65,85 @@ else
   fail "named fields: returns 0" "$(cat /tmp/cu-out.txt)"
 fi
 
+echo "--- a fenced Signals JSON block does not fire CONTRACT_UNDEFINED (#229) ---"
+SPECS_U3="${TMPDIR}/u3/specs"
+mkdir -p "$SPECS_U3"
+cat >"${SPECS_U3}/vs1-a.md" <<'EOF'
+## Description
+
+Add tier tracking to the triage worker.
+
+## Signals
+
+```json
+{
+  "Decision": "Triage payload gains fields for tier reached and attempt count",
+  "AffectedServices": "worker,api",
+  "TargetSymbols": "_run_triage:worker/main.py:20"
+}
+```
+EOF
+
+if planner_crosscheck_contract_undefined "$SPECS_U3" >/tmp/cu-fenced.txt 2>&1; then
+  pass "fenced Signals block: returns 0"
+else
+  fail "fenced Signals block: returns 0" "$(cat /tmp/cu-fenced.txt)"
+fi
+
+echo "--- prose outside a fence still fires when the file also has a Signals block ---"
+SPECS_U4="${TMPDIR}/u4/specs"
+mkdir -p "$SPECS_U4"
+cat >"${SPECS_U4}/vs1-b.md" <<'EOF'
+## Description
+
+`ClassificationResult` gains fields for tier reached / attempt count, exact
+shape decided later.
+
+## Signals
+
+```json
+{
+  "Decision": "Triage payload gains fields for tier reached",
+  "AffectedServices": "worker,api"
+}
+```
+EOF
+
+out=$(planner_crosscheck_contract_undefined "$SPECS_U4")
+case "$out" in
+*"CONTRACT_UNDEFINED"*"ClassificationResult"*) pass "fence strip: prose finding preserved" ;;
+*) fail "fence strip: prose finding preserved" "got: $out" ;;
+esac
+if [ "$(echo "$out" | grep -c CONTRACT_UNDEFINED)" -eq 1 ]; then
+  pass "fence strip: exactly one finding"
+else
+  fail "fence strip: exactly one finding" "got: $out"
+fi
+
+echo "--- an identifier backticked only inside a fence is not a structure candidate ---"
+SPECS_U5="${TMPDIR}/u5/specs"
+mkdir -p "$SPECS_U5"
+cat >"${SPECS_U5}/vs1-c.md" <<'EOF'
+## Description
+
+Touches `parent_document_id` only.
+
+## Signals
+
+```json
+{
+  "Decision": "Wire `fenced_only_symbol` through the worker"
+}
+```
+EOF
+
+out=$(_planner_crosscheck_contracts_structures_in_dir "$SPECS_U5")
+case "$out" in
+*"fenced_only_symbol"*) fail "fenced-only candidate: excluded" "got: $out" ;;
+*"parent_document_id"*) pass "fenced-only candidate: excluded, prose candidate kept" ;;
+*) fail "fenced-only candidate: excluded, prose candidate kept" "got: $out" ;;
+esac
+
 # ═══════════════════════════════════════════════════════════════════════════
 # planner_crosscheck_contract_mismatch
 # ═══════════════════════════════════════════════════════════════════════════

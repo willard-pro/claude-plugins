@@ -17,6 +17,37 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.20 (2026-09-02)
+
+Closes #229 — the contracts checker read every spec as prose (a backtick span
+is a structure reference, a blank-line paragraph is one claim about it), but
+the planner writes a fenced JSON `## Signals` block into
+every spec it generates. That block's prose-shaped `Decision` value could match
+`CONTRACT_UNDEFINED`'s "gains/adds fields"/"new fields" regex while its JSON
+keys, being unquoted, left no backtick-quoted canonical name to satisfy the
+check — so it fired on the planner's own machine-readable output format,
+naming `` `(unnamed structure)` `` and quoting `AffectedServices`/
+`TargetSymbols` in the snippet. Every initiative to date carried two such
+warnings, and every `COMPLETED.md` recorded them as expected boilerplate,
+which is exactly what makes a genuine `CONTRACT_UNDEFINED` easy to miss.
+
+- Fix (`lib/planner-crosscheck-contracts.sh`, new
+  `_planner_crosscheck_contracts_defenced` /
+  `_planner_crosscheck_contracts_blocks`): fenced regions (backtick- or
+  tilde-delimited) are blanked once at the read boundary, and all three
+  checks now read that view
+  — paragraph iteration in `planner_crosscheck_contract_undefined` /
+  `_consumers_unnotified` / the shape-comparison helpers, structure-candidate
+  extraction in `_structures_in_dir`, and file membership in
+  `_files_with_structure`. Fenced lines are replaced by empty lines rather
+  than deleted, so paragraph boundaries stay exactly where they were.
+- An identifier backticked only inside a fence is no longer a structure
+  candidate, so `CONTRACT_MISMATCH` / `CONTRACT_CONSUMERS_UNNOTIFIED` can no
+  longer pair two specs over a symbol neither one mentions in prose.
+- Prose findings are unaffected: a real "`X` gains fields for ..." paragraph
+  in a spec that also carries a Signals block still fires exactly once. Three
+  new test fixtures cover both directions.
+
 ## ticket-auto-pipeline 0.29.20 (2026-09-02)
 
 Closes #209 — `ticket-appraise`'s Step 2.5 axis sweep had no trigger for
