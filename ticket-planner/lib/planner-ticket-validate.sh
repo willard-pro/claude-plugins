@@ -64,7 +64,7 @@ planner_validate_ticket() {
     # Try relative path (same repo)
     local script_dir
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    checker="${script_dir}/../ticket-auto-pipeline/lib/planned-ticket-check.sh"
+    checker="${script_dir}/../../ticket-auto-pipeline/lib/planned-ticket-check.sh"
   fi
 
   if [ ! -f "$checker" ]; then
