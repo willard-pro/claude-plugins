@@ -17,6 +17,34 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.5 (2026-09-02)
+
+Closes #218 — the citation + precedent linter (`planner-crosscheck-citations.sh`,
+#172) only ran once, at Crosscheck (phase 7). Across the 7 initiatives run so
+far, the large majority of raw Crosscheck findings (VS-1: 82, VS-3: 36, VS-4:
+36, ebc: 22) were citation-grammar mistakes — annotation on the wrong side of
+`Name:path`, off-by-one line ranges, missing `(new)` markers — authored during
+Specify (phase 4) and left untouched by Review and Consensus, which critique
+content, not citation syntax. By the time Crosscheck caught them, the spec had
+already been through two review rounds and a full remediation round was
+needed before Epic Gen could proceed.
+
+- The Specify phase prompt (`planner_prompt_specify` in
+  `lib/planner-phase-prompts.sh`) now has a Part 4 self-lint step: after
+  writing proposal.md and the spec files, the agent sources
+  `planner-crosscheck-citations.sh` and runs `planner_crosscheck_citations`
+  against its own fresh output — the same deterministic check Crosscheck
+  runs later — and fixes any findings itself (up to 3 fix-and-recheck
+  passes) before handing off, all inside the context window that introduced
+  the defect.
+- Crosscheck at phase 7 is unchanged and remains the final gate — it still
+  catches drift introduced by Review/Consensus edits and anything the
+  self-lint missed. This front-loads the same check; it does not replace it.
+- No change to `planner-crosscheck-citations.sh` itself or to the
+  determinism boundary: the check stays deterministic bash, called directly
+  by the (already-Bash-capable) Specify agent, exactly as Crosscheck already
+  calls it from the router.
+
 ## ticket-auto-pipeline 0.29.9 (2026-09-02)
 
 Closes #194 — `spawn_capture` (`lib/spawn-helper.sh`) passed its `PHASE`
