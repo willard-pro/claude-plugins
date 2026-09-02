@@ -689,10 +689,15 @@ spawn_capture() {
     return 1
   fi
 
+  # capture_agent_result requires kebab-case; call sites pass the uppercase
+  # PHASE used elsewhere in the router (e.g. IMPLEMENT, PR-REVIEW).
+  local phase_lower
+  phase_lower=$(echo "$PHASE" | tr '[:upper:]' '[:lower:]')
+
   if [ -n "${ATTEMPT:-}" ]; then
-    capture_agent_result "$TICKET_ID" "$PHASE" "${RESULT:-}" "$ATTEMPT"
+    capture_agent_result "$TICKET_ID" "$phase_lower" "${RESULT:-}" "$ATTEMPT"
   else
-    capture_agent_result "$TICKET_ID" "$PHASE" "${RESULT:-}"
+    capture_agent_result "$TICKET_ID" "$phase_lower" "${RESULT:-}"
   fi
 }
 

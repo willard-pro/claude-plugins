@@ -17,6 +17,28 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.29.9 (2026-09-02)
+
+Closes #194 — `spawn_capture` (`lib/spawn-helper.sh`) passed its `PHASE`
+argument straight through to `capture_agent_result`
+(`lib/capture-transcript.sh`), which hard-rejects any phase that isn't
+kebab-case. Every real call site passes the uppercase `PHASE` used elsewhere
+in the router (`MAINTENANCE`, `IMPLEMENT`, `VERIFY`, `PR-REVIEW`), so the
+rejection fired 100% of the time and no `{TICKET-ID}-{phase}-agent.log`
+transcript was ever written. `spawn_agent_pre` and `spawn_agent_post` already
+normalise `PHASE` (to uppercase, for `detect-resume.sh`); `spawn_capture` was
+the one bracket helper missing the equivalent normalisation in the opposite
+direction.
+
+- Fix: `spawn_capture` now lowercases `PHASE` before calling
+  `capture_agent_result`.
+- New regression test in `test-spawn-helper.sh`
+  (`test_capture_lowercases_uppercase_phase_for_real_capture`) exercises the
+  real (unmocked) `capture_agent_result` with an uppercase `PHASE` and asserts
+  the transcript file is written — the existing `spawn_capture` tests only
+  covered param plumbing against a file-scoped mock that always returns 0, so
+  they couldn't have caught this.
+
 ## ticket-auto-pipeline 0.29.8 (2026-09-01)
 
 Closes #189 — `ticket-pr-review` Step 6b merged any PR with a ✅ verdict
