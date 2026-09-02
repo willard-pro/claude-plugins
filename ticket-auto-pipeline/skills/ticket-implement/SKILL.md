@@ -359,9 +359,24 @@ Spawn a `general-purpose` agent for each repo with changes. Pass it:
 - The ticket ID and a one-sentence description of what was implemented
 - This exact instruction: **Invoke `Skill("superpowers:requesting-code-review")` — use the Skill tool with this exact name. Do NOT use any other review tool, plugin, or slash command.**
 
-The agent returns a findings list. **All findings at any severity are blockers.** For each finding: fix the code, re-run unit tests, then re-spawn the agent with the updated file list. Do not proceed to commit until the review returns clean.
+The agent returns a findings list, each tagged with a severity. **Only `medium` severity and above are blockers** — `low`-severity findings (style preferences, naming opinions) never gate the commit.
 
-[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|code-review|done|Clean" >> "$LOG_FILE"
+This is a bounded fix-and-re-review loop, **capped at 3 cycles** — the same cap used for verify retry and PR iteration (`pipeline-log-format.md`). Track it with a `cycle#N` counter on the log line, the same convention `pr-reconcile` uses for `PR_FEEDBACK_CYCLE`:
+
+- Cycle 1: spawn the agent. If there are no medium+ findings, the review is clean — stop here.
+- If medium+ findings exist and `cycle < 3`: fix each one, re-run unit tests, re-spawn the agent with the updated file list as the next cycle.
+- If medium+ findings still exist at `cycle == 3`: gate-stop and stop — do not commit:
+  ```bash
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|code-review|fail|cycle#3 CODE_REVIEW_EXHAUSTED" >> "$LOG_FILE"
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|CODE_REVIEW_EXHAUSTED" >> "$LOG_FILE"
+  ```
+  This ticket needs human review.
+
+Do not proceed to commit until the review is clean or the loop gate-stops.
+
+**Residual low-severity findings** at a clean exit: append them to notes.md under a `## Code Review — Deferred Findings` heading (create it if absent), one line per finding — `- {file}:{line} — {finding summary}`. These are informational only and never block.
+
+[ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|code-review|done|cycle#{N} clean" >> "$LOG_FILE"
 
 ---
 
