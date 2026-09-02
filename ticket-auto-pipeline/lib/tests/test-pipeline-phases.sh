@@ -556,6 +556,21 @@ test_router_pr_reconcile_emits_cycle_marker() {
   }
 }
 
+test_router_reconcile_cycle_caps_at_3() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  local block
+  block=$(sed -n '/### STEP_3_5 —/,/^### STEP_4/p' "$skill_md")
+  echo "$block" | grep -q '{RECONCILE_CYCLE}" -ge 3' || {
+    echo "STEP_3_5 does not cap RECONCILE_CYCLE at 3"
+    return 1
+  }
+  echo "$block" | grep -q 'RECONCILE_EXHAUSTED' || {
+    echo "STEP_3_5 does not gate-stop with RECONCILE_EXHAUSTED"
+    return 1
+  }
+}
+
 test_router_prescan_skipped_on_late_resume() {
   local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
   [ -f "$skill_md" ] || return 1
