@@ -97,6 +97,7 @@ test-planner:
 	bash ticket-planner/lib/tests/test-planner-sanitize.sh
 	bash ticket-planner/lib/tests/test-planner-state.sh
 	bash ticket-planner/lib/tests/test-planner-lib-root.sh
+	bash ticket-planner/lib/tests/test-planner-lib-sync.sh
 	bash ticket-planner/lib/tests/test-planner-linear-api.sh
 	bash ticket-planner/lib/tests/test-planner-stop-conditions.sh
 	bash ticket-planner/lib/tests/test-planner-config-durability.sh

@@ -17,6 +17,54 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.19 (2026-09-02)
+
+Closes #234 — the `SessionStart` hook was a one-liner that copied the *installed*
+plugin cache's `lib/*.sh` into `~/.claude/skills/lib/`. A fix applied in a source
+checkout reached neither location until the marketplace was re-installed, so every
+session that touched planner internals hand-synced the same file into several
+places. A fix that lives in the cache and the skills lib but only *uncommitted* in
+the checkout is one `git checkout .` from disappearing from all of them at once —
+neither copy is independently version-controlled.
+
+The hook now overlays a detected source checkout's working tree on top of the
+installed copy. Writing the plugin cache is the load-bearing half: `planner_resolve_lib_root`
+searches the cache before `~/.claude/skills/lib`, so a skills-lib-only sync would
+never produce the copy that actually runs.
+
+- New `hooks/planner-lib-sync.sh`, registered as the `SessionStart` command in
+  `.claude-plugin/plugin.json` in place of the inline `bash -c 'cp ...'`. Step 1 is
+  the old behaviour verbatim (cache → skills lib), so a plain marketplace install
+  is unchanged. Step 2 overlays `<checkout>/lib/*.sh` onto both the cache `lib/`
+  and the skills lib.
+- Detection precedence, first hit wins: `PLANNER_DEV_ROOT` (repo root or plugin
+  dir) → `CLAUDE_PROJECT_DIR` (falling back to `$PWD`) walked upwards → the
+  checkout a previous session recorded at
+  `~/.claude/skills/lib/.ticket-planner-dev-root`. A candidate counts only if it
+  carries both `lib/planner-state.sh` and a `.claude-plugin/plugin.json` naming
+  `ticket-planner`; a pointer to a checkout that has since vanished is deleted
+  rather than retried every session.
+- Only a repository's **main** worktree is ever recorded as that pointer — a
+  linked worktree still syncs for sessions started inside it, but a throwaway
+  issue-branch worktree must not become what every other session runs.
+- A checkout whose `plugin.json` version is *older* than the installed one is
+  refused, so a stale clone cannot silently downgrade the plugin. Equal versions
+  sync, which is the normal case: a fix applied before the version bump.
+- Files are copied only when their contents differ, so repeat sessions leave
+  mtimes alone, and the hook prints to stdout — which `SessionStart` injects into
+  session context — only when it actually copied something, naming the checkout
+  so an operator can tell they are running a working tree rather than the release.
+- `PLANNER_DEV_SYNC=0` disables the overlay; the baseline copy still runs. The
+  hook is fail-open throughout and always exits 0 — session start never breaks on
+  it.
+- Scope is `lib/*.sh`, the file set the hook already owned. Skill markdown and the
+  hook script itself still arrive by marketplace install.
+- New `lib/tests/test-planner-lib-sync.sh` (17 assertions, wired into `make
+  test-planner`): baseline copy, explicit-root overlay, ancestor-walk detection,
+  pointer persistence and reuse from an unrelated session, linked worktrees not
+  being recorded, stale-pointer removal, the downgrade guard and its equal-version
+  case, the opt-out, the silent no-op, and a lookalike directory being rejected.
+
 ## ticket-planner 0.8.18 (2026-09-02)
 
 Closes #233 — a blocking Crosscheck run told the operator to
