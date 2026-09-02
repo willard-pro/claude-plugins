@@ -454,7 +454,7 @@ _planner_crosscheck_scan_target_symbols() {
     # naming two illustrative call sites. Reattach any such bare-number part
     # to the last real path seen so it's checked against that file instead
     # of being treated as an unresolvable path named "2022".
-    local -a subtokens
+    local -a subtokens final_tokens=()
     IFS=',' read -ra subtokens <<<"$token"
     local subtoken last_path=""
     for subtoken in "${subtokens[@]}"; do
@@ -465,10 +465,39 @@ _planner_crosscheck_scan_target_symbols() {
       else
         last_path="${subtoken%%:*}"
       fi
-      if ! _planner_crosscheck_check_citation "$repos_root" "$spec_file" "$symbol_line" "$subtoken" "$symbol"; then
-        failures=$((failures + 1))
-      fi
+      final_tokens+=("$subtoken")
     done
+
+    # A compound "A()/B()" name (see the subsymbol split inside
+    # _planner_crosscheck_check_citation) cited against exactly as many
+    # comma-separated lines is each symbol's own line, not a shared
+    # location every symbol must appear near
+    # ("_run_triage()/_run_triage_inner():worker/main.py:1749,1758" —
+    # `_run_triage` at 1749, `_run_triage_inner` at 1758). Passing the whole
+    # compound symbol string to every subtoken made the checker require
+    # BOTH symbols within proximity of EACH line, false-flagging whichever
+    # symbol isn't defined near the other symbol's line. Pair them
+    # positionally instead — but only when the counts match 1:1; a
+    # non-compound symbol citing several real support locations (see above)
+    # has one symbol name and N paths, and must keep checking that one name
+    # against every subtoken.
+    local -a subsymbols=()
+    [ -n "$symbol" ] && IFS='/' read -ra subsymbols <<<"$symbol"
+
+    if [ "${#subsymbols[@]}" -gt 1 ] && [ "${#subsymbols[@]}" -eq "${#final_tokens[@]}" ]; then
+      local idx
+      for idx in "${!final_tokens[@]}"; do
+        if ! _planner_crosscheck_check_citation "$repos_root" "$spec_file" "$symbol_line" "${final_tokens[$idx]}" "${subsymbols[$idx]}"; then
+          failures=$((failures + 1))
+        fi
+      done
+    else
+      for subtoken in "${final_tokens[@]}"; do
+        if ! _planner_crosscheck_check_citation "$repos_root" "$spec_file" "$symbol_line" "$subtoken" "$symbol"; then
+          failures=$((failures + 1))
+        fi
+      done
+    fi
   done
 
   return "$failures"
