@@ -183,6 +183,57 @@ this is not folded into the phase-retry budget. Fix the cited artifact and
 are separate, not-yet-implemented check families — Crosscheck runs only the two above
 today.
 
+## Target Symbols Grammar
+
+The Signals `TargetSymbols` field — and any `path:line` citation in proposal.md
+or spec prose — is parsed literally by the citation linter
+(`lib/planner-crosscheck-citations.sh`, [#172](https://github.com/willard-pro/claude-plugins/issues/172)),
+not read as natural language. Getting the shape wrong is the single biggest
+source of Crosscheck findings across every initiative to date — one
+initiative's remediation round found 17 of its 22 raw findings were the same
+mistake (annotation on the wrong side of the colon). This section documents
+the grammar the linter actually enforces, so Specify can follow it instead of
+re-deriving it from checker failures one finding at a time:
+
+```
+TargetSymbols := entry (';' entry)*
+entry         := Name ':' location (',' location)*
+              |  Name ':' path                      -- no line at all: checks only that the file exists
+Name          := identifier ['(' annotation ')']     -- annotation goes HERE, never in `location`
+              |  identifier '/' identifier ...       -- two+ related symbols sharing the SAME location
+location      := [path ':'] line ['-' line2]         -- omitting `path:` reuses the previous location's path
+```
+
+- **Annotations belong on the `Name` side, never the path side.**
+  `uploadFile (new):UploadPageClient.tsx:304-310` resolves cleanly.
+  `uploadFile:UploadPageClient.tsx (new):304-310` does not — the parser
+  treats everything up to the trailing `:line` as the path, so the
+  annotation gets folded into the literal filename it searches for
+  (`UploadPageClient.tsx (new)`), which never exists on disk. This single
+  mistake is the majority-cause finding above.
+- **`(new)` and its variants skip the unresolved-path check only.** `(new)`,
+  `(new in <slug>, ...)`, or any parenthetical whose first word is `new`
+  tells the linter this file doesn't exist yet — don't flag
+  `CITATION_UNRESOLVED` for it. It does not skip the line-range or
+  symbol-proximity checks once the file exists.
+- **Don't cite two symbols against two different line ranges in one compound
+  `Name1()/Name2()` entry.** The linter checks *every* `/`-separated name in
+  `Name` against *every* comma-separated range in the entry (each within
+  `±PLANNER_CROSSCHECK_SYMBOL_PROXIMITY` lines, or via an earlier definition
+  line) — it does not pair the first name with the first range and the
+  second with the second. `check_llm_allowed()/record_llm_usage():guard.py:58-87,89-115`
+  happens to pass when the two symbols sit close together and fails when
+  they don't, because each range is checked against both names
+  independently. Write one entry per symbol instead:
+  `check_llm_allowed():guard.py:58-87;record_llm_usage():guard.py:89-115`.
+  A compound `Name1/Name2` sharing one *single* location is fine — the
+  ambiguity only appears once a second, distinct range enters the same entry.
+- **A concept with no citable source location is not a `TargetSymbols`
+  entry.** A migration description, a sibling initiative's slug, or any
+  other non-file concept has nothing for the linter to resolve against
+  `REPOS_ROOT` — state it in prose (Summary, Technical Approach, Risk
+  Register), not as a colon-path citation.
+
 ## Contracts (frozen — the planner produces against these)
 
 The planner does not re-specify these. They are the interface to the downstream pipeline:
