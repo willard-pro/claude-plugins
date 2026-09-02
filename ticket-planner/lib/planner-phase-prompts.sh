@@ -781,21 +781,26 @@ ENTITY_KEY="epic-${initiative_id}"
 # Step 1: Record intent
 planner_record_intent "${initiative_id}" "EpicGen" "epic" "\$ENTITY_KEY"
 
-# Step 2: Check if already created
+# Step 2: Check if already created. CREATED_EPIC_ID is the id every later step
+# (team/project resolution persist against it, step 5c reads it, TicketGen reads
+# it from the state log) uses — bind it here too, so a re-entering run that skips
+# creation still flows into everything downstream. Do NOT exit here: the
+# branch-directive step (5c) is independent of epic creation and has its own
+# idempotency check, so a re-entering run must keep going, not stop.
+CREATED_EPIC_ID=""
 if planner_entity_exists "${initiative_id}" "\$ENTITY_KEY"; then
-  existing_epic="\$(planner_entity_get_id "${initiative_id}" "\$ENTITY_KEY")"
-  planner_state_write "${initiative_id}" "EpicGen" "create" "done" "Epic already exists: \${existing_epic} (idempotent)"
-  echo "EPIC_ID=\${existing_epic}"
-  # Exit agent — nothing to do
+  CREATED_EPIC_ID="\$(planner_entity_get_id "${initiative_id}" "\$ENTITY_KEY")"
+  planner_state_write "${initiative_id}" "EpicGen" "create" "done" "Epic already exists: \${CREATED_EPIC_ID} (idempotent)"
+  echo "EPIC_ID=\${CREATED_EPIC_ID}"
 fi
 
-# Step 3: Create the epic via Linear API.
+# Step 3: Resolve team/project/milestone and ensure the dynamic label. These run
+# on every entry, including a re-entering one where the epic already exists —
+# step 5c and Ticket Gen read the ids persisted here via planner_config_set.
 # planner_linear_create_issue takes label NAMES and resolves them to UUIDs itself
 # (IssueCreateInput.labelIds requires UUIDs). An unknown label is a hard failure —
 # do not work around it by dropping the label.
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-linear-api.sh"
-
-planner_state_write "${initiative_id}" "EpicGen" "create" "start" "Creating Linear epic for initiative"
 
 # Every issueCreate needs a teamId. TEAM_REF below is whatever the operator
 # configured (--team, or LINEAR_TEAM_ID) interpolated from the state log; when it
@@ -861,28 +866,34 @@ planner_linear_ensure_label "\$TEAM_ID" "\$INIT_LABEL" >/dev/null || {
   exit 1
 }
 
-EPIC_RESPONSE=\$(planner_linear_create_issue \\
-  "\$TEAM_ID" \\
-  "\$EPIC_TITLE" \\
-  "\$EPIC_DESCRIPTION" \\
-  "\$(jq -nc --arg init "\$INIT_LABEL" '[\$init, "epic"]')" \\
-  "" \\
-  "\$RESOLVED_PROJECT_ID" \\
-  "\$RESOLVED_MILESTONE_ID") || {
-  planner_state_write "${initiative_id}" "EpicGen" "create" "fail" "Linear issueCreate failed"
-  exit 1
-}
-
-CREATED_EPIC_ID=\$(echo "\$EPIC_RESPONSE" | jq -r '.data.issueCreate.issue.identifier // empty')
+# Only create when step 2 did not already bind CREATED_EPIC_ID — a re-entering
+# run must not create a second epic.
 if [ -z "\$CREATED_EPIC_ID" ]; then
-  planner_state_write "${initiative_id}" "EpicGen" "create" "fail" "issueCreate returned no identifier"
-  exit 1
-fi
+  planner_state_write "${initiative_id}" "EpicGen" "create" "start" "Creating Linear epic for initiative"
 
-# Step 4: Mark created
-planner_entity_mark_created "${initiative_id}" "\$ENTITY_KEY" "\$CREATED_EPIC_ID"
-planner_state_write "${initiative_id}" "EpicGen" "create" "done" "EPIC_ID=\$CREATED_EPIC_ID"
-echo "EPIC_ID=\$CREATED_EPIC_ID"
+  EPIC_RESPONSE=\$(planner_linear_create_issue \\
+    "\$TEAM_ID" \\
+    "\$EPIC_TITLE" \\
+    "\$EPIC_DESCRIPTION" \\
+    "\$(jq -nc --arg init "\$INIT_LABEL" '[\$init, "epic"]')" \\
+    "" \\
+    "\$RESOLVED_PROJECT_ID" \\
+    "\$RESOLVED_MILESTONE_ID") || {
+    planner_state_write "${initiative_id}" "EpicGen" "create" "fail" "Linear issueCreate failed"
+    exit 1
+  }
+
+  CREATED_EPIC_ID=\$(echo "\$EPIC_RESPONSE" | jq -r '.data.issueCreate.issue.identifier // empty')
+  if [ -z "\$CREATED_EPIC_ID" ]; then
+    planner_state_write "${initiative_id}" "EpicGen" "create" "fail" "issueCreate returned no identifier"
+    exit 1
+  fi
+
+  # Step 4: Mark created
+  planner_entity_mark_created "${initiative_id}" "\$ENTITY_KEY" "\$CREATED_EPIC_ID"
+  planner_state_write "${initiative_id}" "EpicGen" "create" "done" "EPIC_ID=\$CREATED_EPIC_ID"
+  echo "EPIC_ID=\$CREATED_EPIC_ID"
+fi
 \`\`\`
 
 ## Labels to set on the epic

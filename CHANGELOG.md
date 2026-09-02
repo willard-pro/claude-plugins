@@ -45,6 +45,35 @@ machine that has never run the pipeline) blocked every subagent's start too.
   telemetry that should never be able to block an agent — this makes that
   invariant hold even if a future unguarded command is added upstream of it.
 
+## ticket-planner 0.8.22 (2026-09-02)
+
+Closes #265 — Epic Gen's Step 2 idempotency check exited the phase as soon as
+it found the epic already existed, but the Branch Directive step (5c) runs
+later in the same phase and has its own, independent idempotency check. A run
+that created the epic and then died before appending the directive could never
+get one on re-entry: Step 2 stopped the phase first. The prompt's own
+Constraints section already said re-entry "must append the directive without
+recreating the epic" — the procedure just never implemented it. Downstream,
+`ticket-auto` resolves its branch target from the parent epic's directive; with
+none, it silently falls back to `BASE_BRANCH` instead of the intended shared
+epic branch.
+
+- `lib/planner-phase-prompts.sh` (`planner_prompt_epicgen`): Step 2 now binds
+  the existing epic's id to `CREATED_EPIC_ID` — the same variable Steps 3-5 and
+  Ticket Gen already read — instead of a separate `existing_epic` that nothing
+  downstream consumed, and no longer exits. Team/project/milestone resolution
+  and the dynamic `INIT-*` label (Step 3) still run unconditionally on every
+  entry, since Step 5c and Ticket Gen read the ids persisted there. The actual
+  `issueCreate` call and `planner_entity_mark_created` (Steps 3b/4) are now
+  guarded behind `[ -z "$CREATED_EPIC_ID" ]`, so a re-entering run skips
+  creation but still reaches Step 5c, whose existing idempotency check appends
+  the directive only when the epic's live description has none.
+- `lib/tests/test-branch-directive-gen.sh`: added M5, a static check against
+  the rendered Epic Gen prompt — no exit-on-existing-epic instruction, the
+  existing-epic path binds `CREATED_EPIC_ID` ahead of Step 5c's
+  `planner_linear_get_issue` call, no lingering `existing_epic` reference, and
+  every rendered bash fence still parses (`bash -n`).
+
 ## ticket-planner 0.8.21 (2026-09-02)
 
 Closes #256 — `--project` / `LINEAR_PROJECT` were read once at parse time, and

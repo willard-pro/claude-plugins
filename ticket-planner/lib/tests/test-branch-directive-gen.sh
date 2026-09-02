@@ -37,6 +37,7 @@ if ! declare -f get_issue >/dev/null 2>&1; then
 fi
 
 source "${LIB_DIR}/branch-directive-gen.sh"
+source "${LIB_DIR}/planner-phase-prompts.sh"
 
 PASS=0
 FAIL=0
@@ -462,6 +463,66 @@ if grep -q '|[[:space:]]*_extract_md_section' "$PROMPTS"; then
 else
   echo "PASS: no stdin-piped _extract_md_section call"
   PASS=$((PASS + 1))
+fi
+
+# Test M5: a re-entering Epic Gen run (existing epic) must not exit the phase —
+# the Branch Directive step (5c) needs to run afterward (#265). Render the
+# rendered prompt, not just grep the source, so escaping bugs would also fail
+# this test.
+echo "--- M5: Epic Gen re-entry does not exit before the Branch Directive step ---"
+if declare -f planner_prompt_epicgen >/dev/null 2>&1; then
+  M5_RENDERED=$(planner_prompt_epicgen "INIT-265" "idea" "/tmp/planner-test-sd")
+
+  if echo "$M5_RENDERED" | grep -qi 'exit agent'; then
+    echo "FAIL: rendered prompt still instructs the agent to exit on an existing epic"
+    FAIL=$((FAIL + 1))
+  else
+    echo "PASS: no exit-on-existing-epic instruction in the rendered prompt"
+    PASS=$((PASS + 1))
+  fi
+
+  # The existing-epic branch must bind CREATED_EPIC_ID — the same variable step
+  # 5c's planner_linear_get_issue call reads — not a separate existing_epic var
+  # that leaves CREATED_EPIC_ID unset on the re-entry path.
+  M5_EXIST_LINE=$(echo "$M5_RENDERED" | grep -n 'planner_entity_exists' | head -1 | cut -d: -f1)
+  M5_BIND_LINE=$(echo "$M5_RENDERED" | grep -n 'CREATED_EPIC_ID="\$(planner_entity_get_id' | head -1 | cut -d: -f1)
+  M5_5C_LINE=$(echo "$M5_RENDERED" | grep -n 'planner_linear_get_issue "\$CREATED_EPIC_ID"' | head -1 | cut -d: -f1)
+  if [ -n "$M5_EXIST_LINE" ] && [ -n "$M5_BIND_LINE" ] && [ -n "$M5_5C_LINE" ] &&
+    [ "$M5_BIND_LINE" -gt "$M5_EXIST_LINE" ] && [ "$M5_5C_LINE" -gt "$M5_BIND_LINE" ]; then
+    echo "PASS: existing-epic path binds CREATED_EPIC_ID, reachable from step 5c"
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL: existing-epic path does not bind CREATED_EPIC_ID ahead of step 5c (exists=${M5_EXIST_LINE:-none} bind=${M5_BIND_LINE:-none} 5c=${M5_5C_LINE:-none})"
+    FAIL=$((FAIL + 1))
+  fi
+
+  if echo "$M5_RENDERED" | grep -q 'existing_epic'; then
+    echo "FAIL: rendered prompt still references the old existing_epic variable"
+    FAIL=$((FAIL + 1))
+  else
+    echo "PASS: no lingering existing_epic reference"
+    PASS=$((PASS + 1))
+  fi
+
+  # Every extracted bash fence must still be syntactically valid after the fix.
+  M5_TMPDIR=$(mktemp -d)
+  echo "$M5_RENDERED" | awk -v dir="$M5_TMPDIR" \
+    '/^```bash$/{flag=1; n++; f=dir"/block-"n".sh"; next} /^```$/{flag=0; next} flag{print > f}'
+  M5_BLOCK_FAIL=0
+  for f in "$M5_TMPDIR"/block-*.sh; do
+    [ -f "$f" ] || continue
+    bash -n "$f" 2>/dev/null || M5_BLOCK_FAIL=1
+  done
+  rm -rf "$M5_TMPDIR"
+  if [ "$M5_BLOCK_FAIL" -eq 0 ]; then
+    echo "PASS: all rendered bash fences are syntactically valid"
+    PASS=$((PASS + 1))
+  else
+    echo "FAIL: a rendered bash fence has a syntax error"
+    FAIL=$((FAIL + 1))
+  fi
+else
+  echo "SKIP: planner_prompt_epicgen not available"
 fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
