@@ -115,7 +115,7 @@ fleet_notify_worker_event() {
   local elapsed="unknown"
   if [ -f "$run_file" ]; then
     local dispatched_at
-    dispatched_at=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('timestamp',''))" "$run_file" 2>/dev/null || echo "")
+    dispatched_at=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('started_at',''))" "$run_file" 2>/dev/null || echo "")
     if [ -n "$dispatched_at" ]; then
       elapsed=$(python3 -c "
 import sys
