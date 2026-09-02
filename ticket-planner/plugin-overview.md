@@ -26,7 +26,7 @@ Maintainer-facing overview of the ticket-planner plugin. Read this before adding
 
 | Component | File | Role |
 |-----------|------|------|
-| Dependency validation | `lib/planner-deps-check.sh` | Acyclicity (`tsort`), topological sort, missing-target detection |
+| Dependency validation | `lib/planner-deps-check.sh` | Acyclicity (`tsort`), topological sort, missing-target detection, cross-initiative (existing Linear ID) ref exemption |
 | Ticket validation | `lib/planner-ticket-validate.sh` | Pre-creation validation, idempotency helpers, post-creation verification, dispatch gate |
 | Spec validation | `lib/planner-spec-validate.sh` | Deterministic spec file validation — required sections + parseable Signals JSON |
 | Context generation | `lib/planner-context-gen.sh` | Deterministic Planner Context block generation, confidence derivation from 5 concrete signals |

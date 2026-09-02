@@ -102,6 +102,44 @@ else
   fail "T1 depends on T2 which exists" "validation failed"
 fi
 
+# ── Cross-initiative prerequisites by existing Linear ID (#227) ───────────────
+
+echo "--- deps: external ref recognition ---"
+if planner_deps_is_external_ref "WIL-83" &&
+  planner_deps_is_external_ref "PRO-1042" &&
+  planner_deps_is_external_ref "ENG2-7"; then
+  pass "Linear identifiers are recognised as external refs"
+else
+  fail "Linear identifiers are recognised as external refs" "one of WIL-83/PRO-1042/ENG2-7 rejected"
+fi
+
+if ! planner_deps_is_external_ref "vs-3a-schema" &&
+  ! planner_deps_is_external_ref "wil-83" &&
+  ! planner_deps_is_external_ref "T2" &&
+  ! planner_deps_is_external_ref "TICKET-A"; then
+  pass "sibling slugs and non-identifier tokens are not external refs"
+else
+  fail "sibling slugs and non-identifier tokens are not external refs" "one was accepted"
+fi
+
+echo "--- deps: external target exempt from ticket-set membership ---"
+deps='{"ebc-a":["WIL-83","WIL-104"]}'
+tickets='["ebc-a","ebc-b"]'
+if planner_deps_validate_targets "$deps" "$tickets"; then
+  pass "cross-initiative Linear IDs do not fail target validation"
+else
+  fail "cross-initiative Linear IDs do not fail target validation" "validation failed"
+fi
+
+echo "--- deps: external exemption does not mask a dangling sibling ref ---"
+deps='{"ebc-a":["WIL-83","ebc-404"]}'
+tickets='["ebc-a","ebc-b"]'
+if ! planner_deps_validate_targets "$deps" "$tickets" 2>/dev/null; then
+  pass "dangling sibling ref alongside an external ID still fails validation"
+else
+  fail "dangling sibling ref alongside an external ID still fails validation" "validation passed"
+fi
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # planner-context-gen.sh
 # ═══════════════════════════════════════════════════════════════════════════════

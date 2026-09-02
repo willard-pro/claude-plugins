@@ -339,7 +339,7 @@ location      := [path ':'] line ['-' line2]         -- omitting `path:` reuses 
 The planner does not re-specify these. They are the interface to the downstream pipeline:
 
 - **Planner Context block** — `## Planner Context` in ticket description, validated by `planned-ticket-check.sh`
-- **Labels** — `planned`, `pre-approved`, `INIT-{id}`, `Type`, `blocked-by:{ID}`
+- **Labels** — `planned`, `pre-approved`, `INIT-{id}`, `Type`, `blocked-by:{ID}` (the target is a sibling ticket in this initiative, or an existing Linear ID for a cross-initiative prerequisite — see `docs/ticket-planner.md` § Cross-initiative prerequisites)
 - **Artifact plane** — `planner-artifacts.sh` resolves to `${REPOS_ROOT}/.ticket-auto/initiatives/{ID}/artifacts/`
 - **Feedback** — `fleet-feedback.sh` aggregates `META|planner-feedback` from pipeline logs
 

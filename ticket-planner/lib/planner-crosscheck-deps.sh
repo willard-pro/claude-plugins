@@ -27,6 +27,13 @@
 # `exc-1-something`). A token matching zero slugs, or matching more than one
 # slug as a prefix, does not resolve.
 #
+# Exempt: a token that is an existing Linear issue identifier (`WIL-83`) is a
+# cross-initiative prerequisite (#227), not a sibling reference — see
+# `planner_deps_is_external_ref` in planner-deps-check.sh. It is already a real
+# ticket ID that Ticket Gen applies verbatim, so there is no sibling spec for it
+# to resolve against. Sibling resolution is attempted first, so an exempt token
+# is only ever one that names nothing inside the initiative.
+#
 # Code: DANGLING_BLOCKED_BY. Blocking (not in PLANNER_CROSSCHECK_WARN_CODES in
 # planner-crosscheck.sh) — same class of defect the citation linter blocks
 # on: an artifact silently wrong about a load-bearing planner contract, not a
@@ -44,6 +51,12 @@ if ! declare -f _planner_crosscheck_known_slugs >/dev/null 2>&1; then
   # shellcheck source=planner-crosscheck-propagation.sh
   [ -f "${_PLANNER_CROSSCHECK_DEPS_LIB_DIR}/planner-crosscheck-propagation.sh" ] &&
     source "${_PLANNER_CROSSCHECK_DEPS_LIB_DIR}/planner-crosscheck-propagation.sh"
+fi
+
+if ! declare -f planner_deps_is_external_ref >/dev/null 2>&1; then
+  # shellcheck source=planner-deps-check.sh
+  [ -f "${_PLANNER_CROSSCHECK_DEPS_LIB_DIR}/planner-deps-check.sh" ] &&
+    source "${_PLANNER_CROSSCHECK_DEPS_LIB_DIR}/planner-deps-check.sh"
 fi
 
 # Extract the `blocked-by:<ref>` tokens (backticks stripped) from <spec_file>'s
@@ -101,6 +114,13 @@ planner_crosscheck_deps() {
         fi
       done
       [ -n "$exact" ] && continue
+
+      # A cross-initiative prerequisite names an existing ticket by its real
+      # Linear identifier (#227) — it is already resolved, so there is no
+      # sibling spec for it to point at and no dangling reference to report.
+      # Sibling resolution above still wins, so this only ever fires for a
+      # token that names nothing inside the initiative.
+      planner_deps_is_external_ref "$tok" && continue
 
       matches=()
       for s in "${known_slugs[@]}"; do

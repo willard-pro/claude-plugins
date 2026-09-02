@@ -469,7 +469,9 @@ ${state_dir}/artifacts/specs/<ticket-slug>.md. Each spec must include:
 
 1. **Title** — the ticket title (will become the Linear ticket title)
 2. **Description** — the ticket body. Include what needs to change, acceptance criteria (observable, testable), and any user-story narrative if helpful.
-3. **Labels** section — the Linear labels: \`planned\`, \`INIT-${initiative_id#INIT-}\`, Type label, \`blocked-by:{ID}\` if dependencies exist
+3. **Labels** section — the Linear labels: \`planned\`, \`INIT-${initiative_id#INIT-}\`, Type label, and one \`blocked-by:<ref>\` entry per dependency. \`<ref>\` is either:
+   - a **sibling spec slug** in this initiative — the spec filename minus \`.md\`, or an unambiguous \`-\`-bounded prefix of one (\`blocked-by:exc-1\` for \`exc-1-something.md\`); or
+   - a **cross-initiative prerequisite** — the existing Linear identifier of the blocking ticket, e.g. \`blocked-by:WIL-83\`. Use this whenever work in this initiative cannot start until a ticket from *another* initiative is Done. Do not leave such a prerequisite as prose in the Description only: prose is invisible to whatever acts on \`blocked-by\` labels, so an unlabelled prerequisite is unenforceable.
 4. **## Signals** — a JSON code block with the 5 raw confidence signals (see below)
 
 ### Confidence signals (RAW VALUES ONLY — do NOT compute confidence)
@@ -1107,7 +1109,9 @@ if ! planner_deps_check_acyclic "\$deps_json"; then
   exit 1
 fi
 
-# 2. Validate all blocked-by targets exist in the ticket set
+# 2. Validate all blocked-by targets exist in the ticket set. Targets that are
+# existing Linear identifiers (cross-initiative prerequisites, e.g. WIL-83) are
+# exempt from this check — they already name a real ticket outside this set.
 ticket_ids='["TICKET-A","TICKET-B"]'  # from specs
 if ! planner_deps_validate_targets "\$deps_json" "\$ticket_ids"; then
   planner_state_write "${initiative_id}" "TicketGen" "validate" "fail" "Dangling dependencies — no tickets created"
@@ -1199,6 +1203,13 @@ planner_linear_ensure_label "\$TEAM_ID" "\$INIT_LABEL" >/dev/null || {
 LABELS=\$(jq -nc --arg init "\$INIT_LABEL" --arg type "\$TYPE_LABEL" \\
   '["planned", \$init, \$type]')
 [ "\$pre_approved" = "true" ] && LABELS=\$(echo "\$LABELS" | jq -c '. + ["pre-approved"]')
+#
+# \${TICKET_DEPS} holds one entry per \`blocked-by:<ref>\` token on the spec's
+# \`## Labels\` line, each already resolved to a real Linear identifier:
+#   - a sibling-slug ref resolves to the ID of the ticket THIS run created for
+#     that slug (guaranteed to exist — tickets are created in dependency order);
+#   - a ref that is already a Linear identifier (TEAM-123) is a cross-initiative
+#     prerequisite and is used verbatim — there is no sibling to map it to.
 for dep in \${TICKET_DEPS}; do
   DEP_LABEL="blocked-by:\$dep"
   planner_linear_ensure_label "\$TEAM_ID" "\$DEP_LABEL" >/dev/null || {

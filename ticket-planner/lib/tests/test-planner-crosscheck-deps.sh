@@ -227,6 +227,64 @@ case "$out" in
 *) pass "INDEX.md excluded: INDEX.md itself is never scanned" ;;
 esac
 
+# ── Cross-initiative prerequisite by existing Linear ID is exempt (#227) ──────
+
+echo "--- existing Linear ID blocked-by is not a finding ---"
+INIT_J="init-j"
+SPECS_J="${REPOS_ROOT}/.ticket-auto/initiatives/${INIT_J}/artifacts/specs"
+mkdir -p "$SPECS_J"
+
+write_spec "$SPECS_J" "ebc-a-collector" "blocked-by:WIL-83, blocked-by:WIL-104"
+write_spec "$SPECS_J" "ebc-b-consumer" "blocked-by:ebc-a"
+
+out=$(planner_crosscheck_deps "$INIT_J")
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  pass "external Linear ID: returns 0"
+else
+  fail "external Linear ID: returns 0" "returned $rc, out: $out"
+fi
+
+echo "--- external ID exempt, sibling typo still reported ---"
+INIT_K="init-k"
+SPECS_K="${REPOS_ROOT}/.ticket-auto/initiatives/${INIT_K}/artifacts/specs"
+mkdir -p "$SPECS_K"
+
+write_spec "$SPECS_K" "ebc-a" "type:backend"
+write_spec "$SPECS_K" "ebc-e" "blocked-by:ebc-a, blocked-by:WIL-83, blocked-by:ebc-404-missing"
+
+out=$(planner_crosscheck_deps "$INIT_K")
+rc=$?
+if [ "$rc" -eq 1 ]; then
+  pass "mixed refs: returns 1 for the dangling sibling ref"
+else
+  fail "mixed refs: returns 1 for the dangling sibling ref" "returned $rc, out: $out"
+fi
+case "$out" in
+*"blocked-by:WIL-83"*) fail "mixed refs: external ID not reported" "got: $out" ;;
+*) pass "mixed refs: external ID not reported" ;;
+esac
+case "$out" in
+*"blocked-by:ebc-404-missing"*) pass "mixed refs: dangling sibling ref reported" ;;
+*) fail "mixed refs: dangling sibling ref reported" "got: $out" ;;
+esac
+
+echo "--- lowercase Linear-shaped token is not exempt ---"
+INIT_L="init-l"
+SPECS_L="${REPOS_ROOT}/.ticket-auto/initiatives/${INIT_L}/artifacts/specs"
+mkdir -p "$SPECS_L"
+
+write_spec "$SPECS_L" "ebc-a" "type:backend"
+write_spec "$SPECS_L" "ebc-b" "blocked-by:wil-83"
+
+out=$(planner_crosscheck_deps "$INIT_L")
+rc=$?
+if [ "$rc" -eq 1 ]; then
+  pass "lowercase wil-83: still reported as dangling"
+else
+  fail "lowercase wil-83: still reported as dangling" "returned $rc, out: $out"
+fi
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]
