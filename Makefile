@@ -112,6 +112,7 @@ test-planner:
 	bash ticket-planner/lib/tests/test-planner-crosscheck-signals.sh
 	bash ticket-planner/lib/tests/test-planner-crosscheck-deps.sh
 	bash ticket-planner/lib/tests/test-planner-crosscheck.sh
+	bash ticket-planner/lib/tests/test-planner-doctor.sh
 
 test-planner-intent-gate:
 	@echo "=== planner intent gate tests ==="

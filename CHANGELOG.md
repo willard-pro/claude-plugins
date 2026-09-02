@@ -17,6 +17,38 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.12 (2026-09-02)
+
+Closes #232 — every planner prerequisite gap so far (`REPOS_ROOT` unset/wrong,
+`LINEAR_TEAM_ID` unset, the 4 static contract labels silently missing —
+including once where they vanished from the Linear team between checks, a
+live `REPOS_ROOT` checkout on the wrong branch relative to what Discovery
+explored, a missing per-initiative `INIT-*` label, a referenced-but-missing
+cross-plugin helper script) was discovered live, mid-run, by hitting the
+failure directly rather than caught before any Linear write was attempted.
+
+- New `/ticket-planner doctor [INIT_ID] [--fix]` mode (`lib/planner-doctor.sh`,
+  `planner_doctor_run`) — deterministic bash, no Linear writes unless `--fix`
+  is passed. Checks: `REPOS_ROOT` resolves to a real directory; the Linear
+  team resolves; each of the 4 static contract labels (`planned`, `epic`,
+  `pre-approved`, `state:execution`) exists, individually, with `--fix`
+  creating any that are missing via the existing
+  `planner_linear_ensure_label` (#223); when an initiative id is given,
+  whether the live `REPOS_ROOT` checkout for each repo Discovery explored
+  still matches the ref it pinned, or an isolated worktree is available
+  (reuses `planner_crosscheck_repo_ref_ensure`, #217); and whether the
+  cross-plugin helper scripts the phase prompts depend on
+  (`planned-ticket-check.sh`, `branch-directive-check.sh` from
+  `ticket-auto-pipeline`, `grill-seal.sh` from `grill-me`) actually resolve
+  on this install.
+- Output uses the same `---BEGIN_VARS---`/`NAME|STATUS|VALUE|LOCATION|NOTE`
+  shape as `/ticket-env-check` and `/fleet-env-check`, similar in spirit to
+  `/skill-doctor`.
+- `doctor` never initializes state and never dispatches a phase — wired into
+  `SKILL.md` to short-circuit before the plan/resume flag-parsing and
+  invocation-config-persistence steps.
+- New `lib/tests/test-planner-doctor.sh`, wired into `make test-planner`.
+
 ## ticket-planner 0.8.11 (2026-09-02)
 
 Closes #223 — Epic Gen's `issueCreate` for the Evidence-Based initiative
