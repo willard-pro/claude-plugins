@@ -17,6 +17,29 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.29.20 (2026-09-02)
+
+Closes #209 — `ticket-appraise`'s Step 2.5 axis sweep had no trigger for
+framework-version migrations, and Step 2.8's blast-radius override only fires on
+HIGH/CRITICAL risk or 3+ d=1 callers. A missing or misordered `@Configuration`
+annotation is an *absence*, so GitNexus has no edge to count and the ticket
+returns LOW. Observed four times across one Java 17 / Spring Boot 3 epic: CRE-17
+(scored `simple`, LOW, d=1:2) landed **Hard**, CRE-19 (scored `simple`, LOW,
+d=1:0) landed **Rough** on exactly this bug class.
+
+- Step 2.5: the `cross-layer` axis now also fires on framework-version
+  migrations (Spring Boot / Java upgrade) touching `@Configuration`, security,
+  or bean-wiring classes, recorded as `cross-layer (framework-migration)`.
+- Step 2.8: that marker overrides `simple` → `complex` regardless of the
+  reported risk level and caller counts. The axis addition alone could not have
+  changed any outcome — classification needs 2 of 3 axes, and neither CRE-17 nor
+  CRE-19 fires a second one — so the override is what makes the signal real.
+
+Effect is a routing change only: these tickets now take the Step 3-Agent
+(delegated, adversarial) planning path instead of inline Step 3. No defect had
+escaped to production — the IMPLEMENT/VERIFY boot-smoke gate already caught
+them — so this corrects a mispredicted effort label, not a correctness hole.
+
 ## ticket-planner 0.8.19 (2026-09-02)
 
 Closes #234 — the `SessionStart` hook was a one-liner that copied the *installed*

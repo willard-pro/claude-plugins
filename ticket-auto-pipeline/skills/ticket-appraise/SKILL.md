@@ -231,8 +231,10 @@ Score the ticket on the three axes below using only what ticket-setup already re
 | Axis                | Fires when                                                                                                                                             |
 | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | **Multi-service**   | Description mentions more than one service, or the affected area is ambiguous (e.g. "payment flow", "attorney assignment", "reporting")                |
-| **Cross-layer**     | Fix clearly requires both frontend AND backend changes, OR touches high-risk areas: DB migrations, Feign clients, payments, PDF generation, async jobs |
+| **Cross-layer**     | Fix clearly requires both frontend AND backend changes, OR touches high-risk areas: DB migrations, Feign clients, payments, PDF generation, async jobs, framework-version migrations (Spring Boot / Java upgrade) that touch `@Configuration`, security, or bean-wiring classes |
 | **Prior rejection** | Comments contain a previous appraisal that was marked `rejected`, or the ticket description says "tried X, didn't work"                                |
+
+**Framework-migration marker.** When `cross-layer` fires on the framework-version-migration trigger, record it in `## Axes fired` as `cross-layer (framework-migration)` rather than plain `cross-layer`. Step 2.8 reads that marker — this bug class is an *absence* (a missing or misordered `@Configuration` annotation), so there is no graph edge for blast radius to count and a LOW result must not be read as a clean bill of health.
 
 **If fewer than 2 axes fire → proceed to Step 2.6, then Step 3 (inline).**
 
@@ -394,6 +396,8 @@ If the symbol is ambiguous (multiple candidates), pick the highest-relevance res
 ```markdown
 **Score:** complex (overridden from simple — blast radius: {reason})
 ```
+
+**Framework-migration override:** If the `## Complexity` section records the `cross-layer (framework-migration)` marker from Step 2.5, override `simple` → `complex` regardless of the risk level and caller counts reported above. The `impact()` thresholds are edge counts, and this class of defect has no edge — a LOW score is absence of evidence, not evidence of absence. Such tickets take the Step 3-Agent (delegated) path so the bean-wiring surface is planned adversarially rather than inline.
 
 **Non-blocking fallback:** If the `mcp__gitnexus__impact` tool is unavailable or returns an error, log a warning and proceed:
 
