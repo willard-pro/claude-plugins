@@ -175,8 +175,36 @@ planner_branch_directive_recommend() {
     # Extract Signals JSON block (```json ... ```)
     signals=$(sed -n '/```json/,/```/p' "$spec_file" 2>/dev/null | sed '1d;$d' | jq -e . 2>/dev/null || echo "{}")
 
-    # Extract blocked_by, defaulting to empty array
+    # Extract blocked_by, defaulting to empty array. No Specify-phase output
+    # observed in practice ever populates Signals.blocked_by — the canonical,
+    # actually-authored dependency format is the spec's `## Labels` line, a
+    # comma-separated list including zero or more `blocked-by:<sibling-slug>`
+    # entries (the same format Ticket Gen reads to set the real Linear
+    # `blocked-by:{ID}` label). Falling back to that line when Signals is
+    # empty means this recommender sees the same dependency graph Ticket Gen
+    # will actually create — instead of a chain depth of 0 on every real
+    # initiative and a shared-branch directive that never fires.
     blocked_by=$(echo "$signals" | jq -r '.blocked_by // []' 2>/dev/null)
+    if [ "$blocked_by" = "[]" ] || [ -z "$blocked_by" ]; then
+      # The Labels line's own formatting is not consistent across initiatives
+      # — some wrap every entry in backticks (`` `blocked-by:vs-1a-...` ``),
+      # others don't (`blocked-by:5-1-...`) — so match the first non-empty
+      # line after the "## Labels" heading and strip optional backticks
+      # around each blocked-by token, rather than anchoring on either style.
+      local labels_line
+      labels_line=$(awk '/^## Labels/{f=1;next} f && NF{print; exit}' "$spec_file" 2>/dev/null)
+      # grep legitimately exits 1 when the Labels line has no blocked-by token
+      # (the common case). Under a caller's `set -o pipefail` (inherited via
+      # source), that non-zero exit would make the *whole* pipeline below
+      # report failure even though jq -sc already produced a valid "[]" —
+      # which would then also run `|| echo "[]"`, appending a second "[]"
+      # line and leaving $blocked_by as two concatenated JSON documents
+      # (invalid input to --argjson below). Neutralize grep's exit status so
+      # only a genuine jq failure triggers the fallback.
+      blocked_by=$(echo "$labels_line" | { grep -oE 'blocked-by:`?[A-Za-z0-9_-]+`?' || true; } |
+        sed -E 's/blocked-by:`?([A-Za-z0-9_-]+)`?/\1/' |
+        jq -R . | jq -sc . 2>/dev/null || echo "[]")
+    fi
 
     # Build JSON entry: {"id": "slug", "blocked_by": [...]}
     if [ "$count" -gt 1 ]; then
@@ -185,6 +213,29 @@ planner_branch_directive_recommend() {
     tickets_json+=$(jq -n --arg id "$slug" --argjson deps "$blocked_by" '{id: $id, blocked_by: $deps}')
   done
   tickets_json+="]"
+
+  # A ticket's `blocked-by` reference isn't always the full spec-filename
+  # slug the way `id` above always is — VS-1/2/3 always wrote the full slug
+  # ("blocked-by:vs-3a-schema-driven-type-classification-and-field-
+  # extraction"), but VS-4's Specify phase wrote short-form references
+  # ("blocked-by:exc-1") instead. Left as-is, every such entry silently
+  # fails to match any `id` in the DP lookup below, capping every ticket's
+  # computed depth at 1 regardless of how deep the real chain is — VS-4's
+  # real depth-2 chain (exc-1 → exc-3 → exc-4) came back as 1, just under
+  # the ≥2 threshold, when a shared branch was actually warranted.
+  # Resolve each unmatched token against the known id set by unambiguous
+  # `-`-bounded prefix match; anything still unresolved is left as-is
+  # (matches prior — silently non-matching — behavior, not worse).
+  tickets_json=$(echo "$tickets_json" | jq '
+    ( [ .[].id ] ) as $ids
+    | map(.blocked_by |= map(
+        . as $tok
+        | if ($ids | index($tok)) then $tok
+          else ( [ $ids[] | select(. == $tok or startswith($tok + "-")) ] ) as $matches
+          | if ($matches | length) == 1 then $matches[0] else $tok end
+          end
+      ))
+  ' 2>/dev/null || echo "$tickets_json")
 
   # ── Condition 1: ticket count ─────────────────────────────────────────────
   if [ "$count" -lt 3 ]; then

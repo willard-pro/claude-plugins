@@ -123,6 +123,26 @@ planner_linear_graphql() {
     classification=$(_planner_retry_classify "$curl_exit" "$http_code" "$resp")
 
     if [ "$classification" = "permanent" ]; then
+      # "permanent" here means "do not retry" — _planner_retry_classify is
+      # deliberately blind to success vs. failure within that verdict (see
+      # its own tests: a genuine success body is classified "permanent"
+      # specifically so field content mentioning "timeout"/"rate.limit"
+      # doesn't false-positive as transient). Conflating "don't retry" with
+      # "failed" here meant a request that genuinely succeeded (HTTP 200,
+      # top-level "data", no "errors") was still returned as exit 1 with its
+      # own success body on stdout — every caller up the stack
+      # (planner_linear_create_issue's `|| return 1`,
+      # planner_linear_resolve_label_ids) then treated a successful mutation
+      # or query as a hard failure. Confirmed live: an EpicGen run's
+      # issueCreate returned `{"data":{"issueCreate":{"success":true,...}}}`
+      # and this function still reported exit 1. Decide success/failure once,
+      # here, instead of collapsing both into "permanent".
+      if [ "$curl_exit" -eq 0 ] && [[ "$http_code" =~ ^2 ]] &&
+        echo "$resp" | jq -e '.data' >/dev/null 2>&1 &&
+        ! echo "$resp" | jq -e '.errors' >/dev/null 2>&1; then
+        echo "$resp"
+        return 0
+      fi
       echo "planner-linear-api: permanent failure (HTTP $http_code, curl exit $curl_exit)" >&2
       echo "$resp"
       return 1

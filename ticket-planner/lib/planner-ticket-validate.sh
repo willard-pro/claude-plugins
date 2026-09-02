@@ -213,14 +213,30 @@ planner_verify_tickets() {
   _source_if_missing "planner_linear_graphql" "${CLAUDE_PLUGIN_ROOT:-.}/lib/planner-linear-api.sh"
 
   for ticket_id in $(echo "$ticket_ids_json" | jq -r '.[]'); do
-    # Build entity key: ticket-{slug}
-    local slug
-    slug=$(echo "$ticket_id" | tr '[:upper:]' '[:lower:]')
-    entity_key="ticket-${slug}"
-
-    # Check intent file for recorded Linear ID
-    intent_file="${intent_dir}/${entity_key}.json"
-    if [ ! -f "$intent_file" ]; then
+    # Reverse-lookup: find the intent file that recorded this Linear ID.
+    # Intent files are keyed by entity slug ("ticket-{spec-slug}", e.g.
+    # "ticket-vs-1a-client-web-upload-source-hash-verification.json"),
+    # written by planner_record_intent BEFORE the ticket is created — the
+    # Linear ID doesn't exist yet at that point, which is the entire reason
+    # intent recording happens first (idempotency across a crash between
+    # intent and creation). Deriving a filename FROM the post-creation
+    # Linear ID (the previous "ticket-${lowercased ticket_id}.json" guess)
+    # can never match anything on disk, since nothing is ever written under
+    # that name — every ticket showed up as "missing-intent" regardless of
+    # whether it was actually fine, silently no-opping the label check.
+    intent_file=""
+    if [ -d "$intent_dir" ]; then
+      local candidate cand_linear_id
+      for candidate in "$intent_dir"/ticket-*.json; do
+        [ -f "$candidate" ] || continue
+        cand_linear_id=$(jq -r '.linear_id // ""' "$candidate" 2>/dev/null)
+        if [ "$cand_linear_id" = "$ticket_id" ]; then
+          intent_file="$candidate"
+          break
+        fi
+      done
+    fi
+    if [ -z "$intent_file" ]; then
       echo "planner-verify: WARNING — no intent file for $ticket_id (created outside planner?)"
       missing=$((missing + 1))
       continue
