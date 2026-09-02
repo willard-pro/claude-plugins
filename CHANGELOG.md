@@ -17,6 +17,59 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.29.23 (2026-09-02)
+
+Closes #273 — the pipeline writes four kinds of scratch file per run into
+`/tmp` (`{id}-ctx.txt`, `{id}-spawn-meta.txt`, `{id}-env.sh`, and one
+`{id}-start-{PHASE}-*.ts` per subagent spawn), and only the last kind was ever
+cleaned up — then only for the ticket and phase the stop hook had just
+resolved, and only from *inside* the `if [ -f "$START_FILE" ]` branch, so the
+prune never ran in exactly the case that accumulates files. A working host had
+158 of these, spanning six tickets and a day of runs, plus test fixtures that
+outlived their suite.
+
+- **Age-based sweep** (new `hooks/tmp-sweep.sh`, registered on `SessionStart`
+  alongside the existing lib-sync hook): removes a ticket's whole scratch
+  group once *none* of its files has been touched for `TICKET_TMP_TTL_MIN`
+  minutes (default 1440 = 24h). `TICKET_TMP_DIR` overrides the swept
+  directory. Progress files, stop files and flow locks share the
+  `/tmp/ticket-auto-*` namespace, have their own lifetimes, and are left
+  alone.
+  - The TTL is grouped **per ticket**, not applied per file, because `env.sh`
+    is written once at run start while `spawn_agent_pre` keeps rewriting
+    ctx/spawn-meta on every phase — a per-file TTL would delete a long run's
+    env out from under it. Two concurrent runs are independent: sweeping a
+    dead run leaves a live one untouched.
+  - Deleting these at `spawn_agent_post` (the issue's first suggestion) is not
+    possible: `env.sh` is sourced by every *later* phase of the same ticket,
+    and the spawn-meta file is deliberately kept alive for duplicate
+    `spawn_agent_post` calls (the bracket-idempotency tail-check) and for
+    `tool-error-capture.sh`. Age is the only safe bound, so the file-lifetime
+    rationale is now documented in `CLAUDE.md` next to the phase-context
+    description.
+- **Unconditional start-file prune** (`hooks/token-tracker.sh`): the >5 min
+  prune for the hook's own ticket+phase moved out of the "start file matched"
+  branch and now runs on every resolved stop. Also scoped with `-maxdepth 1`
+  (it previously walked all of `/tmp` recursively).
+- **No bare-glob expansion of a filename-derived id**: the start-file
+  candidate list now comes from `find -print0` instead of an unquoted
+  `ls -t /tmp/ticket-auto-${TICKET_ID}-start-${PHASE}-*.ts`, so a TICKET_ID or
+  PHASE containing shell metacharacters is never re-expanded by the shell.
+- **Test fixtures no longer outlive the suite**: `test-spawn-helper.sh` writes
+  into real `/tmp` (the helpers hardcode it) and left
+  `/tmp/ticket-auto-TEST-*` files behind, including the injection-hardening
+  fixture whose name contains shell metacharacters. Its EXIT trap now removes
+  them. Nine new tests cover the sweep (stale group removed, live group kept,
+  old env preserved while the group is active, concurrent runs independent,
+  unmanaged files ignored, TTL override, garbage TTL falls back to the
+  default) and the prune (runs with no start-file match, spares a start file
+  written moments ago).
+
+Deliberately not done: moving off `/tmp` to a per-run directory under
+`${REPOS_ROOT}/.ticket-auto/runs/` (suggestion 4 in the issue). That is the
+more durable fix, but it changes a path contract that skills, preambles and
+three hooks all hardcode — out of scope for a hygiene fix.
+
 ## ticket-planner 0.8.23 (2026-09-02)
 
 Closes #264 — the third (relative-path) fallback in `planner_validate_ticket`'s

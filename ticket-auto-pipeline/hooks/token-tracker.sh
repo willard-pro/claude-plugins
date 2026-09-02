@@ -63,7 +63,16 @@ done
 
 # Pick the most recent start file for this phase. Unique suffixes per spawn
 # prevent sub-sub-agent overwrite races; ls -t ensures correct pairing.
-START_FILE=$(ls -t /tmp/ticket-auto-${TICKET_ID}-start-${PHASE}-*.ts 2>/dev/null | head -1 || true)
+# The candidate list comes from find -print0, not a bare glob, so a TICKET_ID
+# or PHASE containing shell metacharacters is never re-expanded by the shell.
+START_FILE=""
+_start_files=()
+while IFS= read -r -d '' _sf; do
+  _start_files+=("$_sf")
+done < <(find /tmp -maxdepth 1 -name "ticket-auto-${TICKET_ID}-start-${PHASE}-*.ts" -print0 2>/dev/null || true)
+if [ "${#_start_files[@]}" -gt 0 ]; then
+  START_FILE=$(ls -t -- "${_start_files[@]}" 2>/dev/null | head -1 || true)
+fi
 
 if [ -n "$AGENT_TRANSCRIPT" ] && [ -f "$AGENT_TRANSCRIPT" ]; then
   TOKENS=$(python3 -c '
@@ -90,14 +99,19 @@ print(f"{input_t}/{output_t}/{cache_read + cache_create}")
       NOW_NS=$(date +%s%N)
       ELAPSED="|elapsed_ms=$(((NOW_NS - START_NS) / 1000000))"
       rm -f "$START_FILE"
-      # Clean up stale start files (>5 min old) from crashed/missing SubagentStop
-      # hooks. Prevents unbounded accumulation under /tmp.
-      find /tmp -name "ticket-auto-${TICKET_ID}-start-${PHASE}-*.ts" -mmin +5 -delete 2>/dev/null || true
     fi
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|tokens|info|${PHASE}:${TOKENS}${ELAPSED}" >>"$LOG_FILE"
     echo "tokens logged: ${PHASE} ${TOKENS}" >&2
   fi
 fi
+
+# Clean up leftover start files (>5 min old) for this ticket and phase, from
+# crashed spawns or SubagentStop hooks that never matched one. Deliberately
+# outside the "start file found" branch above: the accumulation this prevents
+# is worst exactly when matching keeps failing, which is when the old nested
+# placement never ran. Bounded to this ticket+phase; the SessionStart sweep
+# (hooks/tmp-sweep.sh) is the host-wide backstop for everything else.
+find /tmp -maxdepth 1 -name "ticket-auto-${TICKET_ID}-start-${PHASE}-*.ts" -mmin +5 -delete 2>/dev/null || true
 
 # Best-effort telemetry — never block the agent that triggered this hook.
 exit 0

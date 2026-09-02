@@ -35,9 +35,24 @@ _cleanup_test_tmpdirs() {
   done
 }
 
+# Scratch files this suite writes straight into /tmp (spawn_write_env,
+# spawn_agent_pre and the token-tracker hooks all hardcode /tmp). Every ticket
+# id used here starts with TEST-, so the glob cannot reach a real run's files.
+# Without this, dormant fixtures outlive the suite and end up as live input to
+# the production hooks (#273).
+_cleanup_test_tmp_fixtures() {
+  local f
+  shopt -s nullglob
+  for f in /tmp/ticket-auto-TEST-*; do
+    rm -f -- "$f" 2>/dev/null || true
+  done
+  shopt -u nullglob
+}
+
 _cleanup_test_exit() {
   _cleanup_test_children
   _cleanup_test_tmpdirs
+  _cleanup_test_tmp_fixtures
 }
 trap _cleanup_test_exit EXIT
 
@@ -1417,6 +1432,160 @@ test_f10_guard_handles_hb_log_file_unset_path() {
   [ "$rc" -eq 0 ]
 }
 
+# ── /tmp scratch-file lifetime tests (#273) ───────────────────────────────────
+
+# Build a scratch-file group for one ticket inside an isolated sweep dir.
+# Usage: _mk_scratch_group <dir> <ticket-id> <touch-date-or-empty>
+_mk_scratch_group() {
+  local dir="$1" id="$2" when="$3" f
+  for f in "$dir/ticket-auto-${id}-ctx.txt" \
+    "$dir/ticket-auto-${id}-spawn-meta.txt" \
+    "$dir/ticket-auto-${id}-env.sh" \
+    "$dir/ticket-auto-${id}-start-APPRAISE-123.ts"; do
+    : >"$f"
+    [ -n "$when" ] && touch -d "$when" "$f"
+  done
+}
+
+_sweep_hook() { echo "$LIB_DIR/../hooks/tmp-sweep.sh"; }
+
+test_tmp_sweep_removes_stale_group() {
+  local dir
+  dir=$(_mktemp_test_dir)
+  _mk_scratch_group "$dir" "TEST-SW-OLD" "2 days ago"
+  TICKET_TMP_DIR="$dir" bash "$(_sweep_hook)" 2>/dev/null
+  # No managed scratch file survives past the TTL.
+  [ -z "$(ls -A "$dir")" ]
+}
+
+test_tmp_sweep_keeps_live_group() {
+  local dir
+  dir=$(_mktemp_test_dir)
+  _mk_scratch_group "$dir" "TEST-SW-NEW" ""
+  TICKET_TMP_DIR="$dir" bash "$(_sweep_hook)" 2>/dev/null
+  [ -f "$dir/ticket-auto-TEST-SW-NEW-env.sh" ] &&
+    [ -f "$dir/ticket-auto-TEST-SW-NEW-ctx.txt" ] &&
+    [ -f "$dir/ticket-auto-TEST-SW-NEW-spawn-meta.txt" ]
+}
+
+test_tmp_sweep_keeps_old_env_when_group_is_active() {
+  # env.sh is written once at run start and is sourced by every later phase.
+  # A long run whose env.sh predates the TTL must keep it as long as
+  # spawn_agent_pre is still refreshing ctx/spawn-meta — this is why the TTL
+  # is grouped per ticket instead of applied per file.
+  local dir
+  dir=$(_mktemp_test_dir)
+  _mk_scratch_group "$dir" "TEST-SW-LONG" "2 days ago"
+  touch "$dir/ticket-auto-TEST-SW-LONG-ctx.txt"
+  TICKET_TMP_DIR="$dir" bash "$(_sweep_hook)" 2>/dev/null
+  [ -f "$dir/ticket-auto-TEST-SW-LONG-env.sh" ]
+}
+
+test_tmp_sweep_leaves_concurrent_run_intact() {
+  # Cleaning up run A must not touch run B (verification item 3 of #273).
+  local dir
+  dir=$(_mktemp_test_dir)
+  _mk_scratch_group "$dir" "TEST-SW-A" "2 days ago"
+  _mk_scratch_group "$dir" "TEST-SW-B" ""
+  TICKET_TMP_DIR="$dir" bash "$(_sweep_hook)" 2>/dev/null
+  [ ! -f "$dir/ticket-auto-TEST-SW-A-env.sh" ] &&
+    [ -f "$dir/ticket-auto-TEST-SW-B-env.sh" ]
+}
+
+test_tmp_sweep_ignores_unmanaged_files() {
+  # Progress files, stop files and flow locks share the namespace but have
+  # their own lifetimes — the sweep must not claim them.
+  local dir
+  dir=$(_mktemp_test_dir)
+  _mk_scratch_group "$dir" "TEST-SW-U" "2 days ago"
+  : >"$dir/ticket-auto-TEST-SW-U-progress.txt"
+  : >"$dir/ticket-auto-TEST-SW-U-pinger-stop"
+  : >"$dir/ticket-auto-env.sh"
+  touch -d "2 days ago" "$dir/ticket-auto-TEST-SW-U-progress.txt" \
+    "$dir/ticket-auto-TEST-SW-U-pinger-stop" "$dir/ticket-auto-env.sh"
+  TICKET_TMP_DIR="$dir" bash "$(_sweep_hook)" 2>/dev/null
+  [ ! -f "$dir/ticket-auto-TEST-SW-U-ctx.txt" ] &&
+    [ -f "$dir/ticket-auto-TEST-SW-U-progress.txt" ] &&
+    [ -f "$dir/ticket-auto-TEST-SW-U-pinger-stop" ] &&
+    [ -f "$dir/ticket-auto-env.sh" ]
+}
+
+test_tmp_sweep_honours_ttl_override() {
+  local dir
+  dir=$(_mktemp_test_dir)
+  _mk_scratch_group "$dir" "TEST-SW-TTL" "30 minutes ago"
+  TICKET_TMP_DIR="$dir" TICKET_TMP_TTL_MIN=10 bash "$(_sweep_hook)" 2>/dev/null
+  [ -z "$(ls -A "$dir")" ]
+}
+
+test_tmp_sweep_bad_ttl_falls_back_to_default() {
+  # A garbage TTL must not produce a cutoff that sweeps live files.
+  local dir
+  dir=$(_mktemp_test_dir)
+  _mk_scratch_group "$dir" "TEST-SW-BAD" ""
+  TICKET_TMP_DIR="$dir" TICKET_TMP_TTL_MIN="not-a-number" bash "$(_sweep_hook)" 2>/dev/null
+  [ -f "$dir/ticket-auto-TEST-SW-BAD-env.sh" ]
+}
+
+test_token_tracker_prunes_start_files_without_a_match() {
+  # The stale-start-file prune must run even when no start file paired with
+  # this stop — the accumulation it prevents is worst exactly then (#273).
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local log_file="$tmpdir/test-tk-prune.log"
+  local meta_file="/tmp/ticket-auto-TEST-TKP1-spawn-meta.txt"
+  local stale="/tmp/ticket-auto-TEST-TKP1-start-APPRAISE-111.ts"
+
+  rm -f "$meta_file" "$stale"
+  cat >"$meta_file" <<'META'
+PHASE=APPRAISE
+STEP=appraise
+TICKET_ID=TEST-TKP1
+LOG_FILE=LOG_FILE_PLACEHOLDER
+SESSION_ID=sess-tkp1
+META
+  sed -i "s|LOG_FILE_PLACEHOLDER|$log_file|" "$meta_file"
+
+  date +%s%N >"$stale"
+  touch -d "30 minutes ago" "$stale"
+
+  # No agent_transcript_path — the branch the old nested prune never reached.
+  echo '{"session_id": "sess-tkp1"}' | bash "$LIB_DIR/../hooks/token-tracker.sh" 2>/dev/null || true
+
+  local result=0
+  [ -f "$stale" ] && result=1
+  rm -f "$meta_file" "$stale" 2>/dev/null || true
+  return $result
+}
+
+test_token_tracker_keeps_recent_start_file_of_live_sibling() {
+  # The prune is age-bounded: a start file written moments ago belongs to a
+  # spawn still in flight and must survive an unrelated sibling's stop.
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local log_file="$tmpdir/test-tk-prune2.log"
+  local meta_file="/tmp/ticket-auto-TEST-TKP2-spawn-meta.txt"
+  local fresh="/tmp/ticket-auto-TEST-TKP2-start-APPRAISE-222.ts"
+
+  rm -f "$meta_file" "$fresh"
+  cat >"$meta_file" <<'META'
+PHASE=APPRAISE
+STEP=appraise
+TICKET_ID=TEST-TKP2
+LOG_FILE=LOG_FILE_PLACEHOLDER
+SESSION_ID=sess-tkp2
+META
+  sed -i "s|LOG_FILE_PLACEHOLDER|$log_file|" "$meta_file"
+  date +%s%N >"$fresh"
+
+  echo '{"session_id": "sess-tkp2"}' | bash "$LIB_DIR/../hooks/token-tracker.sh" 2>/dev/null || true
+
+  local result=0
+  [ -f "$fresh" ] || result=1
+  rm -f "$meta_file" "$fresh" 2>/dev/null || true
+  return $result
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -1491,7 +1660,16 @@ for fn in \
   test_f10_guard_still_blocks_external_kill \
   test_f10_guard_succeeds_when_no_stop_files_exist \
   test_f10_guard_idempotent_across_multiple_spawns \
-  test_f10_guard_handles_hb_log_file_unset_path; do
+  test_f10_guard_handles_hb_log_file_unset_path \
+  test_tmp_sweep_removes_stale_group \
+  test_tmp_sweep_keeps_live_group \
+  test_tmp_sweep_keeps_old_env_when_group_is_active \
+  test_tmp_sweep_leaves_concurrent_run_intact \
+  test_tmp_sweep_ignores_unmanaged_files \
+  test_tmp_sweep_honours_ttl_override \
+  test_tmp_sweep_bad_ttl_falls_back_to_default \
+  test_token_tracker_prunes_start_files_without_a_match \
+  test_token_tracker_keeps_recent_start_file_of_live_sibling; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done
