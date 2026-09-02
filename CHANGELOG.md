@@ -17,6 +17,26 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.23 (2026-09-02)
+
+Closes #264 — the third (relative-path) fallback in `planner_validate_ticket`'s
+resolution of `planned-ticket-check.sh` pointed one directory too high.
+`planner-ticket-validate.sh` lives in `ticket-planner/lib/`, two levels below
+the repository root, so reaching the sibling `ticket-auto-pipeline` plugin
+needs `../../`, not `../`. On a bare checkout with no plugin install — CI, a
+fresh worktree, or a developer who has not installed the marketplace — levels
+1 and 2 both miss and this fallback resolved to a path that never exists,
+returning 3 (`HARD STOP (validator unavailable)`) and blocking Ticket Gen from
+creating any tickets. Every sibling resolver in this plugin
+(`_resolve_branch_directive_checker`, `_resolve_planned_ticket_check`,
+`_planner_doctor_resolve_planned_ticket_check`, `_resolve_grill_seal`) already
+used the correct `../../`.
+
+- `lib/planner-ticket-validate.sh` (`planner_validate_ticket`): fixed the
+  relative-path fallback from `${script_dir}/../ticket-auto-pipeline/...` to
+  `${script_dir}/../../ticket-auto-pipeline/...`. Fail-closed behaviour
+  (return 3 when the validator is genuinely missing) is unchanged.
+
 ## ticket-auto-pipeline 0.29.22 (2026-09-02)
 
 Closes #272 — the token-tracker hooks (`token-tracker-start.sh` /
