@@ -339,6 +339,40 @@ test_gate_gate_done_still_advances_past_gate_held() {
   [ "$resume_step" = "STEP_4" ]
 }
 
+# ── gate-reconcile held vs clean collision (GitHub #195) ────────────────────
+
+test_gate_reconcile_held_routes_to_gate_held_not_step_4() {
+  # ticket-gate-reconcile's held terminal marker
+  # (GATE|reconcile|done|cycle#N|held: reason) shares the GATE|reconcile|done|
+  # prefix with the clean marker. Before the fix, both matched the same
+  # branch and a deliberately-held ticket resumed straight into STEP_4.
+  local out
+  out=$(_detect_resume_with_log "GH-195-1" \
+    "2026-07-05T10:00:00Z|META|schema|info|2" \
+    "2026-07-05T10:00:01Z|APPRAISE|appraise|done|complexity=simple" \
+    "2026-07-05T10:00:02Z|GATE|gate|fail|held" \
+    "2026-07-05T10:00:03Z|GATE|reconcile|done|cycle#0|held: needs more detail")
+  local resume_step
+  resume_step=$(_field "$out" RESUME_STEP)
+  [ "$resume_step" != "STEP_4" ]
+}
+
+test_gate_reconcile_clean_after_prior_held_cycle_still_routes_to_step_4() {
+  # A clean reconcile that follows an earlier held cycle in the same log must
+  # still win and advance to STEP_4 — the held-vs-clean split must not
+  # regress the original #146 fix for the multi-cycle case.
+  local out
+  out=$(_detect_resume_with_log "GH-195-2" \
+    "2026-07-05T10:00:00Z|META|schema|info|2" \
+    "2026-07-05T10:00:01Z|APPRAISE|appraise|done|complexity=simple" \
+    "2026-07-05T10:00:02Z|GATE|gate|fail|held" \
+    "2026-07-05T10:00:03Z|GATE|reconcile|done|cycle#0|held: needs more detail" \
+    "2026-07-05T10:00:04Z|GATE|reconcile|done|clean")
+  local resume_step
+  resume_step=$(_field "$out" RESUME_STEP)
+  [ "$resume_step" = "STEP_4" ]
+}
+
 # ── Terminal "done" state (#168) ────────────────────────────────────────────
 
 test_resume_step_done_on_completed_outcome() {
@@ -531,6 +565,8 @@ for fn in \
   test_schema_v2_accepted \
   test_gate_reconcile_done_advances_past_gate_held \
   test_gate_gate_done_still_advances_past_gate_held \
+  test_gate_reconcile_held_routes_to_gate_held_not_step_4 \
+  test_gate_reconcile_clean_after_prior_held_cycle_still_routes_to_step_4 \
   test_prescan_zombie_does_not_force_step5_on_fresh_ticket \
   test_maintenance_document_zombie_still_routes_to_step5 \
   test_branch_context_survives_resume \

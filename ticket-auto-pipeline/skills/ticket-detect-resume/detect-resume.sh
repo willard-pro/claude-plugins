@@ -155,13 +155,19 @@ else
     RESUME_STEP="STEP_4_5"
   elif grep -q '^[^|]*|IMPLEMENT|implement|done|' "$LOG_FILE"; then
     RESUME_STEP="STEP_4_5"
-  elif grep -qE '^[^|]*\|GATE\|(gate|reconcile)\|done\|' "$LOG_FILE"; then
+  elif grep -qE '^[^|]*\|GATE\|(gate\|done\||reconcile\|done\|clean)' "$LOG_FILE"; then
     # Accept both the original gate-check completion marker (GATE|gate|done|)
-    # and ticket-gate-reconcile's actual completion marker (GATE|reconcile|done|).
-    # Without this, STEP_3_5 loops forever after re-approval unless a
-    # hand-authored compensating GATE|gate|done| line is written (see
-    # CRE-12 retro, 2026-08-29; GitHub #146).
+    # and ticket-gate-reconcile's clean completion marker
+    # (GATE|reconcile|done|clean). Without this, STEP_3_5 loops forever after
+    # re-approval unless a hand-authored compensating GATE|gate|done| line is
+    # written (see CRE-12 retro, 2026-08-29; GitHub #146). A held reconcile
+    # (GATE|reconcile|done|cycle#N|held: ...) must NOT match this branch — it
+    # needs to route back to GATE_HELD, not skip into IMPLEMENT (GitHub #195).
     RESUME_STEP="STEP_4"
+  elif grep -qE '^[^|]*\|GATE\|reconcile\|done\|.*held:' "$LOG_FILE"; then
+    # ticket-gate-reconcile deliberately held this cycle for human input —
+    # resuming must not bypass the hold (GitHub #195).
+    RESUME_STEP="GATE_HELD"
   elif grep -q '^[^|]*|GATE|gate|fail|held' "$LOG_FILE"; then
     RESUME_STEP="GATE_HELD"
   elif grep -q '^[^|]*|META|gate-stop|fail|EXEC_NO_ARTIFACT' "$LOG_FILE"; then
