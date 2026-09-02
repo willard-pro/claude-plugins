@@ -17,6 +17,24 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.29.17 (2026-09-02)
+
+Closes #201 — `RECONCILE_CYCLE` was computed by `detect-resume.sh`, emitted
+in `DETECT_RESUME_RESULT`, and documented in five places, but no branch of
+the router ever read it. Verify retry, PR iteration, and PR feedback
+reconciliation are all capped at 3 cycles via router-side checks; gate
+reconcile had the counter but no cap, so a hold → re-approve → re-hold
+cycle could repeat without bound.
+
+- Fix: `ticket-auto` STEP_3_5 now checks `RECONCILE_CYCLE` before dispatching
+  `ticket-gate-reconcile`, gate-stopping with the new `RECONCILE_EXHAUSTED`
+  code once the cap of 3 is reached — same pattern as STEP_5_5's
+  `PR_FEEDBACK_EXHAUSTED` check.
+- New test: `test_router_reconcile_cycle_caps_at_3` asserts the cap and
+  gate-stop code are present in STEP_3_5.
+- Docs: `RECONCILE_EXHAUSTED` added to the gate-stop code tables in
+  `CLAUDE.md` and `pipeline-log-format.md`.
+
 ## ticket-auto-pipeline 0.29.16 (2026-09-02)
 
 Closes #200 — `write_verifier_result` (`lib/verifier-result.sh`) built its

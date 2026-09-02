@@ -719,7 +719,19 @@ fi
 
 ### STEP_3_5 — Gate Reconcile
 
-Spawned only when a held ticket is re-approved:
+Spawned only when a held ticket is re-approved. **Before dispatching**, check
+`RECONCILE_CYCLE` from `detect-resume.sh`. Caps at 3, matching the
+`VERIFY_ATTEMPTS`/`ITERATION`/`PR_FEEDBACK_CYCLE` cap pattern — otherwise a
+hold → re-approve → re-hold cycle could repeat without bound:
+
+```bash
+if [ "{RECONCILE_CYCLE}" -ge 3 ]; then
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|RECONCILE_EXHAUSTED" >> "{LOG_FILE}"
+  echo "Gate reconciliation exhausted after 3 cycles for {TICKET_ID}. Needs human review."
+  bash ~/.claude/skills/lib/pipeline-finalize.sh "{TICKET_ID}" 1 "{LOG_FILE}" || true
+  exit 1
+fi
+```
 
 ```
 STEP=reconcile PHASE=GATE SKILL=/ticket-gate-reconcile
