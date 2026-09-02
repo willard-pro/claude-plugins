@@ -464,6 +464,29 @@ function — do NOT compute Confidence or Pre-approved yourself.
 Write ${state_dir}/artifacts/specs/INDEX.md listing every ticket spec with
 its title, affected service, and dependencies.
 
+### Part 4: Self-lint your own citations before handoff
+
+Once proposal.md and every spec file are written, run the same citation +
+precedent linter that Crosscheck (phase 7) runs, against your own fresh
+output, and fix what it finds — Review and Consensus critique content, not
+citation syntax, so a grammar defect you introduce here (annotation on the
+wrong side of \`Name:path\`, an off-by-one line range, a missing \`(new)\`
+marker) would otherwise survive both of those phases untouched and only
+surface as a Crosscheck finding 3 phases later, outside this context window.
+
+\`\`\`bash
+source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-crosscheck-citations.sh"
+planner_crosscheck_citations "${initiative_id}"
+\`\`\`
+
+If it reports failures, read each \`planner-crosscheck-citations: <CODE>
+<file>:<line> → <detail>\` line, fix the cited file, and re-run. Up to 3
+fix-and-recheck passes — this is a same-context cleanup of your own output,
+not a phase retry. If a finding is still open after 3 passes (e.g. the
+underlying symbol genuinely does not exist yet), leave it and note it in the
+proposal's Risk Register rather than fabricating a citation to satisfy the
+linter; Crosscheck will catch it as a final gate regardless.
+
 ## State log
 
 \`\`\`bash
@@ -476,8 +499,8 @@ fi
 export CLAUDE_PLUGIN_ROOT
 source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-state.sh"
 planner_state_write "${initiative_id}" "Specify" "synthesize" "start" "Synthesizing proposal and writing specs for N tickets"
-# ... do your work ...
-planner_state_write "${initiative_id}" "Specify" "synthesize" "done" "Proposal written, N ticket specs in artifacts/specs/"
+# ... do your work, then self-lint per Part 4 ...
+planner_state_write "${initiative_id}" "Specify" "synthesize" "done" "Proposal written, N ticket specs in artifacts/specs/, self-lint clean"
 \`\`\`
 
 On failure, write \`fail\` instead of \`done\`.

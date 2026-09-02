@@ -145,7 +145,7 @@ Re-plan an initiative that carries the `Regenerate` flag. Ingests aggregated fee
 | 1 | Appraisal | Interprets the idea, establishes initiative scope | Scope summary |
 | 2 | Discovery | Explores affected repos, gathers context | Code paths, symbols, APIs |
 | 3 | Architecture | Determines the technical approach | Architecture decision record |
-| 4 | Specify | Synthesizes proposal + writes per-ticket specs with signals | `proposal.md`, spec files |
+| 4 | Specify | Synthesizes proposal + writes per-ticket specs with signals, self-lints citations | `proposal.md`, spec files |
 | 5 | Review | Critiques the proposal and specs (internal by default) | Review findings |
 | 6 | Consensus | Resolves review findings into a settled plan | Finalized proposal |
 | 7 | Crosscheck | Deterministic bash — citation + cross-ticket propagation checks against the artifacts and the live repo | `META|crosscheck` events; gates Epic Gen on a blocking finding |
@@ -161,6 +161,14 @@ directly instead of spawning one (see step 7a below). It wires in two check fami
 
 - **Citation + precedent linter** ([#172](https://github.com/willard-pro/claude-plugins/issues/172)) — every `path:line` citation and Signals `TargetSymbols` entry must resolve against `REPOS_ROOT`; every "mirrors the existing `X`"-style precedent claim must name a symbol that actually exists in the repo.
 - **Cross-ticket propagation linter** ([#173](https://github.com/willard-pro/claude-plugins/issues/173)) — a Consensus resolution or in-spec forward reference naming 2+ tickets must actually reach all of them; a post-Specify ticket-count change is flagged for manual scope audit.
+
+The citation + precedent linter also runs once earlier, as a self-lint at the end of
+the Specify phase ([#218](https://github.com/willard-pro/claude-plugins/issues/218)) —
+the Specify agent runs `planner_crosscheck_citations` against its own fresh output and
+fixes findings before handing off to Review, catching the defect class in the same
+context window that introduced it. This front-loads the check; it does not replace
+Crosscheck, which still re-runs it as the final gate against the fully-reviewed
+artifacts.
 
 Every finding is written to state.log as `META|crosscheck|fail|<CODE> <message>` — the
 shape `ticket-retro`'s failure-histogram parser already reads (see
