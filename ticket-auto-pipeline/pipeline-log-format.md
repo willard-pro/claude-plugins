@@ -77,6 +77,26 @@ human-readable summary it wants in `MSG`, but the token in front of it is guaran
 | `WARN`  | PR review verdict ⚠️ — gaps, iterate     | PR-REVIEW terminal |
 | `BLOCK` | PR review verdict ❌ — blocking issues   | PR-REVIEW terminal |
 
+### Relation to the phase-result `VERDICT` field
+
+These are the **router's** tokens, written by `spawn_agent_post`. The `VERDICT` inside a
+`=== PHASE_RESULT ===` block is the **agent's own** claim, on a different channel, and the
+two vocabularies are not identical. They line up like this:
+
+| Event | Router token (`spawn_agent_post`) | Phase-result `VERDICT` |
+|---|---|---|
+| VERIFY passed | `PASS` | `PASS` |
+| VERIFY failed | `FAIL` | `FAIL` |
+| PR review ✅ | **`OK`** | **`PASS`** |
+| PR review ⚠️ | `WARN` | `WARN` |
+| PR review ❌ | `BLOCK` | `BLOCK` |
+
+`OK` and `PASS` denote the same ✅ event. The router keeps `OK` because `detect-resume.sh`
+already counts on it; the phase-result enum keeps `PASS` because it is shared across all
+three loop-bearing phases and a phase-specific synonym would make the enum
+phase-dependent. A consumer correlating the two channels for the same run must apply this
+mapping — it is the one place their vocabularies diverge.
+
 Example:
 
 ```bash
@@ -351,6 +371,73 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|postmortem|info|{\"run_id\":\"CRE-123-
 ### Planned/unplanned asymmetry
 
 Confidence-weighted verdict processing applies only to planned tickets. Consumers of `META|verifier-result` SHALL check for `META|from-planned|info|true` before applying confidence weighting. Unplanned tickets get the verdict but not confidence-weighted treatment.
+
+### Phase-result entries (rlvr-phase-result-contract)
+
+A loop-bearing phase agent's own claimed verdict, made machine-readable. Written by
+`lib/phase-result-parse.sh`, which parses the terminal `=== PHASE_RESULT ===` block from
+the agent's captured return (`./logs/{TID}-{phase}-agent.log`). The MSG is a JSON object:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|phase-result|info|{\"schema_version\":1,\"phase\":\"VERIFY\",\"verifier\":\"playwright_uat\",\"claimed_verdict\":\"PASS\",\"criteria_met\":3,\"criteria_total\":3,\"attempt\":1,\"evidence\":\"exercised AC1-AC3\",\"unaddressed\":\"\",\"extra\":{},\"parse_status\":\"ok\",\"parse_error\":\"\"}" >> "$LOG_FILE"
+```
+
+JSON fields: `schema_version` (integer), `phase` (`IMPLEMENT`|`VERIFY`|`PR-REVIEW`),
+`verifier` (one of the 14 established verifier ids), `claimed_verdict`
+(`PASS`|`FAIL`|`WARN`|`BLOCK`|`UNKNOWN`), `criteria_met`, `criteria_total`, `attempt`
+(integers), `evidence`, `unaddressed` (strings), `extra` (object of unknown keys the
+emitter supplied), `parse_status` (`ok`|`invalid`|`absent`), `parse_error` (string).
+
+The full field set, enums and worked examples are in
+[docs/phase-result-schema.md](docs/phase-result-schema.md).
+
+Emitted only for the three loop-bearing phases — the phases whose outcome is otherwise
+recoverable only by reading agent prose. `APPRAISE`, `EXEC` and `GATE` already publish
+their outcome via `META|gate-result` and `META|artifact`; `MAINTENANCE` returns its own
+`PRESCAN_RESULT`.
+
+`phase` is always populated, including on a rejected record, so a consumer can attribute
+every entry with `jq` alone and never by position. A retried phase writes one entry per
+attempt, each carrying its own `attempt`.
+
+**MSG parsing rule**: join fields 5+ with awk (`awk -F'|' '{s=$5; for(i=6;i<=NF;i++) s=s"|"$i; print s}'`), NEVER `cut -f5` — JSON payloads contain `|`.
+
+**Observe-only**: nothing routes on this channel today. The router continues to route on
+its `RESULT=done|fail` and `VERDICT=` tokens. Emission rate must be measured in real runs
+before any consumer reads it.
+
+#### UNKNOWN fallback rule
+
+Emission depends on an agent following a prompt instruction, and **no deterministic check
+can observe whether an LLM followed an instruction**. An absent block, a malformed block,
+or a `claimed_verdict` of `UNKNOWN` therefore means *absence of information* — never
+failure, and never success.
+
+A consumer that routes on phase results SHALL, on an absent or `UNKNOWN` claim, fall back
+to the whole-run classification produced by `fleet_ticket_terminal_state`
+(`fleet-controller/lib/fleet-reconcile.sh`) and proceed exactly as it does today. It
+SHALL NOT synthesize a verdict, infer one from adjacent log lines, or read a missing
+claim as either outcome.
+
+Per-phase data is an enhancement over whole-run data, never a replacement that fails
+closed. This rule is written down before any consumer exists so it is not decided under
+pressure when the first one is.
+
+### phase-result coexistence
+
+`META|phase-result` is the agent's **claim**. `META|verifier-result` is a **verified**
+result. They may coexist in the same log and SHALL NOT be double-counted: a consumer
+computing verifier statistics SHALL read only `META|verifier-result`, and a consumer
+computing per-phase routing signals SHALL read only `META|phase-result`.
+
+The claim is deliberately never written through `write_verifier_result`. A claimed-PASS
+sitting beside a verified-FAIL in the verifier array would trip detection pattern #1
+(`flaky_tests`) and #4 (`verdict_disagreement`), inventing signals that do not exist. All
+five verifier detection patterns are unaffected by this channel.
+
+`META|phase-result` and `META|gate-warn|RETURN_INCOMPLETE` may likewise coexist — the
+first is what the agent said, the second is what the artifact shows. Same rule: read one,
+not both.
 
 ### RETURN_INCOMPLETE coexistence
 

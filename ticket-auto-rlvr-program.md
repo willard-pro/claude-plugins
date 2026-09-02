@@ -176,6 +176,44 @@ Phase 1 and Phase 2 without blocking on them.
 
 ---
 
+## Adjacent track — phase-result contract (not an RLVR phase)
+
+`openspec/changes/rlvr-phase-result-contract` shares the `rlvr-` prefix but is **a
+separate track**, not a sixth phase of this programme. Recording that here so the naming
+does not imply a dependency that does not exist.
+
+**Why separate.** Phases 0–4 are about *measuring agent honesty and shaping rewards*.
+The phase-result contract is about *control*: giving a consumer that is code —
+fleet-controller, a workflow script, a future asyncio/SDK supervisor — a per-phase
+outcome it can branch on, on the channel it already reads. Its motivating goal is running
+the workflow on fleet-controller, not scoring agents. It has no dependency on Phases 0–4
+and none of them depends on it.
+
+**Relationship to Design Invariant 1** ("agents never self-report their own scores"). The
+contract does introduce an agent-authored block, so the reconciliation matters:
+
+- The value is recorded as `claimed_verdict`, never `verdict`, and lives on its own
+  `META|phase-result` channel. It is deliberately **not** written through
+  `write_verifier_result`, so Phase 0's verifier array and all five Phase 1 detection
+  patterns are untouched — a claimed-PASS beside a verified-FAIL would otherwise
+  manufacture `flaky_tests` and `verdict_disagreement` signals that do not exist.
+- Nothing routes on the claim. The router keeps routing on its existing
+  `RESULT=done|fail` and `VERDICT=` tokens.
+- Turning the claim into a *score* — diffing it against observable state — is the
+  separate `rlvr-verdict-recompute` change, which does depend on this one. That change,
+  not this one, is where the claim meets Invariant 1's rule, and it resolves it the way
+  the codebase always has: by validating against observable state and treating the
+  mismatch as the signal.
+
+Invariant 2 (additive only), 3 (fail-soft) and 5 (independent shipping) all hold as
+written: the channel is new, the parser is `|| true`-guarded and degrades to `UNKNOWN`,
+and the change ships alone.
+
+**Shipping order**: independent. It does not appear in the Shipping Order block above,
+and no phase there should wait on it.
+
+---
+
 ## Design Invariants
 
 1. **Determinism boundary preserved**: bash orchestrates, agents reason.

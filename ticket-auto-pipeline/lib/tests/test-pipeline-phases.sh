@@ -366,8 +366,11 @@ test_router_prescan_success_judged_by_content() {
   [ -f "$skill_md" ] || return 1
   local block
   block=$(sed -n '/spawn_capture TICKET_ID={TICKET-ID} PHASE=MAINTENANCE/,/flock -u/p' "$skill_md")
-  echo "$block" | grep -q 'echo "\$AGENT_RESULT" | grep -q' || {
-    echo "prescan success no longer judged by AGENT_RESULT content"
+  # Success must be judged by the agent's returned CONTENT, not by spawn_capture's
+  # exit code. The return now arrives as a file (RESULT_FILE=, quoted heredoc) rather
+  # than an interpolated "$AGENT_RESULT" argument, so the content check greps the file.
+  echo "$block" | grep -q 'grep -q "\$slug: scanned" /tmp/ticket-auto-{TICKET-ID}-agent-return.txt' || {
+    echo "prescan success no longer judged by the agent's returned content"
     return 1
   }
   echo "$block" | grep -qE '\bif \[ \$\? -eq 0 \]' && {

@@ -9,7 +9,7 @@ You have been given a ticket ID as the argument (e.g. `WIL-42`). Execute the ful
 
 ## Pipeline Preamble
 
-If `--from-auto` is present in the arguments, follow the auto-pipeline preamble in `~/.claude/skills/lib/skill-preamble-auto.md` with parameters: TICKET_ID=<from args>, PHASE=PR-REVIEW, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_LOGGING=true, HAS_HEARTBEAT=true. Before starting, source the project context: `source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true`. Otherwise, follow the full pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=PR-REVIEW, FROM_FLAG=none, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=ISSUE_PREFIX,REPOS_ROOT, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
+If `--from-auto` is present in the arguments, follow the auto-pipeline preamble in `~/.claude/skills/lib/skill-preamble-auto.md` with parameters: TICKET_ID=<from args>, PHASE=PR-REVIEW, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_LOGGING=true, HAS_HEARTBEAT=true, EMITS_PHASE_RESULT=true, PHASE_RESULT_TIER=1, PHASE_RESULT_VERIFIER=pr_review, PHASE_RESULT_ATTEMPT=<the `PHASE_RESULT_ATTEMPT=` value in your spawn INSTRUCTIONS; omit the ATTEMPT field entirely if you were not given one>. Before starting, source the project context: `source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true`. Otherwise, follow the full pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=PR-REVIEW, FROM_FLAG=none, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=ISSUE_PREFIX,REPOS_ROOT, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
 
 ### Heartbeat points
 - **Requirement extraction**: after extracting requirements from the ticket, write `hb-wrap.sh decision "requirement-extraction" "ok" "extracted N requirements" '{"count":"N"}'`
@@ -408,3 +408,21 @@ write_verifier_result verifier=pr_review verdict=<PASS|WARN|BLOCK> criteria_met=
 
 Findings posted to PR #{number}.
 ```
+
+---
+
+## Step 8 — Emit the PHASE_RESULT block (--from-auto only)
+
+PR-REVIEW is the **last gate before merge**, and it is where a false claim is most
+expensive. End your return with the `=== PHASE_RESULT ===` block described in **§ 6 Phase
+result emission** of the auto preamble, with `PHASE: PR-REVIEW` and
+`VERIFIER: pr_review`.
+
+Map `VERDICT` from the emoji verdict exactly as the `write_verifier_result` call above
+does: ✅ → `PASS`, ⚠️ → `WARN`, ❌ → `BLOCK`. Do not emit the emoji itself and do not
+invent a value — anything outside the four-value enum is rejected outright and your
+verdict is then recorded as `UNKNOWN`.
+
+Set `CRITERIA_MET`/`CRITERIA_TOTAL` to the requirement counts from Step 5, `EVIDENCE` to
+what you actually reviewed (files, diff size, checks run), and `UNADDRESSED` to any
+requirement you could not evaluate. Nothing goes after the closing marker.

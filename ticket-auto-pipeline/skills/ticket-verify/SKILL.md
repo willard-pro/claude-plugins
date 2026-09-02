@@ -27,6 +27,8 @@ Parse the arguments before proceeding.
 
 Follow the pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=VERIFY, FROM_FLAG=none, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_GUARD=true, HAS_PROJECT_CONTEXT=false, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=false
 
+When `--from-auto` is present, VERIFY is a loop-bearing phase: additionally follow **§ 6 Phase result emission** in `~/.claude/skills/lib/skill-preamble-auto.md` with parameters: EMITS_PHASE_RESULT=true, PHASE_RESULT_TIER=1, PHASE_RESULT_VERIFIER=<this run's actual verifier — `playwright_uat` in browser mode, `build_only` when `VERIFY_MODE=build-only`, `live_backend` when `VERIFY_MODE=live-backend`>, PHASE_RESULT_ATTEMPT=<the `PHASE_RESULT_ATTEMPT=` value in your spawn INSTRUCTIONS; omit the ATTEMPT field entirely if you were not given one>. The block grammar lives there and in `docs/phase-result-schema.md`; it is never restated here.
+
 ### Heartbeat points
 - **Browser session**: after starting Playwright, write `hb-wrap.sh api "browser-session" "ok" "browser session established"`; if session fails, write `hb-wrap.sh api "browser-session" "fail" "browser session failed"`
 - **Navigation**: after each page navigation, write `hb-wrap.sh api "browser-navigate" "ok" "navigated to <url>" '{"url":"...","title":"..."}'`
@@ -826,6 +828,13 @@ write_verifier_result verifier=build_only verdict=<PASS|FAIL> criteria_met=<N> c
 write_verifier_result verifier=live_backend verdict=<PASS|FAIL> criteria_met=<N> criteria_total=<M> attempt=<A> phase=VERIFY
 ```
 
+### Post-verdict: Emit the PHASE_RESULT block (--from-auto only)
+
+End your return with the `=== PHASE_RESULT ===` block described in **§ 6 Phase result
+emission** of the auto preamble: `PHASE: VERIFY`, `VERDICT: PASS`, `VERIFIER` set to this
+run's actual verifier, and `CRITERIA_MET`/`CRITERIA_TOTAL`/`ATTEMPT` matching the
+`write_verifier_result` call above. Nothing goes after the closing marker.
+
 ---
 
 ## Step 7 — Failure report
@@ -1077,6 +1086,18 @@ This moves state → `Ready`, adds `rejected`, removes `reviewed`. A human must 
 If `--env local`: no state change — the ticket is still in `Ready`, code just needs more work.
 
 The REMEDIATION_BRIEF above feeds `ticket-implement` for the fix round.
+
+### 7g — Emit the PHASE_RESULT block (--from-auto only)
+
+A failure still reports. End your return with the `=== PHASE_RESULT ===` block described
+in **§ 6 Phase result emission** of the auto preamble: `PHASE: VERIFY`, `VERDICT: FAIL`,
+`VERIFIER` set to this run's actual verifier, `CRITERIA_MET` the number that passed,
+`CRITERIA_TOTAL` the number attempted, and `UNADDRESSED` naming any criterion never
+reached. This is **additive** — the REMEDIATION_BRIEF above is unchanged and keeps its
+canonical format. The block goes last, after everything else in the return.
+
+A FAIL with a block is a usable signal; a FAIL with no block is an absence of
+information, and any consumer must then fall back to whole-run classification.
 
 ---
 

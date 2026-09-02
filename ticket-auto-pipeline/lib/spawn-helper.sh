@@ -663,7 +663,17 @@ spawn_agent_post() {
 
 # ── spawn_capture ────────────────────────────────────────────────────────────────
 # Wrapper around capture_agent_result that reads metadata if available.
-# Usage: spawn_capture TICKET_ID=<id> PHASE=<phase> RESULT="<agent output>"
+#
+# Usage (preferred — injection-safe):
+#   spawn_capture TICKET_ID=<id> PHASE=<phase> RESULT_FILE=<path> [ATTEMPT=<n>]
+# Usage (legacy — inline string):
+#   spawn_capture TICKET_ID=<id> PHASE=<phase> RESULT="<agent output>" [ATTEMPT=<n>]
+#
+# RESULT_FILE is preferred because the router's model composes this command line:
+# an agent return containing `"`, `$`, backticks or `$(...)` interpolated into a
+# double-quoted RESULT= argument is truncated at best and evaluated at worst.
+# Call sites write the return through a quoted heredoc first, then pass the path.
+# RESULT_FILE wins if both are supplied.
 spawn_capture() {
   # Source capture-transcript.sh if capture_agent_result is not already loaded.
   # spawn-helper.sh is sourced from multiple contexts; capture-transcript.sh may
@@ -675,12 +685,14 @@ spawn_capture() {
   local TICKET_ID=""
   local PHASE=""
   local RESULT=""
+  local RESULT_FILE=""
   local ATTEMPT=""
 
   for arg in "$@"; do
     case "$arg" in
     TICKET_ID=*) TICKET_ID="${arg#TICKET_ID=}" ;;
     PHASE=*) PHASE="${arg#PHASE=}" ;;
+    RESULT_FILE=*) RESULT_FILE="${arg#RESULT_FILE=}" ;;
     RESULT=*) RESULT="${arg#RESULT=}" ;;
     ATTEMPT=*) ATTEMPT="${arg#ATTEMPT=}" ;;
     *)
@@ -693,6 +705,15 @@ spawn_capture() {
   if [ -z "$TICKET_ID" ] || [ -z "$PHASE" ]; then
     echo "spawn_capture: TICKET_ID and PHASE are required" >&2
     return 1
+  fi
+
+  # File hand-off: read the return as data. Never eval, never re-quote.
+  if [ -n "$RESULT_FILE" ]; then
+    if [ ! -f "$RESULT_FILE" ]; then
+      echo "spawn_capture: RESULT_FILE '$RESULT_FILE' does not exist" >&2
+      return 1
+    fi
+    RESULT=$(cat -- "$RESULT_FILE")
   fi
 
   # capture_agent_result requires kebab-case; call sites pass the uppercase

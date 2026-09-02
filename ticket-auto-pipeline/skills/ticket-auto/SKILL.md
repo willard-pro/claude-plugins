@@ -405,9 +405,20 @@ Every agent spawn follows this 3-step pattern:
    ```
    **NEVER use `Skill` tool here.** `Skill` runs inline and defeats isolation. Always `Agent` with `subagent_type: "general-purpose"`.
 
-3. **Post-spawn** — `spawn_capture` persists agent output to `-{phase}-agent.log`, then `spawn_agent_post` writes done/fail log entries, stops pinger, and writes heartbeat transitions:
+3. **Post-spawn** — `spawn_capture` persists agent output to `-{phase}-agent.log`, then `spawn_agent_post` writes done/fail log entries, stops pinger, and writes heartbeat transitions.
+
+   **Hand the return over as a file, never as a quoted argument.** Write the
+   agent's return verbatim into `/tmp/ticket-auto-{TICKET-ID}-agent-return.txt`
+   using a **quoted** heredoc (`<<'AGENT_RETURN_EOF'` — the quotes are what stop
+   the shell expanding `$`, backticks and `$(...)` inside the return), then pass
+   the path. A return containing `"` or `$` interpolated into `RESULT="..."` is
+   truncated at best and evaluated at worst:
    ```bash
-   spawn_capture TICKET_ID={TICKET-ID} PHASE=<phase> RESULT="$AGENT_RESULT"
+   cat > /tmp/ticket-auto-{TICKET-ID}-agent-return.txt <<'AGENT_RETURN_EOF'
+   <the agent's return text, verbatim and unmodified>
+   AGENT_RETURN_EOF
+
+   spawn_capture TICKET_ID={TICKET-ID} PHASE=<phase> RESULT_FILE=/tmp/ticket-auto-{TICKET-ID}-agent-return.txt [ATTEMPT=<n>]
    # On success:
    spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done MSG="<result>" NEXT_PHASE=<next>
    # On failure (blocking):
@@ -587,11 +598,16 @@ if flock -n "$lock_fd"; then
     agentType="ticket-prescan-agent" \
     description="Prescan $slug ($PRESCAN_STATUS)")
 
-  spawn_capture TICKET_ID={TICKET-ID} PHASE=MAINTENANCE RESULT="$AGENT_RESULT"
+  # Hand the return over as a file (quoted heredoc — see "Agent spawn template").
+  cat > /tmp/ticket-auto-{TICKET-ID}-agent-return.txt <<'AGENT_RETURN_EOF'
+<the prescan agent's return text, verbatim>
+AGENT_RETURN_EOF
+
+  spawn_capture TICKET_ID={TICKET-ID} PHASE=MAINTENANCE RESULT_FILE=/tmp/ticket-auto-{TICKET-ID}-agent-return.txt
 
   # Judge success by the PRESCAN_RESULT block's per-repo marker, not spawn_capture's
   # exit code (spawn_capture is a log write and succeeds regardless of agent outcome).
-  if echo "$AGENT_RESULT" | grep -q "$slug: scanned"; then
+  if grep -q "$slug: scanned" /tmp/ticket-auto-{TICKET-ID}-agent-return.txt; then
     spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done \
       MSG="$slug prescan complete: $PRESCAN_STATUS → fresh" NEXT_PHASE=APPRAISE
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|MAINTENANCE|prescan|done|$slug prescan complete" >> {LOG_FILE}
@@ -776,7 +792,25 @@ NEXT_PHASE=IMPLEMENT
 ```
 
 ```bash
-spawn_capture TICKET_ID={TICKET-ID} PHASE=IMPLEMENT RESULT="$AGENT_RESULT"
+# Hand the return over as a file (quoted heredoc — see "Agent spawn template").
+cat > /tmp/ticket-auto-{TICKET-ID}-agent-return.txt <<'AGENT_RETURN_EOF'
+<the implement agent's return text, verbatim>
+AGENT_RETURN_EOF
+
+spawn_capture TICKET_ID={TICKET-ID} PHASE=IMPLEMENT RESULT_FILE=/tmp/ticket-auto-{TICKET-ID}-agent-return.txt
+
+# Phase-result parse (advisory, observe-only). Converts the agent's terminal
+# === PHASE_RESULT === block into META|phase-result|info|{json} on the pipeline log.
+# Runs after spawn_capture and before spawn_agent_post — the same insertion point as
+# return-completeness-check.sh below, and before the phase inspector appends to the
+# same capture file.
+# Exit 1 (absent or malformed block → claimed_verdict=UNKNOWN) is a NORMAL outcome,
+# not an error. Nothing routes on this channel in this increment, so a parser failure
+# cannot halt a run. Hence `|| true`.
+_prp_sh="${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}/phase-result-parse.sh"
+bash "$_prp_sh" --phase IMPLEMENT \
+  --return-file "./logs/{TICKET_ID}-implement-agent.log" \
+  --log-file "{LOG_FILE}" >/dev/null 2>&1 || true
 
 # Return-completeness gate — runs for all artifact types.
 # Handles both openspec tasks.md and simple-fix.md Completion Checklist
@@ -845,7 +879,14 @@ FAIL_ACTION=warn-continue
 After the agent returns:
 
 ```bash
-spawn_capture TICKET_ID={TICKET-ID} PHASE=IMPLEMENT RESULT="$AGENT_RESULT"
+cat > /tmp/ticket-auto-{TICKET-ID}-agent-return.txt <<'AGENT_RETURN_EOF'
+<the inspector agent's return text, verbatim>
+AGENT_RETURN_EOF
+
+# ATTEMPT=inspector puts this capture in append-with-separator mode. Without it
+# the inspector's return overwrites the implement agent's at the same path
+# (./logs/{TID}-implement-agent.log), destroying the parser's input.
+spawn_capture TICKET_ID={TICKET-ID} PHASE=IMPLEMENT RESULT_FILE=/tmp/ticket-auto-{TICKET-ID}-agent-return.txt ATTEMPT=inspector
 spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done MSG="Phase inspector completed for IMPLEMENT" PHASE=IMPLEMENT STEP=phase-inspector-implement 2>/dev/null || true
 ```
 
@@ -910,7 +951,7 @@ fi
 STEP=verify PHASE=VERIFY SKILL=/ticket-verify FROM_STEP={VERIFY_FROM}
 EXTRA_FLAGS="--from-auto --mode extract"
 DESCRIPTION="Run Playwright UAT verification"
-INSTRUCTIONS="Follow the skill exactly. Use per-criterion checkpointing: after each criterion passes, write VERIFY|checkpoint|done|criterion-{N}-pass to LOG_FILE. If the agent crashes, resume from the last checkpoint — do not restart from criterion 1."
+INSTRUCTIONS="Follow the skill exactly. Use per-criterion checkpointing: after each criterion passes, write VERIFY|checkpoint|done|criterion-{N}-pass to LOG_FILE. If the agent crashes, resume from the last checkpoint — do not restart from criterion 1. PHASE_RESULT_ATTEMPT=$(({VERIFY_ATTEMPTS} + 1)) — emit this verbatim as the ATTEMPT field of your phase result block."
 NEXT_PHASE=VERIFY
 ```
 
@@ -919,6 +960,24 @@ NEXT_PHASE=VERIFY
 depends on router prose, then re-run `detect-resume.sh` and check VERIFY_ATTEMPTS:
 
 ```bash
+# Capture first. VERIFY retries, so ATTEMPT is mandatory here — without it the
+# second attempt overwrites the first at ./logs/{TID}-verify-agent.log and the
+# retry history is gone.
+cat > /tmp/ticket-auto-{TICKET-ID}-agent-return.txt <<'AGENT_RETURN_EOF'
+<the verify agent's return text, verbatim>
+AGENT_RETURN_EOF
+
+spawn_capture TICKET_ID={TICKET-ID} PHASE=VERIFY \
+  RESULT_FILE=/tmp/ticket-auto-{TICKET-ID}-agent-return.txt \
+  ATTEMPT=$(({VERIFY_ATTEMPTS} + 1))
+
+# Phase-result parse (advisory, observe-only) — see STEP_4 for the full rationale.
+# The parser takes the LAST block in the capture file, which is this attempt's.
+_prp_sh="${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}/phase-result-parse.sh"
+bash "$_prp_sh" --phase VERIFY \
+  --return-file "./logs/{TICKET_ID}-verify-agent.log" \
+  --log-file "{LOG_FILE}" >/dev/null 2>&1 || true
+
 spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done VERDICT=PASS MSG="<summary>" NEXT_PHASE=PR-REVIEW LOOP_BEARING=true  # on PASS
 spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail VERDICT=FAIL MSG="<summary>" LOOP_BEARING=true                         # on FAIL
 
@@ -947,7 +1006,12 @@ FAIL_ACTION=warn-continue
 After the agent returns:
 
 ```bash
-spawn_capture TICKET_ID={TICKET-ID} PHASE=VERIFY RESULT="$AGENT_RESULT"
+cat > /tmp/ticket-auto-{TICKET-ID}-agent-return.txt <<'AGENT_RETURN_EOF'
+<the inspector agent's return text, verbatim>
+AGENT_RETURN_EOF
+
+# ATTEMPT=inspector — append, do not overwrite the verify agent's own capture.
+spawn_capture TICKET_ID={TICKET-ID} PHASE=VERIFY RESULT_FILE=/tmp/ticket-auto-{TICKET-ID}-agent-return.txt ATTEMPT=inspector
 spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done MSG="Phase inspector completed for VERIFY" PHASE=VERIFY STEP=phase-inspector-verify 2>/dev/null || true
 ```
 
@@ -975,7 +1039,7 @@ The router manages the pr-review→pr-iterate→re-implement→verify→pr-revie
 ```
 STEP=pr-review PHASE=PR-REVIEW SKILL=/ticket-pr-review
 DESCRIPTION="Review the PR for code quality and correctness"
-INSTRUCTIONS="Follow the skill exactly. Return verdict: ✅ ✅, ⚠️, or ❌."
+INSTRUCTIONS="Follow the skill exactly. Return verdict: ✅ ✅, ⚠️, or ❌. PHASE_RESULT_ATTEMPT=$(({ITERATION} + 1)) — emit this verbatim as the ATTEMPT field of your phase result block."
 NEXT_PHASE=PR-REVIEW
 ```
 
@@ -985,6 +1049,24 @@ mapped from the review's emoji verdict (see
 counts on, so it must never be skipped or left as free-text prose:
 
 ```bash
+# Capture first. PR-REVIEW iterates, so ATTEMPT is mandatory — without it a
+# second review cycle overwrites the first at ./logs/{TID}-pr-review-agent.log.
+cat > /tmp/ticket-auto-{TICKET-ID}-agent-return.txt <<'AGENT_RETURN_EOF'
+<the pr-review agent's return text, verbatim>
+AGENT_RETURN_EOF
+
+spawn_capture TICKET_ID={TICKET-ID} PHASE=PR-REVIEW \
+  RESULT_FILE=/tmp/ticket-auto-{TICKET-ID}-agent-return.txt \
+  ATTEMPT=$(({ITERATION} + 1))
+
+# Phase-result parse (advisory, observe-only) — see STEP_4 for the full rationale.
+# This is the last gate before merge, so it is the record most worth having; it is
+# still observe-only, and the router's VERDICT token below remains what routes.
+_prp_sh="${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}/phase-result-parse.sh"
+bash "$_prp_sh" --phase PR-REVIEW \
+  --return-file "./logs/{TICKET_ID}-pr-review-agent.log" \
+  --log-file "{LOG_FILE}" >/dev/null 2>&1 || true
+
 # ✅ → VERDICT=OK
 # ⚠️ → VERDICT=WARN
 # ❌ → VERDICT=BLOCK
@@ -1016,7 +1098,12 @@ FAIL_ACTION=warn-continue
 After the agent returns:
 
 ```bash
-spawn_capture TICKET_ID={TICKET-ID} PHASE=PR-REVIEW RESULT="$AGENT_RESULT"
+cat > /tmp/ticket-auto-{TICKET-ID}-agent-return.txt <<'AGENT_RETURN_EOF'
+<the inspector agent's return text, verbatim>
+AGENT_RETURN_EOF
+
+# ATTEMPT=inspector — append, do not overwrite the pr-review agent's own capture.
+spawn_capture TICKET_ID={TICKET-ID} PHASE=PR-REVIEW RESULT_FILE=/tmp/ticket-auto-{TICKET-ID}-agent-return.txt ATTEMPT=inspector
 spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done MSG="Phase inspector completed for PR-REVIEW" PHASE=PR-REVIEW STEP=phase-inspector-pr-review 2>/dev/null || true
 ```
 
@@ -1191,7 +1278,8 @@ exit 1
 
 1. **No inline LLM reasoning**: Every conditional between dispatch calls is a deterministic bash comparison (string equality, numeric comparison, file existence check).
 2. **Stateless router**: All state lives in the pipeline log. The router re-reads it via `detect-resume.sh` before every dispatch decision.
-3. **3-step spawn pattern at every dispatch site**: `spawn_agent_pre` → agent spawn → `spawn_capture` (saves agent return value to `-{phase}-agent.log`) → `spawn_agent_post`. Token-tracker SubagentStop hook captures token counts only — agent output text logging requires the explicit `spawn_capture` step.
+3. **3-step spawn pattern at every dispatch site**: `spawn_agent_pre` → agent spawn → `spawn_capture` (saves agent return value to `-{phase}-agent.log`) → `spawn_agent_post`. Token-tracker SubagentStop hook captures token counts only — agent output text logging requires the explicit `spawn_capture` step. The agent's return is handed to `spawn_capture` as a **file** (`RESULT_FILE=`, written with a quoted heredoc), never interpolated into a quoted `RESULT="..."` argument.
+7. **Phase results are observe-only**: `phase-result-parse.sh` runs at the three loop-bearing sites (IMPLEMENT, VERIFY, PR-REVIEW) between `spawn_capture` and `spawn_agent_post`, and only appends `META|phase-result|info|{json}` to the log. The router continues to route on its existing `RESULT=done|fail` and `VERDICT=` tokens. The parser emits no gate-stop code, and every call site is `|| true`-guarded, so a parser failure cannot halt a run. See [phase-result schema](../../docs/phase-result-schema.md).
 4. **Sequential dispatch**: Agents are spawned one at a time. The dispatch loop guarantees only one agent is in flight at a time.
 5. **Bash gates**: Gate decisions are deterministic bash scripts (`gate-check.sh`, `outcome-label-check.sh`), not Claude agents.
 6. **Router-managed loops**: Verify retry and PR iteration loops are managed by the router tracking counters from the pipeline log, not by phase agents internally.
