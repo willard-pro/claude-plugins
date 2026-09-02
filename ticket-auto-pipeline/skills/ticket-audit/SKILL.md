@@ -147,6 +147,13 @@ This is one of maximum two persona invocations per audit run.
 
 For each ticket in the fetched list (capped at `TICKET_AUDIT_MAX_TICKETS`), run these checks. **Bash scripts handle clear cases deterministically; LLM reviews only borderline/ambiguous results.**
 
+Planner-generated tickets carry a `## Planner Context` block that the planner is required to emit (e.g. `Affected Services` always lists 3+ services). Strip it before running Checks 4 and 6 and split detection, so the planner's own mandated metadata is never counted as ticket content:
+```bash
+source lib/planned-ticket-check.sh
+description_stripped="$(_strip_planner_context_block "$description")"
+```
+Use `$description_stripped` (not `$description`) in those three checks below.
+
 ### Check 1: Multi-role credential gaps (BLOCKER — LLM)
 
 Requires semantic understanding of role mentions vs credential availability. LLM evaluates the ticket description for distinct role requirements and checks CLAUDE.md for matching credentials. Flag as BLOCKER if roles > credential sets.
@@ -176,7 +183,7 @@ audit_test_data_check "${description}\n${acceptance_criteria}"
 **Fully deterministic — no LLM involved:**
 ```bash
 source lib/audit-scope-check.sh
-audit_scope_check "${title}\n${description}" "$wiki_services_csv" "$extra_patterns"
+audit_scope_check "${title}\n${description_stripped}" "$wiki_services_csv" "$extra_patterns"
 ```
 - If `SCOPE_FOUND=true`: skip. Scope is identifiable.
 - If `SCOPE_FOUND=false`: record as WARNING: "Scope unclear: ticket does not reference any known service, component, or scope indicator."
@@ -195,7 +202,7 @@ audit_repro_check "${description}\n${acceptance_criteria}" "$labels"
 ### Check 6: Empty ticket (BLOCKER — bash)
 
 ```bash
-content="$(echo "$description $acceptance_criteria" | sed 's/[#*_`~>|\[\]()]//g')"
+content="$(echo "$description_stripped $acceptance_criteria" | sed 's/[#*_`~>|\[\]()]//g')"
 word_count=$(echo "$content" | wc -w)
 if [ "$word_count" -lt 20 ]; then
   echo "BLOCKER: Empty ticket (< 20 substantive words)"
@@ -227,8 +234,9 @@ Requires semantic comparison of ticket's claimed service references against wiki
 
 ### Split detection (bash-first with templated suggestions)
 
-1. **Bash signal detection:**
+1. **Bash signal detection** (build `ticket_text` from the stripped description — see Step 6 intro — so the planner's own `Affected Services` field can't inflate the wiki-service-count signal):
    ```bash
+   ticket_text="${title}\n${description_stripped}\n${acceptance_criteria}"
    source lib/audit-size-check.sh
    audit_size_check "$ticket_text" "$wiki_services_csv"
    ```

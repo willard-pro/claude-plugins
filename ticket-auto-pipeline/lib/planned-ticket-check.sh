@@ -269,6 +269,28 @@ _extract_planner_context_block() {
   _extract_md_section "$1" "Planner Context"
 }
 
+# _strip_md_section <description> <heading>
+# Removes a markdown section (heading line through the next `## ` heading,
+# or end of text) from a markdown description. Inverse of _extract_md_section.
+_strip_md_section() {
+  local description="$1"
+  local heading="$2"
+  echo "$description" | awk -v heading="$heading" '
+    $0 ~ ("^## " heading "[[:space:]]*$") { skip=1; next }
+    skip && /^## / { skip=0 }
+    !skip { print }
+  '
+}
+
+# _strip_planner_context_block <description>
+# Removes the ## Planner Context block from a markdown description, if
+# present. Inverse of _extract_planner_context_block. Used by heuristics
+# (ticket-audit) that must not count the planner's own mandated metadata
+# (e.g. Affected Services) as ticket content.
+_strip_planner_context_block() {
+  _strip_md_section "$1" "Planner Context"
+}
+
 # _extract_field <field-name> — reads from stdin (the block), outputs value
 _extract_field() {
   local field="$1"

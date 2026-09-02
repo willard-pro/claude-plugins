@@ -407,5 +407,36 @@ _run "standard + simple → exit 0" test_depth_mismatch_standard_simple
 _run_exit_code "quick-scan + 5 services → exit 1" 1 test_depth_mismatch_quick_many_services
 
 echo ""
+echo "--- _strip_planner_context_block ---"
+
+test_strip_removes_block() {
+  local desc stripped
+  desc=$(_build_block)
+  stripped=$(_strip_planner_context_block "$desc")
+  ! echo "$stripped" | grep -q "Planner Context" &&
+    ! echo "$stripped" | grep -q "Affected Services" &&
+    echo "$stripped" | grep -q "Some ticket description text."
+}
+
+test_strip_no_block_is_noop() {
+  local desc="Just a regular ticket description. No planner block here."
+  local stripped
+  stripped=$(_strip_planner_context_block "$desc")
+  [ "$stripped" = "$desc" ]
+}
+
+test_strip_preserves_trailing_section() {
+  local desc stripped
+  desc=$(_build_block)
+  stripped=$(_strip_planner_context_block "$desc")
+  echo "$stripped" | grep -q "## Acceptance Criteria" &&
+    echo "$stripped" | grep -q "Something works"
+}
+
+_run "strip removes Planner Context block" test_strip_removes_block
+_run "strip is a no-op when no block present" test_strip_no_block_is_noop
+_run "strip preserves sections after the block" test_strip_preserves_trailing_section
+
+echo ""
 echo "=== $((PASS + FAIL)) tests: $PASS pass, $FAIL fail ==="
 [ "$FAIL" -eq 0 ] || exit 1
