@@ -775,6 +775,24 @@ test_capture_calls_through_with_all_params() {
   spawn_capture TICKET_ID=TEST-42 PHASE=TEST RESULT="captured output" ATTEMPT=2 >/dev/null 2>&1
 }
 
+# capture_agent_result is mocked at file scope (see mocks section above) so the
+# tests above only exercise param plumbing. This test uses the real
+# capture-transcript.sh to catch the actual regression: capture_agent_result
+# hard-rejects any non-kebab-case PHASE, and every real call site passes
+# uppercase (e.g. PHASE=IMPLEMENT).
+test_capture_lowercases_uppercase_phase_for_real_capture() {
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  (
+    cd "$tmpdir" || exit 1
+    unset -f capture_agent_result
+    source "$LIB_DIR/spawn-helper.sh"
+    source "$LIB_DIR/capture-transcript.sh"
+    spawn_capture TICKET_ID=TEST-42 PHASE=IMPLEMENT RESULT="agent output"
+  ) >/dev/null 2>&1
+  [ -f "$tmpdir/logs/TEST-42-implement-agent.log" ]
+}
+
 # ── escalation test — printf '%q' safety ──────────────────────────────────────
 
 test_env_prefix_survives_shell_special_chars_in_paths() {
@@ -1337,6 +1355,7 @@ for fn in \
   test_post_retry_after_fail_writes_new_bracket \
   test_capture_rejects_missing_phase \
   test_capture_calls_through_with_all_params \
+  test_capture_lowercases_uppercase_phase_for_real_capture \
   test_env_prefix_survives_shell_special_chars_in_paths \
   test_heartbeat_sourced_when_not_predefined \
   test_heartbeat_not_sourced_when_already_defined \
