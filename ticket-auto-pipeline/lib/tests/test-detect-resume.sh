@@ -202,6 +202,20 @@ test_artifact_type_simple_fix_from_create_artifact_line() {
   [ "$(_field "$out" ARTIFACT_TYPE)" = "simple-fix" ]
 }
 
+# GitHub #196: RESUME_STEP's EXEC-done branch grepped a marker
+# (EXEC|exec|done|) no writer emits, so a pipeline that completed EXEC never
+# resumed at STEP_2_5 and fell through to a later, wrong branch. Regression
+# test for the fix that changed the grep pattern to the canonical
+# EXEC|create-artifact|done| marker (same one gate-check.sh reads).
+test_resume_step_2_5_on_exec_create_artifact_done() {
+  local out
+  out=$(_detect_resume_with_log "TEST-16" \
+    "2026-07-05T10:00:00Z|META|schema|info|1" \
+    "2026-07-05T10:00:01Z|APPRAISE|appraise|done|complexity=simple" \
+    "2026-07-05T10:00:02Z|EXEC|create-artifact|done|simple-fix")
+  [ "$(_field "$out" RESUME_STEP)" = "STEP_2_5" ]
+}
+
 # ── Zombie detection ──────────────────────────────────────────────────────────
 
 test_zombie_detection_triggers_on_old_waiting() {
@@ -594,6 +608,7 @@ for fn in \
   test_pr_feedback_cycle_zero_when_no_reconcile_yet \
   test_artifact_type_openspec_from_create_artifact_line \
   test_artifact_type_simple_fix_from_create_artifact_line \
+  test_resume_step_2_5_on_exec_create_artifact_done \
   test_zombie_detection_triggers_on_old_waiting \
   test_zombie_detection_skips_non_phase_waiting \
   test_msg_field_preserves_embedded_pipes \
