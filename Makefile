@@ -110,6 +110,7 @@ test-planner:
 	bash ticket-planner/lib/tests/test-planner-crosscheck-bypass.sh
 	bash ticket-planner/lib/tests/test-planner-crosscheck-contracts.sh
 	bash ticket-planner/lib/tests/test-planner-crosscheck-signals.sh
+	bash ticket-planner/lib/tests/test-planner-crosscheck-deps.sh
 	bash ticket-planner/lib/tests/test-planner-crosscheck.sh
 
 test-planner-intent-gate:

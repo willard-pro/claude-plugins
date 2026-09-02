@@ -13,6 +13,7 @@
 #   - planner-crosscheck-bypass.sh      (#174 — bypass sweep + discovery gap)
 #   - planner-crosscheck-contracts.sh   (#175 — cross-initiative contract shape)
 #   - planner-crosscheck-signals.sh     (#220 — uniform per-ticket Signals blocks)
+#   - planner-crosscheck-deps.sh        (#221 — dangling blocked-by references)
 #
 # Adding a check later means adding one more call in planner_crosscheck_run
 # and, if it can emit a non-blocking finding, adding its codes to
@@ -59,6 +60,8 @@ _planner_crosscheck_source_if_missing "planner_crosscheck_contracts" \
   "${_PLANNER_CROSSCHECK_LIB_DIR}/planner-crosscheck-contracts.sh"
 _planner_crosscheck_source_if_missing "planner_crosscheck_signals" \
   "${_PLANNER_CROSSCHECK_LIB_DIR}/planner-crosscheck-signals.sh"
+_planner_crosscheck_source_if_missing "planner_crosscheck_deps" \
+  "${_PLANNER_CROSSCHECK_LIB_DIR}/planner-crosscheck-deps.sh"
 _planner_crosscheck_source_if_missing "planner_state_write" \
   "${_PLANNER_CROSSCHECK_LIB_DIR}/planner-state.sh"
 
@@ -68,8 +71,8 @@ _planner_crosscheck_source_if_missing "planner_state_write" \
 # CITATION_LINE_OUT_OF_RANGE, CITATION_SYMBOL_MISMATCH, PRECEDENT_NOT_FOUND,
 # RESOLUTION_NOT_PROPAGATED, FORWARD_REF_UNFULFILLED, CARVE_SCOPE_LOST),
 # #174's BYPASS_PATH_UNADDRESSED, #175's CONTRACT_MISMATCH /
-# CONTRACT_CONSUMERS_UNNOTIFIED, and #220's SIGNALS_UNIFORM block EpicGen per
-# #176's table.
+# CONTRACT_CONSUMERS_UNNOTIFIED, #220's SIGNALS_UNIFORM, and #221's
+# DANGLING_BLOCKED_BY block EpicGen per #176's table.
 # DISCOVERY_GAP_UNRESOLVED and CONTRACT_UNDEFINED are warn-level: a declared
 # exploration gap or an ambiguous upstream shape is a prompt for human
 # judgment, not by itself proof of a defect.
@@ -148,7 +151,7 @@ planner_crosscheck_run() {
   local total_blocking=0 total_warn=0
   local b w
 
-  planner_state_write "$initiative_id" "Crosscheck" "check" "start" "running citation + propagation + bypass + contracts + signals checks"
+  planner_state_write "$initiative_id" "Crosscheck" "check" "start" "running citation + propagation + bypass + contracts + signals + deps checks"
 
   read -r b w < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_citations "$initiative_id")
   total_blocking=$((total_blocking + b))
@@ -167,6 +170,10 @@ planner_crosscheck_run() {
   total_warn=$((total_warn + w))
 
   read -r b w < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_signals "$initiative_id")
+  total_blocking=$((total_blocking + b))
+  total_warn=$((total_warn + w))
+
+  read -r b w < <(_planner_crosscheck_run_family "$initiative_id" planner_crosscheck_deps "$initiative_id")
   total_blocking=$((total_blocking + b))
   total_warn=$((total_warn + w))
 
