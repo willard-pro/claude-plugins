@@ -17,6 +17,34 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.29.21 (2026-09-02)
+
+Closes #271 — `token-tracker.sh` (the `SubagentStop` hook) and
+`token-tracker-start.sh` (the `SubagentStart` hook) each ran under
+`set -eo pipefail` with one unguarded `ls -t /tmp/ticket-auto-*... | head -1`
+glob. When the glob matched nothing, GNU `ls` exits 2, `pipefail` carries that
+through the pipe, and `set -e` kills the script on the failed assignment —
+before either script reached its intended `exit 0`. From a `SubagentStop`
+hook, exiting 2 isn't "an error occurred", it's a decision to **block the
+stop**: Claude Code re-invokes the subagent with the hook's stderr as the
+reason, but the script died before writing anything to stderr, so the agent
+is force-continued with an empty reason, loops, and its real final report is
+discarded. The companion `SubagentStart` hook had the identical pattern, so a
+host with no prior `/tmp/ticket-auto-*-ctx.txt` file (a clean machine, or any
+machine that has never run the pipeline) blocked every subagent's start too.
+
+- `token-tracker.sh:59` — guarded the `START_FILE` glob with `|| true`,
+  matching the existing pattern already used for `META_FILE` (line 27) and
+  `CTX_FILE` (line 40) in the same file. `START_FILE` empty is already
+  handled downstream (`if [ -f "$START_FILE" ]`), so no behavior changes on
+  the miss path beyond no longer crashing.
+- `token-tracker-start.sh:12` — same guard on its `CTX_FILE` glob. Empty is
+  already handled by the `[ -z "$CTX_FILE" ] && exit 0` guard immediately
+  below it.
+- Added an explicit `exit 0` at the end of both scripts. Both are best-effort
+  telemetry that should never be able to block an agent — this makes that
+  invariant hold even if a future unguarded command is added upstream of it.
+
 ## ticket-planner 0.8.21 (2026-09-02)
 
 Closes #256 — `--project` / `LINEAR_PROJECT` were read once at parse time, and
