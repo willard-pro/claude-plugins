@@ -185,6 +185,59 @@ else
   fail "symbol within proximity of cited line passes" "$(cat /tmp/cc-out-2.txt)"
 fi
 
+# ── compound two-symbol citation with two distinct line numbers (#224) ──────
+
+echo "--- compound X()/Y():path:line1,line2 pairs each symbol with its own line ---"
+COMPOUND_OK_SPEC="${TMPDIR}/compound-ok-spec.md"
+cat >"$COMPOUND_OK_SPEC" <<'EOF'
+## Title
+Compound citation spec
+
+## Signals
+```json
+{
+  "services_identified": 1,
+  "symbols_resolved": 1,
+  "prior_art_found": true,
+  "complexity": "simple",
+  "exploration_depth": "standard",
+  "TargetSymbols": "_helper_one()/_run_triage_inner():worker/main.py:1,20"
+}
+```
+EOF
+
+if planner_crosscheck_citations_one "$COMPOUND_OK_SPEC" "$REPOS_ROOT" >/tmp/cc-out-compound-1.txt 2>&1; then
+  pass "compound citation pairs each symbol with its own line and passes"
+else
+  fail "compound citation pairs each symbol with its own line and passes" "$(cat /tmp/cc-out-compound-1.txt)"
+fi
+
+echo "--- compound X()/Y():path:line1,line2 still catches a genuinely missing symbol ---"
+COMPOUND_BAD_SPEC="${TMPDIR}/compound-bad-spec.md"
+cat >"$COMPOUND_BAD_SPEC" <<'EOF'
+## Title
+Compound citation spec with a bad symbol
+
+## Signals
+```json
+{
+  "services_identified": 1,
+  "symbols_resolved": 1,
+  "prior_art_found": true,
+  "complexity": "simple",
+  "exploration_depth": "standard",
+  "TargetSymbols": "_helper_one()/nonexistent_symbol():worker/main.py:1,20"
+}
+```
+EOF
+
+OUT=$(planner_crosscheck_citations_one "$COMPOUND_BAD_SPEC" "$REPOS_ROOT" 2>&1)
+if [ $? -ne 0 ] && echo "$OUT" | grep -q "CITATION_SYMBOL_MISMATCH"; then
+  pass "compound citation with a genuinely missing symbol still reports CITATION_SYMBOL_MISMATCH"
+else
+  fail "compound citation with a genuinely missing symbol still reports CITATION_SYMBOL_MISMATCH" "$OUT"
+fi
+
 # ── precedent with zero matches ──────────────────────────────────────────────
 
 echo "--- precedent claim with zero matches is PRECEDENT_NOT_FOUND ---"

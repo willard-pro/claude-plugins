@@ -1,6 +1,6 @@
 {
   "name": "ticket-planner",
-  "version": "0.8.12",
+  "version": "0.8.13",
   "description": "10-phase autonomous planner — turns business ideas into dependency-ordered planned tickets. Appraisal → Discovery → Architecture → Specify → Review → Consensus → Crosscheck → Epic Gen → Ticket Gen → Completed. Produces Planner Context blocks, Branch Directives for shared epic branches, and initiative epics with planned tickets ready for fleet-controller dispatch.",
   "author": {
     "name": "John Willard"

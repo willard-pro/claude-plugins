@@ -108,6 +108,31 @@ detection precisely in the retry loops it exists to catch.
 - New test fixture: an early `done` followed by a stalled `waiting` for
   the same phase/step now correctly returns KILL severity.
 
+## ticket-planner 0.8.13 (2026-09-02)
+
+Closes #224 — a compound two-symbol citation with two distinct line numbers
+(`X()/Y():path:line1,line2`) checked both symbols against the first line
+number only, dropping the second. Found on the Evidence-Based initiative's
+`ebc-e` spec (`_run_triage()/_run_triage_inner():worker/main.py:1749,1758`):
+`_run_triage_inner` is defined at 1758, but the checker only ever looked
+near 1749, false-flagging `CITATION_SYMBOL_MISMATCH`. Worked around at the
+time by splitting into two independent `Name:path:line` entries rather than
+fixing the checker — this shape could recur for any future two-symbol
+compound citation with two distinct line numbers.
+
+- Fix (`lib/planner-crosscheck-citations.sh`,
+  `_planner_crosscheck_scan_target_symbols`): when a compound `A()/B()`
+  symbol name is cited against exactly as many comma-separated line
+  numbers, pair each symbol with its own line positionally instead of
+  checking every symbol against every line. Falls back to the prior
+  behavior (checking the whole symbol string against each comma part) when
+  the counts don't match 1:1 — the case where one non-compound symbol name
+  cites several real supporting locations.
+- New regression tests in `test-planner-crosscheck-citations.sh`: a
+  positive case (two symbols at two distinct, correct lines now passes)
+  and a negative case (a genuinely missing symbol in a compound citation
+  still reports `CITATION_SYMBOL_MISMATCH`).
+
 ## ticket-planner 0.8.12 (2026-09-02)
 
 Closes #232 — every planner prerequisite gap so far (`REPOS_ROOT` unset/wrong,
