@@ -162,6 +162,29 @@ else
   fail "team ref reaches EpicGen" "$(echo "$prompt" | grep -m1 'TEAM_REF=' || echo 'absent')"
 fi
 
+# The project gate is the reason an unset --project is no longer silent (#256).
+# It has to be wired into the prompt, and wired in *before* the create call —
+# after it, the epic is already filed with no project and the gate is theatre.
+if echo "$prompt" | grep -qF 'planner_project_gate_check "INIT-PROJ" "$TEAM_ID"'; then
+  pass "EpicGen calls the project gate"
+else
+  fail "EpicGen calls the project gate" "no planner_project_gate_check call in the prompt"
+fi
+
+if echo "$prompt" | grep -qF 'source "${CLAUDE_PLUGIN_ROOT}/lib/planner-project-gate.sh"'; then
+  pass "EpicGen sources the gate it calls"
+else
+  fail "EpicGen sources the gate" "no source line for planner-project-gate.sh"
+fi
+
+gate_line=$(echo "$prompt" | grep -n 'planner_project_gate_check' | head -1 | cut -d: -f1)
+create_line=$(echo "$prompt" | grep -n 'EPIC_RESPONSE=$(planner_linear_create_issue' | head -1 | cut -d: -f1)
+if [ -n "$gate_line" ] && [ -n "$create_line" ] && [ "$gate_line" -lt "$create_line" ]; then
+  pass "the gate runs before the epic is created"
+else
+  fail "gate precedes creation" "gate at line '${gate_line}', create at line '${create_line}'"
+fi
+
 # ── Test 5: TicketGen prefers the ids EpicGen resolved ─────────────────────────
 
 echo "--- Test 5: TicketGen files against the resolved ids ---"

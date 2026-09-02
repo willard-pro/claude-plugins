@@ -69,6 +69,7 @@ process per phase and an `export` does not survive that (#144).
 | `--dry-run` | Accepted and redundant — stopping before Linear is already the default |
 | `--team <key\|name\|id>` | Linear team to create on (overrides `LINEAR_TEAM_ID`) |
 | `--project <name\|id>` | Linear project for the epic and its tickets |
+| `--no-project` | File the epic and its tickets with no Linear project, deliberately — silences the project gate |
 | `--milestone <name\|id>` | Linear project milestone (needs `--project` when given by name) |
 
 The branch flags are optional. Supplying both together is an error. When neither is supplied,
@@ -392,7 +393,7 @@ The router never reasons about content; phases never mutate state directly (they
 | `PLANNER_IDEA_MAX_LENGTH` | 2000 | Maximum idea length in chars (truncated with warning) |
 | `PLANNER_REQUIRE_INTENT` | false | When `true`, raw idea strings are refused — must pass a grill-me intent file |
 | `LINEAR_TEAM_ID` | *(unset)* | Team key, name or id to create on, the fallback for `--team`. Unset ⇒ the workspace's only team, or an error naming the candidates |
-| `LINEAR_PROJECT` | *(unset)* | Default project name or id for created epics/tickets, read once at parsing time as the fallback for `--project`. Unset ⇒ no project field is sent |
+| `LINEAR_PROJECT` | *(unset)* | Default project name or id for created epics/tickets, read once at parsing time as the fallback for `--project`. Unset ⇒ no project field is sent, and Epic Gen's project gate reports the omission (or stops on a single plausible candidate) unless `--no-project` was passed |
 | `LINEAR_PROJECT_MILESTONE` | *(unset)* | Default project milestone name or id, the fallback for `--milestone`. Requires a project when given by name |
 | `FLEET_AUTO_DISPATCH` | false | Must be true for automatic fleet-controller dispatch |
 
@@ -498,6 +499,7 @@ CREATE_FLAG=""
 UNTIL_PHASE=""
 TEAM_REF=""
 PROJECT_REF=""
+NO_PROJECT_FLAG=""
 MILESTONE_REF=""
 ACCEPT_FLAGS=()
 
@@ -522,6 +524,7 @@ while [ "$#" -gt 0 ]; do
     --team=*) TEAM_REF="${1#*=}" ;;
     --project) shift; PROJECT_REF="${1:-}" ;;
     --project=*) PROJECT_REF="${1#*=}" ;;
+    --no-project) NO_PROJECT_FLAG=true ;;
     --milestone) shift; MILESTONE_REF="${1:-}" ;;
     --milestone=*) MILESTONE_REF="${1#*=}" ;;
   esac
@@ -531,6 +534,14 @@ done
 # Reject both branch flags together
 if [ "$SHARED_BRANCH_FLAG" = "true" ] && [ "$NO_SHARED_BRANCH_FLAG" = "true" ]; then
   echo "ERROR: --shared-branch and --no-shared-branch are mutually exclusive" >&2
+  exit 1
+fi
+
+# Same for the project flags. --no-project is an opt-out, not an override: an
+# invocation that says both has not decided, and Epic Gen must not guess which
+# half was meant.
+if [ -n "$PROJECT_REF" ] && [ "$NO_PROJECT_FLAG" = "true" ]; then
+  echo "ERROR: --project and --no-project are mutually exclusive" >&2
   exit 1
 fi
 
@@ -608,6 +619,7 @@ fi
 
 [ -n "$TEAM_REF" ] && planner_config_set "$INITIATIVE_ID" "linear-team" "$TEAM_REF"
 [ -n "$PROJECT_REF" ] && planner_config_set "$INITIATIVE_ID" "linear-project" "$PROJECT_REF"
+[ "$NO_PROJECT_FLAG" = "true" ] && planner_config_set "$INITIATIVE_ID" "no-project" "true"
 [ -n "$MILESTONE_REF" ] && planner_config_set "$INITIATIVE_ID" "linear-milestone" "$MILESTONE_REF"
 
 if [ "$SHARED_BRANCH_FLAG" = "true" ]; then
@@ -642,6 +654,18 @@ project, with one name lookup for the whole run.
 `--team` is optional. With nothing set, `planner_linear_resolve_team_id` falls back to
 the workspace's only team; when several are visible it fails naming them, because
 guessing would file an entire initiative against the wrong board.
+
+`--project` is optional too, but its absence is no longer silent. With neither
+`--project` nor `--no-project` set, Epic Gen runs `planner_project_gate_check`
+(`planner-project-gate.sh`) before creating anything: it lists the team's projects and
+matches their names against the idea and the Affected Services. Exactly one match stops
+the phase naming that project, so the operator confirms it with
+`resume <ID> --create --project '<name>'` or opts out with `--no-project` — it is never
+applied automatically, for the same reason `--team` refuses to pick between teams. Zero
+or several matches proceed with no project, as before, but record an
+`EpicGen|project|skip` entry in the state log so the omission is visible there rather
+than in the Linear UI weeks later (#256). `--no-project` is persisted, so a workspace
+that does not use Linear projects is asked once and never again.
 
 ### 3. Plan mode
 

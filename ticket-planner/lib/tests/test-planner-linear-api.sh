@@ -475,6 +475,93 @@ else
   fail "a non-GraphQL-success body with 'timeout' still classifies as transient" "got '$got'"
 fi
 
+# ── Test 9: team project listing and candidate detection ──────────────────────
+#
+# The inputs to Epic Gen's project gate (#256). Listing answers "does this team
+# have projects at all?", which is what tells an absent --project apart from a
+# workspace that has none; detection answers "does one of them name this
+# initiative?" — offered to the operator for confirmation, never applied.
+
+echo "--- Test 9: team projects ---"
+
+PROJECTS_RESPONSE='{"data":{"team":{"projects":{"nodes":[
+  {"id":"proj-ledgerly","name":"Ledgerly"},
+  {"id":"proj-atlas","name":"Atlas"}
+]}}}}'
+planner_linear_graphql() { echo "$PROJECTS_RESPONSE"; }
+
+got=$(planner_linear_list_team_projects "$TEAM_UUID")
+if [ "$got" = '[{"id":"proj-ledgerly","name":"Ledgerly"},{"id":"proj-atlas","name":"Atlas"}]' ]; then
+  pass "team projects come back as a compact {id,name} array"
+else
+  fail "team projects listing shape" "got '$got'"
+fi
+
+PROJECTS_RESPONSE='{"data":{"team":{"projects":{"nodes":[]}}}}'
+got=$(planner_linear_list_team_projects "$TEAM_UUID")
+if [ "$got" = "[]" ]; then
+  pass "a team with no projects lists as an empty array, not an error"
+else
+  fail "empty project list" "got '$got'"
+fi
+
+if planner_linear_list_team_projects "" 2>/dev/null; then
+  fail "an empty team id is rejected" "returned 0"
+else
+  pass "an empty team id is rejected rather than queried"
+fi
+
+echo "--- Test 9b: project candidate detection ---"
+
+CATALOGUE_JSON='[{"id":"p1","name":"Ledgerly"},{"id":"p2","name":"Atlas"},{"id":"p3","name":"ML"}]'
+
+got=$(planner_linear_detect_project_candidates "$CATALOGUE_JSON" \
+  "Add a fee engine to the LEDGERLY billing service")
+if [ "$got" = "Ledgerly" ]; then
+  pass "a project name matches case-insensitively and reports its original casing"
+else
+  fail "case-insensitive single match" "got '$got'"
+fi
+
+got=$(planner_linear_detect_project_candidates "$CATALOGUE_JSON" "an unrelated idea")
+if [ -z "$got" ]; then
+  pass "no project name in the text yields no candidate"
+else
+  fail "no match yields nothing" "got '$got'"
+fi
+
+got=$(planner_linear_detect_project_candidates "$CATALOGUE_JSON" "ledgerly and atlas both change")
+if [ "$(printf '%s\n' "$got" | wc -l)" = "2" ]; then
+  pass "two matching names yield two candidates (ambiguity is visible, not resolved)"
+else
+  fail "two candidates" "got '$got'"
+fi
+
+# "ML" is a substring of "html", "xml", "compiler"… — a name that short would
+# make a candidate out of almost any prose, and a spurious candidate stops a run.
+got=$(planner_linear_detect_project_candidates "$CATALOGUE_JSON" "render the html template")
+if [ -z "$got" ]; then
+  pass "names shorter than the minimum length never match"
+else
+  fail "short names are ignored" "got '$got'"
+fi
+
+got=$(planner_linear_detect_project_candidates "[]" "Ledgerly work")
+if [ -z "$got" ]; then
+  pass "an empty catalogue yields no candidate"
+else
+  fail "empty catalogue" "got '$got'"
+fi
+
+got=$(planner_linear_detect_project_candidates "" "")
+if [ -z "$got" ]; then
+  pass "empty arguments are tolerated"
+else
+  fail "empty arguments" "got '$got'"
+fi
+
+echo ""
+
 echo ""
 echo "=== planner-linear-api.sh: ${PASS} passed, ${FAIL} failed ==="
 [ "$FAIL" -eq 0 ]

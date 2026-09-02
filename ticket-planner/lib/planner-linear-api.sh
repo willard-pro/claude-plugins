@@ -31,6 +31,13 @@
 #     Resolves the team to create on: explicit ref → $LINEAR_TEAM_ID → the only
 #     team. Ambiguity is an error, never a guess.
 #
+#   planner_linear_list_team_projects <team_id>
+#     Lists {id, name} for every project on a team. Feeds the project gate.
+#
+#   planner_linear_detect_project_candidates <projects_json> <text>
+#     Pure name matcher — project names appearing in the given text. Offered for
+#     confirmation, never applied automatically.
+#
 #   planner_linear_get_issue <issue_id>
 #     Fetches a single issue by ID. Returns issue JSON on stdout.
 #
@@ -405,6 +412,67 @@ planner_linear_resolve_project() {
     return 1
   fi
   echo "$id"
+}
+
+# List every project on a team.
+#
+# `planner_linear_resolve_project` only ever answers "what UUID is this name?".
+# The project gate needs the other direction — the full set, so it can tell an
+# absent --project apart from a workspace that genuinely has no projects (#256).
+#
+# Usage: planner_linear_list_team_projects <team_id>
+# Output: JSON array of {id, name} on stdout ([] when the team has none).
+planner_linear_list_team_projects() {
+  local team_id="$1"
+
+  if [ -z "$team_id" ]; then
+    echo "planner-linear-api: planner_linear_list_team_projects requires a team id" >&2
+    return 1
+  fi
+
+  local query='query TeamProjects($teamId: String!) { team(id: $teamId) { projects(first: 250) { nodes { id name } } } }'
+  local payload resp
+  payload=$(jq -nc --arg query "$query" --arg teamId "$team_id" '{query: $query, variables: {teamId: $teamId}}')
+  resp=$(planner_linear_graphql "$payload") || return 1
+
+  echo "$resp" | jq -c '[.data.team.projects.nodes[]? | {id, name}]'
+}
+
+# Detect projects whose name plausibly names this initiative.
+#
+# Pure — no network, no state. A project is a candidate when its name appears as a
+# case-insensitive substring of the supplied text (the initiative idea and its
+# Affected Services). The result is only ever offered to the operator for
+# confirmation, never applied: the same rule planner_linear_resolve_team_id
+# applies to team ambiguity — never guess, fail loudly instead.
+#
+# Names shorter than PLANNER_PROJECT_MATCH_MIN_LEN (default 3) are ignored: a
+# project called "ML" would match almost any prose, and a spurious single match
+# stops a run.
+#
+# Usage: planner_linear_detect_project_candidates <projects_json> <text>
+# Output: matching project names, one per line; empty when none match.
+planner_linear_detect_project_candidates() {
+  local projects_json="${1:-[]}" text="${2:-}"
+  [ -z "$projects_json" ] && projects_json="[]"
+
+  local min_len="${PLANNER_PROJECT_MATCH_MIN_LEN:-3}"
+  case "$min_len" in
+  '' | *[!0-9]*) min_len=3 ;;
+  esac
+
+  printf '%s' "$projects_json" | jq -r --arg text "$text" --argjson min "$min_len" '
+    ($text | ascii_downcase) as $hay
+    | [ .[]? | .name
+        | select(type == "string")
+        | select(length >= $min)
+        | . as $name
+        | ascii_downcase as $needle
+        | select($hay | contains($needle))
+        | $name ]
+    | unique
+    | .[]
+  ' 2>/dev/null
 }
 
 # Resolve a project milestone by name or id within a project.

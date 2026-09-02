@@ -17,6 +17,47 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.21 (2026-09-02)
+
+Closes #256 — `--project` / `LINEAR_PROJECT` were read once at parse time, and
+when they were never set Epic Gen filed the epic (and, transitively, every
+ticket Ticket Gen creates under it) with no Linear project and said nothing
+anywhere: no derivation, no confirmation, no warning, no state-log entry. Four
+initiatives and 24 child tickets went to one workspace that way — correctly
+parented, invisible in the project's Issues view — and were found weeks later by
+a human, then diagnosed by diffing a working epic against a broken one field by
+field. `planner_linear_resolve_team_id` has refused to guess between teams since
+it was written, for exactly this reason; `--project` had no equivalent net.
+
+- New `lib/planner-project-gate.sh`: `planner_project_gate_check <id> <team_id>`,
+  called from the Epic Gen prompt right after team resolution and before any
+  Linear write. Deterministic bash — the decision and its log record both live
+  there, not in the agent's judgement.
+- Exactly one project on the team whose name matches the initiative (the idea
+  plus the Affected Services of appraisal.md/proposal.md, case-insensitive
+  substring) **stops** the phase naming that project, with the confirm
+  (`resume <ID> --create --project '<name>'`) and opt-out (`--no-project`)
+  commands. It is never applied automatically — a probably-right guess is still
+  a guess, and that is the rule `--team` already follows.
+- Zero or several matches proceed with no project exactly as before, but now
+  write `EpicGen|project|skip|no project configured — N project(s) on team,
+  M matched; pass --project or --no-project to silence this`, so the omission is
+  visible in the state log instead of in the Linear UI weeks later.
+- New `--no-project` flag: an explicit, persisted opt-out for workspaces that
+  genuinely do not use Linear projects. Mutually exclusive with `--project`.
+  Documented alongside it in SKILL.md; `no-project` added to
+  `PLANNER_CONFIG_KEYS`.
+- New `planner_linear_list_team_projects` / `planner_linear_detect_project_candidates`
+  in `lib/planner-linear-api.sh`. The matcher is pure and ignores names shorter
+  than 3 characters — a project called "ML" would match almost any prose, and a
+  spurious single match stops a run.
+- A failed project listing degrades to the old behaviour with a log entry: the
+  gate is a safety net, never a new dependency between Epic Gen and Linear.
+- New `lib/tests/test-planner-project-gate.sh` (17 assertions); Epic Gen prompt
+  wiring (gate sourced, called, and ordered before `issueCreate`) pinned in
+  `test-planner-config-durability.sh`; helper payload/match shape covered in
+  `test-planner-linear-api.sh`.
+
 ## ticket-planner 0.8.20 (2026-09-02)
 
 Closes #229 — the contracts checker read every spec as prose (a backtick span

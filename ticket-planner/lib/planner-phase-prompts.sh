@@ -809,9 +809,21 @@ TEAM_ID=\$(planner_linear_resolve_team_id "\$TEAM_REF") || {
 }
 planner_config_set "${initiative_id}" "linear-team-id" "\$TEAM_ID"
 
+# Project gate. When no project was configured, this decides — deterministically,
+# in bash — whether that omission is deliberate. It stops this phase when exactly
+# one project on the team names this initiative, so the operator confirms it with
+# --project or opts out with --no-project; otherwise it records a visible skip
+# entry and lets the run continue. It never picks a project for you, and it is a
+# no-op when --project or --no-project was given. Do not work around it (#256).
+source "\${CLAUDE_PLUGIN_ROOT}/lib/planner-project-gate.sh"
+if ! planner_project_gate_check "${initiative_id}" "\$TEAM_ID"; then
+  exit 5
+fi
+
 # Project / milestone are operator configuration, not your judgement. The values
 # below were interpolated from the state log, where argument parsing recorded the
-# --project / --milestone flags. Empty means no project — leave it that way.
+# --project / --milestone flags. Empty means no project — the gate above has
+# already reported that; leave it that way.
 PROJECT_REF="${project_ref}"
 MILESTONE_REF="${milestone_ref}"
 
