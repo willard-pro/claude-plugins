@@ -17,6 +17,31 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.8 (2026-09-02)
+
+Closes #220 — Crosscheck had no check for uniform per-ticket Signals blocks. On
+VS-2 (INIT-1788079196-3438) all 8 of the initiative's spec files carried the same
+byte-identical `## Signals` JSON block — the initiative-level exploration signals,
+copy-pasted instead of computed per ticket — which would have produced the exact
+same 0.85 confidence for every ticket via `planner_confidence_derive`, from a
+schema migration to a from-scratch FE review UI. Ticket Gen's own agent happened
+to notice and halted rather than create tickets with fake variance; nothing in
+Crosscheck, which runs before Ticket Gen and is supposed to be the deterministic
+gate, caught it.
+
+- New `lib/planner-crosscheck-signals.sh`: `planner_crosscheck_signals` groups an
+  initiative's spec files by their Signals block. Byte-identical (key
+  order/whitespace normalized via `jq -S -c`) across 2+ specs reports
+  `SIGNALS_UNIFORM`; a second pass reports the same code for specs (not already
+  reported byte-identical) matching only on `services_identified`/
+  `symbols_resolved`/`prior_art_found` — the fields the issue calls out. The
+  all-zero/false combination is excluded from the near-identical pass, since it's
+  the legitimate default for genuinely trivial tickets, not evidence of
+  copy-paste.
+- Wired into `planner-crosscheck.sh` as a fifth check family. `SIGNALS_UNIFORM` is
+  blocking, same as the citation/propagation/bypass/contract findings.
+- New `lib/tests/test-planner-crosscheck-signals.sh` (10 tests).
+
 ## ticket-auto-pipeline 0.29.13 (2026-09-02)
 
 Closes #210 — `detect-resume.sh`'s schema-v1 warning write was unconditional: every
