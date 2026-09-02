@@ -78,6 +78,7 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-prescan-docs.sh
 	# pipeline-integrity tests
 	bash ticket-auto-pipeline/lib/tests/test-return-completeness.sh
+	bash ticket-auto-pipeline/lib/tests/test-phase-result-parse.sh
 	bash ticket-auto-pipeline/lib/tests/test-corrections.sh
 	bash ticket-auto-pipeline/lib/tests/test-guidance-store.sh
 	# retro GitHub issues tests

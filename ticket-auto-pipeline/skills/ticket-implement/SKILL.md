@@ -11,7 +11,7 @@ You have been given a ticket ID as the argument (e.g. `WIL-42`). Execute the ful
 
 ## Pipeline Preamble
 
-If `--from-auto` is present in the arguments, follow the auto-pipeline preamble in `~/.claude/skills/lib/skill-preamble-auto.md` with parameters: TICKET_ID=<from args>, PHASE=IMPLEMENT, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_LOGGING=true, HAS_HEARTBEAT=true. Before starting, source the project context: `source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true`. Otherwise, follow the full pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=IMPLEMENT, FROM_FLAG=none, EXTRA_GUARD=base-branch, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=REPOS_ROOT,ISSUE_PREFIX,BE_SERVICES,BE_TEST_CMD,BE_TEST_RUNNER,FE_TEST_CMD, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
+If `--from-auto` is present in the arguments, follow the auto-pipeline preamble in `~/.claude/skills/lib/skill-preamble-auto.md` with parameters: TICKET_ID=<from args>, PHASE=IMPLEMENT, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_LOGGING=true, HAS_HEARTBEAT=true, EMITS_PHASE_RESULT=true, PHASE_RESULT_TIER=1, PHASE_RESULT_VERIFIER=implement_tests. Before starting, source the project context: `source /tmp/ticket-auto-{TICKET_ID}-env.sh 2>/dev/null || true`. Otherwise, follow the full pipeline preamble in `~/.claude/skills/lib/skill-preamble.md` with parameters: TICKET_ID=<from args>, PHASE=IMPLEMENT, FROM_FLAG=none, EXTRA_GUARD=base-branch, HAS_LINEAR_ACCESS=true, LINEAR_OPS=get_issue,save_comment, HAS_GUARD=true, HAS_PROJECT_CONTEXT=true, PROJECT_CONTEXT_FIELDS=REPOS_ROOT,ISSUE_PREFIX,BE_SERVICES,BE_TEST_CMD,BE_TEST_RUNNER,FE_TEST_CMD, HAS_LOGGING=true, HAS_HEARTBEAT=true, HAS_STEP_DISPATCH=true, HAS_TASK_TRACKER=true
 
 ### Heartbeat points
 - **Test command**: if BE_TEST_RUNNER found, write `hb-wrap.sh heartbeat "test-command" "BE_TEST_RUNNER configured" '{"cmd":"<cmd>"}'`; elif BE_TEST_CMD found, write `hb-wrap.sh heartbeat "test-command" "BE_TEST_CMD configured" '{"cmd":"<cmd>"}'`; if absent, write `hb-wrap.sh heartbeat "test-command" "skip" "no BE_TEST_CMD or BE_TEST_RUNNER"`
@@ -549,3 +549,21 @@ Branch: `{branch-name}` pushed to {repo}.
 No PR created yet. No Linear state change. The calling pipeline (`ticket-auto` or user) handles verification and PR creation.
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|IMPLEMENT|commit-push|done|Pushed {branch-name}" >> "$LOG_FILE"
+
+---
+
+## Step 6 — Emit the PHASE_RESULT block (--from-auto only)
+
+IMPLEMENT is a loop-bearing phase: the router decides whether to advance or re-implement
+partly on what you report, and today that requires a model to read your prose.
+
+End your return with the `=== PHASE_RESULT ===` block described in **§ 6 Phase result
+emission** of the auto preamble, with `PHASE: IMPLEMENT` and `VERIFIER: implement_tests`.
+Map `VERDICT` from Step 4b's test results: all pass → `PASS`, any fail → `FAIL`, blockers
+still open after the code-review loop → `BLOCK`. Use `CRITERIA_MET`/`CRITERIA_TOTAL` for
+the artifact's completion checklist (openspec `tasks.md` boxes, or simple-fix.md's
+Completion Checklist), and `UNADDRESSED` for any task you did not complete.
+
+**Emit whether you succeeded or not.** A run that aborted before pushing still reports —
+that is exactly the case where the router's only other evidence is prose. Nothing goes
+after the closing marker.

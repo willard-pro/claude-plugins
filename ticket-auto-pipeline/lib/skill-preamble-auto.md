@@ -25,6 +25,9 @@ When a skill says "Follow the auto-pipeline preamble with parameters: ...", use 
 | `{HAS_LOGGING}` | Whether skill writes pipeline log entries | `true` |
 | `{HAS_HEARTBEAT}` | Whether skill writes heartbeat entries | `true` |
 | `{HAS_API_ERROR_CAPTURE}` | Whether skill applies API error-capture patterns | `true` |
+| `{EMITS_PHASE_RESULT}` | Whether the agent appends a terminal `=== PHASE_RESULT ===` block | `false` |
+| `{PHASE_RESULT_TIER}` | `1` — loop-bearing phase, emission is mandatory. `2` — reserved for a future widening; not used yet. | `1` |
+| `{PHASE_RESULT_VERIFIER}` | Verifier id for the block's `VERIFIER` field. See `docs/phase-result-schema.md` § VERIFIER enum. | Required when `{EMITS_PHASE_RESULT}` is `true` |
 
 ---
 
@@ -181,5 +184,55 @@ _elapsed=$(( $(date +%s) - _t0 ))
 ```
 
 Apply the API telemetry pattern to `get_issue` and `get_comments` calls at each step.
+
+<!-- endif -->
+
+---
+
+## 6. Phase result emission
+
+<!-- if {EMITS_PHASE_RESULT} == true -->
+
+Your phase is **loop-bearing**: the router, fleet-controller and any future
+supervisor decide what happens next partly on what you report, and today that
+decision requires a model to read your prose. End your return with a machine-readable
+block so a consumer that is code can read the same verdict.
+
+**This is the last content of your return.** Write your ordinary prose first —
+findings, reasoning, what you changed — then append the block. Nothing goes after
+the closing marker.
+
+```
+=== PHASE_RESULT ===
+SCHEMA_VERSION: 1
+PHASE: {PHASE}
+VERIFIER: {PHASE_RESULT_VERIFIER}
+VERDICT: <PASS|FAIL|WARN|BLOCK>
+CRITERIA_MET: <integer>
+CRITERIA_TOTAL: <integer>
+ATTEMPT: <integer>
+EVIDENCE: <one line: what you actually observed>
+UNADDRESSED: <one line: what you did not cover, or empty>
+=== END PHASE_RESULT ===
+```
+
+Rules:
+
+- `SCHEMA_VERSION`, `PHASE`, `VERIFIER` and `VERDICT` are **required**. The rest are
+  optional and default to `0` / `1` / empty.
+- Emit the block **whether you succeeded or failed**. A failure with a `FAIL` verdict
+  is a useful signal; a failure with no block is an absence of information.
+- Values are **plain text on a single line**. Do not quote them, do not escape them,
+  do not embed JSON. Quotes, `$`, backticks, `&&` and `;` inside a value are fine —
+  the parser treats every value as data and never evaluates it.
+- Use only the four verdict values. Do not invent `SUCCESS`, `OK`, `DONE` or `❌` —
+  a value outside the enum is rejected outright rather than coerced, and your verdict
+  is then recorded as `UNKNOWN`.
+- `EVIDENCE` names what you **observed** — a command you ran, a URL you exercised, a
+  file you wrote. Not what you intended.
+- `UNADDRESSED` names what you knowingly left out. Leave it empty only when nothing was.
+
+`docs/phase-result-schema.md` is the source of truth for the field set and the enums.
+Do not restate the grammar anywhere else.
 
 <!-- endif -->

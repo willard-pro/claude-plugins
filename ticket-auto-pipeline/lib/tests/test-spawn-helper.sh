@@ -87,7 +87,26 @@ hb_heartbeat() { return 0; }
 hb_pinger_start() { return 0; }
 hb_pinger_stop() { return 0; }
 cl_write() { return 0; }
-capture_agent_result() { return 0; }
+
+# capture_agent_result spy. NOT a no-op: an unconditional `return 0` here is what
+# let the uppercase-PHASE defect (#194) reach production green. This stub enforces
+# the same contract the real function does — kebab-case phase, ticket id and phase
+# both required — and records the call so a test can assert the capture happened
+# and with which arguments.
+_CAPTURE_SPY="${TMPDIR:-/tmp}/spawn-helper-capture-spy.$$"
+capture_agent_result() {
+  local ticket_id="${1:-}" phase="${2:-}" result="${3:-}" attempt="${4:-}"
+  [ -z "$ticket_id" ] && return 0
+  [ -z "$phase" ] && return 0
+  if ! [[ "$phase" =~ ^[a-z][a-z0-9-]*$ ]]; then
+    echo "capture_agent_result(spy): invalid phase '$phase' (must be kebab-case)" >&2
+    return 1
+  fi
+  printf '%s|%s|%s|%s\n' "$ticket_id" "$phase" "$attempt" "$result" >>"$_CAPTURE_SPY"
+}
+
+_spy_reset() { : >"$_CAPTURE_SPY"; }
+_spy_last() { tail -1 "$_CAPTURE_SPY" 2>/dev/null; }
 
 # ── spawn_write_env tests ──────────────────────────────────────────────────────
 
@@ -901,7 +920,85 @@ test_capture_rejects_missing_phase() {
 
 test_capture_calls_through_with_all_params() {
   source "$LIB_DIR/spawn-helper.sh"
-  spawn_capture TICKET_ID=TEST-42 PHASE=TEST RESULT="captured output" ATTEMPT=2 >/dev/null 2>&1
+  _spy_reset
+  spawn_capture TICKET_ID=TEST-42 PHASE=TEST RESULT="captured output" ATTEMPT=2 >/dev/null 2>&1 || return 1
+  # The capture must actually have happened, lowercased, with the attempt passed
+  # through — not merely have returned 0.
+  [ "$(_spy_last)" = "TEST-42|test|2|captured output" ]
+}
+
+test_capture_records_lowercased_phase() {
+  source "$LIB_DIR/spawn-helper.sh"
+  _spy_reset
+  spawn_capture TICKET_ID=TEST-42 PHASE=PR-REVIEW RESULT="out" >/dev/null 2>&1 || return 1
+  [ "$(_spy_last)" = "TEST-42|pr-review||out" ]
+}
+
+test_capture_reads_result_file() {
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  printf 'line one\nline two\n' >"$tmpdir/ret.txt"
+  source "$LIB_DIR/spawn-helper.sh"
+  _spy_reset
+  spawn_capture TICKET_ID=TEST-42 PHASE=IMPLEMENT RESULT_FILE="$tmpdir/ret.txt" >/dev/null 2>&1 || return 1
+  local got
+  got=$(cat "$_CAPTURE_SPY")
+  rm -rf "$tmpdir"
+  # Multi-line result lands in the spy verbatim.
+  [ "$got" = "TEST-42|implement||line one
+line two" ]
+}
+
+test_capture_rejects_missing_result_file() {
+  source "$LIB_DIR/spawn-helper.sh"
+  spawn_capture TICKET_ID=TEST-42 PHASE=IMPLEMENT RESULT_FILE=/nonexistent/nope.txt >/dev/null 2>&1 && false || true
+}
+
+# ── real capture_agent_result contract tests ───────────────────────────────────
+# These unset the file-scope spy and run the genuine function, so a regression in
+# attempt separation or metacharacter handling fails CI rather than passing on a
+# stubbed success.
+
+test_real_capture_appends_each_attempt() {
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  (
+    cd "$tmpdir" || exit 1
+    unset -f capture_agent_result
+    source "$LIB_DIR/spawn-helper.sh"
+    source "$LIB_DIR/capture-transcript.sh"
+    spawn_capture TICKET_ID=TEST-42 PHASE=VERIFY RESULT="first attempt" ATTEMPT=1
+    spawn_capture TICKET_ID=TEST-42 PHASE=VERIFY RESULT="second attempt" ATTEMPT=2
+  ) >/dev/null 2>&1
+  local log="$tmpdir/logs/TEST-42-verify-agent.log"
+  local ok=1
+  if grep -q 'first attempt' "$log" 2>/dev/null &&
+    grep -q 'second attempt' "$log" 2>/dev/null &&
+    grep -q -- '--- Attempt 1 ---' "$log" 2>/dev/null &&
+    grep -q -- '--- Attempt 2 ---' "$log" 2>/dev/null; then
+    ok=0
+  fi
+  rm -rf "$tmpdir"
+  return "$ok"
+}
+
+test_real_capture_preserves_shell_metacharacters() {
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local payload='quote " dollar $HOME backtick `id` subst $(id) amp && semi ; back\slash'
+  printf '%s\n' "$payload" >"$tmpdir/ret.txt"
+  (
+    cd "$tmpdir" || exit 1
+    unset -f capture_agent_result
+    source "$LIB_DIR/spawn-helper.sh"
+    source "$LIB_DIR/capture-transcript.sh"
+    spawn_capture TICKET_ID=TEST-42 PHASE=IMPLEMENT RESULT_FILE="$tmpdir/ret.txt"
+  ) >/dev/null 2>&1
+  local got
+  got=$(cat "$tmpdir/logs/TEST-42-implement-agent.log" 2>/dev/null)
+  rm -rf "$tmpdir"
+  # Verbatim round-trip: nothing expanded, nothing executed, nothing truncated.
+  [ "$got" = "$payload" ]
 }
 
 # capture_agent_result is mocked at file scope (see mocks section above) so the
@@ -1642,6 +1739,11 @@ for fn in \
   test_post_retry_after_fail_writes_new_bracket \
   test_capture_rejects_missing_phase \
   test_capture_calls_through_with_all_params \
+  test_capture_records_lowercased_phase \
+  test_capture_reads_result_file \
+  test_capture_rejects_missing_result_file \
+  test_real_capture_appends_each_attempt \
+  test_real_capture_preserves_shell_metacharacters \
   test_capture_lowercases_uppercase_phase_for_real_capture \
   test_env_prefix_survives_shell_special_chars_in_paths \
   test_heartbeat_sourced_when_not_predefined \

@@ -17,6 +17,71 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.30.0 (2026-09-02)
+
+**Phase results are machine-readable.** fleet-controller's entire view of a run is
+`fleet_ticket_terminal_state` — a whole-run classification into
+`incomplete | gate-held | gate-stopped | done | dead-letter`. Per-phase outcomes never
+left the router's Claude session: they were prose, and the router's model read that prose
+to pick `RESULT=done|fail`. That inference is the one step a code consumer cannot
+reproduce, and it is what pinned the pipeline to a Claude session as orchestrator.
+
+The three **loop-bearing** phases — IMPLEMENT, VERIFY, PR-REVIEW, exactly the phases
+whose outcome is otherwise recoverable only from prose — now append a terminal
+`=== PHASE_RESULT ===` block of flat `KEY: value` lines to their return. A new
+deterministic parser converts it to canonical JSON and appends
+`META|phase-result|info|{json}` to the pipeline log, the channel fleet-controller already
+reads (14 files read `META|outcome` today, 5 `META|gate-stop`, 8 `META|planner-feedback`).
+
+APPRAISE, EXEC and GATE do not emit — `gate-check.sh` already computes their outcome and
+the router already writes `META|gate-result` and `META|artifact`. MAINTENANCE does not
+emit — prescan returns its own `PRESCAN_RESULT`.
+
+**Nothing routes on it.** The router keeps routing on its existing `RESULT=done|fail` and
+`VERDICT=` tokens. The parser emits no gate-stop code and every call site is
+`|| true`-guarded, so a parser failure cannot halt a run. Emission depends on an agent
+following a prompt instruction and no bash gate can observe whether it did, so the
+degrade path is specified up front: an absent or malformed block records
+`claimed_verdict: UNKNOWN`, and a consumer that meets `UNKNOWN` falls back to whole-run
+`fleet_ticket_terminal_state` classification rather than synthesizing a verdict.
+
+Tolerant at the transport boundary (whitespace, CRLF, blank lines, field order, unknown
+fields recorded under `extra`), strict at the contract boundary (required fields, integer
+types, closed enums, closing marker). `VERDICT: SUCCESS` is rejected, never coerced to
+`PASS` — coercion is how a false claim reaches a merge. JSON is serialized by `jq`
+argument binding, never bash string interpolation, so a value containing `"`, `$`,
+backticks, `$()` or `&&` round-trips verbatim and is never evaluated.
+
+**Capture-path fixes this depends on.** The parser's input had three defects, all fixed:
+
+- Agent return text was interpolated into a double-quoted `RESULT="$AGENT_RESULT"`
+  argument at all six router call sites. The router's *model* composes that command line,
+  so a return containing `"` truncated the capture and `$(...)` was a command
+  substitution. `spawn_capture` now takes `RESULT_FILE=`, and call sites write the return
+  through a quoted heredoc first.
+- No call site passed `ATTEMPT=`, so a VERIFY retry silently overwrote the previous
+  attempt's capture. VERIFY and PR-REVIEW now pass it and the file keeps every attempt.
+- The phase inspector captured under the same `PHASE` as the agent it inspects, so its
+  return **overwrote** the phase agent's capture at the same path — destroying the
+  parser's input. Inspector captures are now append-mode, and the parser runs before them.
+
+`lib/tests/test-spawn-helper.sh` had a file-scope `capture_agent_result() { return 0; }`
+no-op, which is why CI never caught the uppercase-`PHASE` defect (#194). It is now a
+contract-enforcing spy, plus real-function tests for attempt separation and metacharacter
+round-tripping.
+
+**New**: `docs/phase-result-schema.md` (source of truth — field table, the 14 verifier
+ids counted from real call sites, enums, worked valid/invalid examples),
+`lib/phase-result-parse.sh` (sourceable lib and standalone CLI, 0/1/2 exit idiom),
+`lib/tests/test-phase-result-parse.sh` (39 tests). Emission instructions live in exactly
+one parameterized section of `lib/skill-preamble-auto.md`; no `SKILL.md` restates the
+grammar.
+
+**Deployment**: `lib/spawn-helper.sh`, `lib/phase-result-parse.sh` and
+`lib/skill-preamble-auto.md` must reach `${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}`,
+not only the repo — `spawn-helper.sh` sources and the router invokes by installed path.
+See `openspec/changes/rlvr-phase-result-contract/deployment.md`.
+
 ## ticket-auto-pipeline 0.29.23 (2026-09-02)
 
 Closes #273 — the pipeline writes four kinds of scratch file per run into
