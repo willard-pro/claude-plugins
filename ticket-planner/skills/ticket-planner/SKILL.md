@@ -343,6 +343,29 @@ The planner does not re-specify these. They are the interface to the downstream 
 - **Artifact plane** — `planner-artifacts.sh` resolves to `${REPOS_ROOT}/.ticket-auto/initiatives/{ID}/artifacts/`
 - **Feedback** — `fleet-feedback.sh` aggregates `META|planner-feedback` from pipeline logs
 
+### Cross-plugin validators (not bundled here)
+
+The planner ships no copy of the scripts that define these contracts — it resolves
+them from the plugins that own them, via a three-level fallback (plugin cache →
+skills lib → sibling path in the same repo). A drifting duplicate would silently
+produce output the downstream pipeline rejects, so the dependency is deliberate.
+Run `/ticket-planner doctor` to see whether each one resolves on this install.
+
+| Script | Owning plugin | What it owns | Planner call site |
+|---|---|---|---|
+| `planned-ticket-check.sh` | ticket-auto-pipeline | Planner Context block **structure** — required fields, `Schema-Version`, confidence range, and the `Target Symbols` grammar (`_validate_target_symbols`: each `;`-separated entry must be `symbol:file` or `symbol:file:line` — a zero-colon bare path is rejected). Also the canonical `_extract_md_section` / `_extract_field` markdown helpers. | `planner_validate_ticket` (`planner-ticket-validate.sh`), before every Ticket Gen create; `branch_directive_source_md_helpers` (`branch-directive-gen.sh`), in the Epic Gen idempotency check |
+| `branch-directive-check.sh` | ticket-auto-pipeline | Branch Directive block schema and enums | `_resolve_branch_directive_checker` (`branch-directive-gen.sh`) — generated blocks are round-trip tested against it |
+| `grill-seal.sh` | grill-me | Validated Business Intent seal verification | `planner_intent_gate` (`planner-intent-gate.sh`) |
+
+**Validation is split across two plugins, and neither side sees the other's rules.**
+Crosscheck's citation linter (`planner-crosscheck-citations.sh`) checks that a
+`symbol:path:line` TargetSymbols entry *resolves* against the repo; it does not
+check the entry's *shape*. The shape rule lives only in `_validate_target_symbols`
+above, which does not run until Ticket Gen's pre-creation validation — so a
+malformed entry surfaces as a late creation failure rather than at the
+artifact-only gate. **Any change to the TargetSymbols grammar must be made in both
+validators**, or one of them will start rejecting what the other emits.
+
 ## State and Resume
 
 State lives in an append-only pipe-delimited log at `${REPOS_ROOT}/.ticket-auto/initiatives/{ID}/state.log`. The router re-derives position by reading the log — no state held in memory between invocations.
