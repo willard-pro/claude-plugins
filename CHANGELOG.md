@@ -17,6 +17,41 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.16 (2026-09-02)
+
+Closes #227 — a `blocked-by` target could only name a sibling spec inside the
+same initiative. Both readers of a spec's `## Labels` line enforced that:
+`planner_deps_validate_targets` required every target to be a member of the
+ticket set about to be created, and the Crosscheck `DANGLING_BLOCKED_BY` check
+reported anything that did not resolve to a sibling spec file. A real
+cross-initiative prerequisite — initiative B's work cannot start until
+initiative A's tickets are Done — was therefore inexpressible as a label and
+survived only as prose in the ticket Description, where nothing enforces it and
+nothing surfaces it to `ticket-auto` or `fleet-controller`. The prerequisite was
+unenforceable in practice: only a human reading the description carefully stood
+between a ticket and dispatch ahead of its own blockers.
+
+- New in `lib/planner-deps-check.sh`: `planner_deps_is_external_ref` and
+  `PLANNER_DEPS_EXTERNAL_REF_RE` — a target with the shape of an existing Linear
+  identifier (uppercase team key, hyphen, number) is a cross-initiative
+  prerequisite, already resolved, and is applied as a real `blocked-by:WIL-##`
+  label. Sibling resolution is always attempted first, so the same-initiative
+  path is unchanged; spec slugs are lowercase filenames, so the two namespaces
+  do not collide.
+- `planner_deps_validate_targets` exempts external refs from its same-set check
+  (they name a ticket outside the set by design) while still failing on a
+  dangling sibling ref on the same Labels line.
+- `planner_crosscheck_deps` exempts external refs from `DANGLING_BLOCKED_BY` —
+  there is no sibling spec for an already-real ticket ID to point at.
+- `planner_branch_directive_recommend` now *drops* external refs from the
+  dependency graph rather than leaving them as unmatched tokens. A ticket in
+  another initiative is not part of this epic branch's merge topology; counting
+  it would add a phantom edge that inflates chain depth and can flip the
+  shared-branch recommendation on an otherwise flat initiative.
+- Specify and Ticket Gen phase prompts document both target forms, and tell the
+  Specify agent to use the real identifier rather than leaving a
+  cross-initiative prerequisite as prose.
+
 ## ticket-planner 0.8.15 (2026-09-02)
 
 Closes #226 — `planner_position_derive` returning the literal string

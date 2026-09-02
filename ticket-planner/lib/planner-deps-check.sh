@@ -15,6 +15,32 @@
 #
 # Sourceable library — no set -euo pipefail.
 
+# ── External (cross-initiative) blocked-by references ─────────────────────────
+
+# A `blocked-by` target may name a ticket *outside* the current initiative by its
+# existing Linear issue identifier (`WIL-83`) rather than a sibling spec slug
+# (issue #227). Cross-initiative prerequisites are real — an initiative whose
+# implementation cannot start until another initiative's tickets are Done had no
+# way to say so as a real `blocked-by:{ID}` label, so it survived only as prose
+# in the ticket Description, which nothing enforces and nothing surfaces to
+# whatever eventually dispatches the ticket (ticket-auto / fleet-controller).
+#
+# Such a token is *already* a resolved Linear ID: Ticket Gen applies
+# `blocked-by:{ID}` verbatim, and the same-set / sibling-slug validations here
+# and in planner-crosscheck-deps.sh — which only make sense for refs the planner
+# itself is about to create — skip it. Sibling resolution always takes
+# precedence: a token counts as external only when it does not resolve inside
+# the initiative AND has the shape of a Linear identifier (uppercase team key,
+# hyphen, number). Sibling slugs are lowercase spec filenames, so the two
+# namespaces do not collide.
+PLANNER_DEPS_EXTERNAL_REF_RE='^[A-Z][A-Z0-9]*-[0-9]+$'
+
+# Usage: planner_deps_is_external_ref <token>
+# Returns: 0 if the token is an existing Linear issue identifier, 1 otherwise.
+planner_deps_is_external_ref() {
+  [[ "$1" =~ $PLANNER_DEPS_EXTERNAL_REF_RE ]]
+}
+
 # ── Cycle detection (DFS-based) ────────────────────────────────────────────────
 
 # Check whether a dependency graph is acyclic.
@@ -113,15 +139,24 @@ planner_deps_from_tickets() {
 
 # Validate that all blocked-by targets exist in the ticket set.
 # A ticket depending on a non-existent ticket is an error — it can never dispatch.
+#
+# Targets that are existing Linear issue identifiers (cross-initiative
+# prerequisites, see planner_deps_is_external_ref) are exempt: they name a
+# ticket that already exists outside this ticket set, so demanding membership
+# would reject exactly the case the exemption is for. Same-initiative slug refs
+# are still validated against the set.
+#
 # Usage: planner_deps_validate_targets <deps_json> <ticket_ids_json>
 # Returns: 0 if all targets exist, 1 with missing IDs on stderr.
 planner_deps_validate_targets() {
   local deps_json="$1" ticket_ids_json="$2"
 
   local missing
-  missing=$(echo "$deps_json" | jq -r --argjson ids "$ticket_ids_json" '
+  missing=$(echo "$deps_json" | jq -r --argjson ids "$ticket_ids_json" \
+    --arg ext "$PLANNER_DEPS_EXTERNAL_REF_RE" '
     to_entries[] | .value[]? |
-    select(. as $dep | $ids | index($dep) | not)
+    select(. as $dep | $ids | index($dep) | not) |
+    select(test($ext) | not)
   ' 2>/dev/null | sort -u)
 
   if [ -n "$missing" ]; then
@@ -226,7 +261,15 @@ planner_branch_directive_recommend() {
   # Resolve each unmatched token against the known id set by unambiguous
   # `-`-bounded prefix match; anything still unresolved is left as-is
   # (matches prior — silently non-matching — behavior, not worse).
-  tickets_json=$(echo "$tickets_json" | jq '
+  #
+  # A cross-initiative prerequisite (an existing Linear ID, #227) names a ticket
+  # this initiative will never create, so it is dropped rather than left as an
+  # unmatched token: it contributes nothing to the epic branch's merge topology,
+  # and leaving it in would add a phantom graph edge that inflates chain depth
+  # and can flip the shared-branch recommendation on an otherwise flat
+  # initiative. Unresolved *non*-Linear-ID tokens are still left as-is, matching
+  # the prior silently-non-matching behaviour.
+  tickets_json=$(echo "$tickets_json" | jq --arg ext "$PLANNER_DEPS_EXTERNAL_REF_RE" '
     ( [ .[].id ] ) as $ids
     | map(.blocked_by |= map(
         . as $tok
@@ -234,6 +277,10 @@ planner_branch_directive_recommend() {
           else ( [ $ids[] | select(. == $tok or startswith($tok + "-")) ] ) as $matches
           | if ($matches | length) == 1 then $matches[0] else $tok end
           end
+      ))
+    | map(.blocked_by |= map(
+        . as $tok
+        | select(($ids | index($tok)) or ($tok | test($ext) | not))
       ))
   ' 2>/dev/null || echo "$tickets_json")
 

@@ -137,6 +137,36 @@ RECOMMEND=$(echo "$RESULT" | jq -r '.recommend')
   FAIL=$((FAIL + 1))
 }
 
+# Test 7: cross-initiative prerequisites do not inflate chain depth (#227)
+echo "--- Test 7: external Linear ID refs excluded from chain depth ---"
+INIT_ID="INIT-TEST-BD-7"
+# Internally flat (b → a, c → a, depth 1). `a` additionally depends on a ticket
+# in another initiative. That prerequisite is outside this epic branch's merge
+# topology, so it must not become a graph edge — counting it would report depth
+# 2 and wrongly recommend a shared branch.
+make_fixture "$INIT_ID" "a:WIL-83" "b:a" "c:a"
+RESULT=$(planner_branch_directive_recommend "$INIT_ID")
+RECOMMEND=$(echo "$RESULT" | jq -r '.recommend')
+DEPTH=$(echo "$RESULT" | jq -r '.chain_depth')
+[ "$RECOMMEND" = "false" ] && [ "$DEPTH" = "1" ] && echo "PASS: external ref excluded, depth stays 1" && PASS=$((PASS + 1)) || {
+  echo "FAIL: got recommend=$RECOMMEND depth=$DEPTH"
+  FAIL=$((FAIL + 1))
+}
+clean_fixture "$INIT_ID"
+
+# Test 8: a real internal chain still recommends alongside external refs
+echo "--- Test 8: external refs do not suppress a real depth-2 chain ---"
+INIT_ID="INIT-TEST-BD-8"
+make_fixture "$INIT_ID" "a:WIL-83" "b:a" "c:b,WIL-104"
+RESULT=$(planner_branch_directive_recommend "$INIT_ID")
+RECOMMEND=$(echo "$RESULT" | jq -r '.recommend')
+DEPTH=$(echo "$RESULT" | jq -r '.chain_depth')
+[ "$RECOMMEND" = "true" ] && [ "$DEPTH" = "2" ] && echo "PASS: internal depth-2 chain still recommended (depth=$DEPTH)" && PASS=$((PASS + 1)) || {
+  echo "FAIL: got recommend=$RECOMMEND depth=$DEPTH"
+  FAIL=$((FAIL + 1))
+}
+clean_fixture "$INIT_ID"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

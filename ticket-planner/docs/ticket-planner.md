@@ -177,7 +177,7 @@ The planner produces against four frozen consumption-side contracts. These are s
 | `planned` | exact | Ticket Gen | Once set, never removed. Provenance marker. |
 | `INIT-*` | wildcard | Ticket Gen | Links ticket to initiative. Never removed. |
 | `pre-approved` | exact | Ticket Gen (when confidence ≥ 0.85) | Accelerates fast-path. Removed by `human-reject`. |
-| `blocked-by:*` | wildcard | Ticket Gen | Dependency enforcement. Auto-removed when blocker reaches Done. |
+| `blocked-by:*` | wildcard | Ticket Gen | Dependency enforcement. Target is a sibling ticket in this initiative, or an existing Linear ID for a cross-initiative prerequisite. Auto-removed when blocker reaches Done. |
 | `state:execution` | exact | Epic Gen (on epic) | Marks initiative ready for dispatch. |
 | `Type` labels | exact | Ticket Gen | `bug`/`feature`/`improvement`/`security`/`chore`. Drives template selection. |
 
@@ -227,6 +227,23 @@ Dependencies are expressed as `blocked-by:{ID}` labels. `planner-deps-check.sh` 
 1. The dependency set forms a DAG (no cycles). Uses `tsort` for cycle detection.
 2. All `blocked-by` targets exist in the ticket set (no dangling references).
 3. Topological sort determines dispatch order.
+
+### Cross-initiative prerequisites
+
+A `blocked-by` target may instead name a ticket **outside** this initiative by its
+existing Linear identifier (`blocked-by:WIL-83`). Such a ref is already resolved, so
+it is exempt from check 2 and from the Crosscheck `DANGLING_BLOCKED_BY` check — it
+names a real ticket by design, not a sibling spec. Ticket Gen applies it verbatim.
+
+Sibling resolution is always attempted first; a token counts as external only when it
+resolves to no sibling spec *and* has the shape of a Linear identifier (uppercase team
+key, hyphen, number). Spec slugs are lowercase filenames, so the namespaces do not
+collide. External refs are also excluded from the shared-branch chain-depth heuristic —
+a ticket in another initiative is not part of this epic branch's merge topology.
+
+Before this, a cross-initiative prerequisite could only be described in prose in the
+ticket Description, where nothing enforces it and nothing surfaces it to `ticket-auto`
+or `fleet-controller`.
 
 A cyclic dependency set produces no tickets — the error is reported before any Linear API call.
 
