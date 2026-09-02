@@ -703,6 +703,10 @@ When mode is `status`:
    `TOTAL:` line, and note whether the initiative is currently halted on a
    blocking finding (blocking total > 0 and current phase is still
    `Crosscheck`) — see #176.
+   When the initiative *is* halted that way, also run
+   `planner_crosscheck_findings_report "$INITIATIVE_ID"` and report its output
+   verbatim below the summary — the counts say how much is outstanding, the
+   report says which artifact and which token to open first (#233).
 5. Report: current phase, initiative metadata, last 10 log entries, artifact listing.
 
 ### 6. Replan mode
@@ -754,12 +758,22 @@ For each phase to run:
     source "${CLAUDE_PLUGIN_ROOT}/lib/planner-crosscheck.sh"
     if ! planner_crosscheck_run "$INITIATIVE_ID"; then
       echo "Crosscheck found blocking findings — fix the cited artifacts and resume."
-      echo "Findings:   grep 'META|crosscheck|fail' $(planner_state_log "$INITIATIVE_ID")"
+      echo ""
+      planner_crosscheck_findings_report "$INITIATIVE_ID"
+      echo ""
+      echo "Raw log:    grep 'META|crosscheck|fail' $(planner_state_log "$INITIATIVE_ID")"
       echo "Artifacts:  ${STATE_DIR}/artifacts/"
       echo "Resume:     /ticket-planner resume ${INITIATIVE_ID}"
       exit 0
     fi
     ```
+
+    Report the `planner_crosscheck_findings_report` output verbatim — it is the
+    remediation list, grouped artifact → code with the offending token and a
+    one-line fix hint per code (#233). Do not re-summarize it, re-order it, or
+    re-derive findings from the raw log: it already renders everything Crosscheck
+    recorded for this attempt, and the raw-log line above is there for auditing,
+    not for reading the findings out of.
 
     Do not fall through to step 5's retry-budget check on a Crosscheck failure — a
     blocking finding is a content defect in the artifacts, not a transient agent

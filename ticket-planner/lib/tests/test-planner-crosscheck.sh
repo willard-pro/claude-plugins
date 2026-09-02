@@ -304,6 +304,136 @@ case "$accept_summary" in
 *) fail "accept: findings summary TOTAL line counts the accepted finding" "got: $accept_summary" ;;
 esac
 
+# ── Grouped findings report (#233) ──────────────────────────────────────────
+
+echo "--- findings report ---"
+
+# Clean initiative: the report is empty, same as the summary.
+if [ -z "$(planner_crosscheck_findings_report "$INIT_ID")" ]; then
+  pass "report: clean run produces no output"
+else
+  fail "report: clean run produces no output" "got: $(planner_crosscheck_findings_report "$INIT_ID")"
+fi
+
+# Fresh initiative with one hand-written finding of every message shape the
+# check families emit — the report is pure presentation over the state log, so
+# writing the log directly is the honest way to cover shapes the fixtures above
+# cannot all produce.
+INIT_ID4="INIT-1700000003-3456"
+STATE_DIR4="${REPOS_ROOT}/.ticket-auto/initiatives/${INIT_ID4}"
+mkdir -p "${STATE_DIR4}/artifacts/specs"
+
+planner_state_init "$INIT_ID4" "test idea for findings report"
+planner_state_write "$INIT_ID4" "Crosscheck" "check" "start" "running checks"
+
+ART4="${STATE_DIR4}/artifacts"
+planner_state_write "$INIT_ID4" "META" "crosscheck" "fail" \
+  "CITATION_UNRESOLVED ${ART4}/specs/vs-1.md:12 → lib/nope.ts:42 (no file under REPOS_ROOT matches 'lib/nope.ts')"
+planner_state_write "$INIT_ID4" "META" "crosscheck" "fail" \
+  "CITATION_UNRESOLVED ${ART4}/specs/vs-1.md:31 → lib/gone.ts:9 (no file under REPOS_ROOT matches 'lib/gone.ts')"
+planner_state_write "$INIT_ID4" "META" "crosscheck" "fail" \
+  "PRECEDENT_NOT_FOUND ${ART4}/specs/vs-1.md:44 → identifier 'fooBar' has zero matches under REPOS_ROOT"
+planner_state_write "$INIT_ID4" "META" "crosscheck" "fail" \
+  "DANGLING_BLOCKED_BY vs-2.md references blocked-by:vs-9 which does not resolve to any sibling spec in this initiative"
+planner_state_write "$INIT_ID4" "META" "crosscheck" "fail" \
+  'CONTRACT_MISMATCH `Invoice` borrowed by INIT-x/vs-3.md from INIT-y/vs-7.md — field sets differ | INIT-x: "a" | INIT-y: "b"'
+planner_state_write "$INIT_ID4" "META" "crosscheck" "fail" \
+  "SIGNALS_UNIFORM 3 specs share byte-identical Signals JSON: vs-1.md vs-2.md vs-3.md — {}"
+planner_state_write "$INIT_ID4" "META" "crosscheck" "warn" \
+  "info DISCOVERY_GAP_UNRESOLVED ${ART4}/discovery.md:8 → \"unknown auth model\" not recorded in proposal.md Out of Scope"
+
+report=$(planner_crosscheck_findings_report "$INIT_ID4")
+
+case "$report" in
+*"specs/vs-1.md"*) pass "report: spec path is shown relative to artifacts/" ;;
+*) fail "report: spec path is shown relative to artifacts/" "got: $report" ;;
+esac
+
+case "$report" in
+*"$ART4"*) fail "report: absolute artifact paths are not printed" "got: $report" ;;
+*) pass "report: absolute artifact paths are not printed" ;;
+esac
+
+case "$report" in
+*"CITATION_UNRESOLVED — 2 blocking"*) pass "report: same-file findings of one code are grouped with a count" ;;
+*) fail "report: same-file findings of one code are grouped with a count" "got: $report" ;;
+esac
+
+case "$report" in
+*"L12  lib/nope.ts:42"*) pass "report: offending token is quoted inline against its spec line" ;;
+*) fail "report: offending token is quoted inline against its spec line" "got: $report" ;;
+esac
+
+case "$report" in
+*"fix: path does not resolve under REPOS_ROOT"*) pass "report: canned fix hint is rendered per code" ;;
+*) fail "report: canned fix hint is rendered per code" "got: $report" ;;
+esac
+
+# A file named mid-message (no leading `file:line` locus) still groups.
+case "$report" in
+*"vs-2.md"*"DANGLING_BLOCKED_BY"*) pass "report: mid-message .md filename groups the finding" ;;
+*) fail "report: mid-message .md filename groups the finding" "got: $report" ;;
+esac
+
+# CONTRACT_MISMATCH messages contain " | " — the detail must survive whole.
+case "$report" in
+*'INIT-y: "b"'*) pass "report: pipes inside a finding message are not truncated" ;;
+*) fail "report: pipes inside a finding message are not truncated" "got: $report" ;;
+esac
+
+case "$report" in
+*"(cross-file)"*"SIGNALS_UNIFORM"*) pass "report: set-wide codes group under (cross-file)" ;;
+*) fail "report: set-wide codes group under (cross-file)" "got: $report" ;;
+esac
+
+# A finding with a file but no line number must not render an empty "L".
+if printf '%s\n' "$report" | grep -q '^    vs-2\.md references'; then
+  pass "report: file-only finding renders without an L prefix"
+else
+  fail "report: file-only finding renders without an L prefix" "got: $report"
+fi
+
+case "$report" in
+*"DISCOVERY_GAP_UNRESOLVED — 1 warn"*) pass "report: warn findings are labelled warn, not blocking" ;;
+*) fail "report: warn findings are labelled warn, not blocking" "got: $report" ;;
+esac
+
+case "$report" in
+*"TOTAL: 6 blocking, 1 warn, 0 accepted across 5 artifact group(s), 6 code(s)"*)
+  pass "report: TOTAL line counts findings, groups and codes"
+  ;;
+*) fail "report: TOTAL line counts findings, groups and codes" "got: $report" ;;
+esac
+
+# Scoping: a second attempt supersedes the first, exactly like the summary.
+planner_state_write "$INIT_ID4" "Crosscheck" "check" "fail" "6 blocking finding(s), 1 warn, 0 accepted"
+planner_state_write "$INIT_ID4" "Crosscheck" "check" "start" "re-running after fixes"
+planner_state_write "$INIT_ID4" "META" "crosscheck" "fail" \
+  "CONTRACT_UNDEFINED ${ART4}/specs/vs-5.md \`Ledger\` declares new fields without canonical names: \"totals\""
+
+report2=$(planner_crosscheck_findings_report "$INIT_ID4")
+case "$report2" in
+*"CITATION_UNRESOLVED"*) fail "report: scoped to the most recent attempt" "stale finding still listed: $report2" ;;
+*"specs/vs-5.md"*) pass "report: scoped to the most recent attempt" ;;
+*) fail "report: scoped to the most recent attempt" "got: $report2" ;;
+esac
+
+# An unknown code still renders — with the fallback hint, not a crash.
+planner_state_write "$INIT_ID4" "META" "crosscheck" "fail" "SOME_NEW_CODE vs-6.md has a problem"
+case "$(planner_crosscheck_findings_report "$INIT_ID4")" in
+*"SOME_NEW_CODE"*"no canned hint for this code"*) pass "report: unknown code falls back to a generic hint" ;;
+*) fail "report: unknown code falls back to a generic hint" "got: $(planner_crosscheck_findings_report "$INIT_ID4")" ;;
+esac
+
+# Long details are truncated rather than swamping the report.
+PLANNER_CROSSCHECK_REPORT_WIDTH=40
+long_report=$(planner_crosscheck_findings_report "$INIT_ID4")
+unset PLANNER_CROSSCHECK_REPORT_WIDTH
+case "$long_report" in
+*"..."*) pass "report: PLANNER_CROSSCHECK_REPORT_WIDTH truncates long detail lines" ;;
+*) fail "report: PLANNER_CROSSCHECK_REPORT_WIDTH truncates long detail lines" "got: $long_report" ;;
+esac
+
 echo ""
 echo "=== Results: $PASS passed, $FAIL failed ==="
 [ "$FAIL" -eq 0 ]

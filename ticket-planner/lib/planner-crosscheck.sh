@@ -335,3 +335,313 @@ planner_crosscheck_findings_summary() {
 
   echo "TOTAL: ${blocking_total} blocking, ${warn_total} warn, ${accepted_total} accepted"
 }
+
+# ── Grouped finding report (#233) ───────────────────────────────────────────
+#
+# planner_crosscheck_findings_summary above answers "how many, of what code".
+# That is the right shape for `status`, and the wrong shape for the thing an
+# operator actually does after a blocking run: open one artifact at a time and
+# fix every finding in it. Doing that from the raw log means re-reading
+# `META|crosscheck|fail|CODE message` lines and re-deriving, per line, which
+# file and which token they point at. planner_crosscheck_findings_report
+# renders the same recorded data grouped file → code, with the offending
+# citation/token kept inline and a canned one-line fix hint per code, so
+# remediation cost tracks distinct defect classes rather than raw finding
+# count.
+#
+# Presentation only. It re-reads the state log and never re-runs a check, so
+# it cannot disagree with what Crosscheck actually recorded.
+
+# Codes whose findings are inherently about a set of artifacts rather than one
+# — grouping them under whichever filename happens to appear first in the
+# message would point the operator at an arbitrary member of the set.
+PLANNER_CROSSCHECK_CROSS_FILE_CODES="RESOLUTION_NOT_PROPAGATED CARVE_SCOPE_LOST SIGNALS_UNIFORM"
+
+# One-line remediation hint per finding code. Deliberately canned and code-
+# scoped: it says what shape the fix takes, not what the specific fix is —
+# the message already carries the specifics.
+# Usage: planner_crosscheck_fix_hint <code>
+planner_crosscheck_fix_hint() {
+  case "$1" in
+  CITATION_UNRESOLVED)
+    echo "path does not resolve under REPOS_ROOT — check for an annotation on the path side of \`Name:path\` (move it to the Name side), a stale path, or a file that needs a \`(new)\` marker"
+    ;;
+  CITATION_LINE_OUT_OF_RANGE)
+    echo "the file resolved but the cited line is past its end — re-read the file and cite a real line, or drop the line number"
+    ;;
+  CITATION_SYMBOL_MISMATCH)
+    echo "the named symbol is not within ${PLANNER_CROSSCHECK_SYMBOL_PROXIMITY:-40} lines of the cited line — cite the line the symbol is defined on, or fix the symbol name"
+    ;;
+  PRECEDENT_NOT_FOUND)
+    echo "the identifier claimed as prior art has zero matches under REPOS_ROOT — quote an identifier that exists, or drop the precedent claim"
+    ;;
+  RESOLUTION_NOT_PROPAGATED)
+    echo "a Consensus resolution reached some specs and not others — copy the resolved wording into the missing-it specs"
+    ;;
+  FORWARD_REF_UNFULFILLED)
+    echo "the referenced spec never delivers the promised terms — add them there, or drop the forward reference"
+    ;;
+  CARVE_SCOPE_LOST)
+    echo "the spec-file count no longer matches the ticket count Specify declared — record the rescope in consensus.md, or restore the missing spec"
+    ;;
+  BYPASS_PATH_UNADDRESSED)
+    echo "a live code path matching this ticket's terms is covered by no spec — extend the spec's scope, or record the path as out of scope"
+    ;;
+  DISCOVERY_GAP_UNRESOLVED)
+    echo "a gap Discovery declared is neither answered nor listed in proposal.md Out of Scope — resolve it, or scope it out explicitly"
+    ;;
+  CONTRACT_UNDEFINED)
+    echo "new fields are declared without canonical names — name the structure's fields explicitly in the spec"
+    ;;
+  CONTRACT_MISMATCH)
+    echo "two specs describe the same borrowed structure differently — align the two shapes, or rename one of them"
+    ;;
+  CONTRACT_CONSUMERS_UNNOTIFIED)
+    echo "a structure retired here is still referenced by a consumer spec — update the consumer, or keep the field"
+    ;;
+  SIGNALS_UNIFORM)
+    echo "these specs share a Signals block — Signals must reflect each spec's own discovery, so regenerate the duplicates"
+    ;;
+  DANGLING_BLOCKED_BY)
+    echo "the blocked-by target matches no sibling spec (or is an ambiguous prefix) — use the exact spec slug, or an existing Linear issue ID"
+    ;;
+  *)
+    echo "no canned hint for this code — read the finding message"
+    ;;
+  esac
+}
+
+# Shorten an artifact path for display: everything under the initiative's
+# artifacts directory is shown relative to it (specs/vs-1.md), anything else
+# is left alone.
+# Usage: _planner_crosscheck_report_path <path>
+_planner_crosscheck_report_path() {
+  case "$1" in
+  */artifacts/*) echo "${1##*/artifacts/}" ;;
+  *) echo "$1" ;;
+  esac
+}
+
+# Truncate a detail line so one long finding cannot swamp the report.
+# Usage: _planner_crosscheck_report_trunc <text>
+_planner_crosscheck_report_trunc() {
+  local text="$1" width="${PLANNER_CROSSCHECK_REPORT_WIDTH:-160}"
+  if [ "${#text}" -gt "$width" ]; then
+    printf '%s...\n' "${text:0:width}"
+  else
+    printf '%s\n' "$text"
+  fi
+}
+
+# Derive which artifact a finding is about, and the detail worth showing next
+# to it, from the finding message with its code already stripped.
+#
+# The check families print two shapes. Most lead with the artifact locus —
+# `<spec_file>:<line> → <token> (...)`, which is where citations, precedents,
+# forward refs and discovery gaps put it. The rest name the artifact somewhere
+# inside prose ("retired in vs-2.md without notifying ..."), where the first
+# `.md`-suffixed token is always the file the fix belongs in. Anything with
+# neither is reported ungrouped rather than guessed at.
+#
+# Fields are separated by \x1e (record separator) rather than a tab: the line
+# number is empty for findings that name a file but no line, and a tab is an
+# IFS-whitespace character, so `IFS=$'\t' read` would collapse the empty field
+# and shift the detail into it.
+#
+# Usage: _planner_crosscheck_finding_locus <code> <message_body>
+# Output (stdout): "<file><RS><line><RS><detail>"
+_planner_crosscheck_finding_locus() {
+  local code="$1" body="$2"
+  local file="" line="" detail="$body" first tok
+
+  case " ${PLANNER_CROSSCHECK_CROSS_FILE_CODES} " in
+  *" ${code} "*)
+    printf '%s\036%s\036%s\n' "(cross-file)" "" "$detail"
+    return 0
+    ;;
+  esac
+
+  first="${body%% *}"
+  if [[ "$first" =~ ^(.+):([0-9]+)$ ]]; then
+    file="${BASH_REMATCH[1]}"
+    line="${BASH_REMATCH[2]}"
+    detail="${body#"$first"}"
+    detail="${detail# }"
+    detail="${detail#→ }"
+  else
+    for tok in $body; do
+      tok="${tok%,}"
+      tok="${tok%)}"
+      tok="${tok%:}"
+      case "$tok" in
+      *.md)
+        file="$tok"
+        break
+        ;;
+      esac
+    done
+  fi
+
+  [ -n "$file" ] || file="(no file)"
+  printf '%s\036%s\036%s\n' "$(_planner_crosscheck_report_path "$file")" "$line" "$detail"
+}
+
+# Render recorded Crosscheck findings grouped by artifact, then by code (#233).
+# Scoped to the most recent Crosscheck attempt, exactly like
+# planner_crosscheck_findings_summary — a finding fixed by an earlier resume
+# must not reappear in the remediation list.
+#
+# Fields are peeled one at a time rather than with `IFS='|' read` because a
+# finding message may legitimately contain a pipe (CONTRACT_MISMATCH separates
+# its two quoted snippets with " | "), and splitting on every pipe would drop
+# everything after the first one.
+#
+# Usage: planner_crosscheck_findings_report <initiative_id>
+# Output (stdout): a header, one block per artifact, and a trailing TOTAL
+# line. No output at all if Crosscheck has not run yet, or its most recent
+# run recorded no findings.
+planner_crosscheck_findings_report() {
+  local initiative_id="$1"
+  local log
+  log=$(planner_state_log "$initiative_id")
+  [ -f "$log" ] || return 0
+
+  local start_line
+  start_line=$(grep -n '|Crosscheck|check|start|' "$log" | tail -1 | cut -d: -f1)
+  [ -z "$start_line" ] && return 0
+
+  declare -A _ccr_blocking=()
+  declare -A _ccr_warn=()
+  declare -A _ccr_accepted=()
+  declare -A _ccr_details=()
+  declare -A _ccr_files=()
+  declare -A _ccr_codes=()
+  local blocking_total=0 warn_total=0 accepted_total=0
+  local line rest phase step status msg code body kind key file lnum detail
+
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    case "$line" in
+    *"|"*"|"*"|"*"|"*) ;;
+    *) continue ;;
+    esac
+
+    rest="${line#*|}"
+    phase="${rest%%|*}"
+    rest="${rest#*|}"
+    step="${rest%%|*}"
+    rest="${rest#*|}"
+    status="${rest%%|*}"
+    msg="${rest#*|}"
+
+    [ "$phase" = "META" ] || continue
+    [ "$step" = "crosscheck" ] || continue
+
+    case "$status" in
+    fail)
+      kind="blocking"
+      body="$msg"
+      ;;
+    accepted)
+      kind="accepted"
+      body="$msg"
+      ;;
+    warn)
+      # Warn findings are written as "info <CODE> <message>" — see
+      # _planner_crosscheck_emit_finding.
+      kind="warn"
+      body="${msg#info }"
+      ;;
+    *) continue ;;
+    esac
+
+    code="${body%% *}"
+    [ -n "$code" ] || continue
+    body="${body#"$code"}"
+    body="${body# }"
+
+    IFS=$'\x1e' read -r file lnum detail < <(_planner_crosscheck_finding_locus "$code" "$body")
+    key="${file}"$'\x1f'"${code}"
+    _ccr_files["$file"]=1
+    _ccr_codes["$code"]=1
+    _ccr_details["$key"]="${_ccr_details["$key"]:-}${lnum}"$'\x1e'"${detail}"$'\n'
+
+    case "$kind" in
+    blocking)
+      _ccr_blocking["$key"]=$((${_ccr_blocking["$key"]:-0} + 1))
+      blocking_total=$((blocking_total + 1))
+      ;;
+    warn)
+      _ccr_warn["$key"]=$((${_ccr_warn["$key"]:-0} + 1))
+      warn_total=$((warn_total + 1))
+      ;;
+    accepted)
+      _ccr_accepted["$key"]=$((${_ccr_accepted["$key"]:-0} + 1))
+      accepted_total=$((accepted_total + 1))
+      ;;
+    esac
+  done < <(tail -n "+$((start_line + 1))" "$log")
+
+  if [ "$blocking_total" -eq 0 ] && [ "$warn_total" -eq 0 ] && [ "$accepted_total" -eq 0 ]; then
+    return 0
+  fi
+
+  echo "Crosscheck findings — ${initiative_id} (most recent attempt)"
+
+  # Real artifacts first, alphabetically; the two pseudo-groups last, because
+  # they are the findings with no single file to open.
+  local -a ordered=()
+  mapfile -t ordered < <(
+    for file in "${!_ccr_files[@]}"; do
+      case "$file" in
+      "(cross-file)" | "(no file)") continue ;;
+      esac
+      printf '%s\n' "$file"
+    done | LC_ALL=C sort
+  )
+  for file in "(cross-file)" "(no file)"; do
+    [ -n "${_ccr_files["$file"]:-}" ] && ordered+=("$file")
+  done
+
+  local -a codes=() parts=()
+  local label
+  for file in "${ordered[@]}"; do
+    echo ""
+    echo "$file"
+
+    mapfile -t codes < <(
+      for key in "${!_ccr_details[@]}"; do
+        [ "${key%%$'\x1f'*}" = "$file" ] || continue
+        printf '%s\n' "${key#*$'\x1f'}"
+      done | LC_ALL=C sort
+    )
+
+    for code in "${codes[@]}"; do
+      key="${file}"$'\x1f'"${code}"
+      parts=()
+      [ "${_ccr_blocking["$key"]:-0}" -gt 0 ] && parts+=("${_ccr_blocking["$key"]} blocking")
+      [ "${_ccr_warn["$key"]:-0}" -gt 0 ] && parts+=("${_ccr_warn["$key"]} warn")
+      [ "${_ccr_accepted["$key"]:-0}" -gt 0 ] && parts+=("${_ccr_accepted["$key"]} accepted")
+      label=$(
+        IFS=,
+        echo "${parts[*]}"
+      )
+      label="${label//,/, }"
+      echo "  ${code} — ${label}"
+      echo "    fix: $(planner_crosscheck_fix_hint "$code")"
+
+      while IFS=$'\x1e' read -r lnum detail; do
+        [ -z "${lnum}${detail}" ] && continue
+        if [ -n "$lnum" ]; then
+          _planner_crosscheck_report_trunc "    L${lnum}  ${detail}"
+        else
+          _planner_crosscheck_report_trunc "    ${detail}"
+        fi
+      done <<<"${_ccr_details["$key"]}"
+    done
+  done
+
+  echo ""
+  echo "TOTAL: ${blocking_total} blocking, ${warn_total} warn, ${accepted_total} accepted across ${#ordered[@]} artifact group(s), ${#_ccr_codes[@]} code(s)"
+  return 0
+}
