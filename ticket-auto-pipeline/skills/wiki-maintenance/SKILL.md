@@ -59,9 +59,13 @@ For each file, grep for `## Errata` — if found, read the errata section. Parse
 
 If no unresolved entries exist across all files, report:
 ```
-All errata resolved. Nothing to incorporate.
+No unresolved errata — skipping to Step 2.5 (ai-context.md synthesis).
 ```
-and stop.
+then proceed directly to **Step 2.5** — do NOT stop the skill here. Step 2.5's
+ai-context.md promotion must run independently of whether any ticket in this
+window logged an errata gap; gating it on errata existence silently drops
+successful-ticket findings (patterns/decisions/gotchas) whenever no sibling
+ticket happened to also log a failure in the same window.
 
 If entries exist, summarize:
 ```

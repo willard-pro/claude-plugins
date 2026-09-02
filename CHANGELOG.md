@@ -17,6 +17,17 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.29.11 (2026-09-02)
+
+Closes #208 — `wiki-maintenance` Step 1's "no unresolved errata" branch stopped the
+entire skill invocation, so Step 2.5 (ai-context.md promotion of successful-ticket
+patterns/decisions/gotchas) only ran when *some* ticket in the run happened to also
+log unresolved wiki errata. Errata existing or not is orthogonal to whether the
+just-completed ticket has promotable ai-context.md findings.
+
+- Fix: Step 1's clean-errata branch now proceeds directly into Step 2.5 instead of
+  stopping the skill.
+
 ## ticket-auto-pipeline 0.29.10 (2026-09-02)
 
 Closes #202 — `ticket-implement` Step 4b's code-review fix-and-re-review loop had no
