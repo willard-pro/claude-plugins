@@ -218,7 +218,7 @@ before `plan`, before `resume`, or any time something in the pipeline feels off.
 | 7 | Crosscheck | Deterministic bash — citation + cross-ticket propagation checks against the artifacts and the live repo | `META|crosscheck` events; gates Epic Gen on a blocking finding |
 | 8 | Epic Gen | Creates the initiative epic in Linear — **first Linear write, gated on `--create`** | Linear epic with `epic` label |
 | 9 | Ticket Gen | Creates planned child tickets, computes confidence, gate-dispatches | Linear tickets, `state:execution` on epic |
-| 10 | Completed | Terminal phase — no further transitions | Completed state |
+| 10 | Completed | Terminal phase — summarizes the run; auto-dispatched right after Ticket Gen, no operator action | `COMPLETED.md`, terminal state log entry |
 
 ### Crosscheck
 
@@ -660,8 +660,11 @@ When mode is `resume`:
 1. Extract the initiative ID from the second argument.
 2. **Persist the invocation config** — run step 2b before anything is dispatched. `--create` must be on disk before Epic Gen becomes reachable, so that a crash in between cannot lose it.
 3. Call `planner_resume "$INITIATIVE_ID"` — it outputs `PLANNER_NEXT_PHASE`, `PLANNER_INITIATIVE`, `PLANNER_LAST_LOG`.
-4. If `PLANNER_COMPLETE=true` is output, report completion and stop.
-5. Run the dispatch loop starting from the returned phase.
+4. If `PLANNER_COMPLETE=true` is output, run the step-8 completion verification
+   before reporting completion — an initiative whose Completed phase never ran also
+   reports `PLANNER_COMPLETE=true` here once its log has a terminal entry.
+5. Run the dispatch loop starting from the returned phase. When that phase is
+   `Completed`, it is the terminal phase and still has to run — see step 7.
 
 ### 5. Status mode
 
@@ -800,15 +803,59 @@ For each phase to run:
    written, and the exact continuation command. Do not ask the user a question —
    stopping is a terminal outcome of this invocation, and `resume` is the continuation.
 
-7. **Advance** by re-reading `planner_position_derive`. If it returns empty, we're done —
-   Completed phase reached. Report the completion summary.
+7. **Advance** by re-reading `planner_position_derive`, and read its result exactly:
+
+   ```bash
+   NEXT_PHASE=$(planner_position_derive "$INITIATIVE_ID")
+   ```
+
+   - **Any phase name — including the literal `Completed`** — means that phase has
+     not run yet. Loop back to step 1 with `PHASE=$NEXT_PHASE`.
+   - **The empty string is the only value that means the initiative is finished.**
+
+   `Completed` is the terminal *phase* (10 of 10), not a terminal *state*: it writes
+   `artifacts/COMPLETED.md` and the final state log entry, and it is dispatched in
+   this same invocation — immediately after Ticket Gen's dispatch-gate write, never
+   left for the operator to remember to `resume` into (#226). Nothing gates it:
+   Completed writes only to disk, so `planner_create_gate_check` waves it through,
+   and step 6 has already stopped the loop first if `--until TicketGen` asked it to.
+   Use the predicate rather than comparing the string by hand:
+
+   ```bash
+   if planner_terminal_pending "$INITIATIVE_ID"; then
+     : # dispatch Completed now — do NOT report the run as finished
+   fi
+   ```
+
+   Ticket Gen's dispatch-gate write is the part operators watch, because it is the
+   part that puts tickets in Linear. A run that stops there looks done from Linear
+   while the operator's primary summary document was never written — that is exactly
+   how two live initiatives ended up needing their `COMPLETED.md` written by hand.
 
 ### 8. After completion
 
-When the dispatch loop finishes (Completed phase done):
+When the dispatch loop finishes (`planner_position_derive` returns empty):
 
-1. Read the completion summary from `${STATE_DIR}/artifacts/COMPLETED.md`.
-2. Report to the user:
+1. **Verify the terminal phase actually produced its artifacts** before reporting
+   anything. This is the only check anywhere in the pipeline that looks for
+   `COMPLETED.md` specifically:
+
+   ```bash
+   if ! planner_completion_verify "$INITIATIVE_ID"; then
+     # Phases are idempotent — re-dispatch Completed once, then re-verify.
+     ...spawn the Completed agent (steps 2-4 above with PHASE=Completed)...
+     if ! planner_completion_verify "$INITIATIVE_ID"; then
+       echo "ERROR: the Completed phase did not write its summary — the initiative is NOT finished." >&2
+       exit 1
+     fi
+   fi
+   ```
+
+   Do not report the run as complete while this fails. `planner_completion_verify`
+   names what is missing on stderr: no terminal state log entry means the phase never
+   ran, a `done` entry with no file means it half-ran.
+2. Read the completion summary from `${STATE_DIR}/artifacts/COMPLETED.md`.
+3. Report to the user:
    - Initiative ID
    - Epic ID
    - Number of tickets created

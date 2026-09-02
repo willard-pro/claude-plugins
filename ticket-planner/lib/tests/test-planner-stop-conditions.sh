@@ -352,6 +352,99 @@ else
   fail "fail counts are per-phase" "got '$(planner_phase_fail_count "INIT-RETRY" "Review")'"
 fi
 
+# ── Test 9: the terminal phase is a phase, not a state ─────────────────────────
+#
+# `planner_position_derive` returning "Completed" means phase 10 still has to be
+# dispatched; only the empty string means the initiative is finished. Reading the
+# former as the latter is what left two live initiatives with tickets in Linear
+# and no COMPLETED.md (#226).
+
+echo "--- Test 9: terminal phase pending vs finished ---"
+
+reset_env
+planner_state_init "INIT-TERM" "an idea" >/dev/null
+planner_authorize_create "INIT-TERM" "test"
+for _p in Appraisal Discovery Architecture Specify Review Consensus Crosscheck EpicGen; do
+  planner_state_write "INIT-TERM" "$_p" "run" "done" "ok"
+done
+planner_state_write "INIT-TERM" "TicketGen" "dispatch-gate" "done" "3 tickets verified"
+
+if [ "$(planner_position_derive INIT-TERM)" = "Completed" ]; then
+  pass "after TicketGen's dispatch-gate the position is Completed, not empty"
+else
+  fail "position after dispatch-gate" "got '$(planner_position_derive INIT-TERM)'"
+fi
+
+if planner_terminal_pending "INIT-TERM"; then
+  pass "planner_terminal_pending is true while Completed has not run"
+else
+  fail "planner_terminal_pending after TicketGen" "reported not pending"
+fi
+
+# Nothing gates Completed — it writes only to disk, so an authorized run with no
+# --until must not stop between TicketGen and it.
+if planner_should_stop_after "INIT-TERM" "TicketGen"; then
+  fail "an authorized run continues into Completed" "stopped after TicketGen"
+else
+  pass "an authorized run does not stop between TicketGen and Completed"
+fi
+
+if planner_create_gate_check "INIT-TERM" "Completed" 2>/dev/null; then
+  pass "the create gate waves Completed through — it writes nothing to Linear"
+else
+  fail "create gate on Completed" "refused a disk-only phase"
+fi
+
+# ── Test 10: completion is verified, not assumed ───────────────────────────────
+#
+# Both halves have to be there. A `done` entry with no COMPLETED.md is a half-run
+# phase; nothing else in the pipeline looks for that file specifically.
+
+echo "--- Test 10: planner_completion_verify ---"
+
+if planner_completion_verify "INIT-TERM" 2>/dev/null; then
+  fail "an un-run Completed phase fails verification" "reported verified"
+else
+  pass "an un-run Completed phase fails verification"
+fi
+
+planner_state_write "INIT-TERM" "Completed" "summarize" "done" "Initiative complete"
+
+if planner_completion_verify "INIT-TERM" 2>/dev/null; then
+  fail "a terminal log entry alone is not completion" "reported verified"
+else
+  pass "a terminal log entry with no COMPLETED.md still fails verification"
+fi
+
+mkdir -p "$(planner_initiative_dir INIT-TERM)/artifacts"
+: >"$(planner_initiative_dir INIT-TERM)/artifacts/COMPLETED.md"
+
+if planner_completion_verify "INIT-TERM" 2>/dev/null; then
+  fail "an empty COMPLETED.md is not a summary" "reported verified"
+else
+  pass "an empty COMPLETED.md still fails verification"
+fi
+
+echo "# Initiative complete" >"$(planner_initiative_dir INIT-TERM)/artifacts/COMPLETED.md"
+
+if planner_completion_verify "INIT-TERM" 2>/dev/null; then
+  pass "summary on disk plus terminal log entry verifies"
+else
+  fail "summary on disk plus terminal log entry verifies" "reported not verified"
+fi
+
+if planner_terminal_pending "INIT-TERM"; then
+  fail "a finished initiative is not pending" "reported pending"
+else
+  pass "planner_terminal_pending is false once Completed is done"
+fi
+
+if [ -z "$(planner_position_derive INIT-TERM)" ]; then
+  pass "a finished initiative derives an empty position"
+else
+  fail "finished position is empty" "got '$(planner_position_derive INIT-TERM)'"
+fi
+
 echo ""
 echo "=== planner stop conditions: ${PASS} passed, ${FAIL} failed ==="
 [ "$FAIL" -eq 0 ]

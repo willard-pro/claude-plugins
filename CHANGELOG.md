@@ -17,6 +17,37 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.15 (2026-09-02)
+
+Closes #226 — `planner_position_derive` returning the literal string
+`"Completed"` means the terminal phase (10 of 10) still has to be dispatched;
+only the empty string means the initiative is finished. The dispatch loop's
+step 7 collapsed the two into "if it returns empty, we're done — Completed
+phase reached", so a run that reached Ticket Gen's dispatch-gate write was
+read as complete and stopped there. Tickets exist in Linear at that point —
+the part operators watch — so nothing looked wrong, while `COMPLETED.md`, the
+operator's primary summary document, was never written. Two live initiatives
+(VS-1, VS-2) had theirs written by hand in a later session.
+
+- New in `lib/planner-router.sh`: `PLANNER_TERMINAL_PHASE`,
+  `planner_terminal_pending <id>` (the position is still the terminal phase),
+  and `planner_completion_verify <id>` (both `artifacts/COMPLETED.md` and the
+  terminal state log entry exist — the only check anywhere in the pipeline
+  that looks for that file specifically).
+- `SKILL.md` dispatch loop step 7 now spells out that any phase name it
+  returns — the literal `Completed` included — is a phase still to dispatch,
+  and that Completed runs in the same invocation as Ticket Gen. It writes only
+  to disk, so `planner_create_gate_check` waves it through and no stop
+  condition sits between the two unless `--until TicketGen` asked for one.
+- `SKILL.md` step 8 gates the completion report on
+  `planner_completion_verify`, re-dispatching Completed once (phases are
+  idempotent) before failing. Resume mode's `PLANNER_COMPLETE=true` path runs
+  the same check rather than reporting completion on the log entry alone.
+- New regression tests in `test-planner-stop-conditions.sh`: the position
+  after a dispatch-gate write is `Completed` and not empty, nothing stops the
+  loop between Ticket Gen and it, and verification fails for a missing entry,
+  a missing file, and an empty file alike.
+
 ## ticket-auto-pipeline 0.29.19 (2026-09-02)
 
 Closes #207 — `ticket-retro`'s `scan_claude_log_failures` keyword list

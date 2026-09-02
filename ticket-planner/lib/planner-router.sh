@@ -333,6 +333,58 @@ planner_phase_retries_exhausted() {
   [ "$fails" -gt "$max" ]
 }
 
+# ── Terminal phase ─────────────────────────────────────────────────────────────
+#
+# `planner_position_derive` returning the literal string "Completed" means the
+# terminal phase has NOT run yet — it is the next phase to dispatch, exactly like
+# every other name that function returns. Only the empty string means the
+# initiative is finished.
+#
+# Conflating the two is what left VS-1 and VS-2 without a completion summary
+# (#226): Ticket Gen's dispatch-gate write puts the tickets in Linear, which is
+# the part operators watch, so a run that halted right after it looked done while
+# `artifacts/COMPLETED.md` — the operator's primary summary document — was never
+# written. Completed writes only to disk, so no gate stands between Ticket Gen
+# and it; the loop dispatches it in the same invocation.
+
+# The last phase in the sequence. Reaching it is not the same as finishing it.
+PLANNER_TERMINAL_PHASE="Completed"
+
+# Is the terminal phase still pending dispatch?
+# Usage: planner_terminal_pending <initiative_id>
+# Returns: 0 when Completed still needs to run, 1 otherwise.
+planner_terminal_pending() {
+  local initiative_id="$1"
+  [ "$(planner_position_derive "$initiative_id")" = "$PLANNER_TERMINAL_PHASE" ]
+}
+
+# Did the terminal phase actually produce what it exists to produce? Both halves
+# are checked — the summary on disk and the terminal state log entry. One without
+# the other is a half-run phase, not a completed initiative, and nothing else in
+# the pipeline looks for that file specifically.
+#
+# Usage: planner_completion_verify <initiative_id>
+# Returns: 0 when both exist, 1 otherwise (what is missing goes to stderr).
+planner_completion_verify() {
+  local initiative_id="$1"
+  local state_dir log_file missing=0
+
+  state_dir=$(planner_initiative_dir "$initiative_id") || return 1
+  log_file=$(planner_state_log "$initiative_id") || return 1
+
+  if [ ! -s "${state_dir}/artifacts/COMPLETED.md" ]; then
+    echo "planner-router: no completion summary at ${state_dir}/artifacts/COMPLETED.md" >&2
+    missing=1
+  fi
+
+  if ! grep -q "|${PLANNER_TERMINAL_PHASE}|.*|done|" "$log_file" 2>/dev/null; then
+    echo "planner-router: no terminal ${PLANNER_TERMINAL_PHASE} entry in ${log_file}" >&2
+    missing=1
+  fi
+
+  [ "$missing" -eq 0 ]
+}
+
 # ── Resume ─────────────────────────────────────────────────────────────────────
 
 # Derive position from the log and return what to do next.
