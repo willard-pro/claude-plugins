@@ -197,6 +197,48 @@ test_embedded_pipe_in_json() {
   _teardown
 }
 
+# ── Quote/backslash-safe JSON construction (jq --arg binding) ──────────────────
+
+test_quote_in_verifier_name() {
+  _setup
+  write_verifier_result verifier='weird "quoted" verifier' verdict=PASS phase=IMPLEMENT
+  local json
+  json=$(_last_msg)
+  echo "$json" | jq -e . >/dev/null 2>&1 || {
+    echo "quote-bearing verifier name produced invalid JSON: $json" >&2
+    _teardown
+    return 1
+  }
+  local verifier
+  verifier=$(echo "$json" | jq -r '.verifier')
+  [ "$verifier" = 'weird "quoted" verifier' ] || {
+    echo "expected verifier field to round-trip, got: $verifier" >&2
+    _teardown
+    return 1
+  }
+  _teardown
+}
+
+test_backslash_in_phase() {
+  _setup
+  write_verifier_result verifier=test verdict=PASS phase='IMPLEMENT\WEIRD'
+  local json
+  json=$(_last_msg)
+  echo "$json" | jq -e . >/dev/null 2>&1 || {
+    echo "backslash-bearing phase produced invalid JSON: $json" >&2
+    _teardown
+    return 1
+  }
+  local phase
+  phase=$(echo "$json" | jq -r '.phase')
+  [ "$phase" = 'IMPLEMENT\WEIRD' ] || {
+    echo "expected phase field to round-trip, got: $phase" >&2
+    _teardown
+    return 1
+  }
+  _teardown
+}
+
 # ── Skip-on-failure ────────────────────────────────────────────────────────────
 
 test_skip_missing_verifier() {
@@ -482,6 +524,8 @@ _run "outcome Smooth → 0.90" test_outcome_smooth
 _run "outcome Rough + 2 corrections → 0.55" test_outcome_rough_with_corrections
 _run "outcome Hard + many corrections → floor 0.10" test_outcome_hard_floor
 _run "embedded pipe in JSON round-trips via awk join" test_embedded_pipe_in_json
+_run "quote in verifier name produces valid JSON (jq --arg binding)" test_quote_in_verifier_name
+_run "backslash in phase produces valid JSON (jq --arg binding)" test_backslash_in_phase
 _run "skip-on-failure: missing verifier returns 0" test_skip_missing_verifier
 _run "skip-on-failure: invalid verdict returns 0" test_skip_invalid_verdict
 _run "skip-on-failure: missing verdict returns 0" test_skip_missing_verdict

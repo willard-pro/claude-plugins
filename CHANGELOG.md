@@ -17,6 +17,22 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.29.16 (2026-09-02)
+
+Closes #200 — `write_verifier_result` (`lib/verifier-result.sh`) built its
+JSON payload with `printf '%s'` string interpolation instead of `jq`
+argument binding. Any `"` or `\` in `verifier`, `verdict`, or `phase`
+produced malformed JSON, which the `jq -e .` guard immediately below then
+silently discarded (`return 0`, no write) — a verifier result vanishing
+with no error, leaving a gap in the RLVR data the guard was meant to
+protect.
+
+- Fix: payload now built with `jq -n --arg`/`--argjson`, matching the
+  pattern used elsewhere in this file's sibling library,
+  `planned-feedback-write.sh`.
+- New tests: quote-bearing verifier name and backslash-bearing phase both
+  round-trip through valid JSON.
+
 ## fleet-controller 0.9.2 (2026-09-02)
 
 Closes #199 — `fleet-notify.sh`'s worker-event notifier read the run file's

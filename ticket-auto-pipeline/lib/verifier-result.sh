@@ -117,17 +117,24 @@ write_verifier_result() {
   local iso
   iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-  local json
-  json=$(printf '{"verifier":"%s","verdict":"%s","score":%s,"criteria_met":%d,"criteria_total":%d,"attempt":%d,"phase":"%s"}' \
-    "$verifier" "$verdict" "$score" "$criteria_met" "$criteria_total" "$attempt" "$phase")
-
   # Validate JSON with jq; skip on failure
   if ! command -v jq >/dev/null 2>&1; then
     echo "[verifier-result] WARN: jq not available, skipping verifier-result write" >&2
     return 0
   fi
 
-  if ! echo "$json" | jq -e . >/dev/null 2>&1; then
+  local json
+  json=$(jq -nc \
+    --arg verifier "$verifier" \
+    --arg verdict "$verdict" \
+    --argjson score "$score" \
+    --argjson criteria_met "$criteria_met" \
+    --argjson criteria_total "$criteria_total" \
+    --argjson attempt "$attempt" \
+    --arg phase "$phase" \
+    '{verifier: $verifier, verdict: $verdict, score: $score, criteria_met: $criteria_met, criteria_total: $criteria_total, attempt: $attempt, phase: $phase}' 2>/dev/null)
+
+  if [ -z "$json" ] || ! echo "$json" | jq -e . >/dev/null 2>&1; then
     echo "[verifier-result] WARN: jq validation failed for payload, skipping" >&2
     return 0
   fi
