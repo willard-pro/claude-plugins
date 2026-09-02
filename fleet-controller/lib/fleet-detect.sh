@@ -197,9 +197,10 @@ detect_zombies() {
     return
   fi
 
-  # Find all |waiting| lines
+  # Find all |waiting| lines, with line numbers so the terminal search below
+  # can be scoped to lines *after* each waiting entry.
   local lines
-  lines=$(command grep '|waiting|' "$log_file" 2>/dev/null || true)
+  lines=$(command grep -n '|waiting|' "$log_file" 2>/dev/null || true)
 
   if [ -z "$lines" ]; then
     echo "0"
@@ -211,8 +212,10 @@ detect_zombies() {
   now_epoch=$(date -u +%s)
   local zombie_threshold="${FLEET_ZOMBIE_SECS:-900}"
 
-  while IFS= read -r line; do
-    [ -z "$line" ] && continue
+  while IFS= read -r raw; do
+    [ -z "$raw" ] && continue
+    local lineno="${raw%%:*}"
+    local line="${raw#*:}"
     local iso
     iso=$(echo "$line" | awk -F'|' '{print $1}')
     local phase
@@ -224,9 +227,12 @@ detect_zombies() {
     line_epoch=$(date -d "$iso" +%s 2>/dev/null || echo "0")
     local age=$((now_epoch - line_epoch))
 
-    # Check if this waiting entry has a matching done/fail/skip
+    # Check if this waiting entry has a matching done/fail/skip *after* its
+    # own line — a terminal line from an earlier cycle must not mask a
+    # currently-stalled waiting entry for the same phase/step.
     local has_terminal
-    has_terminal=$(command grep -E -c "\|${phase}\|${step}\|(done|fail|skip)\|" "$log_file" 2>/dev/null || true)
+    has_terminal=$(tail -n "+$((lineno + 1))" "$log_file" 2>/dev/null | command grep -E -c "\|${phase}\|${step}\|(done|fail|skip)\|" 2>/dev/null || true)
+    has_terminal="${has_terminal:-0}"
 
     if [ "$has_terminal" -eq 0 ] && [ "$age" -ge "$zombie_threshold" ]; then
       severity=2 # KILL

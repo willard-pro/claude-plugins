@@ -256,6 +256,25 @@ test_zombie_old_waiting_no_terminal_returns_kill() {
   )
 }
 
+test_zombie_prior_cycle_terminal_does_not_mask_new_waiting() {
+  local ws
+  ws=$(_setup_workspace)
+  local old
+  old=$(date -u -d '1200 seconds ago' +%Y-%m-%dT%H:%M:%SZ)
+  # Earlier cycle completed cleanly...
+  _plog "$ws" "CRE-47" "IMPLEMENT" "implement" "done" "agent returned" "2026-06-02T09:00:00Z"
+  # ...but a later retry of the same phase/step is now stalled.
+  _plog "$ws" "CRE-47" "IMPLEMENT" "implement" "waiting" "agent launched" "$old"
+  (
+    export FLEET_ZOMBIE_SECS=900
+    source "$LIB_DIR/fleet-detect.sh"
+    local r
+    r=$(detect_zombies "CRE-47" "$ws")
+    rm -rf "$ws"
+    [ "$r" -eq 2 ]
+  )
+}
+
 test_zombie_malformed_line_no_crash() {
   local ws
   ws=$(_setup_workspace)
@@ -934,6 +953,7 @@ for fn in \
   test_zombie_no_waiting_returns_ok \
   test_zombie_waiting_with_terminal_returns_ok \
   test_zombie_old_waiting_no_terminal_returns_kill \
+  test_zombie_prior_cycle_terminal_does_not_mask_new_waiting \
   test_zombie_malformed_line_no_crash \
   test_loop_no_hb_file_returns_ok \
   test_loop_terminal_exhaustion_returns_restart \
