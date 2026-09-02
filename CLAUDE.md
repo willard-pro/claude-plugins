@@ -102,6 +102,12 @@ Pipe-delimited: `ISO|PHASE|STEP|STATUS|MSG`. Statuses: `start`, `done`, `fail`, 
 - Standard git commit messages — no Co-Authored-By trailers. The harness default `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` is blocked by the auto mode Content Integrity classifier. Omit it.
 - Commit messages should follow conventional commits: `type(scope): description` (e.g., `fix: tighten outcome grep pattern`, `feat: add BE_TEST_RUNNER support`).
 
+## Issue filing conventions
+
+- Every GitHub issue filed against this repo — by a human or an agent — must be **agent-handoff shaped**: another Claude Code agent with zero context on how the issue was found should be able to implement the fix from the issue body alone, without further discovery. See `.github/ISSUE_TEMPLATE/agent-handoff-issue.yml` for the full field set (Severity, Plugin, Component, Current/Expected Behavior, Steps to Reproduce, Root Cause, Handover Package, Verification Checklist, Related).
+- That `.yml` form only renders for a human filing through the GitHub web UI — `gh issue create` never applies it. Any script or agent filing issues from the CLI must instead call `github_issue_body_template` (`ticket-auto-pipeline/lib/github-issues.sh`), which renders the same field set as flat markdown headers, then pass the result to `github_issue_create` via `--body-file`.
+- No ticket IDs or user data in any field — this is a public repo.
+
 ## Known sharp edges (harness-level)
 
 - **Co-Authored-By classifier block**: Auto mode Content Integrity classifier rejects commits with the default `Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>` trailer. Workaround: omit the trailer. See Commit conventions above.

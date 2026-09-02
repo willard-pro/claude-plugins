@@ -165,3 +165,71 @@ github_issue_comment() {
   hb_api "github-request" "ok" "gh issue comment succeeded" "{\"elapsed_ms\":\"$elapsed\",\"issue\":\"$number\"}"
   echo "$output"
 }
+
+# ── github_issue_body_template ───────────────────────────────────────────────
+# Render the repo's agent-handoff issue body — same field set/order as
+# .github/ISSUE_TEMPLATE/agent-handoff-issue.yml, as flat markdown headers.
+# The web form only renders for a human using the GitHub UI; `gh issue create`
+# never applies it, so this is the load-bearing template for any agent (or
+# skill) filing an issue via the CLI. Every field but `related` is required —
+# an issue another agent can't act on without more discovery isn't done yet.
+# Usage: github_issue_body_template <severity> <plugin> <component> \
+#          <current_behavior> <expected_behavior> <steps_to_reproduce> \
+#          <root_cause> <handover> <verification> [related]
+#   severity: P0|P1|P2|P3
+#   plugin: ticket-planner|ticket-auto-pipeline|fleet-controller|
+#           knowledge-curator|grill-me|Repo-level|Multiple plugins
+# Outputs the rendered markdown body on stdout.
+# Returns 0 on success, non-zero if a required field is missing.
+github_issue_body_template() {
+  local severity="$1" plugin="$2" component="$3" current_behavior="$4"
+  local expected_behavior="$5" steps_to_reproduce="$6" root_cause="$7"
+  local handover="$8" verification="$9" related="${10:-}"
+
+  if [ -z "$severity" ] || [ -z "$plugin" ] || [ -z "$component" ] ||
+    [ -z "$current_behavior" ] || [ -z "$expected_behavior" ] ||
+    [ -z "$steps_to_reproduce" ] || [ -z "$root_cause" ] ||
+    [ -z "$handover" ] || [ -z "$verification" ]; then
+    echo "github_issue_body_template: missing a required field (severity, plugin, component, current_behavior, expected_behavior, steps_to_reproduce, root_cause, handover, verification are all required — related is optional)" >&2
+    return "$E_GITHUB_API"
+  fi
+
+  cat <<EOF
+**Severity:** ${severity}
+**Plugin:** ${plugin}
+**Component:** ${component}
+
+## Current Behavior (Actual)
+
+${current_behavior}
+
+## Expected Behavior
+
+${expected_behavior}
+
+## Steps to Reproduce
+
+${steps_to_reproduce}
+
+## Root Cause
+
+${root_cause}
+
+## Handover Package
+
+${handover}
+
+## Verification Checklist
+
+${verification}
+EOF
+
+  if [ -n "$related" ]; then
+    cat <<EOF
+
+## Related
+
+${related}
+EOF
+  fi
+}

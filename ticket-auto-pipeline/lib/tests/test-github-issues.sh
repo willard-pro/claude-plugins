@@ -215,6 +215,40 @@ assert_fail "returns non-zero on comment failure" "$CODE"
 CODE=$(run_test github_issue_comment "" "$COMMENT_FILE")
 assert_fail "returns non-zero for missing number" "$CODE"
 
+# ── Test: github_issue_body_template ─────────────────────────────────────────
+echo "### github_issue_body_template"
+
+TEMPLATE_OUTPUT=$(github_issue_body_template \
+  "P0" "ticket-planner" "lib/planner-deps-check.sh" \
+  "Grep exits 1 on no match, corrupting the JSON pipeline under pipefail." \
+  "Recommender should degrade to an empty list, not two concatenated JSON docs." \
+  "1. Run the recommender against a spec with no blocked-by tokens" \
+  "grep's non-zero exit trips pipefail before jq -sc runs" \
+  "**Files:** lib/planner-deps-check.sh — neutralize grep's exit status" \
+  "- [ ] Existing recommender tests pass" \
+  "See #217 for the same class of masked-by-earlier-failure bug.")
+assert_eq "includes severity" "**Severity:** P0" "$(echo "$TEMPLATE_OUTPUT" | head -1)"
+echo "$TEMPLATE_OUTPUT" | grep -q "^## Current Behavior (Actual)$"
+assert_ok "includes Current Behavior section" "$?"
+echo "$TEMPLATE_OUTPUT" | grep -q "^## Root Cause$"
+assert_ok "includes Root Cause section" "$?"
+echo "$TEMPLATE_OUTPUT" | grep -q "^## Related$"
+assert_ok "includes Related section when provided" "$?"
+
+TEMPLATE_NO_RELATED=$(github_issue_body_template \
+  "P2" "fleet-controller" "lib/fleet-notify.sh" \
+  "current" "expected" "steps" "root cause" "handover" "verification")
+GREP_CODE=0
+echo "$TEMPLATE_NO_RELATED" | grep -q "^## Related$" || GREP_CODE=$?
+assert_fail "omits Related section when not provided" "$GREP_CODE"
+
+CODE=$(run_test github_issue_body_template "P0" "ticket-planner" "" \
+  "current" "expected" "steps" "root cause" "handover" "verification")
+assert_fail "returns non-zero for missing component" "$CODE"
+
+CODE=$(run_test github_issue_body_template "" "" "" "" "" "" "" "" "")
+assert_fail "returns non-zero when all required fields are missing" "$CODE"
+
 # ── Test: state file roundtrip ───────────────────────────────────────────────
 echo "### state file roundtrip"
 
