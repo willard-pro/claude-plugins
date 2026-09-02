@@ -17,6 +17,20 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.29.19 (2026-09-02)
+
+Closes #207 — `ticket-retro`'s `scan_claude_log_failures` keyword list
+matched a manually curated set of English-language failure phrases but
+missed the pipeline's own structured error marker, `META|error|fail|`.
+Confirmed on two separate tickets (CRE-22, CRE-19): structured errors with
+wording outside the keyword list (e.g. "ticket directory not found for X")
+were invisible to the Claude Log Failures section even though the pipeline
+itself already flagged them.
+
+- Fix: `retro.sh`'s Claude-log scan now also matches `|META|error|fail|`,
+  a literal marker that's more reliable than any keyword list and doesn't
+  need updating every time a new error message wording appears.
+
 ## ticket-auto-pipeline 0.29.18 (2026-09-02)
 
 Closes #206 — `ticket-retro`'s heartbeat aggregation only counted
