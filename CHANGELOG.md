@@ -17,6 +17,53 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.18 (2026-09-02)
+
+Closes #233 — a blocking Crosscheck run told the operator to
+`grep 'META|crosscheck|fail'` and read the raw state log. Every remediation round
+therefore started by cross-referencing each raw finding line back against the spec
+it cites, one line at a time, to work out which token tripped which code. On the
+larger initiatives (82, 36 and 36 raw findings) that re-derivation, not the fixes
+themselves, was the bulk of the round: cost tracked raw finding count rather than
+distinct defect classes.
+
+Presentation only. Nothing about detection changed, and the new renderer never
+re-runs a check — it reads the same state-log entries `planner_crosscheck_findings_summary`
+already reads, scoped the same way to the most recent Crosscheck attempt, so it
+cannot disagree with what Crosscheck recorded.
+
+- New in `lib/planner-crosscheck.sh`: `planner_crosscheck_findings_report
+  <initiative_id>` — findings grouped artifact → code, each code carrying its
+  count by kind (blocking/warn/accepted), a one-line fix hint, and one line per
+  finding with the spec line number and the offending citation/token inline.
+- New `planner_crosscheck_fix_hint <code>` — a canned remediation hint for each of
+  the 14 finding codes, saying what shape the fix takes rather than what the fix
+  is (the message already carries the specifics). Unknown codes get a generic
+  fallback, so a check family added later renders without a change here.
+- Grouping is derived from the finding message: a leading `<file>:<line>` locus
+  where the check families emit one, otherwise the first `.md`-suffixed token in
+  the message. Codes that are inherently about a set of artifacts
+  (`RESOLUTION_NOT_PROPAGATED`, `CARVE_SCOPE_LOST`, `SIGNALS_UNIFORM`, listed in
+  `PLANNER_CROSSCHECK_CROSS_FILE_CODES`) group under `(cross-file)` rather than
+  being filed under an arbitrary member of the set.
+- Log fields are peeled one at a time instead of with `IFS='|' read` — a
+  `CONTRACT_MISMATCH` message separates its two quoted snippets with `" | "`, and
+  splitting on every pipe drops everything after the first.
+- `SKILL.md`: the Crosscheck halt path prints the report between the halt line and
+  the artifact/resume hints (the raw-log grep stays, as an audit pointer), and
+  `status` prints it below the counts when the initiative is halted on a blocking
+  finding.
+- `PLANNER_CROSSCHECK_REPORT_WIDTH` (default 160) truncates a long detail line so
+  one finding cannot swamp the report.
+- `lib/tests/test-planner-crosscheck.sh` gains 12 cases: clean run stays silent,
+  paths render relative to `artifacts/`, same-file findings of one code collapse
+  into a counted group, the token and fix hint render, a mid-message filename
+  still groups, pipes inside a message survive, set-wide codes land in
+  `(cross-file)`, a file-only finding renders no empty `L` prefix, warn findings
+  are labelled warn, the `TOTAL:` line counts findings/groups/codes, the report is
+  scoped to the latest attempt, an unknown code falls back, and the width knob
+  truncates.
+
 ## ticket-planner 0.8.17 (2026-09-02)
 
 Closes #228 — the Epic Gen phase prompt's Branch Directive idempotency check
