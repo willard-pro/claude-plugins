@@ -57,7 +57,7 @@ PLANNER_CROSSCHECK_CITE_EXTENSIONS=$(
 # Claude Code session transcripts under .claude/projects/**/tool-results/,
 # which can quote real code and false-positive-resolve a citation or
 # precedent search against cached prose instead of the actual codebase.
-PLANNER_CROSSCHECK_EXCLUDE_DIRS=("node_modules" ".venv" ".git" ".ticket-auto" ".claude" "ledgerly" "tickets")
+PLANNER_CROSSCHECK_EXCLUDE_DIRS=("node_modules" ".venv" ".git" ".ticket-auto" ".claude" "tickets")
 
 # How many lines on either side of a cited line a TargetSymbols symbol name
 # may appear in and still count as resolved (issue #172 suggests N=5).

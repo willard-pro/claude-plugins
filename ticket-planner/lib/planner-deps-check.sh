@@ -193,7 +193,15 @@ planner_branch_directive_recommend() {
       # around each blocked-by token, rather than anchoring on either style.
       local labels_line
       labels_line=$(awk '/^## Labels/{f=1;next} f && NF{print; exit}' "$spec_file" 2>/dev/null)
-      blocked_by=$(echo "$labels_line" | grep -oE 'blocked-by:`?[A-Za-z0-9_-]+`?' |
+      # grep legitimately exits 1 when the Labels line has no blocked-by token
+      # (the common case). Under a caller's `set -o pipefail` (inherited via
+      # source), that non-zero exit would make the *whole* pipeline below
+      # report failure even though jq -sc already produced a valid "[]" —
+      # which would then also run `|| echo "[]"`, appending a second "[]"
+      # line and leaving $blocked_by as two concatenated JSON documents
+      # (invalid input to --argjson below). Neutralize grep's exit status so
+      # only a genuine jq failure triggers the fallback.
+      blocked_by=$(echo "$labels_line" | { grep -oE 'blocked-by:`?[A-Za-z0-9_-]+`?' || true; } |
         sed -E 's/blocked-by:`?([A-Za-z0-9_-]+)`?/\1/' |
         jq -R . | jq -sc . 2>/dev/null || echo "[]")
     fi
