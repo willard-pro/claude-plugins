@@ -19,6 +19,8 @@ Sits upstream of `ticket-auto` and `fleet-controller`. Produces against frozen c
 | `/ticket-planner resume <INIT_ID> --create` | Authorize creation and run through to Linear |
 | `/ticket-planner status <INIT_ID>` | Show current phase and recent log entries |
 | `/ticket-planner replan <INIT_ID>` | Re-plan an initiative from feedback (requires Regenerate flag) |
+| `/ticket-planner doctor` | Preflight check — REPOS_ROOT, Linear team/labels, helper scripts |
+| `/ticket-planner doctor <INIT_ID>` | Preflight check, plus resume branch/sha alignment (#217) |
 
 ## Modes
 
@@ -173,6 +175,35 @@ Re-plan an initiative that carries the `Regenerate` flag. Ingests aggregated fee
 ```
 /ticket-planner replan INIT-42
 ```
+
+### Doctor (`doctor`)
+
+Run every environment/Linear-side preflight check the planner has ever hit mid-run,
+before starting or resuming a run. Deterministic bash, no Linear writes unless
+`--fix` is passed:
+
+```
+/ticket-planner doctor
+/ticket-planner doctor INIT-42          # also checks resume branch/sha alignment (#217)
+/ticket-planner doctor --fix            # create any missing static contract label
+```
+
+Checks: `REPOS_ROOT` resolves and is a real directory; the Linear team resolves
+(`--team`/`LINEAR_TEAM_ID`/the workspace's only team); the 4 static contract
+labels (`planned`, `epic`, `pre-approved`, `state:execution`) exist on that team —
+reported individually, and created with `--fix`; when an initiative id is given,
+whether the live `REPOS_ROOT` checkout for each repo Discovery explored still
+matches the ref it pinned, or an isolated worktree is available (the same
+mechanism Crosscheck itself falls back to, see #217 below); and whether the
+cross-plugin helper scripts the phase prompts reference
+(`planned-ticket-check.sh`, `branch-directive-check.sh` from
+`ticket-auto-pipeline`, `grill-seal.sh` from `grill-me`) actually resolve on
+this install. Every check that has ever cost a mid-run failure and a manual
+recovery step is covered here — see the `project-ticket-planner-preflight-gaps`
+history in the issue this mode was added for (#232).
+
+`doctor` never creates state and never dispatches a phase — it is safe to run
+before `plan`, before `resume`, or any time something in the pipeline feels off.
 
 ## The 10 Phases
 
@@ -396,13 +427,36 @@ and no state log entry, so `resume` re-runs straight back into the same failure.
 
 ### 2. Parse mode
 
-First argument is the mode: `plan`, `resume`, `status`, or `replan`. Capture it as
+First argument is the mode: `plan`, `resume`, `status`, `replan`, or `doctor`. Capture it as
 `MODE` — step 2a checks it when rejecting `--create` outside `resume`.
 
 ```bash
 MODE="${1:-}"
 shift || true
 ```
+
+### 2z. Doctor mode (short-circuits before flag parsing)
+
+`doctor` takes none of the plan/resume flags in step 2a — it has its own
+optional initiative id and its own `--fix` flag — and it never touches the
+state log or the create gate, so it runs and exits here rather than falling
+through to steps 2a/2b.
+
+```bash
+if [ "$MODE" = "doctor" ]; then
+  source "${PLUGIN_ROOT}/lib/planner-doctor.sh"
+  DOCTOR_OUTPUT=$(planner_doctor_run "$@")
+  DOCTOR_ISSUES=$?
+  echo "$DOCTOR_OUTPUT"
+fi
+```
+
+Render the `---BEGIN_VARS---`/`---END_VARS---` block the same way `/ticket-env-check`
+and `/fleet-env-check` already do: first pipe-delimited row is the header, the
+`ROWCOUNT=N` line is metadata, every remaining row renders as a markdown table
+(**Name**, **Status**, **Value**, **Location**, **Note**). After the table, report
+"N issue(s) found" (`$DOCTOR_ISSUES`) or "All checks passed." Then **stop — do not
+proceed to any other mode's steps.**
 
 ### 2a. Parse override flags
 
