@@ -1,47 +1,51 @@
----
-name: Pipeline Issue
-description: Bug, regression, or improvement for the ticket-auto-pipeline
+name: Agent Handoff Issue
+description: Bug, regression, or improvement in any claude-plugins plugin
 labels: []
 body:
   - type: markdown
     attributes:
       value: |
-        > This template is designed for **agent handoff** — another Claude Code agent should be able to pick this up from the information provided and implement a fix without additional context.
-        > Remove sections that don't apply. No ticket IDs or user data in any field.
+        > This template is designed for **agent handoff** — another Claude Code agent, with no
+        > prior context on this conversation or investigation, should be able to pick this up
+        > from the information provided alone and implement a fix without further discovery.
+        > Remove sections that genuinely don't apply. No ticket IDs or user data in any field —
+        > this is a public repo.
 
   - type: dropdown
     id: severity
     attributes:
       label: Severity
-      description: How badly does this affect the pipeline?
+      description: How badly does this affect the affected plugin/pipeline?
       options:
         - P0 — breaks every run
-        - P1 — blocks or delays pipeline
+        - P1 — blocks or delays the pipeline
         - P2 — causes silent failures or degraded behavior
         - P3 — quality / hygiene
     validations:
       required: true
 
   - type: dropdown
+    id: plugin
+    attributes:
+      label: Affected Plugin
+      description: Which plugin does this belong to? (see root CLAUDE.md for the ecosystem map)
+      options:
+        - ticket-planner — 10-phase business-idea → planned-tickets pipeline
+        - ticket-auto-pipeline — autonomous ticket implementation pipeline
+        - fleet-controller — parent orchestrator / dispatch / epic branch lifecycle
+        - knowledge-curator — cross-project knowledge tracking
+        - grill-me — pre-work readiness gate
+        - Repo-level (CI, Makefile, docs, marketplace manifest)
+        - Multiple plugins
+    validations:
+      required: true
+
+  - type: input
     id: component
     attributes:
       label: Affected Component
-      description: Which part of the pipeline is affected?
-      options:
-        - lib/ — shared library script
-        - ticket-auto — orchestrator
-        - ticket-appraise — investigation phase
-        - ticket-appraise-exec — artifact creation
-        - ticket-flow — state machine
-        - ticket-implement — implementation phase
-        - ticket-verify — UAT verification
-        - ticket-pr-review — PR review & merge
-        - ticket-setup — workspace creation
-        - ticket-env-check — environment validation
-        - ticket-prescan — repo pre-scanning
-        - ticket-retro — retrospection
-        - gate-check — gate logic
-        - Multiple components
+      description: Specific file(s), function(s), or skill(s) — as precise as you can be.
+      placeholder: "ticket-planner/lib/planner-crosscheck-citations.sh — _planner_crosscheck_resolve_path()"
     validations:
       required: true
 
@@ -49,7 +53,7 @@ body:
     id: current-behavior
     attributes:
       label: Current Behavior (Actual)
-      description: What actually happens? Include sanitized log excerpts (no ticket IDs, no user data, no timestamps with identifiable info).
+      description: What actually happens? Include sanitized log excerpts or command output (no ticket IDs, no user data, no timestamps with identifiable info).
       render: shell
       placeholder: |
         api|linear-request|fail|GraphQL call failed|{"elapsed_ms":"389","http_code":"200"}
@@ -72,7 +76,7 @@ body:
     id: steps-to-reproduce
     attributes:
       label: Steps to Reproduce
-      description: Numbered, atomic steps. Include exact commands where applicable. Someone unfamiliar with the pipeline should be able to follow these.
+      description: Numbered, atomic steps. Include exact commands where applicable. Someone unfamiliar with this plugin should be able to follow these.
       placeholder: |
         1. Run ticket-auto-pipeline against a ticket in Backlog state
         2. Observe the heartbeat log during linear-api calls
@@ -84,7 +88,7 @@ body:
     id: root-cause
     attributes:
       label: Root Cause
-      description: Which code path causes this? What's the mechanism? Be specific about the logic error.
+      description: Which code path causes this? What's the mechanism? Be specific about the logic error — verify against the actual current code, not assumption.
     validations:
       required: true
 
@@ -93,7 +97,7 @@ body:
     attributes:
       label: Handover Package
       description: |
-        Everything an agent needs to implement the fix:
+        Everything an agent needs to implement the fix, with no further investigation:
         - Exact file paths relative to repo root
         - Functions or line ranges to modify
         - Suggested fix approach (pseudocode or diff acceptable)
