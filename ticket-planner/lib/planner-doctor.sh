@@ -70,7 +70,7 @@ _planner_doctor_resolve_planned_ticket_check() {
     return 0
   fi
 
-  checker="${_PLANNER_DOCTOR_LIB_DIR}/../ticket-auto-pipeline/lib/planned-ticket-check.sh"
+  checker="${_PLANNER_DOCTOR_LIB_DIR}/../../ticket-auto-pipeline/lib/planned-ticket-check.sh"
   if [ -f "$checker" ]; then
     echo "$checker"
     return 0
