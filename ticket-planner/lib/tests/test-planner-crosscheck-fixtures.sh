@@ -92,9 +92,17 @@ for fixture_dir in "$FIXTURES_DIR"/*/; do
     continue
   fi
 
-  exp_blocking=$(jq -r '.blocking' "$expected_file")
-  exp_warn=$(jq -r '.warn' "$expected_file")
-  exp_accepted=$(jq -r '.accepted' "$expected_file")
+  exp_blocking=$(jq -r '.blocking // "MISSING"' "$expected_file")
+  exp_warn=$(jq -r '.warn // "MISSING"' "$expected_file")
+  exp_accepted=$(jq -r '.accepted // "MISSING"' "$expected_file")
+
+  case "$exp_blocking$exp_warn$exp_accepted" in
+  *MISSING*)
+    fail "${fixture_name}: expected.json has blocking/warn/accepted" \
+      "blocking=${exp_blocking} warn=${exp_warn} accepted=${exp_accepted} in $expected_file"
+    continue
+    ;;
+  esac
 
   # Isolated REPOS_ROOT per fixture — planner-crosscheck-contracts.sh scans
   # sibling initiatives under REPOS_ROOT/.ticket-auto/initiatives/*, so
