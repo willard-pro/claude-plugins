@@ -57,6 +57,51 @@ process once an operator signs off on donating one.
 - Wired into `Makefile`'s `test-planner` target, after
   `test-planner-crosscheck.sh`.
 
+## ticket-auto-pipeline 0.38.5 (2026-09-03)
+
+`get_team()` in `lib/linear-api.sh` queried a team's `labels` field with no
+pagination. Linear's default page size for that connection is 50; once a
+team accumulates more labels than that — which happens naturally from
+planner-generated labels (`blocked-by:*`, `INIT-*`) — any label past the
+cutoff silently vanished from every caller's view, with no error. This
+made `validate-linear-config.sh` report well-known labels like `bug` and
+`claimed` as "NOT FOUND" even though they existed, and made `flow.sh`'s own
+label-ID resolution (`TEAM_JSON` from the same `get_team()` call) fail the
+same way, breaking label add/remove on state transitions. Filed as
+[#280](https://github.com/willard-pro/claude-plugins/issues/280), flagged
+as a known-but-separate bug in the 0.38.4 (#283) entry above.
+
+- `get_team()` now loops with `first: 100`, reading
+  `labels.pageInfo.{hasNextPage,endCursor}` and merging `labels.nodes`
+  across pages until `hasNextPage` is false. The first-page query omits the
+  `$after` variable entirely rather than sending it empty — Linear rejects
+  `after` without `first` (`CannotUseWithoutAny`) — and only the
+  second-page-onward query variant declares and sends it. `states` is not
+  paginated (teams rarely exceed 50 workflow states, and the issue is
+  scoped to labels), and is taken from the first page's response only.
+  Return shape is unchanged: `{states: [...], labels: [...]}`. A guard
+  failure on page 1 preserves the exact original error contract (empty
+  `{states:[],labels:[]}`, exit 1); a guard failure on a later page is
+  best-effort — keep what's already merged and stop rather than discard
+  prior pages. A hard 100-page cap and an empty-cursor-with-`hasNextPage`
+  check prevent a runaway loop against a malformed or adversarial response.
+- Investigated the issue's claim of a second, separately hand-rolled
+  unpaginated-labels query in `gate-check.sh` around line 310 — that
+  function does not call `get_team()` or query labels at all (`grep -n
+  get_team` across the repo confirms flow.sh:231 and
+  validate-linear-config.sh:112 are the only two call sites, both simple
+  callers). The line-310 reference matches `flow.sh`, whose `labels[]`
+  filter at that line reads the already-fetched `$TEAM_JSON` — not a
+  second network query. Fixing `get_team()` alone fixes both callers; no
+  second query needed the same treatment.
+- New tests in `lib/tests/test-linear-api.sh`:
+  `test_get_team_paginates_labels_across_multiple_pages` (3-page mock,
+  asserts all 3 pages' labels land in the merged result, not just page 1),
+  `test_get_team_single_page_no_extra_call` (a team under the page-size
+  cutoff resolves in exactly one `linear_graphql` call — no regression for
+  the common case), and `test_get_team_first_page_omits_after_variable`
+  (asserts the first request's `variables` has no `after` key at all).
+
 ## ticket-auto-pipeline 0.38.4 (2026-09-03)
 
 `lib/linear-api.sh` had no `create_issue()` — the pipeline could fetch,
