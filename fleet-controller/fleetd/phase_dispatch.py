@@ -34,8 +34,10 @@ Stdlib only. Third-party dependencies stay quarantined in `otel.py` (D11).
 import json
 import os
 import subprocess
+import tempfile
 import time
 from collections import namedtuple
+from datetime import datetime, timezone
 from pathlib import Path
 
 # ── Paths ───────────────────────────────────────────────────────────────────
@@ -454,6 +456,219 @@ def phase_terminal_write(phase, step, outcome, log_file, hb_log_file='',
             f'{phase}/{step}: {stderr_tail}'
         )
     return True
+
+
+# ── The spawn bracket, opening half (task 4.12) ─────────────────────────────
+#
+# `spawn_agent_pre` does six things. The split for fleetd is decided by what
+# each one is evidence *of*, not by symmetry with the router:
+#
+# | What | Who | Why |
+# |---|---|---|
+# | `\|waiting\|` line + `META\|model` | **Delegated** to `phase_bracket_open` | The log grammar keeps one writer, as D13 requires for the closing half. An unopened bracket reads to `detect-resume.sh`, the zombie detector and the OTel exporter as "this phase never started". |
+# | spawn-meta + start marker | **fleetd itself** (`write_spawn_meta`, D15) | fleetd's differs: a session id generated before `execvpe`, and `SPAWNED_BY=fleetd` so `token-tracker.sh` picks the authoritative event. |
+# | Agent-return capture | **Delegated** to `capture_phase_return` | `phase-result-parse.sh --return-file` reads `logs/{tid}-{phase}-agent.log`; without it the phase-result channel has no input on the automated path. |
+# | Heartbeat pinger | **Obsolete** | It exists to prove a *router* is still looping while it waits. fleetd is not waiting in a loop it might fall out of. |
+# | Orchestrator watchdog | **Replaced** by `phase_liveness_heartbeat` | Same log line, better evidence: the watchdog's `alive` proves a backgrounded bash loop is looping, whereas fleetd checks the pid it forked. Emitting it is not the monitor reporting on itself — it is a fact fleetd verified, and it is written **only** when the check passes. |
+# | ctx file, progress file | **Obsolete** | The progress file is read only by that watchdog. The ctx file has no reader left at all: `tool-error-capture.sh` moved to session-id resolution and dropped the ctx fallback, so today it is written and swept and nothing consumes it. |
+#
+# The watchdog line is the one that cannot simply be dropped.
+# `fleet-detect.sh:411` reads the newest `|orchestrator-waiting|` or
+# `|watchdog|alive|` entry as its heartbeat liveness dimension, so a
+# phase-dispatched ticket emitting neither would cross `FLEET_STALL_WARN_SECS`
+# and be reported stalled while running perfectly.
+
+WATCHDOG_ALIVE_EVENT = 'watchdog'
+
+
+class BracketOpenError(RuntimeError):
+    """The opening pipeline-log marker could not be written."""
+
+
+def phase_bracket_open(phase, step, tid, log_file, description='', model='',
+                       lib_dir=None, timeout=30):
+    """Open a phase's bracket: the `|waiting|` line and `META|model`.
+
+    Delegates to the bash helper of the same name so the line grammar keeps
+    exactly one writer, shared with the router's `spawn_agent_pre`. Returns
+    the model name the helper resolved, so a caller recording model identity
+    elsewhere uses that value rather than re-reading the environment.
+    """
+    lib = Path(lib_dir) if lib_dir else ticket_auto_lib_dir()
+    helper = lib / 'spawn-helper.sh'
+    if not helper.is_file():
+        raise BracketOpenError(f'spawn-helper.sh not found at {helper}')
+
+    bash_cmd = (
+        'source "$PBO_HELPER" && phase_bracket_open '
+        'PHASE="$PBO_PHASE" STEP="$PBO_STEP" TICKET_ID="$PBO_TID" '
+        'DESCRIPTION="$PBO_DESC" LOG_FILE="$PBO_LOG_FILE" MODEL="$PBO_MODEL"'
+    )
+    env = {
+        **os.environ,
+        'PBO_HELPER': str(helper),
+        'PBO_PHASE': str(phase or ''),
+        'PBO_STEP': str(step or ''),
+        'PBO_TID': str(tid or ''),
+        'PBO_DESC': str(description or ''),
+        'PBO_LOG_FILE': str(log_file or ''),
+        'PBO_MODEL': str(model or ''),
+    }
+    try:
+        proc = subprocess.run(['bash', '-c', bash_cmd], capture_output=True,
+                              text=True, timeout=timeout, env=env)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise BracketOpenError(
+            f'phase_bracket_open failed for {phase}/{step}: {exc}') from exc
+    if proc.returncode != 0:
+        stderr_tail = (proc.stderr or '').strip().splitlines()[-3:]
+        raise BracketOpenError(
+            f'phase_bracket_open exited {proc.returncode} for '
+            f'{phase}/{step}: {stderr_tail}')
+    return (proc.stdout or '').strip()
+
+
+def _pid_alive(pid, start_ticks=None):
+    """Whether `pid` is running, and is still the process that was forked.
+
+    The start-ticks comparison is the PID-reuse guard `spawn-helper.sh` and
+    `detect-resume.sh` both use. Without it a recycled pid reads as alive and
+    the heartbeat below would assert a liveness nobody checked.
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except (OSError, ProcessLookupError):
+        return False
+    if not start_ticks:
+        return True
+    try:
+        stat = Path(f'/proc/{pid}/stat').read_text()
+    except OSError:
+        # No /proc to check against. `kill -0` succeeded, and claiming the
+        # process is gone on the strength of a missing file would be worse
+        # than accepting the weaker evidence.
+        return True
+    # Field 22 is starttime; the comm field can contain spaces and
+    # parentheses, so split after the closing paren, never on the whole line.
+    tail = stat.rsplit(')', 1)[-1].split()
+    if len(tail) < 20:
+        return True
+    return tail[19] == str(start_ticks)
+
+
+def phase_liveness_heartbeat(tid, phase, hb_log_file, pid, start_ticks=None,
+                             now=None):
+    """Write one `watchdog|alive` heartbeat for a live phase worker.
+
+    The replacement for the router's backgrounded watchdog, and deliberately
+    not a translation of it. The watchdog's `alive` line means "a bash loop is
+    still looping"; this one means "fleetd checked the pid it forked and the
+    process is still that process". Same log line, because
+    `fleet-detect.sh`'s heartbeat dimension reads it and a phase-dispatched
+    ticket emitting nothing would be reported stalled while running fine.
+
+    Returns True when a line was written. Writes **nothing** when the worker
+    is not verifiably alive: a supervisor that emits liveness on a schedule
+    rather than on a check is asserting what it was supposed to be measuring.
+    """
+    if not hb_log_file or not _pid_alive(pid, start_ticks):
+        return False
+    iso = (now or datetime.now(timezone.utc)).strftime('%Y-%m-%dT%H:%M:%SZ')
+    phase_label = str(phase or 'UNKNOWN').upper()
+    msg = f'phase {phase_label} worker alive (pid {pid})'
+    try:
+        with open(hb_log_file, 'a') as fh:
+            fh.write(f'{iso}|heartbeat|{WATCHDOG_ALIVE_EVENT}|alive|{msg}|'
+                     f'{{"ticket":"{tid}","phase":"{phase_label}"}}\n')
+    except OSError:
+        return False
+    return True
+
+
+def worker_return_text(stdout_path):
+    """Extract a phase worker's final message from its captured stdout.
+
+    fleetd spawns workers with `--output-format json`, so the captured stdout
+    is a JSON envelope, not the prose the router's `spawn_capture` receives
+    from an Agent return. The `result` field is the equivalent text; handing
+    the envelope to `phase-result-parse.sh` verbatim would work by accident
+    (the marker block survives JSON string escaping unevenly) and fail
+    silently when it did not.
+
+    Falls back to the raw text when the envelope will not parse — a truncated
+    or non-JSON capture still carries a readable tail, and a phase-result
+    block that does survive there is better than none.
+    """
+    try:
+        raw = Path(stdout_path).read_text()
+    except OSError:
+        return ''
+    stripped = raw.strip()
+    if not stripped:
+        return ''
+    try:
+        payload = json.loads(stripped)
+    except (ValueError, TypeError):
+        return raw
+    if isinstance(payload, dict):
+        return str(payload.get('result') or raw)
+    return raw
+
+
+def capture_phase_return(tid, phase, text, attempt=None, lib_dir=None,
+                         timeout=30):
+    """Persist a phase's return to `logs/{tid}-{phase}-agent.log`.
+
+    Delegates to `spawn_capture`, which owns the file's path and its
+    append-per-attempt convention. That file is `phase-result-parse.sh`'s
+    `--return-file` input, so skipping it on the automated path would leave
+    the phase-result channel with nothing to read — the quiet degradation the
+    change's operator decision on `phase-result` explicitly asked to
+    instrument rather than gate-stop.
+
+    Fail-soft: a capture failure is a lost observation, never a lost phase.
+    """
+    lib = Path(lib_dir) if lib_dir else ticket_auto_lib_dir()
+    helper = lib / 'spawn-helper.sh'
+    if not helper.is_file():
+        return False
+
+    with tempfile.NamedTemporaryFile('w', prefix=f'fleetd-return-{tid}-',
+                                     suffix='.txt', delete=False) as fh:
+        fh.write(text or '')
+        return_file = fh.name
+
+    bash_cmd = (
+        'source "$CPR_HELPER" && spawn_capture '
+        'TICKET_ID="$CPR_TID" PHASE="$CPR_PHASE" RESULT_FILE="$CPR_FILE"'
+    )
+    if attempt is not None:
+        bash_cmd += ' ATTEMPT="$CPR_ATTEMPT"'
+    env = {
+        **os.environ,
+        'CPR_HELPER': str(helper),
+        'CPR_TID': str(tid or ''),
+        'CPR_PHASE': str(phase or ''),
+        'CPR_FILE': return_file,
+        'CPR_ATTEMPT': str(attempt if attempt is not None else ''),
+    }
+    try:
+        proc = subprocess.run(['bash', '-c', bash_cmd], capture_output=True,
+                              text=True, timeout=timeout, env=env)
+        return proc.returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    finally:
+        try:
+            os.unlink(return_file)
+        except OSError:
+            pass
 
 
 # ── Phase spawn construction (tasks 4.4 / 4.16) ─────────────────────────────

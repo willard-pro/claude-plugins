@@ -32,6 +32,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+from fleetd import phase_dispatch  # noqa: E402
 from fleetd.phase_dispatch import (  # noqa: E402
     DispatchTable,
     DispatchTableError,
@@ -346,6 +347,135 @@ class TestTerminalWrite(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestBracketOpen(unittest.TestCase):
+    """Task 4.12 — the opening half, through the same shared bash writer."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.log = Path(self._tmp.name) / 'CRE-7-pipeline.log'
+        self.log.write_text('2026-09-03T09:00:00Z|META|schema|info|1\n')
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_opens_the_bracket_and_names_the_model(self):
+        model = phase_dispatch.phase_bracket_open(
+            'verify', 'Verify', 'CRE-7', self.log,
+            description='verify agent', model='claude-opus-5',
+            lib_dir=TICKET_AUTO_LIB)
+        written = self.log.read_text()
+        self.assertEqual(model, 'claude-opus-5')
+        self.assertIn('|VERIFY|verify|waiting|Agent launched — verify agent',
+                      written)
+        self.assertIn('"model":"claude-opus-5"', written)
+
+    def test_a_second_open_of_the_same_bracket_is_suppressed(self):
+        for _ in range(2):
+            phase_dispatch.phase_bracket_open('VERIFY', 'verify', 'CRE-7',
+                                              self.log,
+                                              lib_dir=TICKET_AUTO_LIB)
+        self.assertEqual(self.log.read_text().count('|VERIFY|verify|waiting|'),
+                         1)
+
+    def test_missing_helper_is_reported_not_swallowed(self):
+        # A silently unopened bracket looks exactly like a phase that never
+        # started, which is what the zombie detector and resume both read.
+        with tempfile.TemporaryDirectory() as empty:
+            with self.assertRaises(phase_dispatch.BracketOpenError):
+                phase_dispatch.phase_bracket_open('VERIFY', 'verify', 'CRE-7',
+                                                  self.log, lib_dir=empty)
+
+
+class TestLivenessHeartbeat(unittest.TestCase):
+    """The watchdog replacement — a checked fact, not a scheduled assertion."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.hb = Path(self._tmp.name) / 'CRE-8-heartbeat.log'
+        self.hb.write_text('2026-09-03T09:00:00Z|META|schema|info|2|{}\n')
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_writes_the_line_fleet_detect_reads_for_a_live_worker(self):
+        wrote = phase_dispatch.phase_liveness_heartbeat(
+            'CRE-8', 'verify', self.hb, os.getpid())
+        self.assertTrue(wrote)
+        # fleet-detect.sh:411 greps exactly this shape for its heartbeat
+        # liveness dimension; a phase-dispatched ticket emitting nothing at
+        # all would cross FLEET_STALL_WARN_SECS while running perfectly.
+        self.assertIn('|watchdog|alive|', self.hb.read_text())
+
+    def test_a_dead_worker_produces_no_line(self):
+        # Emitting liveness on a schedule rather than on a check would assert
+        # the very thing the line is supposed to measure.
+        dead = 2 ** 22 - 1
+        wrote = phase_dispatch.phase_liveness_heartbeat(
+            'CRE-8', 'verify', self.hb, dead)
+        self.assertFalse(wrote)
+        self.assertNotIn('|watchdog|alive|', self.hb.read_text())
+
+    def test_a_recycled_pid_is_not_alive(self):
+        # Same start-ticks guard spawn-helper.sh and detect-resume.sh use: the
+        # pid exists, but it is not the process that was forked.
+        wrote = phase_dispatch.phase_liveness_heartbeat(
+            'CRE-8', 'verify', self.hb, os.getpid(), start_ticks='1')
+        self.assertFalse(wrote)
+
+    def test_no_heartbeat_file_is_not_an_error(self):
+        self.assertFalse(
+            phase_dispatch.phase_liveness_heartbeat('CRE-8', 'verify', '',
+                                                    os.getpid()))
+
+
+class TestReturnCapture(unittest.TestCase):
+    """The phase-result channel's input on the automated path."""
+
+    def test_json_envelope_is_unwrapped_to_the_result_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'CRE-9-verify-gen1.json'
+            out.write_text(json.dumps({
+                'type': 'result', 'is_error': False,
+                'result': '=== PHASE_RESULT ===\nVERDICT: PASS\n',
+            }))
+            self.assertIn('VERDICT: PASS',
+                          phase_dispatch.worker_return_text(out))
+            self.assertNotIn('"is_error"',
+                             phase_dispatch.worker_return_text(out))
+
+    def test_a_non_json_capture_falls_back_to_its_raw_text(self):
+        # A truncated capture still carries a readable tail, and a
+        # phase-result block that survives there beats none.
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'CRE-9-verify-gen1.json'
+            out.write_text('{"result": "half a jso')
+            self.assertIn('half a jso', phase_dispatch.worker_return_text(out))
+
+    def test_a_missing_capture_is_empty_not_an_error(self):
+        self.assertEqual(
+            phase_dispatch.worker_return_text('/nonexistent/x.json'), '')
+
+    def test_capture_writes_the_file_phase_result_parse_reads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cwd = os.getcwd()
+            os.chdir(tmp)
+            try:
+                ok = phase_dispatch.capture_phase_return(
+                    'CRE-9', 'VERIFY', 'the agent said this',
+                    lib_dir=TICKET_AUTO_LIB)
+                self.assertTrue(ok)
+                captured = Path(tmp) / 'logs' / 'CRE-9-verify-agent.log'
+                self.assertTrue(captured.is_file())
+                self.assertIn('the agent said this', captured.read_text())
+            finally:
+                os.chdir(cwd)
+
+    def test_capture_is_fail_soft_when_the_helper_is_absent(self):
+        with tempfile.TemporaryDirectory() as empty:
+            self.assertFalse(phase_dispatch.capture_phase_return(
+                'CRE-9', 'VERIFY', 'x', lib_dir=empty))
 
 
 class TestPhaseSpawnConstruction(unittest.TestCase):

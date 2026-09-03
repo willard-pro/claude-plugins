@@ -420,21 +420,13 @@ spawn_agent_pre() {
   # Normalize phase to uppercase for detect-resume.sh compatibility
   phase_upper=$(echo "$PHASE" | tr '[:lower:]' '[:upper:]')
 
-  # 1. Write waiting log entry (idempotent: tail-2 check — allows retries after fail).
-  # Model write (6b) appends after the waiting line, so pure tail -1 would miss
-  # the waiting entry and duplicate on back-to-back spawn_agent_pre calls.
-  # tail -3 would span into prior brackets (fail/done) and suppress retries.
-  # tail -2: covers [waiting, model] but not [waiting, model, fail/done].
-  if [ -n "$LOG_FILE" ]; then
-    local last_lines
-    last_lines=$(tail -2 "$LOG_FILE" 2>/dev/null || true)
-    if echo "$last_lines" | grep -q "|${PHASE}|${phase_lower}|waiting|"; then
-      : # already written, skip (back-to-back duplicate)
-    else
-      local desc="${DESCRIPTION:-agent for ${TICKET_ID}}"
-      _plog "$LOG_FILE" "$phase_upper" "$phase_lower" "waiting" "Agent launched — ${desc}"
-    fi
-  fi
+  # 1. Open the bracket: the |waiting| line and the META|model entry.
+  # Delegated to phase_bracket_open so the grammar has one writer and two
+  # callers, exactly as phase_terminal_write does for the closing half.
+  local _model
+  _model=$(phase_bracket_open \
+    PHASE="$PHASE" STEP="$STEP" TICKET_ID="$TICKET_ID" \
+    DESCRIPTION="$DESCRIPTION" LOG_FILE="$LOG_FILE")
 
   # 2. Start heartbeat pinger and watchdog
   local PINGER_PID=""
@@ -508,26 +500,97 @@ EOF
     echo "ATTEMPT=${ATTEMPT}" >>"$meta_file" || true
   fi
 
-  # 6a. Append MODEL to spawn-meta file (Phase 0 RLVR — model identity recording)
-  local model="${ANTHROPIC_MODEL:-unknown}"
+  # 6a. Append MODEL to spawn-meta file (Phase 0 RLVR — model identity recording).
+  # The value is the one phase_bracket_open already recorded in the log, so the
+  # spawn-meta file and META|model can never name two different models.
   # F6: guard against unwritable /tmp or full disk — must not abort router spawn
-  echo "MODEL=${model}" >>"$meta_file" || true
+  echo "MODEL=${_model}" >>"$meta_file" || true
 
-  # 6b. Write META|model|info to pipeline log (wrapped for set -e safety)
-  local model_json
-  model_json=$(printf '{"phase":"%s","model":"%s"}' "$PHASE" "$model")
-  # F7: validate JSON with jq before appending — unescaped newlines or quotes
-  # in ANTHROPIC_MODEL would inject forged log lines or produce malformed JSON
-  if echo "$model_json" | jq -e . >/dev/null 2>&1; then
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|model|info|${model_json}" >>"$LOG_FILE" || true
-  else
-    # Fallback: escape the model value via jq -Rs, then embed in valid JSON
-    local safe_model
-    safe_model=$(printf '%s' "$model" | jq -Rs 'rtrimstr("\n")' 2>/dev/null || echo "\"unknown\"")
-    model_json=$(printf '{"phase":"%s","model":%s}' "$PHASE" "$safe_model")
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|model|info|${model_json}" >>"$LOG_FILE" || true
+  return 0
+}
+
+# ── phase_bracket_open ───────────────────────────────────────────────────────────
+# Opens a phase's bracket: the `{PHASE}|{step}|waiting|` pipeline-log line, and
+# the `META|model|info|` entry naming the model that phase will run on.
+#
+# The mirror of phase_terminal_write, and extracted for the same reason
+# (design.md D13, task 4.12): one writer of the line grammar, two callers. The
+# router reaches it through spawn_agent_pre; fleetd calls it directly, because
+# it forks phases itself and would otherwise leave every bracket unopened —
+# which detect-resume.sh, the zombie detector and the OTel exporter all read as
+# "this phase never started".
+#
+# What is deliberately NOT here, because it belongs to the manual path only:
+# the heartbeat pinger and watchdog (they exist to prove a *router* is still
+# looping while it waits; fleetd knows whether its own child is alive and says
+# so from a fact it verified), the spawn-meta write (fleetd's is different —
+# it carries SPAWNED_BY and a session id generated before exec, per D15), the
+# progress file (read only by that watchdog) and the ctx file (which, since
+# tool-error-capture.sh moved to session-id resolution, now has no reader at
+# all — it is written and swept and nothing consumes it).
+#
+# Echoes the resolved model name on stdout so a caller that also records model
+# identity elsewhere uses the same value rather than re-reading the env.
+#
+# Usage: phase_bracket_open PHASE=<phase> STEP=<step> TICKET_ID=<id> \
+#          [DESCRIPTION=<text>] [LOG_FILE=<path>] [MODEL=<name>]
+phase_bracket_open() {
+  local PHASE="" STEP="" TICKET_ID="" DESCRIPTION="" LOG_FILE="" MODEL=""
+
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+    PHASE=*) PHASE="${arg#PHASE=}" ;;
+    STEP=*) STEP="${arg#STEP=}" ;;
+    TICKET_ID=*) TICKET_ID="${arg#TICKET_ID=}" ;;
+    DESCRIPTION=*) DESCRIPTION="${arg#DESCRIPTION=}" ;;
+    LOG_FILE=*) LOG_FILE="${arg#LOG_FILE=}" ;;
+    MODEL=*) MODEL="${arg#MODEL=}" ;;
+    *)
+      echo "phase_bracket_open: unknown parameter '$arg'" >&2
+      return 1
+      ;;
+    esac
+  done
+
+  local phase_lower="" phase_upper=""
+  [ -n "$STEP" ] && phase_lower=$(echo "$STEP" | tr '[:upper:]' '[:lower:]')
+  [ -n "$PHASE" ] && phase_upper=$(echo "$PHASE" | tr '[:lower:]' '[:upper:]')
+  phase_upper="${phase_upper:-UNKNOWN}"
+
+  local model="${MODEL:-${ANTHROPIC_MODEL:-unknown}}"
+
+  # No log file: still resolve and echo the model, so a caller can record it.
+  if [ -z "$LOG_FILE" ]; then
+    printf '%s' "$model"
+    return 0
   fi
 
+  # Idempotent on the waiting line: tail-2 check, which allows a retry after a
+  # fail but suppresses a back-to-back duplicate. The window is 2 rather than 1
+  # because the model line lands immediately after the waiting line, and rather
+  # than 3 because a 3-line window reaches back into the previous bracket's
+  # terminal and would suppress a legitimate retry.
+  local last_lines
+  last_lines=$(tail -2 "$LOG_FILE" 2>/dev/null || true)
+  if ! echo "$last_lines" | command grep -q "|${phase_upper}|${phase_lower}|waiting|"; then
+    local desc="${DESCRIPTION:-agent for ${TICKET_ID}}"
+    _plog "$LOG_FILE" "$phase_upper" "$phase_lower" "waiting" "Agent launched — ${desc}"
+  fi
+
+  # META|model. Validate the JSON before appending: an unescaped quote or
+  # newline in the model name would otherwise forge a log line, and the log is
+  # what every consumer routes on.
+  local model_json
+  model_json=$(printf '{"phase":"%s","model":"%s"}' "$phase_upper" "$model")
+  if ! echo "$model_json" | jq -e . >/dev/null 2>&1; then
+    local safe_model
+    safe_model=$(printf '%s' "$model" | jq -Rs 'rtrimstr("\n")' 2>/dev/null || echo '"unknown"')
+    model_json=$(printf '{"phase":"%s","model":%s}' "$phase_upper" "$safe_model")
+  fi
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|model|info|${model_json}" >>"$LOG_FILE" || true
+
+  printf '%s' "$model"
   return 0
 }
 

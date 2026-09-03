@@ -1358,6 +1358,107 @@ test_watchdog_exits_at_iteration_cap_when_pid_unset() {
 
 # ── spawn_agent_post wait/reaping (Bug #4 fix) ─────────────────────────────────
 
+# ── phase_bracket_open (task 4.12) ───────────────────────────────────────────
+# The opening half, extracted for the same reason as the closing one: fleetd
+# forks phases itself and would otherwise leave every bracket unopened, which
+# detect-resume.sh, the zombie detector and the OTel exporter all read as "this
+# phase never started". Exercised the way fleetd calls it — directly, with no
+# pinger, no watchdog and no spawn-meta file.
+
+test_phase_bracket_open_writes_waiting_and_model() {
+  local tmpdir log
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PBO1-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|1" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    ANTHROPIC_MODEL=claude-opus-5 phase_bracket_open \
+      PHASE=verify STEP=Verify TICKET_ID=TEST-PBO1 \
+      DESCRIPTION="verify agent" LOG_FILE="$log" >/dev/null
+  )
+  grep -q '|VERIFY|verify|waiting|Agent launched — verify agent$' "$log" &&
+    grep -q '|META|model|info|{"phase":"VERIFY","model":"claude-opus-5"}$' "$log"
+}
+
+# The guard used to compare the caller's PHASE verbatim against a line written
+# with PHASE uppercased, so a lowercase caller never matched its own entry and
+# the idempotency check was inert. Both sides normalise now.
+test_phase_bracket_open_suppresses_duplicate_for_a_lowercase_phase() {
+  local tmpdir log count
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PBO2-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|1" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    phase_bracket_open PHASE=implement STEP=implement TICKET_ID=TEST-PBO2 LOG_FILE="$log" >/dev/null
+    phase_bracket_open PHASE=implement STEP=implement TICKET_ID=TEST-PBO2 LOG_FILE="$log" >/dev/null
+  )
+  count=$(grep -c '|IMPLEMENT|implement|waiting|' "$log")
+  [ "$count" = "1" ]
+}
+
+# A retry after a resolved bracket must open a new one. The tail window is two
+# lines precisely so it covers [waiting, model] without reaching back over a
+# terminal line into the previous attempt.
+test_phase_bracket_open_allows_a_retry_after_a_terminal() {
+  local tmpdir log count
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PBO3-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|1" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    phase_bracket_open PHASE=VERIFY STEP=verify TICKET_ID=TEST-PBO3 LOG_FILE="$log" >/dev/null
+    phase_terminal_write PHASE=VERIFY STEP=verify RESULT=fail MSG="1/3 criteria" LOG_FILE="$log"
+    phase_bracket_open PHASE=VERIFY STEP=verify TICKET_ID=TEST-PBO3 LOG_FILE="$log" >/dev/null
+  )
+  count=$(grep -c '|VERIFY|verify|waiting|' "$log")
+  [ "$count" = "2" ]
+}
+
+# A model name carrying a quote would otherwise forge a log line, and the log
+# is what every consumer routes on.
+test_phase_bracket_open_never_forges_a_log_line() {
+  local tmpdir log
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PBO4-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|1" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    phase_bracket_open PHASE=EXEC STEP=exec TICKET_ID=TEST-PBO4 \
+      MODEL='evil","x":"y' LOG_FILE="$log" >/dev/null
+  )
+  # Every META|model line must still be valid JSON in field 5+.
+  grep '|META|model|info|' "$log" | sed 's/^[^|]*|META|model|info|//' | jq -e . >/dev/null
+}
+
+test_phase_bracket_open_echoes_the_model_without_a_log_file() {
+  local out
+  out=$(
+    source "$LIB_DIR/spawn-helper.sh"
+    ANTHROPIC_MODEL=claude-sonnet-5 phase_bracket_open PHASE=EXEC STEP=exec TICKET_ID=X
+  )
+  [ "$out" = "claude-sonnet-5" ]
+}
+
+test_spawn_agent_pre_still_opens_through_the_helper() {
+  # The router path must be unchanged by the extraction, including the
+  # spawn-meta MODEL line, which now reuses the value the helper resolved.
+  local tmpdir log meta
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PBO5-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|1" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    ANTHROPIC_MODEL=claude-opus-5 spawn_agent_pre \
+      PHASE=APPRAISE STEP=appraise TICKET_ID=TEST-PBO5 SKILL=/ticket-appraise \
+      LOG_FILE="$log" DESCRIPTION="appraise agent" >/dev/null
+  )
+  meta="/tmp/ticket-auto-TEST-PBO5-spawn-meta.txt"
+  grep -q '|APPRAISE|appraise|waiting|Agent launched — appraise agent$' "$log" &&
+    grep -q '|META|model|info|{"phase":"APPRAISE","model":"claude-opus-5"}$' "$log" &&
+    grep -q '^MODEL=claude-opus-5$' "$meta"
+}
+
 # ── phase_terminal_write (design.md D13) ─────────────────────────────────────
 # The writing half of spawn_agent_post, extracted so fleetd can resolve a
 # bracket on the automated path without going through the router. These tests
@@ -2006,6 +2107,12 @@ for fn in \
   test_watchdog_exits_when_worker_pid_dies \
   test_watchdog_exits_at_iteration_cap_when_pid_unset \
   test_spawn_agent_post_waits_for_captured_pids \
+  test_phase_bracket_open_writes_waiting_and_model \
+  test_phase_bracket_open_suppresses_duplicate_for_a_lowercase_phase \
+  test_phase_bracket_open_allows_a_retry_after_a_terminal \
+  test_phase_bracket_open_never_forges_a_log_line \
+  test_phase_bracket_open_echoes_the_model_without_a_log_file \
+  test_spawn_agent_pre_still_opens_through_the_helper \
   test_phase_terminal_write_emits_done_marker \
   test_phase_terminal_write_prefixes_verdict \
   test_phase_terminal_write_marks_warn_continue \

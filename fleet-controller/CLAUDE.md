@@ -17,7 +17,7 @@ fleet-controller/
   fleetd/                         # Python 3 supervisor daemon (stdlib-only)
   fleetd/schema.sql               # Fleet state store schema (SQLite, v1)
   fleetd/store.py                 # State store module — fleetd is its sole writer
-  fleetd/phase_dispatch.py        # Phase-level dispatch — table loader, classifier, spawn construction, loop caps
+  fleetd/phase_dispatch.py        # Phase-level dispatch — table loader, classifier, spawn construction, loop caps, spawn bracket
   fleetd/gate_hold.py             # Gate-hold reconciliation on its own cadence (a hold is a row, not a process)
   fleetd/preamble.py              # Once-per-ticket preamble caller — env file, log init, branch context, preflight
   fleetd/otel.py                  # OTel exporter — the ONLY module with a third-party dep
