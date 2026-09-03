@@ -644,6 +644,9 @@ After state detection, enter the stateless dispatch loop. Re-run `detect-resume.
 
 ### Dispatch table
 
+<!-- GENERATED:dispatch-table START -->
+<!-- Generated from skills/ticket-flow/dispatch-table.json by skills/ticket-flow/gen-dispatch-table.py. Do not hand-edit: edit the JSON and regenerate. CI fails the build when this block drifts. -->
+
 | RESUME_STEP | Action | Type |
 |-------------|--------|------|
 | `STEP_1` | Spawn `ticket-appraise` agent | Agent |
@@ -660,6 +663,7 @@ After state detection, enter the stateless dispatch loop. Re-run `detect-resume.
 | `STEP_6` | Retro check + optional `ticket-retro` + outcome write | Bash + Agent |
 | `done` | Exit 0 | — |
 | `*` (unknown) | Log error, exit 1 | — |
+<!-- GENERATED:dispatch-table END -->
 
 ### STEP_1 — Appraise
 

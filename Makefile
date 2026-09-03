@@ -1,11 +1,16 @@
 SCRIPTS := $(shell find . -name "*.sh" -not -path "./.git/*")
 
-.PHONY: test test-lib test-fleetd test-flow test-kc lint fmt-check fmt test-grill test-planner-intent-gate
+.PHONY: test test-lib test-fleetd test-flow test-kc lint fmt-check fmt test-grill test-planner-intent-gate check-generated
 
-test: test-lib test-fleetd test-planner test-flow test-kc test-grill test-planner-intent-gate
+test: check-generated test-lib test-fleetd test-planner test-flow test-kc test-grill test-planner-intent-gate
+
+check-generated:
+	@echo "=== generated-section drift check ==="
+	python3 ticket-auto-pipeline/skills/ticket-flow/gen-dispatch-table.py --check
 
 test-lib:
 	@echo "=== lib unit tests ==="
+	bash ticket-auto-pipeline/lib/tests/test-dispatch-table.sh
 	bash ticket-auto-pipeline/lib/tests/test-linear-api.sh
 	bash ticket-auto-pipeline/lib/tests/test-env-check.sh
 	bash ticket-auto-pipeline/lib/tests/test-notes-parse.sh

@@ -26,5 +26,8 @@ jobs:
       - name: Format check (shfmt)
         run: make fmt-check
 
+      - name: Generated-section drift check
+        run: make check-generated
+
       - name: Unit tests
         run: make test

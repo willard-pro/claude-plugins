@@ -15,6 +15,8 @@ ticket-auto-pipeline/
   lib/                            # Shared bash libraries
   personas/                       # In-house persona role guidance (base + specializers)
   skills/ticket-flow/state-machine.json              # Linear state/label transition definitions
+  skills/ticket-flow/dispatch-table.json             # Canonical router dispatch table (steps, loop caps, preconditions)
+  skills/ticket-flow/gen-dispatch-table.py           # Renders that table into ticket-auto/SKILL.md; --check is the CI drift gate
   pipeline-log-format.md          # Pipeline log schema (ISO|PHASE|STEP|STATUS|MSG)
   pipeline-heartbeat-format.md    # Heartbeat log schema
   docs/ticket-auto-pipeline-diagram.html  # Interactive state diagram (served via GitHub Pages)
@@ -211,6 +213,34 @@ When ticket-planner creates a ticket, it appends a `## Planner Context` markdown
 
 **Exploration depth consumption** (appraise fast-path): The depth declared by the planner controls how much the appraise agent trusts the planner's investigation. `deep` → skip full grep, trust traced paths. `standard` → use targets as primary path, supplement with targeted grep. `quick-scan` → treat targets as hints, do full investigation. Depth mismatch (`quick-scan` on complex ticket) is a soft signal in gate-check.sh — warns, never blocks.
 
+## Dispatch table (generated)
+
+`skills/ticket-auto/SKILL.md`'s Dispatch Loop table is **generated**, not hand-written.
+The canonical source is `skills/ticket-flow/dispatch-table.json`; the renderer is
+`skills/ticket-flow/gen-dispatch-table.py`.
+
+```bash
+python3 skills/ticket-flow/gen-dispatch-table.py           # print the block
+python3 skills/ticket-flow/gen-dispatch-table.py --check   # exit 1 on drift (CI gate)
+python3 skills/ticket-flow/gen-dispatch-table.py --write   # rewrite the block in SKILL.md
+```
+
+Exit codes: `0` in sync, `1` drift, `2` structural (missing file, missing markers,
+malformed JSON). The generator owns only the span between
+`<!-- GENERATED:dispatch-table START -->` and `<!-- GENERATED:dispatch-table END -->` —
+the rest of SKILL.md stays hand-written. Edit the JSON and regenerate; never hand-edit
+the block. `make check-generated` runs the gate as the first dependency of `make test`
+and as its own CI step.
+
+The JSON carries more than the three rendered columns: per-step spawn parameters (skill,
+phase, `FROM_STEP` variable, extra flags, instructions), the four router-managed loop
+caps with their counters and gate-stop codes, the `STEP_2_5`/`STEP_3` alias, the
+`VERIFY_LAST=fail` precondition on `STEP_4_5`, and each step's non-agent pre/post
+orchestration (`return-completeness-check.sh`, `outcome-label-check.sh`, auto-merge,
+phase inspectors). That richer field set exists because fleet-controller's phase-dispatch
+module loads the same file as its phase-sequencing input — the prose table and the code
+supervisor read one source, so they cannot disagree.
+
 ## Pipeline log format
 
 `ISO|PHASE|STEP|STATUS|MSG` — schema version 1. Phases: `APPRAISE`, `EXEC`, `GATE`, `IMPLEMENT`, `VERIFY`, `PR-REVIEW`, `MAINTENANCE`. `META` pseudo-phase for schema, gate results, outcomes, artifacts.
@@ -260,6 +290,7 @@ Consumers: `skills/ticket-auto/dashboard.py` (dual-panel), `skills/ticket-overse
 - [Pipeline log format](pipeline-log-format.md)
 - [Heartbeat log format](pipeline-heartbeat-format.md)
 - [State machine](skills/ticket-flow/state-machine.json)
+- [Dispatch table](skills/ticket-flow/dispatch-table.json)
 - [Planner Context schema](docs/planner-context-schema.md)
 - [Branch Directive schema](docs/branch-directive-schema.md)
 - [Phase Result schema](docs/phase-result-schema.md)
