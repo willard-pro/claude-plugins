@@ -1771,6 +1771,166 @@ META
   return $result
 }
 
+# ── fleetd phase-worker token capture (design.md D15) ─────────────────────────
+# A fleetd-dispatched phase is a top-level `claude -p` session, not a subagent,
+# so SubagentStop never fires for it. Without these, META|tokens silently stops
+# being written on the automated path and the dashboard, the OTel exporter's
+# gen_ai.usage.* attributes and retro trend aggregation all degrade with no
+# error anywhere. That silence is exactly why the move is tested rather than
+# assumed.
+
+_tt_write_fleetd_meta() {
+  # $1 meta file, $2 ticket, $3 phase, $4 session, $5 log file
+  cat >"$1" <<META
+PHASE=$3
+STEP=$(echo "$3" | tr '[:upper:]' '[:lower:]')
+TICKET_ID=$2
+LOG_FILE=$5
+HB_LOG_FILE=
+CLAUDE_LOG_FILE=
+SESSION_ID=$4
+SPAWNED_BY=fleetd
+META
+  touch "$1"
+}
+
+_tt_write_transcript() {
+  cat >"$1" <<'JSONL'
+{"type": "assistant", "message": {"usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 10}}}
+JSONL
+}
+
+test_token_tracker_stop_event_captures_fleetd_phase() {
+  # The load-bearing case: Stop + SPAWNED_BY=fleetd + transcript_path writes
+  # META|tokens under the phase from spawn-meta.
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local log_file="$tmpdir/test-tk-fleetd.log"
+  local transcript="$tmpdir/top-transcript.jsonl"
+  local meta_file="/tmp/ticket-auto-TEST-TKF1-spawn-meta.txt"
+
+  rm -f "$meta_file" "$log_file"
+  _tt_write_fleetd_meta "$meta_file" TEST-TKF1 VERIFY sess-tkf1 "$log_file"
+  _tt_write_transcript "$transcript"
+
+  echo "{\"session_id\": \"sess-tkf1\", \"hook_event_name\": \"Stop\", \"transcript_path\": \"$transcript\"}" |
+    bash "$LIB_DIR/../hooks/token-tracker.sh" 2>/dev/null || true
+
+  local result=0
+  grep -q '|META|tokens|info|VERIFY:100/50/10' "$log_file" 2>/dev/null || result=1
+
+  rm -rf "$tmpdir"
+  rm -f "$meta_file" 2>/dev/null || true
+  return $result
+}
+
+test_token_tracker_subagent_stop_ignores_fleetd_phase() {
+  # The phase agent's own subagents stop within the phase's session id and so
+  # match the same spawn-meta. Counting them would double-count the phase the
+  # imminent Stop is about to count in full.
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local log_file="$tmpdir/test-tk-fleetd2.log"
+  local transcript="$tmpdir/sub-transcript.jsonl"
+  local meta_file="/tmp/ticket-auto-TEST-TKF2-spawn-meta.txt"
+
+  rm -f "$meta_file" "$log_file"
+  _tt_write_fleetd_meta "$meta_file" TEST-TKF2 VERIFY sess-tkf2 "$log_file"
+  _tt_write_transcript "$transcript"
+
+  echo "{\"session_id\": \"sess-tkf2\", \"hook_event_name\": \"SubagentStop\", \"agent_transcript_path\": \"$transcript\"}" |
+    bash "$LIB_DIR/../hooks/token-tracker.sh" 2>/dev/null || true
+
+  local result=0
+  [ -f "$log_file" ] && result=1
+
+  rm -rf "$tmpdir"
+  rm -f "$meta_file" 2>/dev/null || true
+  return $result
+}
+
+test_token_tracker_stop_ignores_router_spawn() {
+  # The mirror guard. A router spawn-meta carries no SPAWNED_BY, and the
+  # router's own Stop fires against its session id at the end of every turn.
+  # Counting it would attribute the whole router turn to whichever phase is
+  # open at the time.
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local log_file="$tmpdir/test-tk-router.log"
+  local transcript="$tmpdir/router-transcript.jsonl"
+  local meta_file="/tmp/ticket-auto-TEST-TKF3-spawn-meta.txt"
+
+  rm -f "$meta_file" "$log_file"
+  cat >"$meta_file" <<META
+PHASE=IMPLEMENT
+STEP=implement
+TICKET_ID=TEST-TKF3
+LOG_FILE=$log_file
+SESSION_ID=sess-tkf3
+META
+  _tt_write_transcript "$transcript"
+
+  echo "{\"session_id\": \"sess-tkf3\", \"hook_event_name\": \"Stop\", \"transcript_path\": \"$transcript\"}" |
+    bash "$LIB_DIR/../hooks/token-tracker.sh" 2>/dev/null || true
+
+  local result=0
+  [ -f "$log_file" ] && result=1
+
+  rm -rf "$tmpdir"
+  rm -f "$meta_file" 2>/dev/null || true
+  return $result
+}
+
+test_token_tracker_stop_never_falls_back_to_agent_transcript() {
+  # A wrong measurement is worse than none: if the event's own transcript
+  # field is absent, the hook must not reach for the other event's field.
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local log_file="$tmpdir/test-tk-nofallback.log"
+  local transcript="$tmpdir/other-transcript.jsonl"
+  local meta_file="/tmp/ticket-auto-TEST-TKF4-spawn-meta.txt"
+
+  rm -f "$meta_file" "$log_file"
+  _tt_write_fleetd_meta "$meta_file" TEST-TKF4 IMPLEMENT sess-tkf4 "$log_file"
+  _tt_write_transcript "$transcript"
+
+  echo "{\"session_id\": \"sess-tkf4\", \"hook_event_name\": \"Stop\", \"agent_transcript_path\": \"$transcript\"}" |
+    bash "$LIB_DIR/../hooks/token-tracker.sh" 2>/dev/null || true
+
+  local result=0
+  [ -f "$log_file" ] && result=1
+
+  rm -rf "$tmpdir"
+  rm -f "$meta_file" 2>/dev/null || true
+  return $result
+}
+
+test_token_tracker_fleetd_phase_records_elapsed_from_start_marker() {
+  # fleetd writes the start stamp itself because SubagentStart does not fire
+  # either. Without it the phase's duration silently disappears.
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local log_file="$tmpdir/test-tk-elapsed.log"
+  local transcript="$tmpdir/elapsed-transcript.jsonl"
+  local meta_file="/tmp/ticket-auto-TEST-TKF5-spawn-meta.txt"
+  local start_file="/tmp/ticket-auto-TEST-TKF5-start-VERIFY-$(date +%s%N).ts"
+
+  rm -f "$meta_file" "$log_file" "$start_file"
+  _tt_write_fleetd_meta "$meta_file" TEST-TKF5 VERIFY sess-tkf5 "$log_file"
+  _tt_write_transcript "$transcript"
+  date +%s%N >"$start_file"
+
+  echo "{\"session_id\": \"sess-tkf5\", \"hook_event_name\": \"Stop\", \"transcript_path\": \"$transcript\"}" |
+    bash "$LIB_DIR/../hooks/token-tracker.sh" 2>/dev/null || true
+
+  local result=0
+  grep -q 'elapsed_ms=' "$log_file" 2>/dev/null || result=1
+
+  rm -rf "$tmpdir"
+  rm -f "$meta_file" "$start_file" 2>/dev/null || true
+  return $result
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -1865,7 +2025,12 @@ for fn in \
   test_tmp_sweep_honours_ttl_override \
   test_tmp_sweep_bad_ttl_falls_back_to_default \
   test_token_tracker_prunes_start_files_without_a_match \
-  test_token_tracker_keeps_recent_start_file_of_live_sibling; do
+  test_token_tracker_keeps_recent_start_file_of_live_sibling \
+  test_token_tracker_stop_event_captures_fleetd_phase \
+  test_token_tracker_subagent_stop_ignores_fleetd_phase \
+  test_token_tracker_stop_ignores_router_spawn \
+  test_token_tracker_stop_never_falls_back_to_agent_transcript \
+  test_token_tracker_fleetd_phase_records_elapsed_from_start_marker; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

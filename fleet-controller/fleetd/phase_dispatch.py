@@ -34,6 +34,7 @@ Stdlib only. Third-party dependencies stay quarantined in `otel.py` (D11).
 import json
 import os
 import subprocess
+import time
 from collections import namedtuple
 from pathlib import Path
 
@@ -593,3 +594,75 @@ def build_phase_spawn(table, step_id, tid, log_file, hb_log_file='',
         loop_bearing=bool(spawn.get('loop_bearing')),
         next_phase=(spawn.get('next_phase') or phase),
     )
+
+
+# ── Hook identity (design.md D15, task 4.13) ────────────────────────────────
+
+SPAWN_META_DIR = Path('/tmp')
+
+
+def spawn_meta_path(tid):
+    """The spawn-meta file every identity-resolving hook reads."""
+    return SPAWN_META_DIR / f'ticket-auto-{tid}-spawn-meta.txt'
+
+
+def write_spawn_meta(tid, spawn, session_id, pinger_pid='', watchdog_pid='',
+                     model=None, meta_dir=None):
+    """Write the spawn-meta file for a fleetd-dispatched phase, before exec.
+
+    `agent-activity.sh`, `tool-error-capture.sh` and `token-tracker.sh` all
+    resolve which ticket and phase they belong to by matching their payload's
+    `session_id` against `SESSION_ID` in this file. Under the router that value
+    is the router's own `$CLAUDE_CODE_SESSION_ID`; here it is the `--session-id`
+    fleetd generated for the phase. The hooks cannot tell the difference, which
+    is what makes them work unchanged on the automated path (D15).
+
+    `SPAWNED_BY=fleetd` is the one new field, and it is not decoration.
+    A router-spawned phase is a **subagent**, so its tokens arrive on
+    `SubagentStop`; a fleetd-spawned phase is a **top-level session**, so they
+    arrive on `Stop`. Both hooks would otherwise match this file — the phase
+    agent's own subagents stop within the phase's session id — and the phase
+    would be counted twice. This field is how `token-tracker.sh` tells which
+    event is the real one for this spawn.
+
+    Written before `execvpe` so no hook can fire against a missing file.
+    """
+    meta_dir = Path(meta_dir) if meta_dir else SPAWN_META_DIR
+    path = meta_dir / f'ticket-auto-{tid}-spawn-meta.txt'
+    lines = [
+        f'PHASE={spawn.phase}',
+        f'STEP={spawn.step}',
+        f'TICKET_ID={tid}',
+        f'LOG_FILE={spawn.env.get("LOG_FILE", "")}',
+        f'HB_LOG_FILE={spawn.env.get("HB_LOG_FILE", "")}',
+        f'CLAUDE_LOG_FILE={spawn.env.get("CLAUDE_LOG_FILE", "")}',
+        f'PINGER_PID={pinger_pid}',
+        f'WATCHDOG_PID={watchdog_pid}',
+        f'SESSION_ID={session_id}',
+        'SPAWNED_BY=fleetd',
+    ]
+    if spawn.attempt is not None:
+        lines.append(f'ATTEMPT={spawn.attempt}')
+    if model is None:
+        model = os.environ.get('ANTHROPIC_MODEL', 'unknown')
+    lines.append(f'MODEL={model}')
+    path.write_text('\n'.join(lines) + '\n')
+    return path
+
+
+def write_phase_start_marker(tid, phase, meta_dir=None):
+    """Write the nanosecond start stamp `token-tracker.sh` reads for elapsed_ms.
+
+    On the router path this is `token-tracker-start.sh`'s job, fired by
+    `SubagentStart`. A fleetd-spawned phase is not a subagent, so that event
+    never fires and fleetd writes the stamp itself — it knows the ticket, the
+    phase and the moment, which is everything the hook was deriving.
+
+    The filename keeps the hook's existing `-start-{PHASE}-{ns}.ts` shape so
+    the reader needs no change, and the same `find -mmin +5` cleanup applies.
+    """
+    meta_dir = Path(meta_dir) if meta_dir else SPAWN_META_DIR
+    stamp = time.time_ns()
+    path = meta_dir / f'ticket-auto-{tid}-start-{phase}-{stamp}.ts'
+    path.write_text(str(stamp))
+    return path

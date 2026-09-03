@@ -1612,7 +1612,7 @@ class SpawnError(Exception):
 
 def spawn_worker(tid, generation, state_dir, reason='dispatched',
                  cmd_override=None, claude_bin=None, claude_cmd=None,
-                 prompt=None, phase='', extra_env=None):
+                 prompt=None, phase='', extra_env=None, session_id=None):
     """Fork and exec a worker for `tid`. Returns the child PID.
 
     The child is placed in its own process group so that kill escalation
@@ -1635,7 +1635,10 @@ def spawn_worker(tid, generation, state_dir, reason='dispatched',
     other's records; `extra_env` carries what `spawn_agent_pre` would have
     exported in the agent prompt — see `phase_dispatch.build_phase_spawn`.
     """
-    session_id = str(uuid.uuid4())
+    # Generated here unless the caller already has one. A phase spawn does:
+    # it must write the session id into spawn-meta *before* the fork, so no
+    # hook can fire against a file that does not name its own session yet.
+    session_id = session_id or str(uuid.uuid4())
     cmd = cmd_override if cmd_override is not None else _build_worker_cmd(
         tid, claude_bin=claude_bin, claude_cmd=claude_cmd,
         session_id=session_id, prompt=prompt)
@@ -1716,6 +1719,22 @@ def spawn_worker(tid, generation, state_dir, reason='dispatched',
     return pid, session_id
 
 
+def _phase_write_identity(tid, spawn, session_id):
+    """Write the phase's spawn-meta and start stamp. Never blocks a spawn.
+
+    These files drive token accounting and activity attribution. Losing them
+    costs telemetry; refusing to spawn over an unwritable `/tmp` would cost
+    the ticket. The failure is warned about rather than raised for the same
+    reason `_store_do` swallows store failures.
+    """
+    try:
+        _phase_mod.write_spawn_meta(tid, spawn, session_id)
+        _phase_mod.write_phase_start_marker(tid, spawn.phase)
+    except OSError as exc:
+        print(f'fleetd: spawn-meta write failed for {tid}/{spawn.phase}: '
+              f'{exc}', file=sys.stderr)
+
+
 def spawn_phase_worker(tid, step_id, generation, state_dir, log_file,
                        table=None, hb_log_file='', claude_log_file='',
                        from_step='', attempt=None, counters=None,
@@ -1741,10 +1760,18 @@ def spawn_phase_worker(tid, step_id, generation, state_dir, log_file,
         claude_log_file=claude_log_file, from_step=from_step, attempt=attempt,
         counters=counters, env_file=env_file, extra_env=extra_env,
     )
+    # Identity before exec (D15). Both files are written by the router's
+    # `spawn_agent_pre`/`SubagentStart` on the manual path; neither of those
+    # runs here, and every hook that resolves "which ticket and phase am I"
+    # reads them.
+    session_id = str(uuid.uuid4())
+    _phase_write_identity(tid, spawn, session_id)
+
     pid, session_id = spawn_worker(
         tid, generation, state_dir, reason=reason, cmd_override=cmd_override,
         claude_bin=claude_bin, claude_cmd=claude_cmd,
         prompt=spawn.prompt, phase=spawn.phase, extra_env=spawn.env,
+        session_id=session_id,
     )
     _store_record_spawn(state_dir, tid, pid, generation, reason, session_id,
                         phase=spawn.phase)

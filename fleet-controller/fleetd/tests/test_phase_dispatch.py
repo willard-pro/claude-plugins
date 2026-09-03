@@ -46,6 +46,8 @@ from fleetd.phase_dispatch import (  # noqa: E402
     router_token,
     PhaseSpawnError,
     build_phase_spawn,
+    write_spawn_meta,
+    write_phase_start_marker,
     DEFAULT_PHASE_FLAGS,
     EXIT_ROUTE_CONTINUE,
     EXIT_ROUTE_GATE_STOP,
@@ -454,4 +456,65 @@ class TestPhaseSpawnConstruction(unittest.TestCase):
             self.assertTrue(spawn.phase, f'{step_id} has no phase')
             built += 1
         self.assertGreaterEqual(built, 6)
+
+
+class TestHookIdentityFiles(unittest.TestCase):
+    """Task 4.13 / D15 — the files every identity-resolving hook reads.
+
+    Under the router these are written by `spawn_agent_pre` and
+    `token-tracker-start.sh`. Neither runs for a fleetd-dispatched phase, so
+    fleetd writes them — in the same shape, so the hooks need no change.
+    """
+
+    def setUp(self):
+        self.table = DispatchTable.load(TABLE_PATH)
+        self.tmp = tempfile.mkdtemp()
+        self.spawn = build_phase_spawn(
+            self.table, 'STEP_4_5', 'CRE-9', '/w/logs/CRE-9-pipeline.log',
+            hb_log_file='/w/logs/CRE-9-hb.log', attempt=2)
+
+    def _meta(self, **kw):
+        path = write_spawn_meta('CRE-9', self.spawn, 'sess-abc',
+                                meta_dir=self.tmp, **kw)
+        return dict(
+            line.split('=', 1)
+            for line in path.read_text().splitlines() if '=' in line
+        )
+
+    def test_session_id_is_the_field_hooks_match_on(self):
+        self.assertEqual(self._meta()['SESSION_ID'], 'sess-abc')
+
+    def test_phase_and_log_file_come_from_the_spawn(self):
+        fields = self._meta()
+        self.assertEqual(fields['PHASE'], 'VERIFY')
+        self.assertEqual(fields['STEP'], 'verify')
+        self.assertEqual(fields['TICKET_ID'], 'CRE-9')
+        self.assertEqual(fields['LOG_FILE'], '/w/logs/CRE-9-pipeline.log')
+        self.assertEqual(fields['HB_LOG_FILE'], '/w/logs/CRE-9-hb.log')
+
+    def test_spawned_by_marks_the_file_as_fleetd_written(self):
+        """The discriminator that keeps a phase from being counted twice.
+
+        Without it both SubagentStop (the phase agent's own subagents) and
+        Stop (the phase session itself) match this file.
+        """
+        self.assertEqual(self._meta()['SPAWNED_BY'], 'fleetd')
+
+    def test_attempt_is_carried_for_the_agent_to_read(self):
+        self.assertEqual(self._meta()['ATTEMPT'], '2')
+
+    def test_model_defaults_to_the_environment(self):
+        fields = self._meta(model='claude-test-model')
+        self.assertEqual(fields['MODEL'], 'claude-test-model')
+
+    def test_filename_matches_what_the_hooks_glob(self):
+        path = write_spawn_meta('CRE-9', self.spawn, 's', meta_dir=self.tmp)
+        self.assertEqual(path.name, 'ticket-auto-CRE-9-spawn-meta.txt')
+
+    def test_start_marker_matches_the_hook_s_find_pattern(self):
+        """`token-tracker.sh` finds this by name; the shape is the contract."""
+        path = write_phase_start_marker('CRE-9', 'VERIFY', meta_dir=self.tmp)
+        self.assertTrue(path.name.startswith('ticket-auto-CRE-9-start-VERIFY-'))
+        self.assertTrue(path.name.endswith('.ts'))
+        self.assertGreater(int(path.read_text()), 0)
 
