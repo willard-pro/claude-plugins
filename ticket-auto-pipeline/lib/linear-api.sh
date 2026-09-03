@@ -429,6 +429,85 @@ update_issue() {
   echo "$resp" | jq '.data.issueUpdate'
 }
 
+# Create a new Linear issue.
+#
+# Positional argument shape — deliberately NOT the flag-based style
+# update_issue() grew in #284. update_issue() moved to flags because an
+# update call legitimately skips almost every field ("4 args is already a
+# lot, more make it unreadable"), so flags let a caller name only the
+# field(s) it's touching. create_issue() doesn't have that ambiguity: every
+# call needs team_id + title + description as required fields, and
+# project_id/parent_id/label_ids are a small, fixed, ordered set of optional
+# trailing fields — there's no "which of these am I skipping" confusion a
+# flag shape would resolve. This mirrors the issue's own suggested
+# signature.
+#
+# ticket-planner/lib/planner-linear-api.sh's planner_linear_build_issue_input()
+# builds a comparably-shaped IssueCreateInput, but it additionally resolves
+# label NAMES and project/milestone refs to Linear IDs via get_team()/
+# get_project() lookups. This helper deliberately does none of that — per
+# #283 (which cites #280, handled separately) it accepts only a
+# pre-resolved label_ids JSON array, same convention update_issue() already
+# uses for its label_ids argument. Callers that need name resolution do it
+# themselves before calling in.
+#
+# Only non-empty optional fields are added to the IssueCreateInput (dynamic
+# jq '. + {field: $v}' build, same incremental pattern update_issue() uses).
+# The response is guarded with _jq_guard on .data.issueCreate.issue before
+# unwrapping — same convention as get_issue()/get_team() — so a malformed
+# response or a success:false result (Linear returns a null issue in that
+# case) is a clean error return, not a silent/corrupt object.
+#
+# Args: <team_id> <title> <description> [project_id] [parent_id] [label_ids_json]
+# Output: {id, identifier, title, url} JSON on stdout (the created issue).
+create_issue() {
+  local team_id="$1"
+  local title="$2"
+  local description="$3"
+  local project_id="${4:-}"
+  local parent_id="${5:-}"
+  local label_ids="${6:-}"
+
+  if [ -z "$team_id" ] || [ -z "$title" ] || [ -z "$description" ]; then
+    echo "create_issue: team_id, title, and description are required" >&2
+    return 1
+  fi
+
+  local input
+  input=$(jq -n --arg teamId "$team_id" --arg title "$title" --arg description "$description" '{
+    teamId: $teamId,
+    title: $title,
+    description: $description
+  }')
+  [ -n "$project_id" ] && input=$(echo "$input" | jq --arg v "$project_id" '. + {projectId: $v}')
+  [ -n "$parent_id" ] && input=$(echo "$input" | jq --arg v "$parent_id" '. + {parentId: $v}')
+  if [ -n "$label_ids" ]; then
+    if ! echo "$label_ids" | jq -e 'type == "array"' >/dev/null 2>&1; then
+      echo "create_issue: label_ids must be a JSON array string, got: $label_ids" >&2
+      return 1
+    fi
+    input=$(echo "$input" | jq --argjson l "$label_ids" '. + {labelIds: $l}')
+  fi
+
+  local query
+  query=$(jq -n --argjson input "$input" '{
+    query: "mutation($input: IssueCreateInput!) { issueCreate(input: $input) { success issue { id identifier title url } } }",
+    variables: {input: $input}
+  }')
+  local resp
+  resp=$(linear_graphql "$query")
+
+  # Type guard: verify .data.issueCreate.issue exists before querying.
+  # A success:false response comes back with issue: null, so this guard
+  # also catches that case, not just a structurally malformed response.
+  if ! _jq_guard "$resp" ".data.issueCreate.issue" "object"; then
+    echo "create_issue: unexpected response shape — .data.issueCreate.issue missing or not an object" >&2
+    echo "null"
+    return 1
+  fi
+  echo "$resp" | jq '.data.issueCreate.issue'
+}
+
 # Get current user (me) info from Linear
 get_me() {
   local query

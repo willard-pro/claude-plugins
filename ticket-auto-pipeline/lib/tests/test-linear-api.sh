@@ -273,6 +273,116 @@ test_update_issue_invalid_priority_errors() {
   [ "$rc" -eq 1 ]
 }
 
+# ── create_issue tests (mock linear_graphql) ──────────────────────────────────
+
+# Issue #283: required-fields-only call (team_id, title, description) —
+# optional fields all omitted, mutation input carries exactly the 3 required keys.
+test_create_issue_required_fields_only() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo \"\$1\" > '$tmpfile'; echo '{\"data\":{\"issueCreate\":{\"success\":true,\"issue\":{\"id\":\"i2\",\"identifier\":\"WIL-2\",\"title\":\"New ticket\",\"url\":\"https://linear.app/x/issue/WIL-2\"}}}}'; }
+    create_issue 'team-1' 'New ticket' 'A description'
+  " 2>/dev/null
+  jq -e '.variables.input == {"teamId":"team-1","title":"New ticket","description":"A description"}' "$tmpfile" >/dev/null 2>&1
+  local result=$?
+  rm -f "$tmpfile"
+  return $result
+}
+
+# Issue #283: all optional fields combined (project_id, parent_id, label_ids).
+test_create_issue_all_optional_fields_combined() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo \"\$1\" > '$tmpfile'; echo '{\"data\":{\"issueCreate\":{\"success\":true,\"issue\":{\"id\":\"i2\",\"identifier\":\"WIL-2\",\"title\":\"New ticket\",\"url\":\"https://linear.app/x/issue/WIL-2\"}}}}'; }
+    create_issue 'team-1' 'New ticket' 'A description' 'proj-1' 'par-1' '[\"label-1\",\"label-2\"]'
+  " 2>/dev/null
+  jq -e '.variables.input == {"teamId":"team-1","title":"New ticket","description":"A description","projectId":"proj-1","parentId":"par-1","labelIds":["label-1","label-2"]}' "$tmpfile" >/dev/null 2>&1
+  local result=$?
+  rm -f "$tmpfile"
+  return $result
+}
+
+# Issue #283: omitted optional fields must be absent from the mutation input,
+# not present as null.
+test_create_issue_omitted_optional_fields_absent() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo \"\$1\" > '$tmpfile'; echo '{\"data\":{\"issueCreate\":{\"success\":true,\"issue\":{\"id\":\"i2\",\"identifier\":\"WIL-2\"}}}}'; }
+    create_issue 'team-1' 'New ticket' 'A description'
+  " 2>/dev/null
+  jq -e '.variables.input | (has("projectId") or has("parentId") or has("labelIds")) | not' "$tmpfile" >/dev/null 2>&1
+  local result=$?
+  rm -f "$tmpfile"
+  return $result
+}
+
+# Issue #283: the created issue object (id/identifier/title/url) is returned
+# on the happy path.
+test_create_issue_returns_issue_object() {
+  local result
+  result=$(bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo '{\"data\":{\"issueCreate\":{\"success\":true,\"issue\":{\"id\":\"i2\",\"identifier\":\"WIL-2\",\"title\":\"New ticket\",\"url\":\"https://linear.app/x/issue/WIL-2\"}}}}'; }
+    create_issue 'team-1' 'New ticket' 'A description'
+  " 2>/dev/null) || true
+  echo "$result" | jq -e '.id == "i2" and .identifier == "WIL-2" and .url == "https://linear.app/x/issue/WIL-2"' >/dev/null
+}
+
+# Issue #283: response-guard failure — success:false (issue comes back null)
+# must return a clean error, not corrupt/silent output.
+test_create_issue_success_false_errors() {
+  local rc=0
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo '{\"data\":{\"issueCreate\":{\"success\":false,\"issue\":null}}}'; }
+    create_issue 'team-1' 'New ticket' 'A description'
+  " >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ]
+}
+
+# Issue #283: response-guard failure — malformed response (missing issueCreate
+# entirely) must return a clean error, not a jq crash or silent bad output.
+test_create_issue_malformed_response_errors() {
+  local rc=0
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo '{\"data\":{}}'; }
+    create_issue 'team-1' 'New ticket' 'A description'
+  " >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ]
+}
+
+# Issue #283: required fields (team_id/title/description) must not be empty —
+# a hard error before any network call, not a malformed mutation.
+test_create_issue_missing_required_field_errors() {
+  local rc=0
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo '{\"data\":{\"issueCreate\":{\"success\":true,\"issue\":{\"id\":\"i2\"}}}}'; }
+    create_issue 'team-1' '' 'A description'
+  " >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ]
+}
+
+# Code review fix: a non-JSON-array label_ids must fail cleanly with a
+# return 1 and a stderr message, not abort the whole script via an
+# unguarded 'jq --argjson' under set -e.
+test_create_issue_invalid_label_ids_errors_cleanly() {
+  local out rc=0
+  out=$(bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo 'SENTINEL_SHOULD_NOT_BE_CALLED'; }
+    create_issue 'team-1' 'New ticket' 'A description' '' '' 'not-json'
+  " 2>&1) || rc=$?
+  [ "$rc" -eq 1 ] && ! echo "$out" | grep -q SENTINEL_SHOULD_NOT_BE_CALLED
+}
+
 # ── get_me test (mock linear_graphql) ────────────────────────────────────────
 
 test_get_me_returns_viewer() {
@@ -477,6 +587,14 @@ for fn in \
   test_update_issue_omitted_fields_absent \
   test_update_issue_unknown_flag_errors \
   test_update_issue_invalid_priority_errors \
+  test_create_issue_required_fields_only \
+  test_create_issue_all_optional_fields_combined \
+  test_create_issue_omitted_optional_fields_absent \
+  test_create_issue_returns_issue_object \
+  test_create_issue_success_false_errors \
+  test_create_issue_malformed_response_errors \
+  test_create_issue_missing_required_field_errors \
+  test_create_issue_invalid_label_ids_errors_cleanly \
   test_get_me_returns_viewer \
   test_check_api_key_exits_4_when_unset \
   test_check_api_key_finds_key_in_current_dir_dotenv \
