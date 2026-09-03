@@ -82,6 +82,96 @@ _worker_progress_file() {
   echo "$(_worker_state_dir)/ticket-auto-${tid}-progress.txt"
 }
 
+# ── Background-process ledger ────────────────────────────────────────────────────
+# spawn_agent_pre disowns its pinger and watchdog so they survive the Bash tool
+# call that started them. That also means a router which dies mid-bracket — a
+# crashed session, a SIGKILL, a closed terminal — leaves them re-parented to init
+# and running, with no stop file ever arriving. The watchdog's max_iterations cap
+# (worker-reap-recovery) eventually stops them, but that is up to 12 hours of a
+# dead router reporting `alive` to detect_stalls.
+#
+# The ledger closes that window: every backgrounded PID is recorded with the
+# /proc start-time ticks of the process that held it, so a later run can tell an
+# orphan from an unrelated process the kernel recycled the pid to.
+_worker_bg_ledger() {
+  local tid="${1:-${TICKET_ID:-}}"
+  echo "$(_worker_state_dir)/ticket-auto-${tid}-bgpids.txt"
+}
+
+# Start-time ticks (field 22 of /proc/PID/stat) for a live pid, empty otherwise.
+# Field-22 indexing matches the PID-reuse guard in spawn_watchdog_start.
+_proc_start_ticks() {
+  local pid="$1"
+  [ -n "$pid" ] || return 0
+  [ -r "/proc/$pid/stat" ] || return 0
+  awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true
+}
+
+# Record a backgrounded helper PID against a ticket.
+# Usage: _worker_bg_record <ticket_id> <type> <pid>
+_worker_bg_record() {
+  local tid="$1" type="$2" pid="$3"
+  [ -n "$tid" ] || return 0
+  [ -n "$pid" ] || return 0
+  local ticks
+  ticks=$(_proc_start_ticks "$pid")
+  local ledger
+  ledger=$(_worker_bg_ledger "$tid")
+  mkdir -p "$(dirname "$ledger")" 2>/dev/null || true
+  echo "${pid}:${ticks}:${type}" >>"$ledger" 2>/dev/null || true
+}
+
+# ── spawn_sweep_orphans ──────────────────────────────────────────────────────────
+# Kill any ledgered pinger/watchdog still alive, then clear the ledger. Called
+# from spawn_agent_post once the current bracket's helpers have been stopped
+# cooperatively — so the only survivors are orphans from a bracket whose router
+# never got to run its own cleanup.
+#
+# A ledger entry is only acted on when the pid is alive AND its current start
+# ticks match the ticks recorded at spawn. A recycled pid fails that comparison
+# and is skipped, so this can never signal an unrelated process.
+#
+# Usage: spawn_sweep_orphans <ticket_id>
+# Prints one "spawn_sweep_orphans: killed ..." line per orphan to stderr.
+spawn_sweep_orphans() {
+  local tid="${1:-${TICKET_ID:-}}"
+  [ -n "$tid" ] || return 0
+
+  local ledger
+  ledger=$(_worker_bg_ledger "$tid")
+  [ -f "$ledger" ] || return 0
+
+  local self_pid=$$
+  local pid ticks type current
+  while IFS=: read -r pid ticks type; do
+    [ -n "$pid" ] || continue
+    case "$pid" in
+    '' | *[!0-9]*) continue ;;
+    esac
+    [ "$pid" -le 1 ] && continue
+    [ "$pid" = "$self_pid" ] && continue
+    kill -0 "$pid" 2>/dev/null || continue
+
+    # PID-reuse guard: only signal the process that was actually recorded.
+    current=$(_proc_start_ticks "$pid")
+    if [ -n "$ticks" ] && [ -n "$current" ] && [ "$ticks" != "$current" ]; then
+      continue
+    fi
+
+    kill -TERM "$pid" 2>/dev/null || true
+    # The helpers spend their lives in sleep, so TERM lands promptly; KILL is
+    # the backstop for one wedged in an uninterruptible call.
+    sleep 0.05 2>/dev/null || true
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+    echo "spawn_sweep_orphans: killed orphaned ${type:-helper} pid ${pid} for ${tid}" >&2
+  done <"$ledger"
+
+  : >"$ledger" 2>/dev/null || true
+  return 0
+}
+
 # ── Diagnostic ERR trap ────────────────────────────────────────────────────────────
 # Logs crash location before exiting. Opt-in via SPAWN_DIAGNOSTICS=true to avoid
 # log noise in normal operation. When a pipeline crashes at an agent-spawn boundary,
@@ -359,6 +449,10 @@ spawn_agent_pre() {
     PINGER_PID=$!
     spawn_watchdog_start "$watchdog_stop" "$PHASE" 60 "$TICKET_ID"
     WATCHDOG_PID=$!
+    # Ledger the disowned helpers so a later run can sweep them if this
+    # router never reaches spawn_agent_post.
+    _worker_bg_record "$TICKET_ID" "pinger" "$PINGER_PID"
+    _worker_bg_record "$TICKET_ID" "watchdog" "$WATCHDOG_PID"
   fi
 
   # 3. Write phase context file
@@ -590,6 +684,11 @@ spawn_agent_post() {
       done
     fi
   fi
+
+  # Sweep helpers left running by any earlier bracket for this ticket whose
+  # router died before reaching this point. Runs unconditionally — an orphan
+  # from a crashed run is exactly the case where HB_LOG_FILE may be unset here.
+  spawn_sweep_orphans "$TICKET_ID"
 
   case "$RESULT" in
   done)

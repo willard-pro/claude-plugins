@@ -148,6 +148,9 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 | `FLEET_ABANDON_WARN_HOURS` | 1 | Abandonment threshold for WARN |
 | `FLEET_ABANDON_KILL_HOURS` | 4 | Abandonment threshold for KILL+RESTART |
 | `FLEET_ZOMBIE_SECS` | 900 | Unresolved waiting entry threshold |
+| `FLEET_ACTIVITY_WARN_SECS` | 240 | Agent-activity staleness → WARN. Second, independent liveness input to `detect_stalls`, read from `{tid}-activity.log` (written per tool call by `ticket-auto-pipeline/hooks/agent-activity.sh`) and applied only while a spawn bracket is open. The watchdog `alive` line proves the *router* is running; this proves the *agent* is. 240s is deliberately well under `FLEET_STALL_WARN_SECS` — an agent that has made no tool call in 4 minutes is anomalous even though a router waiting 4 minutes is not |
+| `FLEET_ACTIVITY_STALE_SECS` | 900 | Agent-activity staleness → KILL. Capped at WARN for tickets with no fleetd run-registry entry, so a human running `/ticket-auto` by hand — who reads output and thinks between tool calls — is never escalated to an intervention |
+| `FLEET_ACTIVITY_LOG_MAX_LINES` | 500 | Ring cap on `{tid}-activity.log`. Read by the hook, not the detector: only the last line's age and the current bracket's line count have consumers |
 | `FLEET_MAX_RESTARTS` | 2 | Max automatic restarts before giving up |
 | `FLEET_AUTO_DISPATCH` | false | Must be `true` to enable automatic dispatch of planned tickets from initiative epics. Detection still runs and reports; dispatch is the actuation step. Human approval gate still stops every auto-dispatched ticket. |
 | `FLEET_AUTO_RESTART` | true | Automatic restarts are enabled by default; set to `false` to opt out |

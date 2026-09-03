@@ -127,14 +127,124 @@ detect_phase_failures() {
   echo "$severity"
 }
 
-# 2. Stall detection via stale heartbeats
+# ── Spawn-bracket state ──────────────────────────────────────────────────────────
+# A bracket is "open" when the last |waiting| line in the pipeline log has no
+# done/fail/skip terminal after it — i.e. the router has launched an agent and
+# has not yet recorded its return. Scoped to lines *after* the waiting entry so
+# a terminal from an earlier cycle of the same phase/step cannot mask it (the
+# same position-scoping detect_zombies uses).
+# Returns 0 (true) when a bracket is open.
+_spawn_bracket_open() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local log_file="${workspace}/${tid}-pipeline.log"
+
+  [ -f "$log_file" ] || return 1
+
+  local last_waiting
+  last_waiting=$(command grep -n '|waiting|' "$log_file" 2>/dev/null | tail -1 || true)
+  [ -z "$last_waiting" ] && return 1
+
+  local lineno="${last_waiting%%:*}"
+  local line="${last_waiting#*:}"
+  local phase step
+  phase=$(echo "$line" | awk -F'|' '{print $2}')
+  step=$(echo "$line" | awk -F'|' '{print $3}')
+
+  local has_terminal
+  has_terminal=$(tail -n "+$((lineno + 1))" "$log_file" 2>/dev/null | command grep -E -c "\|${phase}\|${step}\|(done|fail|skip)\|" 2>/dev/null || true)
+  has_terminal="${has_terminal:-0}"
+
+  [ "$has_terminal" -eq 0 ]
+}
+
+# ── fleetd ownership ─────────────────────────────────────────────────────────────
+# True when a fleetd run-registry entry exists for this ticket. run_all_detectors
+# globs every *-pipeline.log in the workspace with no ownership gate, so a human
+# running /ticket-auto by hand is measured by the same engines that drive
+# fleet-intervene.sh's kills. The agent-activity signals are the ones most likely
+# to fire on a human (reading output, thinking, exploring), so they are capped at
+# WARN for tickets fleetd does not own. This is the file-based interim of the
+# store-backed ownership scoping the fleet-state-store capability specifies.
+# Returns 0 (true) when fleetd owns the ticket.
+_fleet_owns_ticket() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local run_file=""
+
+  if declare -f _fleet_run_file >/dev/null 2>&1; then
+    run_file=$(_fleet_run_file "$tid" "$workspace" 2>/dev/null || true)
+  elif [ -n "${FLEET_STATE_DIR:-}" ]; then
+    run_file="${FLEET_STATE_DIR}/${tid}-run.json"
+  else
+    run_file="${workspace}/${tid}-run.json"
+  fi
+
+  [ -n "$run_file" ] && [ -f "$run_file" ]
+}
+
+# ── Agent-activity liveness ──────────────────────────────────────────────────────
+# Second, independent input to detect_stalls. The orchestrator watchdog's `alive`
+# line proves the *router* is running; it says nothing about the agent the router
+# is blocked on. The activity log (hooks/agent-activity.sh, one line per tool
+# call) is the agent's own pulse — a fresh watchdog with a cold activity log is
+# exactly the hung-agent case the heartbeat dimension cannot see.
+#
+# Only meaningful while a spawn bracket is open: between brackets the router is
+# doing its own deterministic work and no agent is expected to be calling tools.
+# Prints a severity (0-2).
+_detect_activity_stall() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local act_log="${workspace}/${tid}-activity.log"
+
+  # No activity log at all — the hook never resolved this ticket (an older
+  # pipeline run, or a phase that made no tool calls yet). Contribute nothing
+  # rather than guessing; the heartbeat dimension still applies.
+  if [ ! -f "$act_log" ] || [ ! -s "$act_log" ]; then
+    echo "0"
+    return
+  fi
+
+  if ! _spawn_bracket_open "$tid" "$workspace"; then
+    echo "0"
+    return
+  fi
+
+  local warn_secs="${FLEET_ACTIVITY_WARN_SECS:-240}"
+  local stale_secs="${FLEET_ACTIVITY_STALE_SECS:-900}"
+  local age
+  age=$(_last_entry_age_secs "$act_log")
+
+  local severity=0
+  if [ "$age" -ge "$stale_secs" ]; then
+    severity=2
+  elif [ "$age" -ge "$warn_secs" ]; then
+    severity=1
+  fi
+
+  # Cap at WARN for work fleetd does not own — see _fleet_owns_ticket.
+  if [ "$severity" -ge 2 ] && ! _fleet_owns_ticket "$tid" "$workspace"; then
+    severity=1
+  fi
+
+  echo "$severity"
+}
+
+# 2. Stall detection via stale heartbeats and stale agent activity
 detect_stalls() {
   local tid="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local hb_file="${workspace}/${tid}-heartbeat.log"
 
+  # Activity dimension is independent of the heartbeat dimension: it is
+  # computed even when there is no heartbeat log or no heartbeat entry, and the
+  # final severity is the max of the two.
+  local act_sev
+  act_sev=$(_detect_activity_stall "$tid" "$workspace")
+
   if [ ! -f "$hb_file" ]; then
-    echo "0"
+    echo "$act_sev"
     return
   fi
 
@@ -143,7 +253,7 @@ detect_stalls() {
   last_hb=$(command grep -E '\|orchestrator-waiting\||\|watchdog\|alive\|' "$hb_file" 2>/dev/null | tail -1 || true)
 
   if [ -z "$last_hb" ]; then
-    echo "0"
+    echo "$act_sev"
     return
   fi
 
@@ -182,6 +292,9 @@ detect_stalls() {
     severity=$((severity + 1))
     [ "$severity" -gt 3 ] && severity=3
   fi
+
+  # A hung agent under a healthy router shows up here and nowhere else.
+  [ "$act_sev" -gt "$severity" ] && severity="$act_sev"
 
   echo "$severity"
 }
