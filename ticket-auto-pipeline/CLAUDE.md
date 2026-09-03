@@ -213,6 +213,37 @@ When ticket-planner creates a ticket, it appends a `## Planner Context` markdown
 
 **Exploration depth consumption** (appraise fast-path): The depth declared by the planner controls how much the appraise agent trusts the planner's investigation. `deep` → skip full grep, trust traced paths. `standard` → use targets as primary path, supplement with targeted grep. `quick-scan` → treat targets as hints, do full investigation. Depth mismatch (`quick-scan` on complex ticket) is a soft signal in gate-check.sh — warns, never blocks.
 
+## Pipeline dashboards
+
+`skills/ticket-auto/dashboard.py` has two modes:
+
+```bash
+python3 dashboard.py <log-file> [--heartbeat]   # one ticket, step by step
+python3 dashboard.py --fleet [<log-dir>]        # every active pipeline, one row each
+```
+
+The per-ticket mode answers "what is this ticket doing"; `--fleet` answers "which
+of the tickets in flight needs me". Fleet mode globs `<log-dir>/*-pipeline.log`
+(default `$FLEET_PIPELINE_LOG_DIR`, else `./logs`), skips any log carrying
+`META|outcome` — matching `fleet_detect_all`'s definition of active — and renders
+one row per pipeline: phase, step, open-bracket age, agent-activity age, verify
+and PR-review counters, and the last gate event. Rows sort oldest-open-bracket
+first, so the row most likely to need attention leads.
+
+The bracket and activity columns colour against the same thresholds
+`fleet-detect.sh` uses (600/900s and 240/900s), so the dashboard and the detector
+never disagree about what "late" means. The activity column is the one an
+orchestrator cannot fake: it reads the last entry of `{tid}-activity.log`, written
+per tool call by `hooks/agent-activity.sh`, so a hung agent inside a young bracket
+is visible here.
+
+The glob is re-evaluated on every refresh rather than cached, so a pipeline that
+starts while the dashboard is open appears on the next tick without a restart.
+
+Reading is pure stdlib (`collect_fleet_rows`, `read_fleet_row`); `rich` is needed
+only to render, and its import is guarded so the data layer can be tested in an
+environment without it. Tests: `skills/ticket-auto/tests/test_dashboard_fleet.py`.
+
 ## Dispatch table (generated)
 
 `skills/ticket-auto/SKILL.md`'s Dispatch Loop table is **generated**, not hand-written.
