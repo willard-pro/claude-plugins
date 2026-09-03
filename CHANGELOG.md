@@ -57,6 +57,53 @@ process once an operator signs off on donating one.
 - Wired into `Makefile`'s `test-planner` target, after
   `test-planner-crosscheck.sh`.
 
+## ticket-auto-pipeline 0.38.4 (2026-09-03)
+
+`lib/linear-api.sh` had no `create_issue()` — the pipeline could fetch,
+update, comment on, and transition Linear issues, but not create one.
+Splitting a ticket is a normal pipeline outcome (three consecutive
+adversarial-review BLOCKED verdicts on CRE-67, a Java 17/Spring Boot 3
+migration epic, established the ticket's scope should split in two), and
+executing that split had no shared helper — every call site would have to
+hand-roll a raw `issueCreate` mutation through `linear_graphql`, with no
+shared error handling or `_jq_guard` type checking. The MCP tools are not a
+fallback here — `mcp__linear-server__*` is authenticated against a
+different workspace. Filed as
+[#283](https://github.com/willard-pro/claude-plugins/issues/283), the
+follow-up flagged in the 0.38.3 (#284) entry above.
+
+- New `create_issue()`: positional args, not the flag-based shape
+  `update_issue()` grew in #284 — `create_issue <team_id> <title>
+  <description> [project_id] [parent_id] [label_ids_json]`. Positional
+  fits here because every call needs `team_id`/`title`/`description` as
+  required fields, and the three optional trailing fields are a small fixed
+  set with no "which am I skipping" ambiguity the flag shape exists to
+  resolve. Required fields are checked non-empty before any network call.
+  Optional fields use the same incremental `jq '. + {field: $v}'` build
+  `update_issue()` uses — only added to `IssueCreateInput` when non-empty.
+  The response is guarded with `_jq_guard` on `.data.issueCreate.issue`
+  before unwrapping (same convention as `get_issue()`/`get_team()`), so a
+  `success: false` response (Linear returns a null issue in that case) or a
+  structurally malformed response both return a clean error instead of
+  corrupt/silent output. Returns `{id, identifier, title, url}` — the
+  fields callers need to write the new `CRE-NNN` into notes/session files
+  and report back.
+- Does not resolve label names to IDs — accepts only a pre-resolved
+  `label_ids` JSON array, same convention `update_issue()` already uses.
+  Name resolution goes through `get_team()`, which has a known pagination
+  bug ([#280](https://github.com/willard-pro/claude-plugins/issues/280))
+  tracked and fixed separately — out of scope here by design.
+  `ticket-planner/lib/planner-linear-api.sh`'s
+  `planner_linear_build_issue_input()` builds a comparably-shaped
+  `IssueCreateInput` but does its own label/project/milestone name
+  resolution on top; that resolution layer was deliberately not pulled
+  into this helper.
+- New tests in `lib/tests/test-linear-api.sh`: required-fields-only call,
+  all-optional-fields-combined call, omitted optional fields staying absent
+  from the mutation input, the happy-path issue object being returned,
+  `success: false` returning an error, a malformed response returning an
+  error, and a missing required field returning an error.
+
 ## ticket-auto-pipeline 0.38.3 (2026-09-03)
 
 `update_issue()` (`lib/linear-api.sh`) accepted only `state_id`/`label_ids`/
