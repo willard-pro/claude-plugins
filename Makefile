@@ -103,6 +103,7 @@ test-fleetd:
 	@echo "=== fleetd supervisor tests (must run from repo root) ==="
 	python3 -m pytest fleet-controller/fleetd/tests/test_supervisor.py -v
 	python3 -m pytest fleet-controller/fleetd/tests/test_store.py -v
+	python3 -m pytest fleet-controller/fleetd/tests/test_otel.py -v
 	python3 -m pytest ticket-auto-pipeline/skills/ticket-auto/tests/test_dashboard_fleet.py -v
 
 test-planner:

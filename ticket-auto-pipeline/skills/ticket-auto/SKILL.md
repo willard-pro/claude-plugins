@@ -314,7 +314,7 @@ This MUST run before Step 0.6 (pipeline log init) and before Step 1 (first agent
 
 ## Step 0.6 — Initialize pipeline log
 
-Initialize the pipeline log and launch the dashboard (heartbeat log already initialized after Step 0.1):
+Initialize the pipeline log (heartbeat log already initialized after Step 0.1):
 
 ```bash
 mkdir -p ./logs
@@ -323,22 +323,20 @@ CLAUDE_LOG_FILE="$PWD/logs/{TICKET-ID}-claude.log"
 touch "$LOG_FILE"
 cl_init
 YELLOW=$(tput setaf 3); BOLD=$(tput bold); RESET=$(tput sgr0)
-if [ -n "$TMUX" ]; then
-  # Check for an existing dashboard pane for this ticket before spawning another —
-  # every resume would otherwise stack a new pane on top of prior ones (R13).
-  if pgrep -f "dashboard.py $LOG_FILE" >/dev/null 2>&1; then
-    echo "${BOLD}${YELLOW}(Dashboard already running for {TICKET-ID} — skipping duplicate pane.)${RESET}"
-  else
-    tmux split-window -h "python3 ~/.claude/skills/ticket-auto/dashboard.py $LOG_FILE; read"
-    echo "${BOLD}${YELLOW}(Dashboard opened in right pane.)${RESET}"
-  fi
-else
-  echo "${BOLD}${YELLOW}Dashboard ready. In a second terminal run:${RESET}"
-  echo "${BOLD}${YELLOW}  python3 ~/.claude/skills/ticket-auto/dashboard.py $LOG_FILE${RESET}"
-fi
+echo "${BOLD}${YELLOW}Dashboard ready. In a second terminal run either:${RESET}"
+echo "${BOLD}${YELLOW}  python3 ~/.claude/skills/ticket-auto/dashboard.py $LOG_FILE${RESET}"
+echo "${BOLD}${YELLOW}  python3 ~/.claude/skills/ticket-auto/dashboard.py --fleet $PWD/logs${RESET}"
 ```
 
-Log the resolved autonomy mode immediately after dashboard launch. Guard the write so a
+**The router no longer spawns a tmux dashboard pane.** It used to split a new pane
+on every run when `$TMUX` was set. With fleetd running many pipelines concurrently that
+produced a pane per ticket, each showing one ticket, and the resume path needed a
+`pgrep` guard to stop panes stacking on every resume. The dashboard is now something the
+operator opens once — `--fleet` covers the whole workspace in one pane and picks up new
+pipelines on its next refresh, so nothing needs to be spawned per run. Printing the two
+commands costs nothing and works identically inside and outside tmux.
+
+Log the resolved autonomy mode immediately after log init. Guard the write so a
 resume doesn't silently re-append (or silently switch modes mid-pipeline after gate
 decisions were already made under the old mode) — an explicit `mode-change` event is
 logged instead when the flag differs from what's recorded (R12):

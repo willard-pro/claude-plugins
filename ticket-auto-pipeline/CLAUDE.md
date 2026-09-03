@@ -240,6 +240,12 @@ is visible here.
 The glob is re-evaluated on every refresh rather than cached, so a pipeline that
 starts while the dashboard is open appears on the next tick without a restart.
 
+**The router does not spawn a dashboard.** Step 0.6 used to `tmux split-window` a
+per-ticket pane on every run when `$TMUX` was set, which produced a pane per ticket
+under fleetd and needed a `pgrep` guard so resumes did not stack panes. It now just
+prints both commands. The dashboard is an operator tool opened once — `--fleet` covers
+the whole workspace and picks up new pipelines by itself.
+
 Reading is pure stdlib (`collect_fleet_rows`, `read_fleet_row`); `rich` is needed
 only to render, and its import is guarded so the data layer can be tested in an
 environment without it. Tests: `skills/ticket-auto/tests/test_dashboard_fleet.py`.

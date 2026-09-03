@@ -604,13 +604,25 @@ test_router_autonomy_write_is_guarded() {
   }
 }
 
-test_router_dashboard_pane_not_duplicated() {
+# Replaces test_router_dashboard_pane_not_duplicated. The router no longer
+# spawns a dashboard pane at all (fleetd-phase-supervisor task 7.4), so the
+# duplicate-pane guard it used to assert on has nothing left to guard: the
+# guard only existed because every resume spawned another pane. What matters
+# now is that the spawn does not come back — under fleetd that was one tmux
+# pane per ticket, each showing a single ticket.
+test_router_does_not_spawn_a_dashboard_pane() {
   local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
   [ -f "$skill_md" ] || return 1
-  local block
-  block=$(sed -n '/^if \[ -n "\$TMUX" \]; then$/,/^fi$/p' "$skill_md" | head -20)
-  echo "$block" | grep -q 'pgrep -f "dashboard.py' || {
-    echo "dashboard pane spawn does not check for an existing pane first"
+  # A blunt literal search, which is why the prose above it in SKILL.md is
+  # worded to avoid the command: the guard is only useful if it cannot be
+  # satisfied by a passing mention.
+  grep -q 'tmux split-window' "$skill_md" && {
+    echo "router still spawns a tmux dashboard pane"
+    return 1
+  }
+  # It must still tell the operator how to open one, including the fleet view.
+  grep -q 'dashboard.py --fleet' "$skill_md" || {
+    echo "router does not surface the --fleet dashboard command"
     return 1
   }
 }

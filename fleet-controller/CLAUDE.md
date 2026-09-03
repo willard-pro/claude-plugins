@@ -17,6 +17,8 @@ fleet-controller/
   fleetd/                         # Python 3 supervisor daemon (stdlib-only)
   fleetd/schema.sql               # Fleet state store schema (SQLite, v1)
   fleetd/store.py                 # State store module — fleetd is its sole writer
+  fleetd/otel.py                  # OTel exporter — the ONLY module with a third-party dep
+  fleetd/requirements-otel.txt    # That dep, optional and deliberately not project-wide
   docs/                           # Architecture and reference docs
 ```
 
@@ -70,6 +72,7 @@ The pipeline log gains one new `META` step: `META|worker-exit|done|fail|code=<N>
 | `fleet-monitor.sh` | Monitor loop: `fleet_monitor_cycle` (one detection + intervention pass), `fleet_monitor_loop` (continuous polling with stop-file gating). Spawn queue consumption integrated with `flock` serialization. Dual-mode: interactive (ACTION:spawn-restart) or cron (JSONL queue). |
 | `fleet-store.sh` | Read-only bash access to the fleet state store via the `sqlite3` CLI: `fleet_store_ready`, `fleet_store_sql`, `fleet_store_pipeline_rows`, `fleet_store_owner`, `fleet_store_is_owned`, `fleet_store_position`, `fleet_store_last_activity_epoch`, `fleet_store_in_flight`, `fleet_store_fence_allows`. Every function degrades to "no store" rather than failing, so a host with no fleetd — or no sqlite3 — keeps working on the file path. Ticket ids are validated against an identifier alphabet before reaching an SQL string, not escaped. |
 | `fleet-registry.sh` | Run registry + generation fence helpers: `registry_write`, `registry_read`, `registry_pid`, `registry_generation`, `registry_exists`, `registry_clear`, `fence_write`, `fence_read`, `fence_is_superseded`, `fence_clear`. Per-ticket JSON files; no shared-file races. |
+| `fleetd/otel.py` | OTel exporter — derives GenAI-convention spans from the pipeline and activity logs, ships OTLP. Pure stdlib at import time; the `opentelemetry` dependency is lazy and inside the exporter process. Supervised by fleetd under the fixed id `otel-exporter`. |
 | `fleet-dashboard.sh` | Dashboard renderer: `fleet_render_dashboard` / `fleet_render_dashboard_from_data` (terminal health table) and `fleet_write_report` / `fleet_write_report_from_data` (markdown report). |
 | `fleet-dispatch.sh` | Planned-ticket dispatch. Reads initiative epics from Linear via `lib/linear-api.sh`, validates `state:execution`, ensures the epic branch exists in **every** working repo under `REPOS_ROOT` before enqueue (multi-repo precondition — creation failure in any repo gate-stops with `EPIC_BRANCH_UNAVAILABLE`; sync failure in one repo warns and continues), resolves `blocked-by` dependencies, orders tickets by explicit dispatch rank (`Urgent`→`High`→`Medium`→`Low`→`No priority` last), writes spawn queue JSONL with `generation` field via shared `_fleet_queue_append` (flock, retry, dead-letter). Respects `FLEET_MAX_CONCURRENT` and `FLEET_DRY_RUN`. |
 | `fleet-feedback.sh` | Feedback aggregation. Scans pipeline logs for `META\|planner-feedback`, groups by `{initiative-id}`, computes confidence drift, writes `$REPOS_ROOT/.ticket-auto/initiatives/{ID}/feedback/{rundate}.json`. |
@@ -124,6 +127,68 @@ These are sourced via `_source_if_missing` from `~/.claude/skills/lib/` (synced 
 **Fence files are still written.** `_write_fence_files` writes both the store row and the `{tid}-fence` marker. `flow.sh`'s fence guard runs inside a worker and still reads the file; dropping it would let a superseded generation's Linear mutations through, which is the one thing the fence exists to prevent. The file goes away when every consumer reads the store.
 
 **Detector input.** `fleet-detect.sh` reads pipeline-log lines through one seam, `_pipeline_rows`, which returns store rows when a store is available and file lines otherwise. One seam rather than a store-backed variant per engine: the filtering, thresholds and severities stay literally the same code, which is what makes the parity assertion (`lib/tests/test-fleet-store-parity.sh`) cheap and meaningful. The heartbeat-log engines (`detect_stalls`' heartbeat dimension, `detect_loops`) and the Linear-API engines are unaffected — the store does not ingest those inputs.
+
+## OTel exporter
+
+`fleetd/otel.py` derives OpenTelemetry GenAI-convention spans by tailing the
+pipeline log and the agent-activity log, and ships them to an OTLP collector.
+Off by default (`FLEET_OTEL_ENABLE=false`).
+
+```bash
+python3 -m pip install -r fleet-controller/fleetd/requirements-otel.txt
+export FLEET_OTEL_ENABLE=true FLEET_OTEL_ENDPOINT=http://collector:4318
+# fleetd spawns and supervises it; or run it standalone:
+python3 fleet-controller/fleetd/otel.py --log-dir ./logs
+```
+
+**Derived, never hand-instrumented (D5).** No phase skill, hook, or fleetd
+module emits a span at the point of action. A log `printf` and an OTel SDK call
+sitting side by side eventually disagree — a new phase gets one and not the
+other — and then two things claim to say what happened. There is one writer of
+truth (the log) and one reader that translates it, which also means a new phase
+skill is traced correctly by writing its log lines correctly and nothing else.
+
+**Downstream, never authoritative (D5).** `detect-resume.sh`, the gate scripts,
+`fleet-detect.sh` and `dashboard.py --fleet` all read the pipeline log directly.
+Nothing waits on the exporter or notices its absence. Stopping it, or pointing
+it at a collector that is down, costs traces and nothing else — the SDK retries
+with backoff and the process exits cleanly.
+
+**Span model.** One root span per ticket (`pipeline {TID}`), opened on first
+sight and closed on `META|outcome`; one child span per phase/step bracket
+(`invoke_agent {phase}.{step}`), from its `|waiting|` line to its terminal.
+A `|fail|` terminal sets span status ERROR. Attributes follow the GenAI
+conventions — `gen_ai.system`, `gen_ai.operation.name`, `gen_ai.agent.name`,
+`gen_ai.request.model` from `META|model`, `gen_ai.usage.*` from `META|tokens` —
+plus `ticket.id` and `pipeline.*`. Tool calls from the activity log attach to
+the span that contains them as a count attribute and bounded span events, not
+as spans of their own: one span per tool call would swamp a trace whose useful
+unit is the phase.
+
+**Why spans wait before emission.** `META|tokens|info|` is written by the
+SubagentStop hook a moment *after* the router writes the phase terminal, so a
+span emitted the instant its bracket closes always loses its token counts.
+Completed spans sit in a buffer for `FLEET_OTEL_SPAN_GRACE_SECS` (30) so late
+enrichment attaches. A ticket reaching its outcome flushes its spans
+immediately — nothing more can arrive for a finished ticket.
+
+**Supervision (task 8.5).** The exporter is a fleetd child under the fixed
+identifier `otel-exporter`: spawned through the same `spawn_worker` fork/exec,
+a run-registry entry while active, reaped by the same `ChildReaper`, stopped
+through the same kill escalation, respawned on crash with a bounded backoff
+(5s → 30s → 2m → 10m). Its exit is branched away from the ticket reap path
+before anything else runs: sending it down that path would write a
+`META|worker-exit` line into an `otel-exporter-pipeline.log`, which
+`fleet_detect_all` would then glob and report as a stuck pipeline — the monitor
+manufacturing findings about itself.
+
+**The one dependency (D11).** `opentelemetry-sdk` is the repository's first
+third-party Python dependency, and it is quarantined to this module.
+`supervisor.py` and `store.py` stay pure-stdlib; the SDK import is lazy and
+inside the exporter *process*. Without the packages the exporter starts, says
+so once on stderr, and emits nothing — fleetd is unaffected. CI runs the whole
+suite without them for exactly that reason, then installs them in a later step
+so the real SDK path is covered too.
 
 ## Severity scale
 

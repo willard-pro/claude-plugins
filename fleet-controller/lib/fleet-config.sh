@@ -45,6 +45,40 @@ FLEET_EPIC_BRANCH_SYNC="${FLEET_EPIC_BRANCH_SYNC:-true}"
 # The integration PR is NEVER auto-merged regardless of this setting.
 FLEET_EPIC_AUTO_PR="${FLEET_EPIC_AUTO_PR:-false}"
 
+# ── OTel exporter ───────────────────────────────────────────────────────────────
+# fleetd supervises an OpenTelemetry exporter (fleetd/otel.py) that derives
+# GenAI-convention spans by tailing the pipeline and agent-activity logs and
+# ships them to an OTLP collector. Off by default: a telemetry exporter that
+# started unasked would have every install opening connections to a collector
+# nobody configured.
+#
+# The exporter is strictly downstream. Nothing in the pipeline reads its output
+# or waits on it — stopping it, or an unreachable collector, costs traces and
+# nothing else. It is also the only component that needs the opentelemetry
+# Python packages; without them it starts, says so once, and emits nothing.
+FLEET_OTEL_ENABLE="${FLEET_OTEL_ENABLE:-false}"
+
+# OTLP collector base URL. `/v1/traces` is appended for the HTTP exporter.
+FLEET_OTEL_ENDPOINT="${FLEET_OTEL_ENDPOINT:-http://localhost:4318}"
+
+# service.name resource attribute on every emitted span.
+FLEET_OTEL_SERVICE_NAME="${FLEET_OTEL_SERVICE_NAME:-ticket-auto-pipeline}"
+
+# Seconds between tail passes over the log directory.
+FLEET_OTEL_POLL_SECS="${FLEET_OTEL_POLL_SECS:-5}"
+
+# How long a completed span waits before emission so late enrichment can still
+# attach to it. `META|tokens|info|` is written by the SubagentStop hook a moment
+# *after* the router writes the phase terminal, so a span emitted the instant
+# its bracket closes always loses its token counts. A ticket reaching its
+# outcome flushes its spans immediately regardless — nothing more can arrive.
+FLEET_OTEL_SPAN_GRACE_SECS="${FLEET_OTEL_SPAN_GRACE_SECS:-30}"
+
+# Cap on per-span tool-call events derived from the agent-activity log. The
+# count is always recorded as an attribute; only the individual events are
+# capped, with pipeline.tool_calls_truncated set when the cap bites.
+FLEET_OTEL_MAX_TOOL_EVENTS="${FLEET_OTEL_MAX_TOOL_EVENTS:-100}"
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────────
 # When false (the default), fleetd sits idle — detection runs and health/status
 # are served, but no epic is auto-enqueued; dispatch happens only when explicitly

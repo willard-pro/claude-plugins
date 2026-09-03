@@ -33,6 +33,14 @@ try:
 except ImportError:  # pragma: no cover - store unavailable
     _store_mod = None
 
+# The OTel exporter module. otel.py is pure stdlib at import time — its
+# opentelemetry dependency is imported lazily inside the exporter *process*,
+# never here — so this only fails when the file itself is missing.
+try:
+    from fleetd import otel as _otel_mod
+except ImportError:  # pragma: no cover - exporter unavailable
+    _otel_mod = None
+
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
@@ -1010,6 +1018,50 @@ def _store_record_fence(state_dir, tid, generation):
                      'record fence')
 
 
+# ── OTel exporter lifecycle (D11, task 8.5) ────────────────────────────────
+# The exporter is supervised with the same primitives as any other worker —
+# fork/exec via spawn_worker, a run-registry entry, ChildReaper reaping, kill
+# escalation — rather than bespoke process management for exactly one process.
+#
+# Everything here is fail-soft. A telemetry process that cannot start must not
+# stop fleetd supervising tickets: that is the whole point of the exporter being
+# downstream of the pipeline rather than in it.
+
+#: Backoff after a crash, in seconds. Bounded and coarse — an exporter that
+#: cannot start at all (no SDK, no collector, bad config) must not spin.
+_OTEL_RESPAWN_BACKOFF = (5, 30, 120, 600)
+
+
+def otel_service_id():
+    """Fixed run-registry identifier. Not a ticket id, and the reap path
+    branches on it so an exporter exit is never mistaken for a ticket dying."""
+    return _otel_mod.SERVICE_ID if _otel_mod is not None else 'otel-exporter'
+
+
+def otel_enabled():
+    """True only when the operator opted in AND the module is importable."""
+    if _otel_mod is None:
+        return False
+    try:
+        return _otel_mod.exporter_enabled()
+    except Exception:
+        return False
+
+
+def _otel_cmd(log_dir):
+    """argv for the exporter child.
+
+    Runs otel.py as a plain script, by absolute path, rather than as
+    `-m fleetd.otel`. The child is exec'd with fleetd's *environment*, not its
+    sys.path, so a `-m` invocation would need `fleet-controller/` on PYTHONPATH
+    and would die with ModuleNotFoundError wherever fleetd happens to have been
+    started from. otel.py imports nothing but the standard library precisely so
+    this works from any working directory.
+    """
+    script = Path(__file__).resolve().parent / 'otel.py'
+    return [sys.executable, str(script), '--log-dir', str(log_dir)]
+
+
 def _write_fence_files(tid, generation, state_dir):
     """Write a generation fence marker so the next spawn uses a higher generation.
 
@@ -1950,6 +2002,12 @@ class Supervisor:
         # ticket's Planner Context block (one Linear call), then served from
         # memory for the daemon's lifetime.
         self._confidence_cache = {}
+        # OTel exporter (D11). One supervised child under a fixed identifier,
+        # not a ticket. `_otel_failures` drives the respawn backoff; it resets
+        # on any spawn that survives to the next reap.
+        self._otel_pid = None
+        self._otel_failures = 0
+        self._otel_next_attempt = 0.0
         # Deterministic-failure circuit breaker (worker-reap-recovery task
         # 3.8): a streak of fast, non-zero exits across the fleet — expired
         # auth, a bad CLAUDE_CMD — halts dispatch rather than burning
@@ -2632,6 +2690,14 @@ class Supervisor:
         non_terminal_tids = []
         newly_reaped = self._reaper.reap()
         for pid, exit_code, exit_type in newly_reaped:
+            # The OTel exporter is a supervised child but not a ticket worker.
+            # Sending it down the ticket path would write a META|worker-exit
+            # line into an `otel-exporter-pipeline.log`, which fleet_detect_all
+            # would then glob and report on as a stuck pipeline — a monitoring
+            # process manufacturing monitoring findings about itself.
+            if pid == self._otel_pid:
+                self._handle_otel_exit(pid, exit_code, exit_type)
+                continue
             # Find the child entry by PID and remove it.
             for tid, entry in list(self._children._workers.items()):
                 if entry['pid'] == pid:
@@ -2946,6 +3012,85 @@ class Supervisor:
 
     # ── run ─────────────────────────────────────────────────────────────────
 
+    # ── OTel exporter supervision ──────────────────────────────────────────
+
+    def _otel_log_dir(self):
+        return os.environ.get('FLEET_PIPELINE_LOG_DIR') or str(self._state_dir)
+
+    def maybe_spawn_otel(self, now=None):
+        """Start the exporter if enabled, not running, and past its backoff.
+
+        Called on startup and on every cycle, so a crashed exporter comes back
+        without fleetd restarting. Returns the pid, or None.
+        """
+        if not otel_enabled() or self._otel_pid is not None:
+            return None
+        now = time.time() if now is None else now
+        if now < self._otel_next_attempt:
+            return None
+
+        sid = otel_service_id()
+        try:
+            pid, session_id = spawn_worker(
+                sid, 0, str(self._state_dir), reason='otel-exporter',
+                cmd_override=_otel_cmd(self._otel_log_dir()),
+            )
+        except Exception as exc:
+            # Never fatal: telemetry failing to start must not stop fleetd
+            # supervising tickets.
+            print(f"fleetd[{os.getpid()}]: otel exporter spawn failed: {exc}",
+                  file=sys.stderr)
+            self._otel_failures += 1
+            self._otel_next_attempt = now + self._otel_backoff()
+            return None
+
+        self._otel_pid = pid
+        self._children.add(sid, pid, generation=0, reason='otel-exporter',
+                           session_id=session_id)
+        print(f"fleetd[{os.getpid()}]: otel exporter started (pid {pid}) "
+              f"watching {self._otel_log_dir()}")
+        return pid
+
+    def _otel_backoff(self):
+        idx = min(self._otel_failures, len(_OTEL_RESPAWN_BACKOFF)) - 1
+        return _OTEL_RESPAWN_BACKOFF[max(idx, 0)]
+
+    def _handle_otel_exit(self, pid, exit_code, exit_type):
+        """Record an exporter exit and schedule a respawn.
+
+        Deliberately not the ticket path: no exit record, no circuit breaker,
+        no pipeline-log line, no reconciliation. The exporter has no ticket
+        state to reconcile and no pipeline log of its own.
+        """
+        sid = otel_service_id()
+        self._children.remove(sid)
+        self._otel_pid = None
+        clean = (exit_type == 'exit' and exit_code == 0)
+        if clean:
+            self._otel_failures = 0
+        else:
+            self._otel_failures += 1
+        self._otel_next_attempt = time.time() + self._otel_backoff()
+        print(
+            f"fleetd[{os.getpid()}]: otel exporter (pid {pid}) exited "
+            f"({exit_type}, code={exit_code}); "
+            f"respawn in {self._otel_backoff()}s"
+        )
+
+    def stop_otel(self, grace_secs=5):
+        """Stop the exporter through the same kill escalation as any worker."""
+        if self._otel_pid is None:
+            return
+        pid, sid = self._otel_pid, otel_service_id()
+        self._otel_pid = None
+        try:
+            kill_worker(sid, pid, 0, str(self._state_dir),
+                        reason='fleetd-shutdown', grace_secs=grace_secs)
+        except Exception as exc:
+            print(f"fleetd[{os.getpid()}]: otel exporter stop failed: {exc}",
+                  file=sys.stderr)
+        self._children.remove(sid)
+
     def run_observe(self, cmd_override=None):
         """Daemon main loop: detect, reap, spawn (if enabled), repeat.
 
@@ -2972,6 +3117,10 @@ class Supervisor:
         health = HealthServer(self._bind, self._port)
         health.start(self)
         print(f"fleetd[{os.getpid()}]: health endpoint on {self._bind}:{self._port}")
+
+        # Telemetry starts after the health endpoint and before the first
+        # detection cycle, so a trace exists for work this run does.
+        self.maybe_spawn_otel()
 
         shutdown_event = threading.Event()
 
@@ -3001,6 +3150,10 @@ class Supervisor:
                 # 4. Consume spawn queue (no-op when spawn is disabled).
                 self._consume_queue(cmd_override=cmd_override)
 
+                # 4b. Restart the exporter if it died (no-op when disabled,
+                # already running, or still inside its backoff window).
+                self.maybe_spawn_otel()
+
                 # 4. Wait for next interval or shutdown.
                 if shutdown_event.wait(timeout=self._cycle_interval):
                     break
@@ -3011,6 +3164,7 @@ class Supervisor:
             # Cooperative shutdown: stop health server, release lock.
             # In future groups we'll also attempt cooperative stop of all
             # workers before exiting.
+            self.stop_otel()
             health.shutdown()
             self._reaper.close()
             self.release_lock()
