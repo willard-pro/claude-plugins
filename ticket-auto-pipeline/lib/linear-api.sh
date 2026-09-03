@@ -314,18 +314,110 @@ get_team() {
   echo "$resp" | jq '{states: .data.team.states.nodes, labels: .data.team.labels.nodes}'
 }
 
-# Update an issue. Pass empty strings to skip state/labels/assignee.
+# Update an issue.
+#
+# Two argument shapes are supported, and may be combined in a single call:
+#
+#   1. Legacy positional (backward compatible — pre-existing call shape,
+#      unchanged for every current caller):
+#        update_issue <issue_id> [state_id] [label_ids_json] [assignee_id]
+#      Pass empty strings ("") to skip state/labels/assignee.
+#
+#   2. Named flags (new — reaches the rest of IssueUpdateInput):
+#        update_issue <issue_id> [--state <id>] [--labels <json>] [--assignee <id>]
+#                                 [--title <str>] [--description <str>]
+#                                 [--project <id>] [--parent <id>] [--priority <0-4>]
+#
+# Detection is unambiguous, not clever: after <issue_id>, up to 3 leading
+# args are consumed as state_id/label_ids/assignee_id (shape 1) ONE AT A
+# TIME, stopping the instant an arg starts with "--" — so 0, 1, 2, or 3
+# legacy positionals may precede the flags in a single call. Whatever
+# remains is parsed strictly as --flag value pairs. An unrecognized --flag
+# is a hard error (return 1) rather than a silent no-op.
+#
+# Only non-empty fields are added to the IssueUpdateInput; omitted/empty
+# fields are left untouched on the Linear issue (unchanged behavior for
+# state/labels/assignee, extended to title/description/project/parent/priority).
 update_issue() {
   local issue_id="$1"
-  local state_id="${2:-}"
-  local label_ids="${3:-}" # JSON array string e.g. '["id1","id2"]'
-  local assignee_id="${4:-}"
+  shift || true
 
-  # Build input object dynamically
+  local state_id="" label_ids="" assignee_id=""
+  local title="" description="" project_id="" parent_id="" priority=""
+
+  # Legacy positional mode: consume at most 3 leading args, but stop as
+  # soon as a --flag is seen — re-checked before EACH slot, not just once,
+  # so a call with 1 or 2 legacy positionals followed by flags parses
+  # correctly instead of swallowing the flag token as a positional value.
+  if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
+    state_id="${1:-}"
+    shift
+  fi
+  if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
+    label_ids="${1:-}"
+    shift
+  fi
+  if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
+    assignee_id="${1:-}"
+    shift
+  fi
+
+  while [ $# -gt 0 ]; do
+    case "$1" in
+    --state)
+      state_id="${2:-}"
+      shift 2
+      ;;
+    --labels)
+      label_ids="${2:-}"
+      shift 2
+      ;;
+    --assignee)
+      assignee_id="${2:-}"
+      shift 2
+      ;;
+    --title)
+      title="${2:-}"
+      shift 2
+      ;;
+    --description)
+      description="${2:-}"
+      shift 2
+      ;;
+    --project)
+      project_id="${2:-}"
+      shift 2
+      ;;
+    --parent)
+      parent_id="${2:-}"
+      shift 2
+      ;;
+    --priority)
+      priority="${2:-}"
+      shift 2
+      ;;
+    *)
+      echo "update_issue: unknown argument: $1" >&2
+      return 1
+      ;;
+    esac
+  done
+
+  # Build input object dynamically — only non-empty fields are included.
   local input="{}"
   [ -n "$state_id" ] && input=$(echo "$input" | jq --arg s "$state_id" '. + {stateId: $s}')
   [ -n "$label_ids" ] && input=$(echo "$input" | jq --argjson l "$label_ids" '. + {labelIds: $l}')
   [ -n "$assignee_id" ] && input=$(echo "$input" | jq --arg a "$assignee_id" '. + {assigneeId: $a}')
+  [ -n "$title" ] && input=$(echo "$input" | jq --arg v "$title" '. + {title: $v}')
+  [ -n "$description" ] && input=$(echo "$input" | jq --arg v "$description" '. + {description: $v}')
+  [ -n "$project_id" ] && input=$(echo "$input" | jq --arg v "$project_id" '. + {projectId: $v}')
+  [ -n "$parent_id" ] && input=$(echo "$input" | jq --arg v "$parent_id" '. + {parentId: $v}')
+  if [ -n "$priority" ]; then
+    input=$(echo "$input" | jq --arg v "$priority" '. + {priority: ($v | tonumber)}') || {
+      echo "update_issue: --priority must be numeric, got: $priority" >&2
+      return 1
+    }
+  fi
 
   local query
   query=$(jq -n --arg id "$issue_id" --argjson input "$input" '{
