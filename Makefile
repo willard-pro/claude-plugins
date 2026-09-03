@@ -1,11 +1,16 @@
 SCRIPTS := $(shell find . -name "*.sh" -not -path "./.git/*")
 
-.PHONY: test test-lib test-fleetd test-flow test-kc lint fmt-check fmt test-grill test-planner-intent-gate
+.PHONY: test test-lib test-fleetd test-flow test-kc lint fmt-check fmt test-grill test-planner-intent-gate check-generated
 
-test: test-lib test-fleetd test-planner test-flow test-kc test-grill test-planner-intent-gate
+test: check-generated test-lib test-fleetd test-planner test-flow test-kc test-grill test-planner-intent-gate
+
+check-generated:
+	@echo "=== generated-section drift check ==="
+	python3 ticket-auto-pipeline/skills/ticket-flow/gen-dispatch-table.py --check
 
 test-lib:
 	@echo "=== lib unit tests ==="
+	bash ticket-auto-pipeline/lib/tests/test-dispatch-table.sh
 	bash ticket-auto-pipeline/lib/tests/test-linear-api.sh
 	bash ticket-auto-pipeline/lib/tests/test-env-check.sh
 	bash ticket-auto-pipeline/lib/tests/test-notes-parse.sh
@@ -13,8 +18,11 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-heartbeat.sh
 	bash ticket-auto-pipeline/lib/tests/test-capture-transcript.sh
 	bash ticket-auto-pipeline/lib/tests/test-reconcile-comments.sh
+	bash ticket-auto-pipeline/lib/tests/test-ticket-preamble.sh
 	bash ticket-auto-pipeline/lib/tests/test-spawn-helper.sh
 	bash ticket-auto-pipeline/lib/tests/test-worker-hooks.sh
+	bash ticket-auto-pipeline/lib/tests/test-agent-activity.sh
+	bash ticket-auto-pipeline/lib/tests/test-tool-error-capture.sh
 	bash ticket-auto-pipeline/lib/tests/test-error-handler.sh
 	bash ticket-auto-pipeline/lib/tests/test-trajectory.sh
 	bash ticket-auto-pipeline/lib/tests/test-verifier-result.sh
@@ -24,6 +32,9 @@ test-lib:
 	# fleet-controller tests
 	bash fleet-controller/lib/tests/test-fleet-detect.sh
 	bash fleet-controller/lib/tests/test-fleet-detect-new.sh
+	bash fleet-controller/lib/tests/test-fleet-detect-activity.sh
+	bash fleet-controller/lib/tests/test-fleet-detect-signals.sh
+	bash fleet-controller/lib/tests/test-fleet-store-parity.sh
 	bash fleet-controller/lib/tests/test-detect-epic-branch-ready.sh
 	bash fleet-controller/lib/tests/test-fleet-intervene.sh
 	bash fleet-controller/lib/tests/test-fleet-dashboard.sh
@@ -92,6 +103,13 @@ test-lib:
 test-fleetd:
 	@echo "=== fleetd supervisor tests (must run from repo root) ==="
 	python3 -m pytest fleet-controller/fleetd/tests/test_supervisor.py -v
+	python3 -m pytest fleet-controller/fleetd/tests/test_store.py -v
+	python3 -m pytest fleet-controller/fleetd/tests/test_phase_dispatch.py -v
+	python3 -m pytest fleet-controller/fleetd/tests/test_gate_hold.py -v
+	python3 -m pytest fleet-controller/fleetd/tests/test_preamble.py -v
+	python3 -m pytest fleet-controller/fleetd/tests/test_orchestration.py -v
+	python3 -m pytest fleet-controller/fleetd/tests/test_otel.py -v
+	python3 -m pytest ticket-auto-pipeline/skills/ticket-auto/tests/test_dashboard_fleet.py -v
 
 test-planner:
 	@echo "=== ticket-planner unit tests ==="

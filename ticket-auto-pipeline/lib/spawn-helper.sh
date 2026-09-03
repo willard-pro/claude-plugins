@@ -82,6 +82,96 @@ _worker_progress_file() {
   echo "$(_worker_state_dir)/ticket-auto-${tid}-progress.txt"
 }
 
+# ── Background-process ledger ────────────────────────────────────────────────────
+# spawn_agent_pre disowns its pinger and watchdog so they survive the Bash tool
+# call that started them. That also means a router which dies mid-bracket — a
+# crashed session, a SIGKILL, a closed terminal — leaves them re-parented to init
+# and running, with no stop file ever arriving. The watchdog's max_iterations cap
+# (worker-reap-recovery) eventually stops them, but that is up to 12 hours of a
+# dead router reporting `alive` to detect_stalls.
+#
+# The ledger closes that window: every backgrounded PID is recorded with the
+# /proc start-time ticks of the process that held it, so a later run can tell an
+# orphan from an unrelated process the kernel recycled the pid to.
+_worker_bg_ledger() {
+  local tid="${1:-${TICKET_ID:-}}"
+  echo "$(_worker_state_dir)/ticket-auto-${tid}-bgpids.txt"
+}
+
+# Start-time ticks (field 22 of /proc/PID/stat) for a live pid, empty otherwise.
+# Field-22 indexing matches the PID-reuse guard in spawn_watchdog_start.
+_proc_start_ticks() {
+  local pid="$1"
+  [ -n "$pid" ] || return 0
+  [ -r "/proc/$pid/stat" ] || return 0
+  awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || true
+}
+
+# Record a backgrounded helper PID against a ticket.
+# Usage: _worker_bg_record <ticket_id> <type> <pid>
+_worker_bg_record() {
+  local tid="$1" type="$2" pid="$3"
+  [ -n "$tid" ] || return 0
+  [ -n "$pid" ] || return 0
+  local ticks
+  ticks=$(_proc_start_ticks "$pid")
+  local ledger
+  ledger=$(_worker_bg_ledger "$tid")
+  mkdir -p "$(dirname "$ledger")" 2>/dev/null || true
+  echo "${pid}:${ticks}:${type}" >>"$ledger" 2>/dev/null || true
+}
+
+# ── spawn_sweep_orphans ──────────────────────────────────────────────────────────
+# Kill any ledgered pinger/watchdog still alive, then clear the ledger. Called
+# from spawn_agent_post once the current bracket's helpers have been stopped
+# cooperatively — so the only survivors are orphans from a bracket whose router
+# never got to run its own cleanup.
+#
+# A ledger entry is only acted on when the pid is alive AND its current start
+# ticks match the ticks recorded at spawn. A recycled pid fails that comparison
+# and is skipped, so this can never signal an unrelated process.
+#
+# Usage: spawn_sweep_orphans <ticket_id>
+# Prints one "spawn_sweep_orphans: killed ..." line per orphan to stderr.
+spawn_sweep_orphans() {
+  local tid="${1:-${TICKET_ID:-}}"
+  [ -n "$tid" ] || return 0
+
+  local ledger
+  ledger=$(_worker_bg_ledger "$tid")
+  [ -f "$ledger" ] || return 0
+
+  local self_pid=$$
+  local pid ticks type current
+  while IFS=: read -r pid ticks type; do
+    [ -n "$pid" ] || continue
+    case "$pid" in
+    '' | *[!0-9]*) continue ;;
+    esac
+    [ "$pid" -le 1 ] && continue
+    [ "$pid" = "$self_pid" ] && continue
+    kill -0 "$pid" 2>/dev/null || continue
+
+    # PID-reuse guard: only signal the process that was actually recorded.
+    current=$(_proc_start_ticks "$pid")
+    if [ -n "$ticks" ] && [ -n "$current" ] && [ "$ticks" != "$current" ]; then
+      continue
+    fi
+
+    kill -TERM "$pid" 2>/dev/null || true
+    # The helpers spend their lives in sleep, so TERM lands promptly; KILL is
+    # the backstop for one wedged in an uninterruptible call.
+    sleep 0.05 2>/dev/null || true
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -KILL "$pid" 2>/dev/null || true
+    fi
+    echo "spawn_sweep_orphans: killed orphaned ${type:-helper} pid ${pid} for ${tid}" >&2
+  done <"$ledger"
+
+  : >"$ledger" 2>/dev/null || true
+  return 0
+}
+
 # ── Diagnostic ERR trap ────────────────────────────────────────────────────────────
 # Logs crash location before exiting. Opt-in via SPAWN_DIAGNOSTICS=true to avoid
 # log noise in normal operation. When a pipeline crashes at an agent-spawn boundary,
@@ -330,21 +420,13 @@ spawn_agent_pre() {
   # Normalize phase to uppercase for detect-resume.sh compatibility
   phase_upper=$(echo "$PHASE" | tr '[:lower:]' '[:upper:]')
 
-  # 1. Write waiting log entry (idempotent: tail-2 check — allows retries after fail).
-  # Model write (6b) appends after the waiting line, so pure tail -1 would miss
-  # the waiting entry and duplicate on back-to-back spawn_agent_pre calls.
-  # tail -3 would span into prior brackets (fail/done) and suppress retries.
-  # tail -2: covers [waiting, model] but not [waiting, model, fail/done].
-  if [ -n "$LOG_FILE" ]; then
-    local last_lines
-    last_lines=$(tail -2 "$LOG_FILE" 2>/dev/null || true)
-    if echo "$last_lines" | grep -q "|${PHASE}|${phase_lower}|waiting|"; then
-      : # already written, skip (back-to-back duplicate)
-    else
-      local desc="${DESCRIPTION:-agent for ${TICKET_ID}}"
-      _plog "$LOG_FILE" "$phase_upper" "$phase_lower" "waiting" "Agent launched — ${desc}"
-    fi
-  fi
+  # 1. Open the bracket: the |waiting| line and the META|model entry.
+  # Delegated to phase_bracket_open so the grammar has one writer and two
+  # callers, exactly as phase_terminal_write does for the closing half.
+  local _model
+  _model=$(phase_bracket_open \
+    PHASE="$PHASE" STEP="$STEP" TICKET_ID="$TICKET_ID" \
+    DESCRIPTION="$DESCRIPTION" LOG_FILE="$LOG_FILE")
 
   # 2. Start heartbeat pinger and watchdog
   local PINGER_PID=""
@@ -359,6 +441,10 @@ spawn_agent_pre() {
     PINGER_PID=$!
     spawn_watchdog_start "$watchdog_stop" "$PHASE" 60 "$TICKET_ID"
     WATCHDOG_PID=$!
+    # Ledger the disowned helpers so a later run can sweep them if this
+    # router never reaches spawn_agent_post.
+    _worker_bg_record "$TICKET_ID" "pinger" "$PINGER_PID"
+    _worker_bg_record "$TICKET_ID" "watchdog" "$WATCHDOG_PID"
   fi
 
   # 3. Write phase context file
@@ -414,25 +500,227 @@ EOF
     echo "ATTEMPT=${ATTEMPT}" >>"$meta_file" || true
   fi
 
-  # 6a. Append MODEL to spawn-meta file (Phase 0 RLVR — model identity recording)
-  local model="${ANTHROPIC_MODEL:-unknown}"
+  # 6a. Append MODEL to spawn-meta file (Phase 0 RLVR — model identity recording).
+  # The value is the one phase_bracket_open already recorded in the log, so the
+  # spawn-meta file and META|model can never name two different models.
   # F6: guard against unwritable /tmp or full disk — must not abort router spawn
-  echo "MODEL=${model}" >>"$meta_file" || true
+  echo "MODEL=${_model}" >>"$meta_file" || true
 
-  # 6b. Write META|model|info to pipeline log (wrapped for set -e safety)
-  local model_json
-  model_json=$(printf '{"phase":"%s","model":"%s"}' "$PHASE" "$model")
-  # F7: validate JSON with jq before appending — unescaped newlines or quotes
-  # in ANTHROPIC_MODEL would inject forged log lines or produce malformed JSON
-  if echo "$model_json" | jq -e . >/dev/null 2>&1; then
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|model|info|${model_json}" >>"$LOG_FILE" || true
-  else
-    # Fallback: escape the model value via jq -Rs, then embed in valid JSON
-    local safe_model
-    safe_model=$(printf '%s' "$model" | jq -Rs 'rtrimstr("\n")' 2>/dev/null || echo "\"unknown\"")
-    model_json=$(printf '{"phase":"%s","model":%s}' "$PHASE" "$safe_model")
-    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|model|info|${model_json}" >>"$LOG_FILE" || true
+  return 0
+}
+
+# ── phase_bracket_open ───────────────────────────────────────────────────────────
+# Opens a phase's bracket: the `{PHASE}|{step}|waiting|` pipeline-log line, and
+# the `META|model|info|` entry naming the model that phase will run on.
+#
+# The mirror of phase_terminal_write, and extracted for the same reason
+# (design.md D13, task 4.12): one writer of the line grammar, two callers. The
+# router reaches it through spawn_agent_pre; fleetd calls it directly, because
+# it forks phases itself and would otherwise leave every bracket unopened —
+# which detect-resume.sh, the zombie detector and the OTel exporter all read as
+# "this phase never started".
+#
+# What is deliberately NOT here, because it belongs to the manual path only:
+# the heartbeat pinger and watchdog (they exist to prove a *router* is still
+# looping while it waits; fleetd knows whether its own child is alive and says
+# so from a fact it verified), the spawn-meta write (fleetd's is different —
+# it carries SPAWNED_BY and a session id generated before exec, per D15), the
+# progress file (read only by that watchdog) and the ctx file (which, since
+# tool-error-capture.sh moved to session-id resolution, now has no reader at
+# all — it is written and swept and nothing consumes it).
+#
+# Echoes the resolved model name on stdout so a caller that also records model
+# identity elsewhere uses the same value rather than re-reading the env.
+#
+# Usage: phase_bracket_open PHASE=<phase> STEP=<step> TICKET_ID=<id> \
+#          [DESCRIPTION=<text>] [LOG_FILE=<path>] [MODEL=<name>]
+phase_bracket_open() {
+  local PHASE="" STEP="" TICKET_ID="" DESCRIPTION="" LOG_FILE="" MODEL=""
+
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+    PHASE=*) PHASE="${arg#PHASE=}" ;;
+    STEP=*) STEP="${arg#STEP=}" ;;
+    TICKET_ID=*) TICKET_ID="${arg#TICKET_ID=}" ;;
+    DESCRIPTION=*) DESCRIPTION="${arg#DESCRIPTION=}" ;;
+    LOG_FILE=*) LOG_FILE="${arg#LOG_FILE=}" ;;
+    MODEL=*) MODEL="${arg#MODEL=}" ;;
+    *)
+      echo "phase_bracket_open: unknown parameter '$arg'" >&2
+      return 1
+      ;;
+    esac
+  done
+
+  local phase_lower="" phase_upper=""
+  [ -n "$STEP" ] && phase_lower=$(echo "$STEP" | tr '[:upper:]' '[:lower:]')
+  [ -n "$PHASE" ] && phase_upper=$(echo "$PHASE" | tr '[:lower:]' '[:upper:]')
+  phase_upper="${phase_upper:-UNKNOWN}"
+
+  local model="${MODEL:-${ANTHROPIC_MODEL:-unknown}}"
+
+  # No log file: still resolve and echo the model, so a caller can record it.
+  if [ -z "$LOG_FILE" ]; then
+    printf '%s' "$model"
+    return 0
   fi
+
+  # Idempotent on the waiting line: tail-2 check, which allows a retry after a
+  # fail but suppresses a back-to-back duplicate. The window is 2 rather than 1
+  # because the model line lands immediately after the waiting line, and rather
+  # than 3 because a 3-line window reaches back into the previous bracket's
+  # terminal and would suppress a legitimate retry.
+  local last_lines
+  last_lines=$(tail -2 "$LOG_FILE" 2>/dev/null || true)
+  if ! echo "$last_lines" | command grep -q "|${phase_upper}|${phase_lower}|waiting|"; then
+    local desc="${DESCRIPTION:-agent for ${TICKET_ID}}"
+    _plog "$LOG_FILE" "$phase_upper" "$phase_lower" "waiting" "Agent launched — ${desc}"
+  fi
+
+  # META|model. Validate the JSON before appending: an unescaped quote or
+  # newline in the model name would otherwise forge a log line, and the log is
+  # what every consumer routes on.
+  local model_json
+  model_json=$(printf '{"phase":"%s","model":"%s"}' "$phase_upper" "$model")
+  if ! echo "$model_json" | jq -e . >/dev/null 2>&1; then
+    local safe_model
+    safe_model=$(printf '%s' "$model" | jq -Rs 'rtrimstr("\n")' 2>/dev/null || echo '"unknown"')
+    model_json=$(printf '{"phase":"%s","model":%s}' "$phase_upper" "$safe_model")
+  fi
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|model|info|${model_json}" >>"$LOG_FILE" || true
+
+  printf '%s' "$model"
+  return 0
+}
+
+# ── phase_terminal_write ─────────────────────────────────────────────────────────
+# Writes a phase's terminal pipeline-log marker — the `{PHASE}|{step}|done|` /
+# `|fail|` line that resolves an open bracket — plus the matching heartbeat and
+# claude-log entries.
+#
+# Extracted from spawn_agent_post so that the line grammar has exactly ONE
+# writer with two callers (design.md D13). On the manual path the router calls
+# spawn_agent_post, which calls this. On the automated path fleetd classifies a
+# finished phase itself (D12) and calls this directly, because it bypasses the
+# router entirely and the marker would otherwise have no writer at all.
+#
+# The writer must be a process that OUTLIVES the agent: a crashed, timed-out or
+# SIGKILLed agent never writes anything, and those are precisely the cases the
+# marker exists to record. That is why this is not the phase skill's job.
+#
+# Everything spawn_agent_post does around this — stopping the pinger and
+# watchdog, reaping helpers, sweeping orphans, reading the spawn-meta file — is
+# deliberately NOT here. Those are the manual path's bracket teardown; fleetd
+# owns its own worker lifecycle and must not inherit them.
+#
+# Usage: phase_terminal_write PHASE=<phase> STEP=<step> RESULT=<done|fail> \
+#          [MSG=<message>] [VERDICT=<PASS|FAIL|OK|WARN|BLOCK>] \
+#          [NEXT_PHASE=<phase>] [FAIL_ACTION=<stop|warn-continue>] \
+#          [LOG_FILE=<path>] [HB_LOG_FILE=<path>] [CLAUDE_LOG_FILE=<path>]
+#
+# PHASE and STEP are normalized here (phase uppercased, step lowercased) rather
+# than by the caller, so both callers produce byte-identical lines.
+phase_terminal_write() {
+  local PHASE="" STEP="" RESULT="" MSG="" VERDICT="" NEXT_PHASE=""
+  local FAIL_ACTION="" LOG_FILE="" HB_LOG_FILE="" CLAUDE_LOG_FILE=""
+
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+    PHASE=*) PHASE="${arg#PHASE=}" ;;
+    STEP=*) STEP="${arg#STEP=}" ;;
+    RESULT=*) RESULT="${arg#RESULT=}" ;;
+    MSG=*) MSG="${arg#MSG=}" ;;
+    VERDICT=*) VERDICT="${arg#VERDICT=}" ;;
+    NEXT_PHASE=*) NEXT_PHASE="${arg#NEXT_PHASE=}" ;;
+    FAIL_ACTION=*) FAIL_ACTION="${arg#FAIL_ACTION=}" ;;
+    LOG_FILE=*) LOG_FILE="${arg#LOG_FILE=}" ;;
+    HB_LOG_FILE=*) HB_LOG_FILE="${arg#HB_LOG_FILE=}" ;;
+    CLAUDE_LOG_FILE=*) CLAUDE_LOG_FILE="${arg#CLAUDE_LOG_FILE=}" ;;
+    *)
+      echo "phase_terminal_write: unknown parameter '$arg'" >&2
+      return 1
+      ;;
+    esac
+  done
+
+  case "$VERDICT" in
+  "" | PASS | FAIL | OK | WARN | BLOCK) ;;
+  *)
+    echo "phase_terminal_write: VERDICT must be one of PASS|FAIL|OK|WARN|BLOCK, got '$VERDICT'" >&2
+    return 1
+    ;;
+  esac
+
+  local phase_lower="" phase_upper=""
+  [ -n "$STEP" ] && phase_lower=$(echo "$STEP" | tr '[:upper:]' '[:lower:]')
+  # Normalize phase to uppercase for detect-resume.sh compatibility
+  [ -n "$PHASE" ] && phase_upper=$(echo "$PHASE" | tr '[:lower:]' '[:upper:]')
+  phase_upper="${phase_upper:-UNKNOWN}"
+
+  case "$RESULT" in
+  done)
+    local done_msg="${MSG:-agent done}"
+    [ -n "$VERDICT" ] && done_msg="${VERDICT} — ${done_msg}"
+    if [ -n "${LOG_FILE:-}" ]; then
+      # Tail-scoped (not whole-file): a whole-file grep would suppress every
+      # done line after the first for loop phases (pr-review iterate, verify
+      # retry), where the same PHASE|STEP recurs across brackets. Matches the
+      # pre-guard's tail-check semantics (see spawn_agent_pre above).
+      local last_line
+      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
+      if echo "$last_line" | grep -q "|$phase_upper|${phase_lower:-unknown}|done|"; then
+        : # already written, skip (back-to-back duplicate)
+      else
+        _plog "$LOG_FILE" "$phase_upper" "${phase_lower:-unknown}" "done" "${done_msg}"
+      fi
+    fi
+    if [ -n "${HB_LOG_FILE:-}" ]; then
+      hb_heartbeat "agent-returned" "${phase_lower:-agent} done — ${done_msg}"
+      if [ -n "$NEXT_PHASE" ]; then
+        hb_heartbeat "phase-transition" "${PHASE:-} → ${NEXT_PHASE}"
+      fi
+    fi
+    if [ -n "${CLAUDE_LOG_FILE:-}" ]; then
+      cl_write "$phase_upper" "${phase_lower:-unknown}" "done" "${done_msg}"
+    fi
+    ;;
+
+  fail)
+    local fail_msg="${MSG:-Agent failed}"
+    [ -n "$VERDICT" ] && fail_msg="${VERDICT} — ${fail_msg}"
+    local fail_action="${FAIL_ACTION:-stop}"
+    local suffix=""
+    [ "$fail_action" = "warn-continue" ] && suffix=" — continuing"
+
+    if [ -n "${LOG_FILE:-}" ]; then
+      local last_line
+      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
+      if echo "$last_line" | grep -q "|$phase_upper|${phase_lower:-unknown}|fail|"; then
+        : # already written, skip (back-to-back duplicate)
+      else
+        _plog "$LOG_FILE" "$phase_upper" "${phase_lower:-unknown}" "fail" "${fail_msg}${suffix}"
+      fi
+    fi
+    if [ -n "${HB_LOG_FILE:-}" ]; then
+      hb_heartbeat "agent-returned" "${phase_lower:-agent} failed${suffix}"
+    fi
+    if [ -n "${CLAUDE_LOG_FILE:-}" ]; then
+      local last_hb="unknown"
+      [ -n "${HB_LOG_FILE:-}" ] && [ -f "$HB_LOG_FILE" ] && last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
+      cl_write "$phase_upper" "context" "fail" "${phase_lower:-agent} agent failed (${fail_action}) — last_hb: ${last_hb}"
+      if [ "$fail_action" = "stop" ]; then
+        cl_write RETRO hint info "sub-agent spawn failure in $phase_upper phase — check agent isolation, tool availability, and CLAUDE_LOG_FILE export for diagnostics"
+      fi
+    fi
+    ;;
+
+  *)
+    echo "phase_terminal_write: RESULT must be 'done' or 'fail', got '$RESULT'" >&2
+    return 1
+    ;;
+  esac
 
   return 0
 }
@@ -537,11 +825,9 @@ spawn_agent_post() {
     return 1
   fi
 
-  local phase_lower="" phase_upper=""
-  [ -n "${STEP:-}" ] && phase_lower=$(echo "${STEP:-}" | tr '[:upper:]' '[:lower:]')
-  # Normalize phase to uppercase for detect-resume.sh compatibility
-  [ -n "${PHASE:-}" ] && phase_upper=$(echo "${PHASE:-}" | tr '[:lower:]' '[:upper:]')
-  phase_upper="${phase_upper:-UNKNOWN}"
+  # PHASE/STEP normalization deliberately lives in phase_terminal_write, not
+  # here: both callers of that helper must produce byte-identical log lines,
+  # so the rule has one home.
 
   # Stop watchdog and heartbeat pinger
   if [ -n "${HB_LOG_FILE:-}" ]; then
@@ -591,68 +877,22 @@ spawn_agent_post() {
     fi
   fi
 
-  case "$RESULT" in
-  done)
-    local done_msg="${MSG:-agent done}"
-    [ -n "$VERDICT" ] && done_msg="${VERDICT} — ${done_msg}"
-    if [ -n "${LOG_FILE:-}" ]; then
-      # Tail-scoped (not whole-file): a whole-file grep would suppress every
-      # done line after the first for loop phases (pr-review iterate, verify
-      # retry), where the same PHASE|STEP recurs across brackets. Matches the
-      # pre-guard's tail-check semantics (see spawn_agent_pre above).
-      local last_line
-      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
-      if echo "$last_line" | grep -q "|$phase_upper|${phase_lower:-unknown}|done|"; then
-        : # already written, skip (back-to-back duplicate)
-      else
-        _plog "$LOG_FILE" "$phase_upper" "${phase_lower:-unknown}" "done" "${done_msg}"
-      fi
-    fi
-    if [ -n "${HB_LOG_FILE:-}" ]; then
-      hb_heartbeat "agent-returned" "${phase_lower:-agent} done — ${done_msg}"
-      if [ -n "$NEXT_PHASE" ]; then
-        hb_heartbeat "phase-transition" "${PHASE:-} → ${NEXT_PHASE}"
-      fi
-    fi
-    if [ -n "${CLAUDE_LOG_FILE:-}" ]; then
-      cl_write "$phase_upper" "${phase_lower:-unknown}" "done" "${done_msg}"
-    fi
-    ;;
+  # Sweep helpers left running by any earlier bracket for this ticket whose
+  # router died before reaching this point. Runs unconditionally — an orphan
+  # from a crashed run is exactly the case where HB_LOG_FILE may be unset here.
+  spawn_sweep_orphans "$TICKET_ID"
 
-  fail)
-    local fail_msg="${MSG:-Agent failed}"
-    [ -n "$VERDICT" ] && fail_msg="${VERDICT} — ${fail_msg}"
-    local fail_action="${FAIL_ACTION:-stop}"
-    local suffix=""
-    [ "$fail_action" = "warn-continue" ] && suffix=" — continuing"
-
-    if [ -n "${LOG_FILE:-}" ]; then
-      local last_line
-      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
-      if echo "$last_line" | grep -q "|$phase_upper|${phase_lower:-unknown}|fail|"; then
-        : # already written, skip (back-to-back duplicate)
-      else
-        _plog "$LOG_FILE" "$phase_upper" "${phase_lower:-unknown}" "fail" "${fail_msg}${suffix}"
-      fi
-    fi
-    if [ -n "${HB_LOG_FILE:-}" ]; then
-      hb_heartbeat "agent-returned" "${phase_lower:-agent} failed${suffix}"
-    fi
-    if [ -n "${CLAUDE_LOG_FILE:-}" ]; then
-      local last_hb="unknown"
-      [ -n "${HB_LOG_FILE:-}" ] && [ -f "$HB_LOG_FILE" ] && last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
-      cl_write "$phase_upper" "context" "fail" "${phase_lower:-agent} agent failed (${fail_action}) — last_hb: ${last_hb}"
-      if [ "$fail_action" = "stop" ]; then
-        cl_write RETRO hint info "sub-agent spawn failure in $phase_upper phase — check agent isolation, tool availability, and CLAUDE_LOG_FILE export for diagnostics"
-      fi
-    fi
-    ;;
-
-  *)
-    echo "spawn_agent_post: RESULT must be 'done' or 'fail', got '$RESULT'" >&2
-    return 1
-    ;;
-  esac
+  phase_terminal_write \
+    PHASE="$PHASE" \
+    STEP="$STEP" \
+    RESULT="$RESULT" \
+    MSG="$MSG" \
+    VERDICT="$VERDICT" \
+    NEXT_PHASE="$NEXT_PHASE" \
+    FAIL_ACTION="${FAIL_ACTION:-stop}" \
+    LOG_FILE="${LOG_FILE:-}" \
+    HB_LOG_FILE="${HB_LOG_FILE:-}" \
+    CLAUDE_LOG_FILE="${CLAUDE_LOG_FILE:-}" || return 1
 
   # Meta file persists until next spawn_agent_pre overwrites it.
   # This allows duplicate spawn_agent_post calls to read PHASE/STEP

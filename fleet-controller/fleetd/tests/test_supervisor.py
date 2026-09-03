@@ -1092,6 +1092,131 @@ class SpawnAndReapTest(unittest.TestCase):
             sup.release_lock()
 
 
+class DualInvocationInterlockTest(unittest.TestCase):
+    """The dual-invocation interlock (task 4.19) actually gates the live
+    ticket-level spawn path — `_consume_queue` — not just its own unit
+    tests. `phase_dispatch.detect_foreign_run` is exercised directly in
+    test_phase_dispatch.py; these tests are the wiring, not the decision.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _append_queue_entry(self, tid, reason, generation=1):
+        queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+        entry = {
+            'tid': tid,
+            'reason': reason,
+            'generation': generation,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+        with open(queue_file, 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+
+    def _write_open_bracket(self, tid):
+        log_file = self.workspace / f'{tid}-pipeline.log'
+        log_file.write_text(
+            '2026-09-03T09:00:00Z|IMPLEMENT|implement|waiting|'
+            'Agent launched\n')
+
+    def _write_activity(self, tid, seconds_ago):
+        stamp = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+        act_file = self.workspace / f'{tid}-activity.log'
+        act_file.write_text(
+            stamp.strftime('%Y-%m-%dT%H:%M:%SZ') + '|IMPLEMENT|Edit\n')
+
+    def test_a_live_foreign_run_is_not_double_spawned(self):
+        """A human running `/ticket-auto` by hand blocks fleetd's own
+        dispatch of the same ticket — the exact race task 4.19 exists to
+        prevent."""
+        from fleetd.supervisor import Supervisor
+
+        self._append_queue_entry('TST-F1', 'test-foreign')
+        self._write_open_bracket('TST-F1')
+        self._write_activity('TST-F1', seconds_ago=30)
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=5)
+            consumed = sup._consume_queue(cmd_override=cmd)
+
+            self.assertEqual(
+                consumed, set(),
+                "a live foreign run must not be consumed/spawned")
+            self.assertIsNone(
+                sup._children.get('TST-F1'),
+                "fleetd must not fork a second worker over a foreign run")
+
+            queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+            remaining = [
+                json.loads(ln)
+                for ln in queue_file.read_text().splitlines() if ln.strip()
+            ]
+            self.assertEqual(
+                [e['tid'] for e in remaining], ['TST-F1'],
+                "the queue entry must be left in place so the next cycle "
+                "re-checks rather than dropping the dispatch")
+        finally:
+            sup.release_lock()
+
+    def test_a_crashed_orphan_is_still_recovered(self):
+        """An open bracket with stale activity is a crash to recover, not a
+        foreign run — it must still spawn normally."""
+        from fleetd.supervisor import Supervisor
+
+        self._append_queue_entry('TST-F2', 'test-orphan')
+        self._write_open_bracket('TST-F2')
+        self._write_activity('TST-F2', seconds_ago=4000)  # stale
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1)
+            consumed = sup._consume_queue(cmd_override=cmd)
+            self.assertEqual(
+                consumed, {'TST-F2'},
+                "a stale/crashed bracket is an orphan, not a foreign run, "
+                "and reconciliation must still be able to spawn it")
+        finally:
+            sup.release_lock()
+
+    def test_no_open_bracket_spawns_normally(self):
+        """A ticket with no pipeline log yet (first dispatch ever) is
+        unaffected by the interlock."""
+        from fleetd.supervisor import Supervisor
+
+        self._append_queue_entry('TST-F3', 'test-first-dispatch')
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1)
+            consumed = sup._consume_queue(cmd_override=cmd)
+            self.assertEqual(consumed, {'TST-F3'})
+        finally:
+            sup.release_lock()
+
+
 # ── Group 7: Kill escalation tests ───────────────────────────────────────
 
 
@@ -1302,6 +1427,137 @@ class WorkerStdioAndEnvTest(unittest.TestCase):
         self.assertNotIn('GEN2', gen1_file.read_text(),
                          "the second generation must not overwrite the first")
 
+    def test_run_registry_records_start_ticks(self):
+        """The run registry carries the worker's /proc start ticks.
+
+        `_ticket_worker_alive` (detect-resume.sh) pairs pid with start ticks
+        to defeat PID reuse, and tolerates the field being absent — so a
+        missing value disarms the guard silently rather than failing. This
+        test is the only thing that notices.
+        """
+        from fleetd.supervisor import spawn_worker, _pid_start_time
+
+        pid, _ = spawn_worker(
+            tid='TST-TICKS', generation=1, state_dir=str(self.workspace),
+            cmd_override=[sys.executable, '-c', 'import time; time.sleep(1)'],
+        )
+        try:
+            entry = json.loads(
+                (self.workspace / 'TST-TICKS-run.json').read_text())
+            self.assertEqual(entry['pid'], str(pid))
+            self.assertIn('start_ticks', entry,
+                          "start_ticks must be recorded or the PID-reuse "
+                          "guard in detect-resume.sh is inert")
+            self.assertEqual(entry['start_ticks'], str(_pid_start_time(pid)),
+                             "recorded ticks must match /proc field 22 for "
+                             "the live worker")
+        finally:
+            os.waitpid(pid, 0)
+
+    def test_phase_worker_gets_its_own_registry_and_stdio_files(self):
+        """A ticket's phases run in sequence and must not overwrite each other.
+
+        The ticket-level `{tid}-run.json` answers "is this ticket running".
+        With per-phase dispatch a reader also needs "which phase is running",
+        and a second phase reusing the ticket-level file would answer with the
+        phase that just finished.
+        """
+        from fleetd.supervisor import spawn_worker
+
+        pid, _ = spawn_worker(
+            tid='TST-PH', generation=1, state_dir=str(self.workspace),
+            phase='VERIFY',
+            cmd_override=[sys.executable, '-c', 'import time; time.sleep(1)'],
+        )
+        try:
+            phase_run = self.workspace / 'TST-PH-verify-run.json'
+            self.assertTrue(phase_run.is_file(),
+                            "phase spawn must write a phase-scoped registry")
+            self.assertFalse((self.workspace / 'TST-PH-run.json').is_file(),
+                             "phase spawn must not claim the ticket-level file")
+            entry = json.loads(phase_run.read_text())
+            self.assertEqual(entry['phase'], 'VERIFY')
+            self.assertEqual(entry['tid'], 'TST-PH')
+            # The registry write is the parent's and is already done; the
+            # stdio files are opened by the child after fork, so this one
+            # has to be waited for.
+            stderr_file = self.workspace / 'TST-PH-verify-gen1.stderr'
+            deadline = time.time() + 5
+            while time.time() < deadline and not stderr_file.is_file():
+                time.sleep(0.05)
+            self.assertTrue(stderr_file.is_file(),
+                            "phase stdio must be namespaced too")
+        finally:
+            os.waitpid(pid, 0)
+
+    def test_phase_worker_environment_reaches_the_process(self):
+        """The env fleetd builds is the env the phase actually runs with.
+
+        This is the whole of task 4.16's claim — that a value fleetd owns is
+        configured rather than requested — so it is asserted against the real
+        forked process, not against the dict that was passed in.
+        """
+        from fleetd.supervisor import spawn_worker
+
+        out = self.workspace / 'TST-ENV-verify-gen1.json'
+        pid, _ = spawn_worker(
+            tid='TST-ENV', generation=1, state_dir=str(self.workspace),
+            phase='VERIFY',
+            extra_env={'LOG_FILE': '/w/logs/TST-ENV-pipeline.log',
+                       'FLEET_PHASE': 'VERIFY'},
+            cmd_override=[
+                sys.executable, '-c',
+                'import os; print(os.environ["LOG_FILE"], '
+                'os.environ["FLEET_PHASE"])'],
+        )
+        os.waitpid(pid, 0)
+        deadline = time.time() + 5
+        while time.time() < deadline and not (
+                out.is_file() and out.stat().st_size > 0):
+            time.sleep(0.05)
+        self.assertIn('/w/logs/TST-ENV-pipeline.log', out.read_text())
+        self.assertIn('VERIFY', out.read_text())
+
+    def test_phase_prompt_replaces_the_ticket_auto_invocation(self):
+        """`-p` carries one phase, and nothing else about the spawn changes."""
+        from fleetd.supervisor import _build_worker_cmd
+
+        default = _build_worker_cmd('CRE-9', claude_bin='claude')
+        phased = _build_worker_cmd('CRE-9', claude_bin='claude',
+                                   prompt='/ticket-verify CRE-9 --from-auto')
+        self.assertIn('/ticket-auto CRE-9 --auto --from-planned', default)
+        self.assertIn('/ticket-verify CRE-9 --from-auto', phased)
+        self.assertNotIn('/ticket-auto CRE-9 --auto --from-planned', phased)
+        # Everything that is not the prompt is identical — session handling,
+        # output format and permission mode are properties of a headless
+        # worker, not of which phase it runs.
+        def strip(cmd):
+            return [a for a in cmd if not a.startswith('/ticket-')]
+
+        self.assertEqual(strip(default), strip(phased))
+
+    def test_spawn_phase_worker_builds_from_the_canonical_table(self):
+        """End to end: a step id in, a forked phase worker out."""
+        from fleetd.supervisor import spawn_phase_worker
+
+        pid, session_id, spawn = spawn_phase_worker(
+            'TST-SPW', 'STEP_4_5', 1, str(self.workspace),
+            log_file='/w/logs/TST-SPW-pipeline.log',
+            counters={'VERIFY_ATTEMPTS': 0}, attempt=1,
+            cmd_override=[sys.executable, '-c', 'import time; time.sleep(1)'],
+        )
+        try:
+            self.assertEqual(spawn.phase, 'VERIFY')
+            self.assertEqual(spawn.step, 'verify')
+            self.assertTrue(spawn.prompt.startswith('/ticket-verify TST-SPW'))
+            self.assertTrue(session_id)
+            entry = json.loads(
+                (self.workspace / 'TST-SPW-verify-run.json').read_text())
+            self.assertEqual(entry['pid'], str(pid))
+            self.assertEqual(entry['phase'], 'VERIFY')
+        finally:
+            os.waitpid(pid, 0)
+
     def test_redirection_failure_does_not_abort_spawn(self):
         """A stdio-redirect failure still lets the worker spawn and exec."""
         from fleetd.supervisor import Supervisor
@@ -1390,6 +1646,44 @@ class KillEscalationTest(unittest.TestCase):
                              "worker should be dead after SIGKILL")
             self.assertIsNone(sup._children.get('TST-K1'),
                               "worker should be removed from child table after kill")
+        finally:
+            sup.release_lock()
+
+    def test_a_hung_phase_worker_is_killable_through_the_same_path(self):
+        """Task 4.17 — `Supervisor.spawn_phase` registers the phase worker
+        as a normal child, so a hung phase subprocess gets the identical
+        cooperative-stop -> SIGINT -> SIGTERM -> SIGKILL escalation a
+        ticket-level worker gets, through the same `kill_worker`."""
+        from fleetd.supervisor import Supervisor
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            cmd = _make_ignoring_worker(sleep_secs=30)
+            pid, session_id, spawn = sup.spawn_phase(
+                'TST-KPHASE', 'STEP_4_5',
+                log_file=str(self.workspace / 'logs' / 'TST-KPHASE-pipeline.log'),
+                counters={'VERIFY_ATTEMPTS': 0}, attempt=1, cmd_override=cmd,
+            )
+            self.assertTrue(_pid_is_alive(pid), "phase worker should be alive")
+            child = sup._children.get('TST-KPHASE')
+            self.assertIsNotNone(child, "spawn_phase must register a child")
+            self.assertEqual(child['pid'], pid)
+            self.assertEqual(child['phase'], 'VERIFY')
+
+            result = sup.kill_worker('TST-KPHASE', grace_secs=1)
+            self.assertTrue(result.success, f"kill should succeed: {result.error}")
+            self.assertEqual(result.method, 'SIGKILL',
+                             "SIGTERM-ignoring phase worker should reach SIGKILL")
+            self.assertFalse(_pid_is_alive(pid),
+                             "phase worker should be dead after SIGKILL")
+            self.assertIsNone(sup._children.get('TST-KPHASE'),
+                              "phase worker should be removed from child table")
         finally:
             sup.release_lock()
 
@@ -1543,6 +1837,85 @@ class KillEscalationTest(unittest.TestCase):
             self.assertEqual(fence_data['tid'], 'TST-K1')
             self.assertIn('fenced_generation', fence_data)
         finally:
+            sup.release_lock()
+
+
+class PhaseLivenessHeartbeatTest(unittest.TestCase):
+    """Task 4.18 — the watchdog replacement, wired to fire every cycle."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _sup(self):
+        from fleetd.supervisor import Supervisor
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        return sup
+
+    def test_spawn_phase_records_hb_log_file_and_start_ticks(self):
+        sup = self._sup()
+        try:
+            hb = str(self.workspace / 'logs' / 'TST-HB1-heartbeat.log')
+            pid, _sid, _spawn = sup.spawn_phase(
+                'TST-HB1', 'STEP_4_5',
+                log_file=str(self.workspace / 'logs' / 'TST-HB1-pipeline.log'),
+                hb_log_file=hb, counters={'VERIFY_ATTEMPTS': 0}, attempt=1,
+                cmd_override=_make_ignoring_worker(sleep_secs=30),
+            )
+            child = sup._children.get('TST-HB1')
+            self.assertEqual(child['hb_log_file'], hb)
+            self.assertTrue(child['start_ticks'])
+        finally:
+            sup.kill_worker('TST-HB1', grace_secs=1)
+            sup.release_lock()
+
+    def test_emit_writes_a_heartbeat_for_a_live_phase_worker(self):
+        sup = self._sup()
+        try:
+            hb_path = self.workspace / 'logs'
+            hb_path.mkdir(parents=True, exist_ok=True)
+            hb = str(hb_path / 'TST-HB2-heartbeat.log')
+            sup.spawn_phase(
+                'TST-HB2', 'STEP_4_5',
+                log_file=str(hb_path / 'TST-HB2-pipeline.log'),
+                hb_log_file=hb, counters={'VERIFY_ATTEMPTS': 0}, attempt=1,
+                cmd_override=_make_ignoring_worker(sleep_secs=30),
+            )
+            sup.emit_phase_liveness_heartbeats()
+            self.assertIn('|watchdog|alive|', Path(hb).read_text())
+        finally:
+            sup.kill_worker('TST-HB2', grace_secs=1)
+            sup.release_lock()
+
+    def test_a_ticket_level_child_is_not_a_candidate(self):
+        # A ticket-level spawn has no `phase`/`hb_log_file` — emitting for it
+        # would be a second, redundant watchdog on top of its own.
+        sup = self._sup()
+        queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+        entry = {
+            'tid': 'TST-HB3', 'reason': 'test-hb', 'generation': 1,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+        with open(queue_file, 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+        try:
+            cmd = _make_worker_cmd(sleep_secs=5)
+            consumed = sup._consume_queue(cmd_override=cmd)
+            self.assertEqual(consumed, {'TST-HB3'})
+            # Should not raise, and should write nothing for TST-HB3 (no hb
+            # file recorded on a ticket-level child, so nothing to write to).
+            sup.emit_phase_liveness_heartbeats()
+        finally:
+            sup.kill_worker('TST-HB3', grace_secs=1)
             sup.release_lock()
 
 

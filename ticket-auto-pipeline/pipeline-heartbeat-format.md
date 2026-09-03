@@ -111,6 +111,30 @@ Current schema version: **1**
 | `orchestrator-waiting` | Orchestrator waiting for agent to complete |
 | `agent-returned` | Agent completed (done or failed) — carries phase and result |
 | `phase-transition` | Pipeline moves to next phase |
+| `step-progress` | A long-running step is still making progress — see below |
+
+#### Long-running steps (enumerated)
+
+Most steps are short enough that their `start`/`done` pair is a sufficient
+liveness signal. A few are not: they run for many minutes inside a single step,
+and the gap between their bracketing entries is indistinguishable from a hang to
+anything reading the heartbeat log. Those steps emit a periodic `step-progress`
+event so the gap is filled with evidence rather than silence.
+
+This is an enumerated set, not a judgment call. A step belongs here only when it
+is listed:
+
+| Skill | Step | Progress unit |
+|-------|------|---------------|
+| `ticket-implement` | code-writing (Step 4 / `implement-changes`) | one event per file or task completed |
+| `ticket-verify` | Playwright navigation + criterion loop (`execute-steps`) | one event per criterion attempted |
+
+Progress events are **advisory instruction text in the skill, not enforced code**.
+Nothing gates on their presence — their absence degrades observability, it never
+fails a phase. `fleet-detect.sh` reads the agent-activity log (one line per tool
+call, written by `hooks/agent-activity.sh`) as its enforced liveness dimension;
+`step-progress` adds the semantic layer that raw tool-call counts cannot carry,
+namely *how far through* the step the agent has got.
 
 ### API events (`hb_api`)
 

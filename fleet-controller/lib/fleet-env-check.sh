@@ -290,11 +290,11 @@ fi
 
 # ── CLI tools ────────────────────────────────────────────────────────────────
 
-for _tool in jq git python3; do
+for _tool in jq git python3 sqlite3; do
   if command -v "$_tool" &>/dev/null; then
     _var "$_tool" "ok" "$(command -v "$_tool")" "PATH" ""
   else
-    _var "$_tool" "missing" "" "PATH" "required — jq: detection engines, git: worktree/epic-branch ops, python3: fleetd"
+    _var "$_tool" "missing" "" "PATH" "required — jq: detection engines, git: worktree/epic-branch ops, python3: fleetd, sqlite3: read-only bash access to the fleet state store"
     issues=$((issues + 1))
   fi
 done

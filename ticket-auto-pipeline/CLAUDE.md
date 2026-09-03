@@ -15,6 +15,8 @@ ticket-auto-pipeline/
   lib/                            # Shared bash libraries
   personas/                       # In-house persona role guidance (base + specializers)
   skills/ticket-flow/state-machine.json              # Linear state/label transition definitions
+  skills/ticket-flow/dispatch-table.json             # Canonical router dispatch table (steps, loop caps, preconditions)
+  skills/ticket-flow/gen-dispatch-table.py           # Renders that table into ticket-auto/SKILL.md; --check is the CI drift gate
   pipeline-log-format.md          # Pipeline log schema (ISO|PHASE|STEP|STATUS|MSG)
   pipeline-heartbeat-format.md    # Heartbeat log schema
   docs/ticket-auto-pipeline-diagram.html  # Interactive state diagram (served via GitHub Pages)
@@ -48,11 +50,12 @@ REPOS_ROOT/.ticket-auto/
 | Hook | Event | Purpose |
 |------|-------|---------|
 | `tmp-sweep.sh` | `SessionStart` | Age-based sweep of the pipeline's `/tmp` scratch files (ctx, spawn-meta, env, start-timestamp). A ticket's whole file group is removed once none of its files has been touched for `TICKET_TMP_TTL_MIN` minutes (default 1440 = 24h); `TICKET_TMP_DIR` overrides the directory. Grouping the TTL per ticket is what keeps a long run's `env.sh` — written once at run start — alive while `spawn_agent_pre` keeps rewriting its ctx/spawn-meta. Progress files, stop files and flow locks share the namespace and are deliberately left alone. |
-| `token-tracker-start.sh` | `SubagentStart` | Initializes per-spawn token tracking |
-| `token-tracker.sh` | `SubagentStop` | Records token usage against the phase in the spawn-meta file |
-| `tool-error-capture.sh` | `PostToolUseFailure` (Bash) | Appends deduplicated tool errors to `{tid}-tool-errors.log` |
-| `stop-capture.sh` | `Stop` | Captures `last_assistant_message` for a fleetd-spawned worker, so a headless worker's question — the only channel it has, since `AskUserQuestion` is absent from the `-p` tool list — reaches a human via the exit record and Slack notifier. Resolves the ticket by scanning `{FLEET_STATE_DIR}/*-run.json` for the payload's `session_id` (the hook itself never receives a ticket id). Does **not** fire on SIGINT or SIGKILL — those exits simply have no hook-captured field. Silently exits 0 whenever unresolvable (not a fleet-managed worker, e.g. an interactive session) — must never affect ordinary Claude Code usage. |
-| `stop-failure.sh` | `StopFailure` | Appends `META\|worker-api-error\|warn\|` to the ticket's own pipeline log when a turn ends on an API error (after retries are exhausted). Same session-id resolution as `stop-capture.sh`. |
+| `token-tracker-start.sh` | `SubagentStart` | Initializes per-spawn token tracking (the start stamp `token-tracker.sh` reads for `elapsed_ms`). Does not fire for a fleetd-dispatched phase, which is not a subagent — fleetd writes the same stamp itself before `execvpe`. |
+| `token-tracker.sh` | `SubagentStop` **and** `Stop` | Records token usage against the phase named in the spawn-meta file. Registered on two events because a phase ends two ways: as a **subagent** of the router (`SubagentStop`, tokens on `agent_transcript_path`), or as a **top-level `claude -p` session** dispatched by fleetd (`Stop`, tokens on `transcript_path`) — `SubagentStop` never fires for the latter. Exactly one event is correct per spawn, and spawn-meta's `SPAWNED_BY=fleetd` line (written only by fleetd) says which; without that discriminator both would match a fleetd-spawned phase, since its own subagents stop within the phase's session id, and the phase would be counted twice. The transcript field is never cross-read between events — a wrong measurement corrupts every downstream aggregate, a missing one does not. |
+| `agent-activity.sh` | `PostToolUse` (all tools) | Appends `ISO\|PHASE\|TOOL_NAME` to `{log-dir}/{TICKET_ID}-activity.log` — the agent's own liveness pulse, which `fleet-detect.sh`'s `detect_stalls` reads as a second dimension alongside the orchestrator watchdog. Resolves identity exactly as `token-tracker.sh` does (the spawn-meta file whose `SESSION_ID` matches the payload's), so an unrelated session resolves nothing and writes nothing. Unlike every other hook here it fires on **every tool call in every session** with the plugin installed, so it parses the payload with bash regex and formats its timestamp with `printf %(...)T` — no `python3`, no forks in the hot path — and exits 0 on every failure. Ring-capped at `FLEET_ACTIVITY_LOG_MAX_LINES` (500). |
+| `tool-error-capture.sh` | `PostToolUseFailure` (all tools) | Appends deduplicated tool errors to `{tid}-tool-errors.log`. Registered without a matcher since fleet-controller 0.11.0: the pipeline's most failure-prone surfaces are not Bash — verify drives Playwright over MCP and every phase reaches Linear the same way, so a Bash-only matcher let an entire verify run fail on browser and MCP errors with the tool-error log staying empty. Classification is two-stage: the tool's identity picks the vocabulary (`playwright_*`, `mcp_*`, or the original Bash tokens), then the message shape picks a token from it — `playwright_timeout` and `timeout` are different problems with different responses. Identity is resolved by matching the payload's `session_id` against spawn-meta's `SESSION_ID` (there is deliberately no ctx-file fallback: the ctx file carries no session id, and with the matcher widened a newest-file scan would attribute an unrelated session's failure to whichever ticket spawned last) |
+| `stop-capture.sh` | `Stop` | Captures `last_assistant_message` for a fleetd-spawned worker, so a headless worker's question — the only channel it has, since `AskUserQuestion` is absent from the `-p` tool list — reaches a human via the exit record and Slack notifier. Resolves the ticket by the payload's `session_id` (the hook itself never receives a ticket id): first via the fleet state store's `workers` table (`fleet-controller/lib/fleet-store.sh`'s `fleet_store_worker_by_session`, discovered the same co-installed-plugin way `lib/spawn-helper.sh` finds `fleet-config.sh`), falling back to scanning `{FLEET_STATE_DIR}/*-run.json` when no store is available. Does **not** fire on SIGINT or SIGKILL — those exits simply have no hook-captured field. Silently exits 0 whenever unresolvable (not a fleet-managed worker, e.g. an interactive session) — must never affect ordinary Claude Code usage. |
+| `stop-failure.sh` | `StopFailure` | Appends `META\|worker-api-error\|warn\|` to the ticket's own pipeline log when a turn ends on an API error (after retries are exhausted). Same store-then-file session-id resolution as `stop-capture.sh`. |
 
 Both new hooks deliberately avoid two payload assumptions the observed `SessionStart`/`SessionEnd` shapes don't support: no `permission_mode` field exists on any hook payload, and `SessionEnd`'s `reason` is `other` for both signal-terminated and ordinary ends — so neither hook reads a permission mode or a signal-specific reason.
 
@@ -101,7 +104,7 @@ Both new hooks deliberately avoid two payload assumptions the observed `SessionS
 | `env-check.sh` | Full environment check (env vars, MCP, CLI tools, CLAUDE.md). Dual-mode: `full` (pipe-delimited) and `validate` (colored output). |
 | `capture-transcript.sh` | Agent transcript capture for retro analysis. |
 | `reconcile-comments.sh` | PR comment reconciliation utility. |
-| `fleet-detect.sh` | **EXTRACTED to `fleet-controller/lib/`** — 12 detection engines now live in fleet-controller plugin. |
+| `fleet-detect.sh` | **EXTRACTED to `fleet-controller/lib/`** — 14 detection engines now live in fleet-controller plugin. |
 | `fleet-intervene.sh` | **EXTRACTED to `fleet-controller/lib/`** — intervention executor now lives in fleet-controller plugin. |
 | `fleet-dashboard.sh` | **EXTRACTED to `fleet-controller/lib/`** — dashboard renderer now lives in fleet-controller plugin. |
 | `gate-check.sh` | Deterministic bash gate logic. `--mode entry` checks artifact existence, complexity-artifact coherence, autonomy routing. `--mode reapprove` checks live Linear state for re-approval integrity. Replaces inline LLM gate reasoning. |
@@ -132,6 +135,7 @@ Both new hooks deliberately avoid two payload assumptions the observed `SessionS
 | `planned-ticket-check.sh` | `check_planned_ticket`, `check_planned_ticket_description`. Deterministic bash validator for `## Planner Context` blocks in planned tickets. Exit 0 (valid), 1 (missing/malformed), 2 (low confidence + not pre-approved). Schema-Version tolerance for forward compatibility. Also exports `_extract_planner_context_block` — canonical shared block parser. |
 | `branch-directive-check.sh` | `check_branch_directive <EPIC_ID>`, `check_branch_directive_description <description>`. Deterministic bash validator for `## Branch Directive` blocks on epic parents. Exit 0 (valid + emits parsed values), 1 (absent), 2 (malformed). Validates branch names, closed enums, Schema-Version tolerance. The optional `UAT Policy` field (`per-ticket`|`epic`) is parsed and enum-validated at **any** Schema-Version — deliberately not version-gated, so a hand-added field is never a silent no-op — and `BRANCH_DIRECTIVE_UAT_POLICY` is emitted normalised to `per-ticket` when absent. Shares `_extract_md_section` and `_extract_field` from planned-ticket-check.sh. |
 | `branch-resolve.sh` | `resolve_branch_context <TICKET_ID> [--branch <override>] [--title <title>] [--parent-json <json>]`, `resolve_uat_policy <TICKET_ID>`, `resolve_merge_policy <TICKET_ID>`, `uat_decide_trigger [--policy] [--uat-url] [--ticket]`. Deterministic branch decision point. Precedence: `--branch` flag → parent epic directive → config default. Under a valid directive, both `BASE_BRANCH` and `INTEGRATION_BRANCH` are the directive's `Branch` (not its `Base`) — children branch off and PR into the shared epic branch. `BRANCH_SOURCE` is `flag`, `epic-directive`, or `default`. Emits `BRANCH_CONTEXT_RESULT` block, including `UAT_POLICY` (`per-ticket`|`epic`) resolved from the parent directive — a `--branch` override retargets the branch but does NOT detach the ticket from its epic's acceptance model. Also emits `MERGE_POLICY` (`manual`|`on-all-children-done`|empty) — unlike `UAT_POLICY`, absence has no normalised default: empty means the ticket has no epic directive at all, distinct from an epic explicitly declaring a policy. `ticket-pr-review` Step 6b reads `MERGE_POLICY` (alongside `AUTONOMY`) to decide whether it may merge a passing PR directly or must leave it for a human. `uat_decide_trigger` is the single UAT-vs-Done decision site: it echoes `pr-review-pass-done` or `pr-review-pass-uat`, evaluating policy **before** the UAT URL (the URL is exported into every agent's env unconditionally, so a later policy check would be unreachable). Depends on config.sh, linear-api.sh, branch-directive-check.sh. |
+| `ticket-preamble.sh` | `ticket_preamble_run`, `ticket_preamble_preflight`, `ticket_preamble_project_context`. The once-per-ticket preamble — SKILL.md Steps 0.1–0.6 as one idempotent entrypoint, so fleetd's phase-level dispatch establishes the same operating environment the router does without carrying a second copy of it. Heartbeat init → Linear preflight (sentinel-cached config check + `get_me`) → pipeline-log schema line → branch context → env file via `spawn_write_env` → autonomy and provenance markers. Emits a `TICKET_PREAMBLE_RESULT` block. A branch decision already recorded as `META|branch-context` is **rehydrated, never re-resolved** — re-resolving re-reads the parent epic, so a directive edited mid-ticket would move the target branch between two of the ticket's own phases. Exit codes are distinct per failure: 1 usage, 2 `BRANCH_DIRECTIVE_INVALID` (the only gate-stop, already written to the log), 3 transient branch-resolution failure, 4/5 preflight, 6 env-file write. |
 | `worktree.sh` | `worktree_path <TICKET_ID> <repo_slug>`, `ensure_worktree <TICKET_ID> <repo_path> <branch> <base>`, `release_worktree <TICKET_ID>`, `worktree_gc`. Per-ticket git worktree isolation. `ensure_worktree` is idempotent with identity guard (refuses re-checkout on branch mismatch). `release_worktree` is safe to repeat. `worktree_gc` removes terminal-state trees. |
 | `epic-precondition.sh` | `is_epic_issue <issue_json>`, `check_precondition <precondition> <subject> <issue_json>`. The epic discriminator and precondition evaluator, sourced by `flow.sh` so tests exercise the executor's real path. Discriminates on the epic marker label (`EPIC_MARKER_LABEL`, default `epic`) or a valid Branch Directive — never on `.issueType.name`, which this workspace does not define. Preconditions are bidirectional: `must_be_epic` and `must_not_be_epic`, both exit 8 on rejection, 9 on an unknown precondition. |
 | `epic-branch.sh` | `ensure_epic_branch <EPIC_ID> [repo_path]`, `epic_branch_sync <EPIC_ID> [repo_path]`, `epic_branch_children_done <EPIC_ID> [children_json]`, `epic_branch_open_pr <EPIC_ID> [repo_path] [children_json] [epic_description]`. Epic branch lifecycle management. `ensure_epic_branch` creates from declared base as a plain ref (`git branch`, no checkout — worktree-safe, idempotent). `epic_branch_sync` merges base into epic (never rebases; conflict → report, no force-push). `epic_branch_children_done` pure bash readiness check — the single canonical "all children Done" implementation (the fleet-controller D-12 detector calls it too). `epic_branch_open_pr` opens integration PR (never merges); it skips repos with no commits between base and the epic branch, accepts cached children/description to avoid per-repo re-fetching, and sets `EPIC_BRANCH_PR_STATE` (`open`|`none`) because its exit 0 covers both "a PR is open" and "nothing was opened". All mutating paths gate behind `FLEET_DRY_RUN`. |
@@ -210,6 +214,71 @@ When ticket-planner creates a ticket, it appends a `## Planner Context` markdown
 
 **Exploration depth consumption** (appraise fast-path): The depth declared by the planner controls how much the appraise agent trusts the planner's investigation. `deep` → skip full grep, trust traced paths. `standard` → use targets as primary path, supplement with targeted grep. `quick-scan` → treat targets as hints, do full investigation. Depth mismatch (`quick-scan` on complex ticket) is a soft signal in gate-check.sh — warns, never blocks.
 
+## Pipeline dashboards
+
+`skills/ticket-auto/dashboard.py` has two modes:
+
+```bash
+python3 dashboard.py <log-file> [--heartbeat]   # one ticket, step by step
+python3 dashboard.py --fleet [<log-dir>]        # every active pipeline, one row each
+```
+
+The per-ticket mode answers "what is this ticket doing"; `--fleet` answers "which
+of the tickets in flight needs me". Fleet mode globs `<log-dir>/*-pipeline.log`
+(default `$FLEET_PIPELINE_LOG_DIR`, else `./logs`), skips any log carrying
+`META|outcome` — matching `fleet_detect_all`'s definition of active — and renders
+one row per pipeline: phase, step, open-bracket age, agent-activity age, verify
+and PR-review counters, and the last gate event. Rows sort oldest-open-bracket
+first, so the row most likely to need attention leads.
+
+The bracket and activity columns colour against the same thresholds
+`fleet-detect.sh` uses (600/900s and 240/900s), so the dashboard and the detector
+never disagree about what "late" means. The activity column is the one an
+orchestrator cannot fake: it reads the last entry of `{tid}-activity.log`, written
+per tool call by `hooks/agent-activity.sh`, so a hung agent inside a young bracket
+is visible here.
+
+The glob is re-evaluated on every refresh rather than cached, so a pipeline that
+starts while the dashboard is open appears on the next tick without a restart.
+
+**The router does not spawn a dashboard.** Step 0.6 used to `tmux split-window` a
+per-ticket pane on every run when `$TMUX` was set, which produced a pane per ticket
+under fleetd and needed a `pgrep` guard so resumes did not stack panes. It now just
+prints both commands. The dashboard is an operator tool opened once — `--fleet` covers
+the whole workspace and picks up new pipelines by itself.
+
+Reading is pure stdlib (`collect_fleet_rows`, `read_fleet_row`); `rich` is needed
+only to render, and its import is guarded so the data layer can be tested in an
+environment without it. Tests: `skills/ticket-auto/tests/test_dashboard_fleet.py`.
+
+## Dispatch table (generated)
+
+`skills/ticket-auto/SKILL.md`'s Dispatch Loop table is **generated**, not hand-written.
+The canonical source is `skills/ticket-flow/dispatch-table.json`; the renderer is
+`skills/ticket-flow/gen-dispatch-table.py`.
+
+```bash
+python3 skills/ticket-flow/gen-dispatch-table.py           # print the block
+python3 skills/ticket-flow/gen-dispatch-table.py --check   # exit 1 on drift (CI gate)
+python3 skills/ticket-flow/gen-dispatch-table.py --write   # rewrite the block in SKILL.md
+```
+
+Exit codes: `0` in sync, `1` drift, `2` structural (missing file, missing markers,
+malformed JSON). The generator owns only the span between
+`<!-- GENERATED:dispatch-table START -->` and `<!-- GENERATED:dispatch-table END -->` —
+the rest of SKILL.md stays hand-written. Edit the JSON and regenerate; never hand-edit
+the block. `make check-generated` runs the gate as the first dependency of `make test`
+and as its own CI step.
+
+The JSON carries more than the three rendered columns: per-step spawn parameters (skill,
+phase, `FROM_STEP` variable, extra flags, instructions), the four router-managed loop
+caps with their counters and gate-stop codes, the `STEP_2_5`/`STEP_3` alias, the
+`VERIFY_LAST=fail` precondition on `STEP_4_5`, and each step's non-agent pre/post
+orchestration (`return-completeness-check.sh`, `outcome-label-check.sh`, auto-merge,
+phase inspectors). That richer field set exists because fleet-controller's phase-dispatch
+module loads the same file as its phase-sequencing input — the prose table and the code
+supervisor read one source, so they cannot disagree.
+
 ## Pipeline log format
 
 `ISO|PHASE|STEP|STATUS|MSG` — schema version 1. Phases: `APPRAISE`, `EXEC`, `GATE`, `IMPLEMENT`, `VERIFY`, `PR-REVIEW`, `MAINTENANCE`. `META` pseudo-phase for schema, gate results, outcomes, artifacts.
@@ -226,12 +295,13 @@ Consumers: `skills/ticket-auto/dashboard.py` (dual-panel), `skills/ticket-overse
 
 - **Determinism boundary**: AI skills never call Linear mutation endpoints directly. All mutations go through `flow.sh`. Skills plan/reason/navigate; flow.sh executes with idempotency and assertions.
 - **Crash recovery**: Pipeline log is the checkpoint. `detect-resume.sh` is called directly as bash by the thin router (no Claude agent spawn). Router re-reads state after every dispatch and resumes from the last completed step.
+- **One writer per log-line grammar**: the phase bracket's two markers each have exactly one implementation with two callers — `phase_bracket_open` (the `|waiting|` line and `META|model`) and `phase_terminal_write` (the `done`/`fail` terminal), both in `lib/spawn-helper.sh`. The router reaches them through `spawn_agent_pre`/`spawn_agent_post`; fleetd's phase dispatch calls them directly, because it forks phases itself and bypasses the router entirely. A second implementation of either would drift silently — both copies read correct alone, and the log is what `detect-resume.sh`, the detectors, the dashboard and the OTel exporter all route on.
 - **Sub-agent isolation**: Thin router spawns named agent types (`ticket-appraise-agent`, `ticket-implement-agent`, `ticket-verify-agent`, `ticket-pr-review-agent`, `ticket-maintenance-agent`, `ticket-gate-reconcile-agent`, `ticket-prescan-agent`, `guidance-extractor-agent`) per phase. Each agent runs in a fresh isolated session. Router brackets each spawn with `|waiting|`/`|done|` via the 3-step pattern (`spawn_agent_pre` → agent spawn → `spawn_capture` → `spawn_agent_post`).
 - **Bash gates**: Gate decisions (artifact existence, complexity coherence, verification readiness, autonomy routing, outcome labels) are deterministic bash scripts (`gate-check.sh`, `outcome-label-check.sh`) — zero Claude agent involvement, zero tokens burned on deterministic comparisons.
 - **Router-managed retry loops**: Verify retry (up to 3 attempts), PR iteration (up to 3 cycles), PR feedback reconciliation (up to 3 cycles, `PR_FEEDBACK_EXHAUSTED` gate-stop beyond that), and gate reconcile (up to 3 cycles, `RECONCILE_EXHAUSTED` gate-stop beyond that) are managed by the router tracking counters (`VERIFY_ATTEMPTS`, `ITERATION`, `PR_FEEDBACK_CYCLE`, `RECONCILE_CYCLE`) from the pipeline log. Each iteration spawns a fresh agent with clean context — no accumulated output from prior attempts.
 - **Stateless routing**: Router reads all state from pipeline log via `detect-resume.sh` (direct bash invocation, not a Claude skill spawn). After every phase dispatch, router re-reads state. Zero in-memory state between dispatches.
 - **Complexity gating**: Simple tickets auto-approve in `auto`/`semi-auto` mode. Complex tickets always gate (require human `approved` label). `manual` mode gates everything.
-- **Phase context**: Before each agent spawn, orchestrator writes both a ctx file (`/tmp/ticket-auto-{ID}-ctx.txt`, still consumed by `tool-error-capture.sh`) and a spawn-meta file (`/tmp/ticket-auto-{ID}-spawn-meta.txt`, stamped with `SESSION_ID=$CLAUDE_CODE_SESSION_ID`). `token-tracker-start.sh`/`token-tracker.sh` derive TICKET_ID/PHASE/LOG_FILE solely from the spawn-meta file whose `SESSION_ID` matches the firing hook's own `session_id` — no ls -t across all of /tmp, no ctx-file fallback, no UNKNOWN phase. A subagent stopping with no live pipeline spawn for its session resolves nothing and the hooks exit 0 without writing anywhere. The spawn-meta file persists until the next `spawn_agent_pre` call overwrites it. None of these files is deleted at `spawn_agent_post` — `env.sh` is sourced by every later phase of the same ticket, and spawn-meta is re-read by duplicate `spawn_agent_post` calls and by `tool-error-capture.sh` — so their lifetime is bounded by age instead, via the `SessionStart` `tmp-sweep.sh` hook. `token-tracker.sh` additionally prunes leftover start-timestamp files (>5 min) for its own ticket+phase, unconditionally: that prune used to sit inside the "start file matched" branch, so it never ran in exactly the case that accumulated files.
+- **Phase context**: Before each agent spawn, orchestrator writes both a ctx file (`/tmp/ticket-auto-{ID}-ctx.txt` — written and swept, but no longer consumed by anything: `tool-error-capture.sh` moved to session-id resolution and dropped its ctx-file fallback) and a spawn-meta file (`/tmp/ticket-auto-{ID}-spawn-meta.txt`, stamped with `SESSION_ID=$CLAUDE_CODE_SESSION_ID`). `token-tracker-start.sh`/`token-tracker.sh` derive TICKET_ID/PHASE/LOG_FILE solely from the spawn-meta file whose `SESSION_ID` matches the firing hook's own `session_id` — no ls -t across all of /tmp, no ctx-file fallback, no UNKNOWN phase. A subagent stopping with no live pipeline spawn for its session resolves nothing and the hooks exit 0 without writing anywhere. The spawn-meta file persists until the next `spawn_agent_pre` call overwrites it. None of these files is deleted at `spawn_agent_post` — `env.sh` is sourced by every later phase of the same ticket, and spawn-meta is re-read by duplicate `spawn_agent_post` calls and by `tool-error-capture.sh` — so their lifetime is bounded by age instead, via the `SessionStart` `tmp-sweep.sh` hook. `token-tracker.sh` additionally prunes leftover start-timestamp files (>5 min) for its own ticket+phase, unconditionally: that prune used to sit inside the "start file matched" branch, so it never ran in exactly the case that accumulated files.
 - **Guidance store** (RLVR Phase 2): Durable filesystem-based store at `~/.claude/state/ticket-auto/guidance/`. JSONL-per-component format (e.g., `lib-gate-check.sh.jsonl`). Entries have a three-state lifecycle (`proposed` → `confirmed` → `deprecated`) with immutable transition audit trail. The `guidance_id` is a stable hash of `component + root_cause + pattern` — same defect across runs produces the same ID, enabling idempotent upsert. `guidance-extractor-agent` classifies inspector verdict patterns by root cause (`skill-file | lib-script | agent-prompt | network-flake`) and writes guidance entries + CORRECTIONS blocks for actionable (skill/lib) defects. Phase 3 post-mortem feeds into the same store for unified accumulation. All operations are `flock`-guarded and fail-soft — the store never blocks the pipeline. Lazy GC removes deprecated entries older than 90 days when a component file exceeds 200 lines.
 - **Safety gates**: 16 structural gate-stop codes (EXEC_NO_ARTIFACT, COMPLEXITY_ARTIFACT_MISMATCH, CRITIQUE_SCORE_MISSING, CRITIQUE_BLOCKED, CRITIQUE_SCORE_IMPLAUSIBLE, ZERO_AC, BUG_NO_REPRO, NO_TEMPLATE_FOR_TYPE, PLANNED_BODY_INCOMPLETE, APPROVAL_REVOKED, VERIFY_EXHAUSTED, PR_REVIEW_VERDICT_UNPARSEABLE, PR_FEEDBACK_EXHAUSTED, BRANCH_DIRECTIVE_INVALID, CODE_REVIEW_EXHAUSTED, RECONCILE_EXHAUSTED). Violations emit `|META|gate-stop|fail|<CODE>`.
 - **Code-review loop cap**: `ticket-implement` Step 4b's fix-and-re-review loop is capped at 3 cycles (tracked via a `cycle#N` log marker, same convention as PR feedback reconciliation) with only `medium`+ severity findings treated as blockers. Unlike the router-managed loops above, this loop runs entirely inside the single `ticket-implement-agent` spawn — there is no separate router dispatch per cycle, so `detect-resume.sh` does not track it. Exhausting 3 cycles with blockers still open is `CODE_REVIEW_EXHAUSTED`.
@@ -259,6 +329,7 @@ Consumers: `skills/ticket-auto/dashboard.py` (dual-panel), `skills/ticket-overse
 - [Pipeline log format](pipeline-log-format.md)
 - [Heartbeat log format](pipeline-heartbeat-format.md)
 - [State machine](skills/ticket-flow/state-machine.json)
+- [Dispatch table](skills/ticket-flow/dispatch-table.json)
 - [Planner Context schema](docs/planner-context-schema.md)
 - [Branch Directive schema](docs/branch-directive-schema.md)
 - [Phase Result schema](docs/phase-result-schema.md)

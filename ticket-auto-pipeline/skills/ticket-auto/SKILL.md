@@ -314,7 +314,7 @@ This MUST run before Step 0.6 (pipeline log init) and before Step 1 (first agent
 
 ## Step 0.6 — Initialize pipeline log
 
-Initialize the pipeline log and launch the dashboard (heartbeat log already initialized after Step 0.1):
+Initialize the pipeline log (heartbeat log already initialized after Step 0.1):
 
 ```bash
 mkdir -p ./logs
@@ -323,22 +323,20 @@ CLAUDE_LOG_FILE="$PWD/logs/{TICKET-ID}-claude.log"
 touch "$LOG_FILE"
 cl_init
 YELLOW=$(tput setaf 3); BOLD=$(tput bold); RESET=$(tput sgr0)
-if [ -n "$TMUX" ]; then
-  # Check for an existing dashboard pane for this ticket before spawning another —
-  # every resume would otherwise stack a new pane on top of prior ones (R13).
-  if pgrep -f "dashboard.py $LOG_FILE" >/dev/null 2>&1; then
-    echo "${BOLD}${YELLOW}(Dashboard already running for {TICKET-ID} — skipping duplicate pane.)${RESET}"
-  else
-    tmux split-window -h "python3 ~/.claude/skills/ticket-auto/dashboard.py $LOG_FILE; read"
-    echo "${BOLD}${YELLOW}(Dashboard opened in right pane.)${RESET}"
-  fi
-else
-  echo "${BOLD}${YELLOW}Dashboard ready. In a second terminal run:${RESET}"
-  echo "${BOLD}${YELLOW}  python3 ~/.claude/skills/ticket-auto/dashboard.py $LOG_FILE${RESET}"
-fi
+echo "${BOLD}${YELLOW}Dashboard ready. In a second terminal run either:${RESET}"
+echo "${BOLD}${YELLOW}  python3 ~/.claude/skills/ticket-auto/dashboard.py $LOG_FILE${RESET}"
+echo "${BOLD}${YELLOW}  python3 ~/.claude/skills/ticket-auto/dashboard.py --fleet $PWD/logs${RESET}"
 ```
 
-Log the resolved autonomy mode immediately after dashboard launch. Guard the write so a
+**The router no longer spawns a tmux dashboard pane.** It used to split a new pane
+on every run when `$TMUX` was set. With fleetd running many pipelines concurrently that
+produced a pane per ticket, each showing one ticket, and the resume path needed a
+`pgrep` guard to stop panes stacking on every resume. The dashboard is now something the
+operator opens once — `--fleet` covers the whole workspace in one pane and picks up new
+pipelines on its next refresh, so nothing needs to be spawned per run. Printing the two
+commands costs nothing and works identically inside and outside tmux.
+
+Log the resolved autonomy mode immediately after log init. Guard the write so a
 resume doesn't silently re-append (or silently switch modes mid-pipeline after gate
 decisions were already made under the old mode) — an explicit `mode-change` event is
 logged instead when the flag differs from what's recorded (R12):
@@ -644,6 +642,9 @@ After state detection, enter the stateless dispatch loop. Re-run `detect-resume.
 
 ### Dispatch table
 
+<!-- GENERATED:dispatch-table START -->
+<!-- Generated from skills/ticket-flow/dispatch-table.json by skills/ticket-flow/gen-dispatch-table.py. Do not hand-edit: edit the JSON and regenerate. CI fails the build when this block drifts. -->
+
 | RESUME_STEP | Action | Type |
 |-------------|--------|------|
 | `STEP_1` | Spawn `ticket-appraise` agent | Agent |
@@ -660,6 +661,7 @@ After state detection, enter the stateless dispatch loop. Re-run `detect-resume.
 | `STEP_6` | Retro check + optional `ticket-retro` + outcome write | Bash + Agent |
 | `done` | Exit 0 | — |
 | `*` (unknown) | Log error, exit 1 | — |
+<!-- GENERATED:dispatch-table END -->
 
 ### STEP_1 — Appraise
 
@@ -1112,7 +1114,8 @@ Then evaluate verdict:
 ```bash
 # ✅ (VERDICT=OK) → proceed to STEP_5 (Document + Wiki)
 # ⚠️ (VERDICT=WARN) AND ITERATION < 3 → run gate-check.sh --mode reapprove, spawn pr-iterate → implement → outcome-check → implement-complete → verify → loop back to pr-review
-# ❌ (VERDICT=BLOCK) OR ITERATION >= 3 → gate-stop
+# ❌ (VERDICT=BLOCK) → gate-stop
+# ITERATION >= 3 → gate-stop with code PR_REVIEW_EXHAUSTED (matching the VERIFY_EXHAUSTED / PR_FEEDBACK_EXHAUSTED cap convention)
 ```
 
 **PR iteration loop:**
@@ -1131,11 +1134,21 @@ After PR review ✅, check auto-merge eligibility. Both `auto` and `semi-auto` m
 written by `outcome-label-check.sh` — the confirmed Linear label — not from the IMPLEMENT
 terminal line, which never carries the Smooth/Rough/Hard value:
 
+**Resolve the PR number before the guard, not after.** The integration-PR
+guard reads `$_pr_num`, so it has to be assigned first. It used to be assigned
+*below* the guard, inside the eligibility block — which meant the guard ran
+`gh pr view ""`, got an empty head ref, never matched `INTEGRATION_BRANCH`, and
+guarded nothing. An integration PR could be auto-merged by the very code
+written to stop it.
+
 ```bash
+_pr_num=$(grep '^[^|]*|PR-REVIEW|checkout-pr|done|' "{LOG_FILE}" | tail -1 | cut -d'|' -f5-)
+
 # Auto-merge guard: integration PRs must never be auto-merged.
 # This is the second guard (the first is in epic_branch_open_pr itself).
-# If this ticket's PR targets an epic integration branch, skip auto-merge.
-if [ -n "{INTEGRATION_BRANCH}" ]; then
+# An integration PR is one whose HEAD is the epic branch; a ticket PR merely
+# targets it as its base.
+if [ -n "$_pr_num" ] && [ -n "{INTEGRATION_BRANCH}" ]; then
   _pr_head=$(gh pr view "$_pr_num" --json headRefName --jq '.headRefName' 2>/dev/null || true)
   if [ "$_pr_head" = "{INTEGRATION_BRANCH}" ]; then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|pr-auto-merge|skip|INTEGRATION_PR_GUARD: $_pr_num is integration PR, not auto-merging" >> "{LOG_FILE}"
@@ -1145,11 +1158,8 @@ fi
 
 if { [ "{AUTONOMY}" = "auto" ] || [ "{AUTONOMY}" = "semi-auto" ]; } && [ "{COMPLEXITY}" = "simple" ]; then
   OUTCOME=$(grep '^[^|]*|META|outcome-label|info|' "{LOG_FILE}" | tail -1 | cut -d'|' -f5-)
-  if [ "$OUTCOME" = "Smooth" ]; then
-    _pr_num=$(grep '^[^|]*|PR-REVIEW|checkout-pr|done|' "{LOG_FILE}" | tail -1 | cut -d'|' -f5-)
-    if [ -n "$_pr_num" ]; then
-      gh pr merge "$_pr_num" --squash --auto || true
-    fi
+  if [ "$OUTCOME" = "Smooth" ] && [ -n "$_pr_num" ]; then
+    gh pr merge "$_pr_num" --squash --auto || true
   fi
 fi
 ```

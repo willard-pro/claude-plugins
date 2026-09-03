@@ -8,7 +8,7 @@ Claude Code plugin marketplace (`willard-pro-claude-plugins`). Ships five plugin
 
 - **`ticket-planner`** — 10-phase autonomous planner turning business ideas into dependency-ordered planned tickets. Sits upstream of ticket-auto. Appraisal → Discovery → Architecture → Specify → Review → Consensus → Crosscheck → Epic Gen → Ticket Gen → Completed. Generates Branch Directives for shared epic branches.
 - **`ticket-auto-pipeline`** — fully autonomous Linear ticket pipeline that appraises, implements, verifies, and merges tickets with zero user input. Consumes planner output via the `planned` label + Planner Context block.
-- **`fleet-controller`** — parent orchestrator above ticket-planner and ticket-auto. Dispatches planned tickets from initiative epics, monitors pipeline health via 12 detection engines, manages epic branch lifecycle (create, sync, GC), aggregates execution feedback back to the planner. Bash-only, zero Claude agents.
+- **`fleet-controller`** — parent orchestrator above ticket-planner and ticket-auto. Dispatches planned tickets from initiative epics, monitors pipeline health via 14 detection engines, manages epic branch lifecycle (create, sync, GC), aggregates execution feedback back to the planner, and supervises an optional OpenTelemetry exporter. Bash orchestration plus a stdlib Python supervisor; zero Claude agents.
 - **`knowledge-curator`** — durable cross-project knowledge tracking. Captures ideas, decisions, lessons, and discoveries with automatic resurfacing.
 - **`grill-me`** — pre-work readiness gate. Assesses business ideas against profile-driven dimensions, asks ranked clarification questions interactively, and produces cryptographically sealed Validated Business Intent documents. Any agent can invoke it before acting. Sits upstream of ticket-planner as an optional pre-flight gate.
 
@@ -46,6 +46,8 @@ ticket-auto-pipeline/
   lib/                             # Shared bash libraries
   docs/                            # Deep-dive reference docs & design notes
   skills/ticket-flow/state-machine.json  # Linear state/label transition definitions (canonical)
+  skills/ticket-flow/dispatch-table.json # Router dispatch table (canonical) — renders into ticket-auto/SKILL.md
+  skills/ticket-flow/gen-dispatch-table.py # Deterministic generator + CI drift gate for that table
   pipeline-log-format.md           # Shared log schema (ISO|PHASE|STEP|STATUS|MSG)
   pipeline-heartbeat-format.md     # Heartbeat log schema
   docs/ticket-auto-pipeline-diagram.html  # Interactive state diagram (ticket-auto, GitHub Pages)
@@ -70,6 +72,8 @@ When a skill or command references a file by name (e.g., `openspec-propose` poin
 ## Determinism boundary
 
 All Linear API mutations flow through `flow.sh` (the `ticket-flow` skill executor) — a deterministic bash script. Skills never call Linear mutation endpoints directly. `flow.sh` handles: state transitions, label add/remove, assignee changes, idempotency checks, post-trigger state assertions, and generation fence checks (`{tid}-fence` — rejects mutations from superseded generations, gated behind `FLEET_FENCE_ENFORCE=true`). The state machine definition lives in `skills/ticket-flow/state-machine.json` — `flow.sh` reads it, so changes to the JSON take effect without script changes.
+
+The router's dispatch table follows the same pattern: `skills/ticket-flow/dispatch-table.json` is canonical, and `gen-dispatch-table.py` renders it into the marker-delimited block in `skills/ticket-auto/SKILL.md`. That block is generated — edit the JSON and regenerate, never the markdown. `make check-generated` (first dependency of `make test`, and its own CI step) fails the build on drift. The JSON is also the phase-sequencing input fleetd's phase-dispatch module loads, so the prose table and the code supervisor cannot disagree.
 
 ## Shared libraries (`lib/`)
 

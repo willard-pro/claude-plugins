@@ -1358,6 +1358,195 @@ test_watchdog_exits_at_iteration_cap_when_pid_unset() {
 
 # ── spawn_agent_post wait/reaping (Bug #4 fix) ─────────────────────────────────
 
+# ── phase_bracket_open (task 4.12) ───────────────────────────────────────────
+# The opening half, extracted for the same reason as the closing one: fleetd
+# forks phases itself and would otherwise leave every bracket unopened, which
+# detect-resume.sh, the zombie detector and the OTel exporter all read as "this
+# phase never started". Exercised the way fleetd calls it — directly, with no
+# pinger, no watchdog and no spawn-meta file.
+
+test_phase_bracket_open_writes_waiting_and_model() {
+  local tmpdir log
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PBO1-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|1" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    ANTHROPIC_MODEL=claude-opus-5 phase_bracket_open \
+      PHASE=verify STEP=Verify TICKET_ID=TEST-PBO1 \
+      DESCRIPTION="verify agent" LOG_FILE="$log" >/dev/null
+  )
+  grep -q '|VERIFY|verify|waiting|Agent launched — verify agent$' "$log" &&
+    grep -q '|META|model|info|{"phase":"VERIFY","model":"claude-opus-5"}$' "$log"
+}
+
+# The guard used to compare the caller's PHASE verbatim against a line written
+# with PHASE uppercased, so a lowercase caller never matched its own entry and
+# the idempotency check was inert. Both sides normalise now.
+test_phase_bracket_open_suppresses_duplicate_for_a_lowercase_phase() {
+  local tmpdir log count
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PBO2-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|1" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    phase_bracket_open PHASE=implement STEP=implement TICKET_ID=TEST-PBO2 LOG_FILE="$log" >/dev/null
+    phase_bracket_open PHASE=implement STEP=implement TICKET_ID=TEST-PBO2 LOG_FILE="$log" >/dev/null
+  )
+  count=$(grep -c '|IMPLEMENT|implement|waiting|' "$log")
+  [ "$count" = "1" ]
+}
+
+# A retry after a resolved bracket must open a new one. The tail window is two
+# lines precisely so it covers [waiting, model] without reaching back over a
+# terminal line into the previous attempt.
+test_phase_bracket_open_allows_a_retry_after_a_terminal() {
+  local tmpdir log count
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PBO3-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|1" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    phase_bracket_open PHASE=VERIFY STEP=verify TICKET_ID=TEST-PBO3 LOG_FILE="$log" >/dev/null
+    phase_terminal_write PHASE=VERIFY STEP=verify RESULT=fail MSG="1/3 criteria" LOG_FILE="$log"
+    phase_bracket_open PHASE=VERIFY STEP=verify TICKET_ID=TEST-PBO3 LOG_FILE="$log" >/dev/null
+  )
+  count=$(grep -c '|VERIFY|verify|waiting|' "$log")
+  [ "$count" = "2" ]
+}
+
+# A model name carrying a quote would otherwise forge a log line, and the log
+# is what every consumer routes on.
+test_phase_bracket_open_never_forges_a_log_line() {
+  local tmpdir log
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PBO4-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|1" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    phase_bracket_open PHASE=EXEC STEP=exec TICKET_ID=TEST-PBO4 \
+      MODEL='evil","x":"y' LOG_FILE="$log" >/dev/null
+  )
+  # Every META|model line must still be valid JSON in field 5+.
+  grep '|META|model|info|' "$log" | sed 's/^[^|]*|META|model|info|//' | jq -e . >/dev/null
+}
+
+test_phase_bracket_open_echoes_the_model_without_a_log_file() {
+  local out
+  out=$(
+    source "$LIB_DIR/spawn-helper.sh"
+    ANTHROPIC_MODEL=claude-sonnet-5 phase_bracket_open PHASE=EXEC STEP=exec TICKET_ID=X
+  )
+  [ "$out" = "claude-sonnet-5" ]
+}
+
+test_spawn_agent_pre_still_opens_through_the_helper() {
+  # The router path must be unchanged by the extraction, including the
+  # spawn-meta MODEL line, which now reuses the value the helper resolved.
+  local tmpdir log meta
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PBO5-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|1" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    ANTHROPIC_MODEL=claude-opus-5 spawn_agent_pre \
+      PHASE=APPRAISE STEP=appraise TICKET_ID=TEST-PBO5 SKILL=/ticket-appraise \
+      LOG_FILE="$log" DESCRIPTION="appraise agent" >/dev/null
+  )
+  meta="/tmp/ticket-auto-TEST-PBO5-spawn-meta.txt"
+  grep -q '|APPRAISE|appraise|waiting|Agent launched — appraise agent$' "$log" &&
+    grep -q '|META|model|info|{"phase":"APPRAISE","model":"claude-opus-5"}$' "$log" &&
+    grep -q '^MODEL=claude-opus-5$' "$meta"
+}
+
+# ── phase_terminal_write (design.md D13) ─────────────────────────────────────
+# The writing half of spawn_agent_post, extracted so fleetd can resolve a
+# bracket on the automated path without going through the router. These tests
+# exercise it the way fleetd will: called directly, with no spawn-meta file, no
+# pinger and no watchdog in play.
+
+test_phase_terminal_write_emits_done_marker() {
+  local tmpdir log
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PTW1-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|2" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    phase_terminal_write PHASE=implement STEP=Implement RESULT=done \
+      MSG="committed 3 files" LOG_FILE="$log"
+  )
+  # Phase uppercased, step lowercased — the grammar detect-resume.sh keys on.
+  grep -q '|IMPLEMENT|implement|done|committed 3 files$' "$log"
+}
+
+test_phase_terminal_write_prefixes_verdict() {
+  local tmpdir log
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PTW2-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|2" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    phase_terminal_write PHASE=VERIFY STEP=verify RESULT=done \
+      VERDICT=PASS MSG="3/3 criteria" LOG_FILE="$log"
+  )
+  grep -q '|VERIFY|verify|done|PASS — 3/3 criteria$' "$log"
+}
+
+test_phase_terminal_write_marks_warn_continue() {
+  local tmpdir log
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PTW3-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|2" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    phase_terminal_write PHASE=MAINTENANCE STEP=document RESULT=fail \
+      MSG="no diff" FAIL_ACTION=warn-continue LOG_FILE="$log"
+  )
+  grep -q '|MAINTENANCE|document|fail|no diff — continuing$' "$log"
+}
+
+test_phase_terminal_write_rejects_bad_verdict() {
+  local tmpdir log
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PTW4-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|2" >"$log"
+  ! (
+    source "$LIB_DIR/spawn-helper.sh"
+    phase_terminal_write PHASE=VERIFY STEP=verify RESULT=done \
+      VERDICT=MAYBE LOG_FILE="$log" 2>/dev/null
+  )
+}
+
+test_phase_terminal_write_suppresses_back_to_back_duplicate() {
+  # A duplicate resolution of the same bracket must not double-write, or the
+  # loop counters detect-resume.sh derives from terminal lines overcount.
+  local tmpdir log count
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PTW5-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|2" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    phase_terminal_write PHASE=VERIFY STEP=verify RESULT=done VERDICT=PASS LOG_FILE="$log"
+    phase_terminal_write PHASE=VERIFY STEP=verify RESULT=done VERDICT=PASS LOG_FILE="$log"
+  )
+  count=$(grep -c '|VERIFY|verify|done|' "$log")
+  [ "$count" = "1" ]
+}
+
+test_spawn_agent_post_still_writes_through_the_helper() {
+  # The router path must be unchanged by the extraction: same line, same shape.
+  local tmpdir log
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PTW6-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|2" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    spawn_agent_post TICKET_ID=TEST-PTW6 RESULT=done PHASE=APPRAISE \
+      STEP=appraise MSG="complexity=simple" LOG_FILE="$log"
+  )
+  grep -q '|APPRAISE|appraise|done|complexity=simple$' "$log"
+}
+
 test_spawn_agent_post_waits_for_captured_pids() {
   # Verify spawn_agent_post reads PINGER_PID/WATCHDOG_PID from spawn-meta
   # and attempts to wait for them after writing stop files.
@@ -1683,6 +1872,166 @@ META
   return $result
 }
 
+# ── fleetd phase-worker token capture (design.md D15) ─────────────────────────
+# A fleetd-dispatched phase is a top-level `claude -p` session, not a subagent,
+# so SubagentStop never fires for it. Without these, META|tokens silently stops
+# being written on the automated path and the dashboard, the OTel exporter's
+# gen_ai.usage.* attributes and retro trend aggregation all degrade with no
+# error anywhere. That silence is exactly why the move is tested rather than
+# assumed.
+
+_tt_write_fleetd_meta() {
+  # $1 meta file, $2 ticket, $3 phase, $4 session, $5 log file
+  cat >"$1" <<META
+PHASE=$3
+STEP=$(echo "$3" | tr '[:upper:]' '[:lower:]')
+TICKET_ID=$2
+LOG_FILE=$5
+HB_LOG_FILE=
+CLAUDE_LOG_FILE=
+SESSION_ID=$4
+SPAWNED_BY=fleetd
+META
+  touch "$1"
+}
+
+_tt_write_transcript() {
+  cat >"$1" <<'JSONL'
+{"type": "assistant", "message": {"usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 10}}}
+JSONL
+}
+
+test_token_tracker_stop_event_captures_fleetd_phase() {
+  # The load-bearing case: Stop + SPAWNED_BY=fleetd + transcript_path writes
+  # META|tokens under the phase from spawn-meta.
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local log_file="$tmpdir/test-tk-fleetd.log"
+  local transcript="$tmpdir/top-transcript.jsonl"
+  local meta_file="/tmp/ticket-auto-TEST-TKF1-spawn-meta.txt"
+
+  rm -f "$meta_file" "$log_file"
+  _tt_write_fleetd_meta "$meta_file" TEST-TKF1 VERIFY sess-tkf1 "$log_file"
+  _tt_write_transcript "$transcript"
+
+  echo "{\"session_id\": \"sess-tkf1\", \"hook_event_name\": \"Stop\", \"transcript_path\": \"$transcript\"}" |
+    bash "$LIB_DIR/../hooks/token-tracker.sh" 2>/dev/null || true
+
+  local result=0
+  grep -q '|META|tokens|info|VERIFY:100/50/10' "$log_file" 2>/dev/null || result=1
+
+  rm -rf "$tmpdir"
+  rm -f "$meta_file" 2>/dev/null || true
+  return $result
+}
+
+test_token_tracker_subagent_stop_ignores_fleetd_phase() {
+  # The phase agent's own subagents stop within the phase's session id and so
+  # match the same spawn-meta. Counting them would double-count the phase the
+  # imminent Stop is about to count in full.
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local log_file="$tmpdir/test-tk-fleetd2.log"
+  local transcript="$tmpdir/sub-transcript.jsonl"
+  local meta_file="/tmp/ticket-auto-TEST-TKF2-spawn-meta.txt"
+
+  rm -f "$meta_file" "$log_file"
+  _tt_write_fleetd_meta "$meta_file" TEST-TKF2 VERIFY sess-tkf2 "$log_file"
+  _tt_write_transcript "$transcript"
+
+  echo "{\"session_id\": \"sess-tkf2\", \"hook_event_name\": \"SubagentStop\", \"agent_transcript_path\": \"$transcript\"}" |
+    bash "$LIB_DIR/../hooks/token-tracker.sh" 2>/dev/null || true
+
+  local result=0
+  [ -f "$log_file" ] && result=1
+
+  rm -rf "$tmpdir"
+  rm -f "$meta_file" 2>/dev/null || true
+  return $result
+}
+
+test_token_tracker_stop_ignores_router_spawn() {
+  # The mirror guard. A router spawn-meta carries no SPAWNED_BY, and the
+  # router's own Stop fires against its session id at the end of every turn.
+  # Counting it would attribute the whole router turn to whichever phase is
+  # open at the time.
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local log_file="$tmpdir/test-tk-router.log"
+  local transcript="$tmpdir/router-transcript.jsonl"
+  local meta_file="/tmp/ticket-auto-TEST-TKF3-spawn-meta.txt"
+
+  rm -f "$meta_file" "$log_file"
+  cat >"$meta_file" <<META
+PHASE=IMPLEMENT
+STEP=implement
+TICKET_ID=TEST-TKF3
+LOG_FILE=$log_file
+SESSION_ID=sess-tkf3
+META
+  _tt_write_transcript "$transcript"
+
+  echo "{\"session_id\": \"sess-tkf3\", \"hook_event_name\": \"Stop\", \"transcript_path\": \"$transcript\"}" |
+    bash "$LIB_DIR/../hooks/token-tracker.sh" 2>/dev/null || true
+
+  local result=0
+  [ -f "$log_file" ] && result=1
+
+  rm -rf "$tmpdir"
+  rm -f "$meta_file" 2>/dev/null || true
+  return $result
+}
+
+test_token_tracker_stop_never_falls_back_to_agent_transcript() {
+  # A wrong measurement is worse than none: if the event's own transcript
+  # field is absent, the hook must not reach for the other event's field.
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local log_file="$tmpdir/test-tk-nofallback.log"
+  local transcript="$tmpdir/other-transcript.jsonl"
+  local meta_file="/tmp/ticket-auto-TEST-TKF4-spawn-meta.txt"
+
+  rm -f "$meta_file" "$log_file"
+  _tt_write_fleetd_meta "$meta_file" TEST-TKF4 IMPLEMENT sess-tkf4 "$log_file"
+  _tt_write_transcript "$transcript"
+
+  echo "{\"session_id\": \"sess-tkf4\", \"hook_event_name\": \"Stop\", \"agent_transcript_path\": \"$transcript\"}" |
+    bash "$LIB_DIR/../hooks/token-tracker.sh" 2>/dev/null || true
+
+  local result=0
+  [ -f "$log_file" ] && result=1
+
+  rm -rf "$tmpdir"
+  rm -f "$meta_file" 2>/dev/null || true
+  return $result
+}
+
+test_token_tracker_fleetd_phase_records_elapsed_from_start_marker() {
+  # fleetd writes the start stamp itself because SubagentStart does not fire
+  # either. Without it the phase's duration silently disappears.
+  local tmpdir
+  tmpdir=$(_mktemp_test_dir)
+  local log_file="$tmpdir/test-tk-elapsed.log"
+  local transcript="$tmpdir/elapsed-transcript.jsonl"
+  local meta_file="/tmp/ticket-auto-TEST-TKF5-spawn-meta.txt"
+  local start_file="/tmp/ticket-auto-TEST-TKF5-start-VERIFY-$(date +%s%N).ts"
+
+  rm -f "$meta_file" "$log_file" "$start_file"
+  _tt_write_fleetd_meta "$meta_file" TEST-TKF5 VERIFY sess-tkf5 "$log_file"
+  _tt_write_transcript "$transcript"
+  date +%s%N >"$start_file"
+
+  echo "{\"session_id\": \"sess-tkf5\", \"hook_event_name\": \"Stop\", \"transcript_path\": \"$transcript\"}" |
+    bash "$LIB_DIR/../hooks/token-tracker.sh" 2>/dev/null || true
+
+  local result=0
+  grep -q 'elapsed_ms=' "$log_file" 2>/dev/null || result=1
+
+  rm -rf "$tmpdir"
+  rm -f "$meta_file" "$start_file" 2>/dev/null || true
+  return $result
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -1758,6 +2107,18 @@ for fn in \
   test_watchdog_exits_when_worker_pid_dies \
   test_watchdog_exits_at_iteration_cap_when_pid_unset \
   test_spawn_agent_post_waits_for_captured_pids \
+  test_phase_bracket_open_writes_waiting_and_model \
+  test_phase_bracket_open_suppresses_duplicate_for_a_lowercase_phase \
+  test_phase_bracket_open_allows_a_retry_after_a_terminal \
+  test_phase_bracket_open_never_forges_a_log_line \
+  test_phase_bracket_open_echoes_the_model_without_a_log_file \
+  test_spawn_agent_pre_still_opens_through_the_helper \
+  test_phase_terminal_write_emits_done_marker \
+  test_phase_terminal_write_prefixes_verdict \
+  test_phase_terminal_write_marks_warn_continue \
+  test_phase_terminal_write_rejects_bad_verdict \
+  test_phase_terminal_write_suppresses_back_to_back_duplicate \
+  test_spawn_agent_post_still_writes_through_the_helper \
   test_f10_guard_clears_stale_stop_files_from_prior_phase \
   test_f10_guard_still_blocks_external_kill \
   test_f10_guard_succeeds_when_no_stop_files_exist \
@@ -1771,7 +2132,12 @@ for fn in \
   test_tmp_sweep_honours_ttl_override \
   test_tmp_sweep_bad_ttl_falls_back_to_default \
   test_token_tracker_prunes_start_files_without_a_match \
-  test_token_tracker_keeps_recent_start_file_of_live_sibling; do
+  test_token_tracker_keeps_recent_start_file_of_live_sibling \
+  test_token_tracker_stop_event_captures_fleetd_phase \
+  test_token_tracker_subagent_stop_ignores_fleetd_phase \
+  test_token_tracker_stop_ignores_router_spawn \
+  test_token_tracker_stop_never_falls_back_to_agent_transcript \
+  test_token_tracker_fleetd_phase_records_elapsed_from_start_marker; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

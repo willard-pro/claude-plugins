@@ -16,7 +16,82 @@ if [ -f "$_CONFIG_DIR/fleet-config.sh" ]; then
   source "$_CONFIG_DIR/fleet-config.sh"
 fi
 
+# Read-only access to the fleet state store. Every engine below prefers store
+# rows to re-parsing the pipeline log, and falls back to the file when there is
+# no store — which is the normal state on a host running the pipeline manually.
+if [ -f "$_CONFIG_DIR/fleet-store.sh" ]; then
+  source "$_CONFIG_DIR/fleet-store.sh"
+fi
+
 # ── Helpers ──────────────────────────────────────────────────────────────────────
+
+# ── Pipeline-log input source ────────────────────────────────────────────────────
+# The one seam through which every pipeline-log-driven engine reads. When the
+# fleet state store is available the lines come from `log_events`, parsed once at
+# ingest; otherwise they come from the file, exactly as before.
+#
+# Deliberately a single seam rather than a store-backed variant of each engine:
+# two code paths per detector would double the surface that has to be kept in
+# agreement, and the parity requirement — same findings, same severities — is
+# only cheap to assert when the filtering logic is literally the same code.
+
+# Emits `lineno:line`, the shape `grep -n` produces.
+# Usage: _pipeline_rows <tid> [workspace]
+_pipeline_rows() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+
+  if declare -f fleet_store_pipeline_rows >/dev/null 2>&1 &&
+    declare -f fleet_store_ready >/dev/null 2>&1 &&
+    fleet_store_ready "$workspace"; then
+    local rows
+    rows=$(fleet_store_pipeline_rows "$tid" "$workspace" 2>/dev/null || true)
+    if [ -n "$rows" ]; then
+      printf '%s\n' "$rows"
+      return 0
+    fi
+  fi
+
+  local log_file="${workspace}/${tid}-pipeline.log"
+  [ -f "$log_file" ] || return 1
+  command grep -n '' "$log_file" 2>/dev/null || true
+}
+
+# Emits the lines without their numbers.
+# Usage: _pipeline_lines <tid> [workspace]
+_pipeline_lines() {
+  _pipeline_rows "$1" "${2:-}" | command sed 's/^[0-9]*://'
+}
+
+# True when this ticket has any pipeline history at all — the store-aware
+# replacement for `[ -f "$log_file" ]`.
+# Usage: _pipeline_has_history <tid> [workspace]
+_pipeline_has_history() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  [ -f "${workspace}/${tid}-pipeline.log" ] && return 0
+  local first
+  first=$(_pipeline_rows "$tid" "$workspace" | head -1)
+  [ -n "$first" ]
+}
+
+# Age in seconds of the ticket's last pipeline entry; 999999 when there is none,
+# matching _last_entry_age_secs.
+# Usage: _pipeline_last_age_secs <tid> [workspace]
+_pipeline_last_age_secs() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local last_iso
+  last_iso=$(_pipeline_lines "$tid" "$workspace" | tail -1 | awk -F'|' '{print $1}')
+  if [ -z "$last_iso" ]; then
+    echo "999999"
+    return
+  fi
+  local last_epoch now_epoch
+  last_epoch=$(date -d "$last_iso" +%s 2>/dev/null || echo "0")
+  now_epoch=$(date -u +%s)
+  echo $((now_epoch - last_epoch))
+}
 
 # Get the age of the last log entry in seconds. Returns 999999 if no entries.
 # Arg: log_file
@@ -87,18 +162,19 @@ _last_msg() {
 detect_phase_failures() {
   local tid="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
-  local log_file="${workspace}/${tid}-pipeline.log"
 
-  if [ ! -f "$log_file" ]; then
+  if ! _pipeline_has_history "$tid" "$workspace"; then
     echo "0"
     return
   fi
 
   local severity=0
+  local lines
+  lines=$(_pipeline_lines "$tid" "$workspace")
 
   # Check for gate-stop codes first (separate classification)
   local gate_stop
-  gate_stop=$(command grep '|META|gate-stop|fail|' "$log_file" 2>/dev/null | tail -1 || true)
+  gate_stop=$(printf '%s\n' "$lines" | command grep '|META|gate-stop|fail|' 2>/dev/null | tail -1 || true)
 
   if [ -n "$gate_stop" ]; then
     local code
@@ -117,7 +193,7 @@ detect_phase_failures() {
 
   # Check for general phase failures (non-MAINTENANCE, non-META)
   local phase_failures
-  phase_failures=$(command grep -v '|MAINTENANCE|' "$log_file" | command grep -v '|META|' | command grep -c '|fail|' 2>/dev/null || true)
+  phase_failures=$(printf '%s\n' "$lines" | command grep -v '|MAINTENANCE|' | command grep -v '|META|' | command grep -c '|fail|' 2>/dev/null || true)
 
   if [ "$phase_failures" -gt 0 ]; then
     # First occurrence → WARN
@@ -127,14 +203,206 @@ detect_phase_failures() {
   echo "$severity"
 }
 
-# 2. Stall detection via stale heartbeats
+# ── Spawn-bracket state ──────────────────────────────────────────────────────────
+# A bracket is "open" when the last |waiting| line in the pipeline log has no
+# done/fail/skip terminal after it — i.e. the router has launched an agent and
+# has not yet recorded its return. Scoped to lines *after* the waiting entry so
+# a terminal from an earlier cycle of the same phase/step cannot mask it (the
+# same position-scoping detect_zombies uses).
+# Returns 0 (true) when a bracket is open.
+# Prints `lineno|iso|phase|step` for the currently open spawn bracket and
+# returns 0; returns 1 when no bracket is open. _spawn_bracket_open is the
+# boolean form. Both callers need the same scan, and the runaway-call counter
+# additionally needs the bracket's start timestamp to scope its count — one
+# function so the two can never disagree about which bracket is open.
+_spawn_bracket_info() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local rows
+  rows=$(_pipeline_rows "$tid" "$workspace") || return 1
+  [ -n "$rows" ] || return 1
+
+  local last_waiting
+  last_waiting=$(printf '%s\n' "$rows" | command grep '|waiting|' | tail -1 || true)
+  [ -z "$last_waiting" ] && return 1
+
+  local lineno="${last_waiting%%:*}"
+  local line="${last_waiting#*:}"
+  local iso phase step
+  iso=$(echo "$line" | awk -F'|' '{print $1}')
+  phase=$(echo "$line" | awk -F'|' '{print $2}')
+  step=$(echo "$line" | awk -F'|' '{print $3}')
+
+  # Scoped to rows *after* the waiting entry by line number rather than by
+  # `tail -n +N`: with the store the row set can be a suffix of the file (old
+  # projection rows pruned), and only the recorded line number is stable.
+  local has_terminal
+  has_terminal=$(printf '%s\n' "$rows" | awk -F: -v n="$lineno" '$1 > n' | command sed 's/^[0-9]*://' | command grep -E -c "\|${phase}\|${step}\|(done|fail|skip)\|" 2>/dev/null || true)
+  has_terminal="${has_terminal:-0}"
+
+  [ "$has_terminal" -eq 0 ] || return 1
+  echo "${lineno}|${iso}|${phase}|${step}"
+}
+
+_spawn_bracket_open() {
+  _spawn_bracket_info "$@" >/dev/null
+}
+
+# ── fleetd ownership ─────────────────────────────────────────────────────────────
+# True when a fleetd run-registry entry exists for this ticket. run_all_detectors
+# globs every *-pipeline.log in the workspace with no ownership gate, so a human
+# running /ticket-auto by hand is measured by the same engines that drive
+# fleet-intervene.sh's kills. The agent-activity signals are the ones most likely
+# to fire on a human (reading output, thinking, exploring), so they are capped at
+# WARN for tickets fleetd does not own. This is the file-based interim of the
+# store-backed ownership scoping the fleet-state-store capability specifies.
+# Returns 0 (true) when fleetd owns the ticket.
+_fleet_owns_ticket() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local run_file=""
+
+  # The store is the durable form of this question: it records ownership at
+  # dispatch rather than inferring it from a file's existence.
+  if declare -f fleet_store_ready >/dev/null 2>&1 && fleet_store_ready "$workspace"; then
+    fleet_store_is_owned "$tid" "$workspace"
+    return $?
+  fi
+
+  if declare -f _fleet_run_file >/dev/null 2>&1; then
+    run_file=$(_fleet_run_file "$tid" "$workspace" 2>/dev/null || true)
+  elif [ -n "${FLEET_STATE_DIR:-}" ]; then
+    run_file="${FLEET_STATE_DIR}/${tid}-run.json"
+  else
+    run_file="${workspace}/${tid}-run.json"
+  fi
+
+  [ -n "$run_file" ] && [ -f "$run_file" ]
+}
+
+# ── Agent-activity liveness ──────────────────────────────────────────────────────
+# Second, independent input to detect_stalls. The orchestrator watchdog's `alive`
+# line proves the *router* is running; it says nothing about the agent the router
+# is blocked on. The activity log (hooks/agent-activity.sh, one line per tool
+# call) is the agent's own pulse — a fresh watchdog with a cold activity log is
+# exactly the hung-agent case the heartbeat dimension cannot see.
+#
+# Only meaningful while a spawn bracket is open: between brackets the router is
+# doing its own deterministic work and no agent is expected to be calling tools.
+# Prints a severity (0-2).
+_detect_activity_stall() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local act_log="${workspace}/${tid}-activity.log"
+
+  # No activity log at all — the hook never resolved this ticket (an older
+  # pipeline run, or a phase that made no tool calls yet). Contribute nothing
+  # rather than guessing; the heartbeat dimension still applies.
+  if [ ! -f "$act_log" ] || [ ! -s "$act_log" ]; then
+    echo "0"
+    return
+  fi
+
+  if ! _spawn_bracket_open "$tid" "$workspace"; then
+    echo "0"
+    return
+  fi
+
+  local warn_secs="${FLEET_ACTIVITY_WARN_SECS:-240}"
+  local stale_secs="${FLEET_ACTIVITY_STALE_SECS:-900}"
+  local age
+  age=$(_last_entry_age_secs "$act_log")
+
+  local severity=0
+  if [ "$age" -ge "$stale_secs" ]; then
+    severity=2
+  elif [ "$age" -ge "$warn_secs" ]; then
+    severity=1
+  fi
+
+  # Cap at WARN for work fleetd does not own — see _fleet_owns_ticket.
+  if [ "$severity" -ge 2 ] && ! _fleet_owns_ticket "$tid" "$workspace"; then
+    severity=1
+  fi
+
+  echo "$severity"
+}
+
+# ── Runaway tool-call rate ───────────────────────────────────────────────────────
+# The mirror image of the activity-stall signal. A stalled agent stops calling
+# tools; a runaway agent never stops — a retry loop, a search that keeps widening,
+# an agent re-reading the same file. Both look identical to the orchestrator
+# heartbeat, which only proves the router is alive.
+#
+# Counted per spawn bracket, not per log: the activity log spans the whole run, so
+# a raw line count would flag any long ticket. The bracket's own `|waiting|`
+# timestamp scopes the count to the current phase. Activity timestamps are
+# fixed-width ISO-8601 UTC, so a lexicographic compare is a correct chronological
+# compare and no date parsing is needed per line.
+#
+# Note the ceiling: hooks/agent-activity.sh ring-caps the activity log at
+# FLEET_ACTIVITY_LOG_MAX_LINES (500). The count therefore saturates there, which
+# is why the default threshold (300) sits below the cap — above it the signal
+# would be unreachable.
+#
+# Prints a severity (0-1). WARN only, by design: a high call count is evidence of
+# a possible problem, never proof of one, and severity >=2 drives real kills.
+detect_runaway_calls() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local act_log="${workspace}/${tid}-activity.log"
+
+  if [ ! -f "$act_log" ] || [ ! -s "$act_log" ]; then
+    echo "0"
+    return
+  fi
+
+  local info
+  info=$(_spawn_bracket_info "$tid" "$workspace") || {
+    echo "0"
+    return
+  }
+
+  local start_iso
+  start_iso=$(echo "$info" | awk -F'|' '{print $2}')
+  if [ -z "$start_iso" ]; then
+    echo "0"
+    return
+  fi
+
+  local threshold="${FLEET_RUNAWAY_CALL_THRESHOLD:-300}"
+  local count
+  count=$(awk -F'|' -v s="$start_iso" '$1 >= s' "$act_log" 2>/dev/null | wc -l)
+  count="${count:-0}"
+
+  local severity=0
+  [ "$count" -gt "$threshold" ] && severity=1
+
+  # Ownership gate (task 9.5). Redundant while the ceiling is WARN, and kept
+  # deliberately: if this signal is ever escalated to a kill severity, the gate
+  # is already in place rather than being remembered at that moment. A human
+  # exploring by hand trips a call-count threshold as naturally as an agent does.
+  if [ "$severity" -ge 2 ] && ! _fleet_owns_ticket "$tid" "$workspace"; then
+    severity=1
+  fi
+
+  echo "$severity"
+}
+
+# 2. Stall detection via stale heartbeats and stale agent activity
 detect_stalls() {
   local tid="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local hb_file="${workspace}/${tid}-heartbeat.log"
 
+  # Activity dimension is independent of the heartbeat dimension: it is
+  # computed even when there is no heartbeat log or no heartbeat entry, and the
+  # final severity is the max of the two.
+  local act_sev
+  act_sev=$(_detect_activity_stall "$tid" "$workspace")
+
   if [ ! -f "$hb_file" ]; then
-    echo "0"
+    echo "$act_sev"
     return
   fi
 
@@ -143,7 +411,7 @@ detect_stalls() {
   last_hb=$(command grep -E '\|orchestrator-waiting\||\|watchdog\|alive\|' "$hb_file" 2>/dev/null | tail -1 || true)
 
   if [ -z "$last_hb" ]; then
-    echo "0"
+    echo "$act_sev"
     return
   fi
 
@@ -183,6 +451,9 @@ detect_stalls() {
     [ "$severity" -gt 3 ] && severity=3
   fi
 
+  # A hung agent under a healthy router shows up here and nowhere else.
+  [ "$act_sev" -gt "$severity" ] && severity="$act_sev"
+
   echo "$severity"
 }
 
@@ -190,17 +461,19 @@ detect_stalls() {
 detect_zombies() {
   local tid="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
-  local log_file="${workspace}/${tid}-pipeline.log"
 
-  if [ ! -f "$log_file" ]; then
+  if ! _pipeline_has_history "$tid" "$workspace"; then
     echo "0"
     return
   fi
 
+  local rows
+  rows=$(_pipeline_rows "$tid" "$workspace" || true)
+
   # Find all |waiting| lines, with line numbers so the terminal search below
   # can be scoped to lines *after* each waiting entry.
   local lines
-  lines=$(command grep -n '|waiting|' "$log_file" 2>/dev/null || true)
+  lines=$(printf '%s\n' "$rows" | command grep '|waiting|' 2>/dev/null || true)
 
   if [ -z "$lines" ]; then
     echo "0"
@@ -231,7 +504,7 @@ detect_zombies() {
     # own line — a terminal line from an earlier cycle must not mask a
     # currently-stalled waiting entry for the same phase/step.
     local has_terminal
-    has_terminal=$(tail -n "+$((lineno + 1))" "$log_file" 2>/dev/null | command grep -E -c "\|${phase}\|${step}\|(done|fail|skip)\|" 2>/dev/null || true)
+    has_terminal=$(printf '%s\n' "$rows" | awk -F: -v n="$lineno" '$1 > n' | command sed 's/^[0-9]*://' | command grep -E -c "\|${phase}\|${step}\|(done|fail|skip)\|" 2>/dev/null || true)
     has_terminal="${has_terminal:-0}"
 
     if [ "$has_terminal" -eq 0 ] && [ "$age" -ge "$zombie_threshold" ]; then
@@ -287,21 +560,20 @@ detect_loops() {
 detect_abandoned() {
   local tid="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
-  local log_file="${workspace}/${tid}-pipeline.log"
 
-  if [ ! -f "$log_file" ]; then
+  if ! _pipeline_has_history "$tid" "$workspace"; then
     echo "0"
     return
   fi
 
   # Check if pipeline has an outcome (completed normally)
-  if command grep -q '|META|outcome|' "$log_file" 2>/dev/null; then
+  if _pipeline_lines "$tid" "$workspace" | command grep -q '|META|outcome|' 2>/dev/null; then
     echo "0"
     return
   fi
 
   local age
-  age=$(_last_entry_age_secs "$log_file")
+  age=$(_pipeline_last_age_secs "$tid" "$workspace")
 
   local warn_secs=$((${FLEET_ABANDON_WARN_HOURS:-1} * 3600))
   local kill_secs=$((${FLEET_ABANDON_KILL_HOURS:-4} * 3600))
@@ -345,9 +617,8 @@ detect_flow_failures() {
 detect_auto_mode_blocks() {
   local tid="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
-  local log_file="${workspace}/${tid}-pipeline.log"
 
-  if [ ! -f "$log_file" ]; then
+  if ! _pipeline_has_history "$tid" "$workspace"; then
     echo "0"
     return
   fi
@@ -356,7 +627,7 @@ detect_auto_mode_blocks() {
 
   # Source 1: check-approval|fail entries in pipeline log
   local pipeline_blocks
-  pipeline_blocks=$(command grep -c '|check-approval|fail|' "$log_file" 2>/dev/null || true)
+  pipeline_blocks=$(_pipeline_lines "$tid" "$workspace" | command grep -c '|check-approval|fail|' 2>/dev/null || true)
   pipeline_blocks=$((pipeline_blocks + 0))
   block_count=$((block_count + pipeline_blocks))
 
@@ -426,16 +697,15 @@ detect_tool_errors() {
 detect_planner_feedback() {
   local tid="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
-  local log_file="${workspace}/${tid}-pipeline.log"
 
-  if [ ! -f "$log_file" ]; then
+  if ! _pipeline_has_history "$tid" "$workspace"; then
     echo "0"
     return
   fi
 
   # Find META|planner-feedback entries
   local fb_entries
-  fb_entries=$(command grep '|META|planner-feedback|' "$log_file" 2>/dev/null || true)
+  fb_entries=$(_pipeline_lines "$tid" "$workspace" | command grep '|META|planner-feedback|' 2>/dev/null || true)
   [ -z "$fb_entries" ] && echo "0" && return
 
   # For each feedback entry, check if this ticket's feedback has already
@@ -990,18 +1260,77 @@ extract_diagnostics() {
   echo "--- end diagnostics ---"
 }
 
+# ── Workspace guard ──────────────────────────────────────────────────────────────
+# A misconfigured fleet and an idle fleet look identical from the aggregator's
+# point of view: both produce zero pipeline rows. The difference is whether the
+# directory is there at all. FLEET_PIPELINE_LOG_DIR defaults to the *relative*
+# path ./logs, so a fleetd started from the wrong working directory silently
+# monitors nothing and reports a clean bill of health forever — the worst
+# possible failure mode for a health monitor.
+#
+# Emits {"severity":N,"findings":"..."} — WARN (1) when the directory cannot be
+# read, silent (0) when it exists and is simply idle.
+_fleet_workspace_guard() {
+  local workspace="${1:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local configured="${FLEET_PIPELINE_LOG_DIR:-}"
+  local origin
+  if [ -n "$configured" ]; then
+    origin="FLEET_PIPELINE_LOG_DIR=${configured}"
+  else
+    origin="FLEET_PIPELINE_LOG_DIR unset — default ./logs resolved against $(pwd)"
+  fi
+
+  if [ ! -e "$workspace" ]; then
+    echo "{\"severity\":1,\"findings\":\"pipeline log directory does not exist: ${workspace} (${origin}). The fleet is monitoring nothing.\"}"
+    return
+  fi
+
+  if [ ! -d "$workspace" ]; then
+    echo "{\"severity\":1,\"findings\":\"pipeline log path is not a directory: ${workspace} (${origin}).\"}"
+    return
+  fi
+
+  if [ ! -r "$workspace" ] || [ ! -x "$workspace" ]; then
+    echo "{\"severity\":1,\"findings\":\"pipeline log directory is not readable: ${workspace} (${origin}).\"}"
+    return
+  fi
+
+  # Exists and is readable. Zero logs here is a genuinely idle fleet, which is a
+  # normal state and stays silent — warning on it would train operators to
+  # ignore this detector.
+  echo '{"severity":0,"findings":""}'
+}
+
 # ── Aggregator ───────────────────────────────────────────────────────────────────
-# Enumerates active pipeline logs, runs all 12 detectors: 8 legacy per-ticket
+# Enumerates active pipeline logs, runs all 14 detectors: 8 legacy per-ticket
 # detectors + planner_feedback + blocked_by + initiative_dispatch +
-# epic_branch_ready. Detectors 9-10 run per-ticket; 10-12 have fleet-wide
-# scans collected into the fleet_wide array.
+# epic_branch_ready + runaway_calls + workspace_config. Detectors 9-10 run
+# per-ticket; 10-13 have fleet-wide scans collected into the fleet_wide array.
 # Outputs JSON results array.
 # Usage: fleet_detect_all <workspace>
 fleet_detect_all() {
   local workspace="${1:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
 
+  # The guard runs before the directory check, not after it: a missing workspace
+  # is exactly the case it exists to report, and the old early return discarded
+  # that fact silently.
+  local ws_json ws_sev ws_findings
+  ws_json=$(_fleet_workspace_guard "$workspace")
+  ws_sev=$(echo "$ws_json" | jq -r '.severity // 0')
+  ws_findings=$(echo "$ws_json" | jq -r '.findings // ""')
+
   if [ ! -d "$workspace" ]; then
-    echo '{"pipelines":[],"fleet_wide":[],"summary":{"total":0,"healthy":0,"warn":0,"kill":0,"restart":0}}'
+    local ws_entry
+    ws_entry=$(jq -nc \
+      --arg name "detect_workspace_config" \
+      --argjson severity "$ws_sev" \
+      --arg findings "$ws_findings" \
+      --arg type "fleet-wide" \
+      '{name: $name, severity: $severity, findings: $findings, type: $type}')
+    jq -nc \
+      --argjson fleet_wide "[$ws_entry]" \
+      --argjson warn "$ws_sev" \
+      '{pipelines: [], fleet_wide: $fleet_wide, summary: {total: 0, healthy: 0, warn: $warn, kill: 0, restart: 0}}'
     return
   fi
 
@@ -1036,7 +1365,7 @@ fleet_detect_all() {
     total=$((total + 1))
 
     # Run all 10 per-ticket detectors (1-8 + planner_feedback + epic-branch), collect max severity
-    local s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 max_sev anomaly_types
+    local s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 max_sev anomaly_types
     s1=$(detect_phase_failures "$tid" "$workspace")
     s2=$(detect_stalls "$tid" "$workspace")
     s3=$(detect_zombies "$tid" "$workspace")
@@ -1047,11 +1376,12 @@ fleet_detect_all() {
     s8=$(detect_tool_errors "$tid" "$workspace")
     s9=$(detect_planner_feedback "$tid" "$workspace")
     s10=$(detect_epic_branch_ready "$tid" "$workspace")
+    s11=$(detect_runaway_calls "$tid" "$workspace")
 
     max_sev=0
     anomaly_types=""
 
-    for s in "$s1" "$s2" "$s3" "$s4" "$s5" "$s6" "$s7" "$s8" "$s9" "$s10"; do
+    for s in "$s1" "$s2" "$s3" "$s4" "$s5" "$s6" "$s7" "$s8" "$s9" "$s10" "$s11"; do
       [ "$s" -gt "$max_sev" ] && max_sev="$s"
     done
 
@@ -1066,6 +1396,7 @@ fleet_detect_all() {
     [ "$s8" -ge 1 ] && anomaly_types="${anomaly_types} tool-errors(S${s8})"
     [ "$s9" -ge 1 ] && anomaly_types="${anomaly_types} planner-feedback(S${s9})"
     [ "$s10" -ge 1 ] && anomaly_types="${anomaly_types} epic-branch-ready(S${s10})"
+    [ "$s11" -ge 1 ] && anomaly_types="${anomaly_types} runaway-calls(S${s11})"
     anomaly_types=$(echo "$anomaly_types" | sed 's/^ //')
 
     # Cap severity at 2 (KILL) when auto-restart is disabled
@@ -1161,6 +1492,19 @@ fleet_detect_all() {
   local ebr_sev
   ebr_sev=$(echo "$ebr_json" | jq -r '.severity // 0')
   [ "$ebr_sev" -ge 1 ] && warn=$((warn + 1))
+
+  # D-13: Workspace configuration guard (computed above, before the directory
+  # check, so the same verdict is reported on both paths).
+  [ "$fw_first" = "false" ] && fleet_wide="$fleet_wide,"
+  fw_first=false
+  fleet_wide="${fleet_wide}$(jq -nc \
+    --arg name "detect_workspace_config" \
+    --argjson severity "$ws_sev" \
+    --arg findings "$ws_findings" \
+    --arg type "fleet-wide" \
+    '{name: $name, severity: $severity, findings: $findings, type: $type}')"
+
+  [ "$ws_sev" -ge 1 ] && warn=$((warn + 1))
 
   fleet_wide="$fleet_wide]"
 

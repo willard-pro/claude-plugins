@@ -1,25 +1,45 @@
 #!/usr/bin/env python3
 """
 ticket-auto pipeline dashboard
-Usage: python3 dashboard.py <log-file> [--heartbeat]
+
+Usage:
+    python3 dashboard.py <log-file> [--heartbeat]   # one ticket, step by step
+    python3 dashboard.py --fleet [<log-dir>]        # every active pipeline, one row each
+
 Log format: {ISO}|{PHASE}|{STEP}|{STATUS}|{MSG}
 Heartbeat format: {ISO}|{CATEGORY}|{EVENT}|{STATUS}|{MSG}|{DETAIL}
 """
 
+# Annotations are strings, never evaluated. That is what lets the rich import
+# below be optional: several methods are annotated `-> Panel`, which Python would
+# otherwise resolve at class-definition time and fail on when rich is absent.
+from __future__ import annotations
+
 import sys
 import time
 import argparse
+import glob
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Optional
 from collections import deque
 
-from rich.live import Live
-from rich.text import Text
-from rich.panel import Panel
-from rich.layout import Layout
-from rich.console import Group
+# rich is required to *render*, not to *read*. The fleet data layer below is pure
+# stdlib so its tests can import this module in an environment without rich —
+# which is exactly the CI environment, where only pytest is installed.
+try:
+    from rich.live import Live
+    from rich.text import Text
+    from rich.panel import Panel
+    from rich.layout import Layout
+    from rich.table import Table
+    from rich.console import Group
+
+    _RICH_ERROR = None
+except ImportError as exc:  # pragma: no cover - exercised only without rich
+    _RICH_ERROR = exc
 
 PHASE_ORDER = ["APPRAISE", "EXEC", "GATE", "IMPLEMENT", "VERIFY", "MAINTENANCE", "PR-REVIEW"]
 
@@ -373,11 +393,246 @@ class Renderer:
         return Panel(t, border_style="blue", padding=(0, 1))
 
 
+
+# ── Fleet view ───────────────────────────────────────────────────────────────
+# One row per active pipeline instead of one screen per ticket. The per-ticket
+# view answers "what is this ticket doing"; the fleet view answers "which of the
+# dozen tickets in flight needs me". They read the same logs.
+#
+# Everything below the renderer is pure stdlib and does no I/O beyond reading the
+# log files, so it is directly testable without a terminal or rich.
+
+LINE_RE = re.compile(r"^([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|(.*)$")
+
+
+@dataclass
+class FleetRow:
+    tid: str
+    phase: str = "-"
+    step: str = "-"
+    status: str = "-"
+    bracket_age: Optional[int] = None
+    activity_age: Optional[int] = None
+    verify_attempts: int = 0
+    pr_iterations: int = 0
+    last_gate: str = ""
+
+
+def _parse_iso(value: str) -> Optional[datetime]:
+    """Parse the log's ISO-8601 UTC timestamp. Returns None on anything else."""
+    try:
+        return datetime.strptime(value.strip(), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _age_secs(ts: Optional[datetime], now: datetime) -> Optional[int]:
+    if ts is None:
+        return None
+    return max(0, int((now - ts).total_seconds()))
+
+
+def read_fleet_row(log_path: str, now: Optional[datetime] = None) -> Optional[FleetRow]:
+    """Build one fleet row from a pipeline log. Returns None for a finished run.
+
+    Completed pipelines are filtered out here rather than rendered greyed-out, to
+    match `fleet_detect_all`'s definition of an active pipeline: a log carrying
+    `META|outcome` is done, and a fleet view that keeps showing it competes for
+    attention with the runs that still need it.
+    """
+    now = now or datetime.now(timezone.utc)
+    tid = os.path.basename(log_path)[: -len("-pipeline.log")]
+    if not tid:
+        return None
+
+    try:
+        with open(log_path, "r", errors="replace") as fh:
+            lines = [ln.rstrip("\n") for ln in fh if ln.strip()]
+    except OSError:
+        return None
+
+    row = FleetRow(tid=tid)
+    last_waiting = None  # (index, iso, phase, step)
+    terminals = set()  # (phase, step) seen after each waiting, resolved below
+    last_entry = None
+
+    for idx, line in enumerate(lines):
+        m = LINE_RE.match(line)
+        if not m:
+            continue
+        iso, phase, step, status, msg = (g.strip() for g in m.groups())
+
+        if phase == "META" and step == "outcome":
+            return None  # finished run
+
+        if phase == "META":
+            if step.startswith("gate"):
+                row.last_gate = f"{step}: {msg}"[:40]
+            continue
+
+        last_entry = (iso, phase, step, status)
+
+        if status == "waiting":
+            last_waiting = (idx, iso, phase, step)
+            terminals = set()
+        elif status in ("done", "fail", "skip"):
+            terminals.add((phase, step))
+            if phase == "VERIFY" and step == "verify":
+                row.verify_attempts += 1
+            elif phase == "PR-REVIEW" and step == "pr-review":
+                row.pr_iterations += 1
+
+    if last_entry:
+        row.phase, row.step, row.status = last_entry[1], last_entry[2], last_entry[3]
+
+    # An open bracket is a `waiting` with no terminal for the same phase/step
+    # after it. Scoping to entries after the waiting line — rather than searching
+    # the whole log — is what stops a previous cycle's terminal from masking a
+    # live wait, the same bug fleet-detect.sh's position-scoped matching fixes.
+    if last_waiting is not None:
+        _, iso, phase, step = last_waiting
+        if (phase, step) not in terminals:
+            row.bracket_age = _age_secs(_parse_iso(iso), now)
+
+    row.activity_age = _read_activity_age(os.path.dirname(log_path), tid, now)
+    return row
+
+
+def _read_activity_age(log_dir: str, tid: str, now: datetime) -> Optional[int]:
+    """Age of the agent's own last tool call, from hooks/agent-activity.sh's log.
+
+    Reads the last line's timestamp rather than the file's mtime: mtime also moves
+    when the hook ring-caps the file, which would report activity that never
+    happened.
+    """
+    path = os.path.join(log_dir or ".", f"{tid}-activity.log")
+    try:
+        with open(path, "r", errors="replace") as fh:
+            last = ""
+            for line in fh:
+                if line.strip():
+                    last = line
+    except OSError:
+        return None
+    if not last:
+        return None
+    return _age_secs(_parse_iso(last.split("|", 1)[0]), now)
+
+
+def collect_fleet_rows(log_dir: str, now: Optional[datetime] = None) -> list:
+    """Every active pipeline in `log_dir`, ordered most-recently-active first.
+
+    Re-globbed on every refresh rather than cached, so a pipeline that starts
+    while the dashboard is open appears on the next tick.
+    """
+    now = now or datetime.now(timezone.utc)
+    rows = []
+    for path in sorted(glob.glob(os.path.join(log_dir, "*-pipeline.log"))):
+        row = read_fleet_row(path, now)
+        if row is not None:
+            rows.append(row)
+    # Oldest bracket first: the row most likely to need attention leads. Rows with
+    # no open bracket sort last, since nothing is currently being waited on.
+    rows.sort(key=lambda r: (r.bracket_age is None, -(r.bracket_age or 0)))
+    return rows
+
+
+def _fmt_age(secs: Optional[int]) -> str:
+    if secs is None:
+        return "-"
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m{secs % 60:02d}s"
+    return f"{secs // 3600}h{(secs % 3600) // 60:02d}m"
+
+
+def _age_style(secs: Optional[int], warn: int, bad: int) -> str:
+    if secs is None:
+        return "dim"
+    if secs >= bad:
+        return "bold red"
+    if secs >= warn:
+        return "yellow"
+    return "green"
+
+
+def render_fleet_table(rows, log_dir: str, tick: int = 0):
+    """Render the fleet rows as a rich table."""
+    table = Table(
+        title=f"fleet — {len(rows)} active pipeline(s) in {log_dir}",
+        title_style="bold blue",
+        expand=True,
+        border_style="blue",
+    )
+    table.add_column("ticket", style="bold")
+    table.add_column("phase")
+    table.add_column("step")
+    table.add_column("bracket", justify="right")
+    table.add_column("activity", justify="right")
+    table.add_column("vfy", justify="right")
+    table.add_column("pr", justify="right")
+    table.add_column("last gate", overflow="ellipsis")
+
+    if not rows:
+        table.add_row("—", "no active pipelines", "", "", "", "", "", "")
+        return Panel(table, border_style="blue", padding=(0, 1))
+
+    spin = SPINNERS[tick % len(SPINNERS)]
+    for r in rows:
+        marker = spin if r.bracket_age is not None else " "
+        # Thresholds mirror fleet-detect.sh's stall dimensions so the dashboard
+        # and the detector agree about what "late" means.
+        table.add_row(
+            f"{marker} {r.tid}",
+            r.phase,
+            r.step,
+            Text(_fmt_age(r.bracket_age), style=_age_style(r.bracket_age, 600, 900)),
+            Text(_fmt_age(r.activity_age), style=_age_style(r.activity_age, 240, 900)),
+            str(r.verify_attempts),
+            str(r.pr_iterations),
+            r.last_gate or "-",
+        )
+    return Panel(table, border_style="blue", padding=(0, 1))
+
+
+def run_fleet(log_dir: str) -> None:
+    """Live fleet view. Same cadence as the per-ticket dashboard (4 fps)."""
+    tick = 0
+    with Live(refresh_per_second=4, screen=True) as live:
+        while True:
+            rows = collect_fleet_rows(log_dir)
+            live.update(render_fleet_table(rows, log_dir, tick))
+            tick += 1
+            time.sleep(0.25)
+
+
 def main():
     parser = argparse.ArgumentParser(description="ticket-auto pipeline dashboard")
-    parser.add_argument("log_file", help="Path to pipeline log file")
+    parser.add_argument("log_file", nargs="?", help="Path to pipeline log file")
     parser.add_argument("--heartbeat", action="store_true", help="Also render heartbeat log panel")
+    parser.add_argument(
+        "--fleet",
+        nargs="?",
+        const="",
+        metavar="LOG_DIR",
+        help="Fleet mode: one row per active pipeline in LOG_DIR "
+        "(default: $FLEET_PIPELINE_LOG_DIR, else ./logs)",
+    )
     args = parser.parse_args()
+
+    if _RICH_ERROR is not None:
+        parser.error(f"the dashboard needs the 'rich' package to render: {_RICH_ERROR}")
+
+    if args.fleet is not None:
+        log_dir = args.fleet or os.environ.get("FLEET_PIPELINE_LOG_DIR") or "./logs"
+        if not os.path.isdir(log_dir):
+            parser.error(f"fleet log directory not found: {log_dir}")
+        run_fleet(log_dir)
+        return
+
+    if not args.log_file:
+        parser.error("a pipeline log file is required (or use --fleet)")
 
     reader = LogReader(args.log_file)
     builder = StateBuilder()

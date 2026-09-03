@@ -1,0 +1,17 @@
+# Optional dependencies — the OTel exporter (fleetd/otel.py) only.
+#
+# Deliberately NOT a project-wide requirements.txt. fleetd's supervisor and
+# state store are pure standard library and must stay that way: fleetd has to
+# start, supervise, dispatch and detect on a host where nothing here is
+# installed. Without these packages the exporter starts, reports once that the
+# SDK is unavailable, and emits nothing — see design decision D11.
+#
+# Install only where you actually want traces:
+#     python3 -m pip install -r fleet-controller/fleetd/requirements-otel.txt
+#
+# Then enable it:
+#     export FLEET_OTEL_ENABLE=true
+#     export FLEET_OTEL_ENDPOINT=http://your-collector:4318
+
+opentelemetry-sdk>=1.25.0
+opentelemetry-exporter-otlp-proto-http>=1.25.0

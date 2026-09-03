@@ -25,6 +25,31 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+# The state store. Imported defensively: a supervisor that cannot open its
+# store must still supervise processes, because the store is an accelerant
+# for state queries, not the thing that keeps workers alive.
+try:
+    from fleetd import store as _store_mod
+except ImportError:  # pragma: no cover - store unavailable
+    _store_mod = None
+
+# The OTel exporter module. otel.py is pure stdlib at import time — its
+# opentelemetry dependency is imported lazily inside the exporter *process*,
+# never here — so this only fails when the file itself is missing.
+try:
+    from fleetd import otel as _otel_mod
+except ImportError:  # pragma: no cover - exporter unavailable
+    _otel_mod = None
+
+# Phase-level dispatch. Unlike the two above, a missing phase_dispatch is not
+# survivable for a phase spawn — there is no degraded mode in which fleetd
+# dispatches a phase without knowing the dispatch table — so the failure is
+# raised at the call, not swallowed at import.
+try:
+    from fleetd import phase_dispatch as _phase_mod
+except ImportError:  # pragma: no cover - phase dispatch unavailable
+    _phase_mod = None
+
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
@@ -132,11 +157,12 @@ class ChildTable:
     """
 
     def __init__(self):
-        # {tid: {pid, started_at, generation, reason, adopted, phase, anomalies}}
+        # {tid: {pid, started_at, generation, reason, adopted, phase,
+        #        anomalies, start_ticks, hb_log_file}}
         self._workers = {}
 
     def add(self, tid, pid, generation=0, reason='', adopted=False, phase='',
-            anomalies='', session_id=None):
+            anomalies='', session_id=None, start_ticks=None, hb_log_file=''):
         self._workers[tid] = {
             'tid': tid,
             'pid': pid,
@@ -147,6 +173,12 @@ class ChildTable:
             'phase': phase,
             'anomalies': anomalies,
             'session_id': session_id,
+            # Phase-worker liveness heartbeat inputs (task 4.18). Empty/None
+            # for a ticket-level spawn, which has no per-cycle heartbeat
+            # writer of its own — the router's backgrounded watchdog already
+            # covers it.
+            'start_ticks': start_ticks,
+            'hb_log_file': hb_log_file,
         }
 
     def remove(self, tid):
@@ -902,8 +934,180 @@ def _write_stop_files(tid, state_dir):
             pass
 
 
+# ── State store (fail-soft) ────────────────────────────────────────────────
+# fleetd is the store's sole writer, and every call below is wrapped so that a
+# store failure degrades fleet-controller to its pre-store behaviour instead of
+# taking the supervisor down with it. Losing the store costs a slower cold
+# start; losing the supervisor loses the fleet.
+
+FLEET_STORE_ENABLE = os.environ.get('FLEET_STORE_ENABLE', 'true') != 'false'
+
+_STORE_WARNED = set()
+
+
+def _store_warn(message):
+    """Warn once per distinct message — a per-cycle failure must not become a
+    per-cycle log flood."""
+    if message in _STORE_WARNED:
+        return
+    _STORE_WARNED.add(message)
+    print(f'fleetd[{os.getpid()}]: state store unavailable — {message}',
+          file=sys.stderr)
+
+
+def _store_do(state_dir, action, what):
+    """Run `action(store)` against the state store, swallowing every failure.
+
+    Short-lived connections rather than one long-held handle: these calls are
+    rare (spawn, exit, kill, one ingest per detection cycle), fleetd is the
+    only writer process, and not holding a connection across the daemon's
+    lifetime removes a whole class of stale-handle bug.
+    """
+    if not FLEET_STORE_ENABLE or _store_mod is None:
+        return None
+    st = None
+    try:
+        st = _store_mod.open_store(state_dir)
+        return action(st)
+    except Exception as exc:  # noqa: BLE001 - deliberately total
+        _store_warn(f'{what}: {exc}')
+        return None
+    finally:
+        if st is not None:
+            try:
+                st.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _store_bootstrap(state_dir):
+    """First-start adoption: take over the JSON file conventions the store
+    replaces, then project the existing logs.
+
+    Runs on every start, not just the first: it is idempotent, and it is also
+    the recovery path for a deleted database — in-flight tickets are recovered
+    from the registry files and the logs rather than orphaned.
+    """
+    def _run(st):
+        imported = st.import_legacy_state(state_dir)
+        counts = st.ingest_workspace(state_dir)
+        return imported, counts
+    return _store_do(state_dir, _run, 'bootstrap')
+
+
+def _store_sync(state_dir):
+    """Project any log lines written since the last cycle.
+
+    Runs before detection so the engines read a store that is current. Only
+    unread bytes are parsed, which is the cost the store removes: the old path
+    re-parsed every log on every sweep.
+    """
+    return _store_do(state_dir, lambda st: st.ingest_workspace(state_dir), 'sync')
+
+
+def _store_record_spawn(state_dir, tid, pid, generation, reason, session_id,
+                        phase=''):
+    return _store_do(
+        state_dir,
+        lambda st: st.record_worker_spawn(
+            tid, pid, generation=generation, phase=phase, reason=reason,
+            session_id=session_id or '',
+            start_ticks=str(_pid_start_time(pid) or '')),
+        'record spawn')
+
+
+def _store_record_exit(state_dir, tid, pid, exit_code, exit_type,
+                       killed_by_fleet=False):
+    def _run(st):
+        for worker in st.running_workers(tid):
+            if worker['pid'] == pid:
+                st.record_worker_exit(
+                    worker['id'], exit_code=exit_code, exit_type=exit_type,
+                    status='killed' if killed_by_fleet else 'exited')
+                return worker['id']
+        return None
+    return _store_do(state_dir, _run, 'record exit')
+
+
+def _store_record_fence(state_dir, tid, generation):
+    return _store_do(state_dir, lambda st: st.set_fence(tid, generation),
+                     'record fence')
+
+
+def _store_record_position(state_dir, tid, step_id, source='dispatch'):
+    """Record `tid`'s dispatch position (task 4.3, design.md D7).
+
+    Called at the moment fleetd decides to spawn `step_id` — recording is
+    strictly simpler than reconstructing, since the supervisor performing
+    the dispatch already knows where it is. `source='dispatch'` here always;
+    `'adopted'` is written only once, by `phase_dispatch.resolve_dispatch_position`
+    for a ticket a human started manually.
+    """
+    return _store_do(
+        state_dir,
+        lambda st: st.record_position(tid, step_id, source=source),
+        'record position')
+
+
+def _store_get_position(state_dir, tid):
+    return _store_do(state_dir, lambda st: st.get_position(tid),
+                     'get position')
+
+
+# ── OTel exporter lifecycle (D11, task 8.5) ────────────────────────────────
+# The exporter is supervised with the same primitives as any other worker —
+# fork/exec via spawn_worker, a run-registry entry, ChildReaper reaping, kill
+# escalation — rather than bespoke process management for exactly one process.
+#
+# Everything here is fail-soft. A telemetry process that cannot start must not
+# stop fleetd supervising tickets: that is the whole point of the exporter being
+# downstream of the pipeline rather than in it.
+
+#: Backoff after a crash, in seconds. Bounded and coarse — an exporter that
+#: cannot start at all (no SDK, no collector, bad config) must not spin.
+_OTEL_RESPAWN_BACKOFF = (5, 30, 120, 600)
+
+
+def otel_service_id():
+    """Fixed run-registry identifier. Not a ticket id, and the reap path
+    branches on it so an exporter exit is never mistaken for a ticket dying."""
+    return _otel_mod.SERVICE_ID if _otel_mod is not None else 'otel-exporter'
+
+
+def otel_enabled():
+    """True only when the operator opted in AND the module is importable."""
+    if _otel_mod is None:
+        return False
+    try:
+        return _otel_mod.exporter_enabled()
+    except Exception:
+        return False
+
+
+def _otel_cmd(log_dir):
+    """argv for the exporter child.
+
+    Runs otel.py as a plain script, by absolute path, rather than as
+    `-m fleetd.otel`. The child is exec'd with fleetd's *environment*, not its
+    sys.path, so a `-m` invocation would need `fleet-controller/` on PYTHONPATH
+    and would die with ModuleNotFoundError wherever fleetd happens to have been
+    started from. otel.py imports nothing but the standard library precisely so
+    this works from any working directory.
+    """
+    script = Path(__file__).resolve().parent / 'otel.py'
+    return [sys.executable, str(script), '--log-dir', str(log_dir)]
+
+
 def _write_fence_files(tid, generation, state_dir):
-    """Write a generation fence marker so the next spawn uses a higher generation."""
+    """Write a generation fence marker so the next spawn uses a higher generation.
+
+    Written to both the store (authoritative for fleetd) and the marker file
+    (which flow.sh's fence guard still reads from inside a worker). The file
+    stays until every consumer reads the store — dropping it here would let a
+    superseded worker's Linear mutations through, which is the one thing the
+    fence exists to prevent.
+    """
+    _store_record_fence(state_dir, tid, generation)
     fence_file = Path(state_dir) / f'{tid}-fence'
     entry = {
         'tid': tid,
@@ -1296,9 +1500,25 @@ def _remove_consumed_entries(state_dir, consumed_tids):
 # ── Worker spawning ────────────────────────────────────────────────────────
 
 def _write_run_registry(state_dir, tid, pid, generation, reason='dispatched',
-                        session_id=None):
-    """Write a run registry entry with the REAL pid (not a sentinel)."""
-    run_file = Path(state_dir) / f'{tid}-run.json'
+                        session_id=None, start_ticks=None, phase=''):
+    """Write a run registry entry with the REAL pid (not a sentinel).
+
+    `start_ticks` is field 22 of `/proc/<pid>/stat` — the process start time
+    in clock ticks since boot. Readers pair it with the pid to defeat PID
+    reuse: `kill -0` succeeds for whatever process now occupies a recycled
+    pid, but its start ticks will not match the one recorded here. The guard
+    in `_ticket_worker_alive` (detect-resume.sh) tolerates the field being
+    absent, so omitting it does not break a reader — it silently disarms it,
+    which is why this is written unconditionally on Linux rather than
+    opportunistically.
+    """
+    # A phase worker gets its own `{tid}-{phase}-run.json` rather than
+    # overwriting the ticket-level file: several phases run in sequence under
+    # one ticket, and a reader asking "is anything working on this ticket"
+    # must see the live phase, not the last one to finish. `_ticket_worker_alive`
+    # (detect-resume.sh) already globs both shapes.
+    suffix = f'-{phase.lower()}' if phase else ''
+    run_file = Path(state_dir) / f'{tid}{suffix}-run.json'
     entry = {
         'tid': tid,
         'pid': str(pid),
@@ -1308,6 +1528,10 @@ def _write_run_registry(state_dir, tid, pid, generation, reason='dispatched',
     }
     if session_id:
         entry['session_id'] = session_id
+    if start_ticks:
+        entry['start_ticks'] = str(start_ticks)
+    if phase:
+        entry['phase'] = phase
     run_file.write_text(json.dumps(entry))
 
 
@@ -1350,8 +1574,16 @@ def _cmd_already_sets_permission_mode(cmd_str):
     return any(marker in cmd_str for marker in _PERMISSION_FLAG_MARKERS)
 
 
-def _build_worker_cmd(tid, claude_bin=None, claude_cmd=None, session_id=None):
-    """Build the argument list for spawning a ticket-auto worker.
+def _build_worker_cmd(tid, claude_bin=None, claude_cmd=None, session_id=None,
+                      prompt=None):
+    """Build the argument list for spawning a worker.
+
+    `prompt` replaces the default whole-ticket `/ticket-auto` invocation with
+    a single-phase one built by `phase_dispatch.build_phase_spawn` (task 4.4).
+    Only the `-p` payload differs: session id, output format and permission
+    handling are identical, because a phase worker is the same kind of
+    headless session as a ticket worker — it simply runs one step of the
+    pipeline instead of all of them.
 
     `claude_cmd` (or the CLAUDE_CMD env var) is a shell-style command line —
     e.g. "claude-deepseek 2 --bypass" — that replaces the bare binary name
@@ -1371,7 +1603,7 @@ def _build_worker_cmd(tid, claude_bin=None, claude_cmd=None, session_id=None):
     """
     cmd_str = claude_cmd or CLAUDE_CMD
     prefix = shlex.split(cmd_str) if cmd_str else [claude_bin or CLAUDE_BIN]
-    args = ['-p', f'/ticket-auto {tid} --auto --from-planned',
+    args = ['-p', prompt or f'/ticket-auto {tid} --auto --from-planned',
             '--output-format', 'json']
     if session_id:
         args += ['--session-id', session_id]
@@ -1406,7 +1638,8 @@ class SpawnError(Exception):
 
 
 def spawn_worker(tid, generation, state_dir, reason='dispatched',
-                 cmd_override=None, claude_bin=None, claude_cmd=None):
+                 cmd_override=None, claude_bin=None, claude_cmd=None,
+                 prompt=None, phase='', extra_env=None, session_id=None):
     """Fork and exec a worker for `tid`. Returns the child PID.
 
     The child is placed in its own process group so that kill escalation
@@ -1422,13 +1655,24 @@ def spawn_worker(tid, generation, state_dir, reason='dispatched',
     claude invocation. This allows tests to spawn a simple Python process.
     claude_bin/claude_cmd: forwarded to _build_worker_cmd when cmd_override
     is not given — see its docstring.
-    """
-    session_id = str(uuid.uuid4())
-    cmd = cmd_override if cmd_override is not None else _build_worker_cmd(
-        tid, claude_bin=claude_bin, claude_cmd=claude_cmd, session_id=session_id)
 
-    stdout_path = Path(state_dir) / f'{tid}-gen{generation}.json'
-    stderr_path = Path(state_dir) / f'{tid}-gen{generation}.stderr'
+    prompt/phase/extra_env: phase dispatch (task 4.4). `prompt` replaces the
+    whole-ticket invocation with one phase's; `phase` namespaces the stdio and
+    run-registry files so a ticket's successive phases do not overwrite each
+    other's records; `extra_env` carries what `spawn_agent_pre` would have
+    exported in the agent prompt — see `phase_dispatch.build_phase_spawn`.
+    """
+    # Generated here unless the caller already has one. A phase spawn does:
+    # it must write the session id into spawn-meta *before* the fork, so no
+    # hook can fire against a file that does not name its own session yet.
+    session_id = session_id or str(uuid.uuid4())
+    cmd = cmd_override if cmd_override is not None else _build_worker_cmd(
+        tid, claude_bin=claude_bin, claude_cmd=claude_cmd,
+        session_id=session_id, prompt=prompt)
+
+    slug = f'{tid}-{phase.lower()}' if phase else tid
+    stdout_path = Path(state_dir) / f'{slug}-gen{generation}.json'
+    stderr_path = Path(state_dir) / f'{slug}-gen{generation}.stderr'
 
     pid = os.fork()
     if pid == 0:
@@ -1476,6 +1720,12 @@ def spawn_worker(tid, generation, state_dir, reason='dispatched',
         if start_ticks:
             worker_env['FLEET_WORKER_START_TICKS'] = start_ticks
         worker_env.update(_NON_INTERACTIVE_ENV)
+        # Last, so a phase's own LOG_FILE/HB_LOG_FILE win over anything
+        # inherited from the daemon's environment — fleetd may itself have
+        # been started with a LOG_FILE set, and a phase writing its bracket
+        # into the wrong log is silent and unrecoverable.
+        if extra_env:
+            worker_env.update({k: str(v) for k, v in extra_env.items()})
 
         try:
             os.execvpe(cmd[0], cmd, worker_env)
@@ -1486,9 +1736,76 @@ def spawn_worker(tid, generation, state_dir, reason='dispatched',
             os._exit(127)
 
     # Parent: record the real PID (and session id) in the run registry.
+    # Read the child's start ticks here rather than in the child before exec:
+    # the child's own value is the pre-exec fork, and exec preserves the pid
+    # and start time, so the parent's read of /proc/<pid>/stat is the same
+    # number and needs no cooperation from the child.
     _write_run_registry(state_dir, tid, pid, generation, reason,
-                        session_id=session_id)
+                        session_id=session_id,
+                        start_ticks=_pid_start_time(pid), phase=phase)
     return pid, session_id
+
+
+def _phase_write_identity(tid, spawn, session_id):
+    """Write the phase's spawn-meta and start stamp. Never blocks a spawn.
+
+    These files drive token accounting and activity attribution. Losing them
+    costs telemetry; refusing to spawn over an unwritable `/tmp` would cost
+    the ticket. The failure is warned about rather than raised for the same
+    reason `_store_do` swallows store failures.
+    """
+    try:
+        _phase_mod.write_spawn_meta(tid, spawn, session_id)
+        _phase_mod.write_phase_start_marker(tid, spawn.phase)
+    except OSError as exc:
+        print(f'fleetd: spawn-meta write failed for {tid}/{spawn.phase}: '
+              f'{exc}', file=sys.stderr)
+
+
+def spawn_phase_worker(tid, step_id, generation, state_dir, log_file,
+                       table=None, hb_log_file='', claude_log_file='',
+                       from_step='', attempt=None, counters=None,
+                       env_file='', extra_env=None, reason='phase-dispatch',
+                       claude_bin=None, claude_cmd=None, cmd_override=None):
+    """Fork one worker for a single dispatch-table phase (tasks 4.4, 4.5).
+
+    Returns `(pid, session_id, spawn)` where `spawn` is the `PhaseSpawn` that
+    produced the invocation — callers need its `phase`/`next_phase` to resolve
+    the bracket later, and returning it saves them rebuilding it.
+
+    Everything about the fork is `spawn_worker`'s: process group, stdio split,
+    non-interactive env, run registry, reaping. This adds only the two things
+    that are phase-specific — the `-p` payload and the phase's environment —
+    plus the `workers` row that lets a reader ask which phase a live PID is
+    running rather than only which ticket.
+    """
+    if _phase_mod is None:  # pragma: no cover - import guard
+        raise SpawnError('fleetd.phase_dispatch is unavailable')
+    table = table or _phase_mod.DispatchTable.load()
+    spawn = _phase_mod.build_phase_spawn(
+        table, step_id, tid, log_file, hb_log_file=hb_log_file,
+        claude_log_file=claude_log_file, from_step=from_step, attempt=attempt,
+        counters=counters, env_file=env_file, extra_env=extra_env,
+    )
+    # Identity before exec (D15). Both files are written by the router's
+    # `spawn_agent_pre`/`SubagentStart` on the manual path; neither of those
+    # runs here, and every hook that resolves "which ticket and phase am I"
+    # reads them.
+    session_id = str(uuid.uuid4())
+    _phase_write_identity(tid, spawn, session_id)
+
+    pid, session_id = spawn_worker(
+        tid, generation, state_dir, reason=reason, cmd_override=cmd_override,
+        claude_bin=claude_bin, claude_cmd=claude_cmd,
+        prompt=spawn.prompt, phase=spawn.phase, extra_env=spawn.env,
+        session_id=session_id,
+    )
+    _store_record_spawn(state_dir, tid, pid, generation, reason, session_id,
+                        phase=spawn.phase)
+    # Position is recorded here, not inferred afterwards — this dispatch
+    # call is the one place fleetd knows it for certain (design.md D7).
+    _store_record_position(state_dir, tid, step_id, source='dispatch')
+    return pid, session_id, spawn
 
 
 # ── Child reaping (self-pipe trick) ────────────────────────────────────────
@@ -1727,6 +2044,33 @@ def _log_reached_terminal(state_dir, tid):
     return False
 
 
+def _foreign_run_for_tid(state_dir, tid):
+    """Read a ticket's log/activity state and ask `detect_foreign_run`.
+
+    The pure decision lives in `phase_dispatch.detect_foreign_run` (task
+    4.19) — this just supplies the two file reads it needs from the same
+    `{tid}-pipeline.log` / `{tid}-activity.log` paths every other consumer of
+    this state dir uses (`_log_reached_terminal`, `fleet-detect.sh`). Always
+    called with `fleetd_owns_worker=False`: every caller has already checked
+    `self._children.get(tid) is None` before reaching here.
+
+    A missing/unreadable phase_dispatch import, or a missing pipeline log,
+    both degrade to "no foreign run detected" — the same fail-open posture
+    the rest of the interlock's own design commentary describes for a log
+    that does not exist yet.
+    """
+    if _phase_mod is None:  # pragma: no cover - import guard
+        return None
+    log_file = Path(state_dir) / f'{tid}-pipeline.log'
+    try:
+        log_lines = [ln for ln in log_file.read_text().splitlines() if ln]
+    except OSError:
+        log_lines = []
+    activity_log = Path(state_dir) / f'{tid}-activity.log'
+    return _phase_mod.detect_foreign_run(
+        tid, log_lines, str(activity_log), False)
+
+
 # ── Epic view (pure state-dir derivation) ─────────────────────────────────
 
 def _list_epics(state_dir, workers):
@@ -1834,6 +2178,12 @@ class Supervisor:
         # ticket's Planner Context block (one Linear call), then served from
         # memory for the daemon's lifetime.
         self._confidence_cache = {}
+        # OTel exporter (D11). One supervised child under a fixed identifier,
+        # not a ticket. `_otel_failures` drives the respawn backoff; it resets
+        # on any spawn that survives to the next reap.
+        self._otel_pid = None
+        self._otel_failures = 0
+        self._otel_next_attempt = 0.0
         # Deterministic-failure circuit breaker (worker-reap-recovery task
         # 3.8): a streak of fast, non-zero exits across the fleet — expired
         # auth, a bad CLAUDE_CMD — halts dispatch rather than burning
@@ -1900,6 +2250,25 @@ class Supervisor:
                 f"fleetd[{os.getpid()}]: adopted {adopted_count} surviving "
                 f"worker(s) from previous instance"
             )
+
+        # Bootstrap the state store after adoption, not before: scan_registry
+        # has by now cleared the registry files of workers that did not
+        # survive, so what the store imports is the set that is genuinely
+        # still running. Idempotent, and also the recovery path when the
+        # database has been deleted — projections rebuild from the logs
+        # instead of the in-flight tickets being orphaned.
+        result = _store_bootstrap(str(self._state_dir))
+        if result is not None:
+            imported, counts = result
+            if imported['workers'] or imported['fences'] or counts['files']:
+                print(
+                    f"fleetd[{os.getpid()}]: state store — imported "
+                    f"{imported['workers']} worker(s), {imported['fences']} "
+                    f"fence(s); projected {counts['pipeline']} pipeline and "
+                    f"{counts['activity']} activity line(s) from "
+                    f"{counts['files']} log file(s)"
+                )
+
         self._sync_health()
 
     def reconcile_orphaned_tickets(self, scope_tids=None):
@@ -2049,6 +2418,15 @@ class Supervisor:
         """
         self._cycle_cache = CycleCache()
         completed_at = datetime.now(timezone.utc).isoformat()
+
+        # Phase-worker liveness heartbeats (task 4.18) are written before
+        # detection runs, so a line emitted THIS cycle is visible to
+        # `detect_stalls` THIS cycle rather than one cycle late.
+        self.emit_phase_liveness_heartbeats()
+
+        # Project new log lines before the engines read them, so store-backed
+        # detection sees the same history a file-backed read would.
+        _store_sync(str(self._state_dir))
 
         result = self._detection.run(str(self._state_dir), cache=self._cycle_cache)
 
@@ -2493,6 +2871,14 @@ class Supervisor:
         non_terminal_tids = []
         newly_reaped = self._reaper.reap()
         for pid, exit_code, exit_type in newly_reaped:
+            # The OTel exporter is a supervised child but not a ticket worker.
+            # Sending it down the ticket path would write a META|worker-exit
+            # line into an `otel-exporter-pipeline.log`, which fleet_detect_all
+            # would then glob and report on as a stuck pipeline — a monitoring
+            # process manufacturing monitoring findings about itself.
+            if pid == self._otel_pid:
+                self._handle_otel_exit(pid, exit_code, exit_type)
+                continue
             # Find the child entry by PID and remove it.
             for tid, entry in list(self._children._workers.items()):
                 if entry['pid'] == pid:
@@ -2524,6 +2910,8 @@ class Supervisor:
                         action=action or 'reconcile-pending',
                         suppressed_retry_reason=suppressed,
                     )
+                    _store_record_exit(
+                        str(self._state_dir), tid, pid, exit_code, exit_type)
                     status = 'done' if (exit_type == 'exit' and exit_code == 0) else 'fail'
                     _append_pipeline_log_line(
                         str(self._state_dir), tid, 'META', 'worker-exit', status,
@@ -2641,6 +3029,18 @@ class Supervisor:
                 )
                 continue
 
+            # Dual-invocation interlock (design.md task 4.19): someone else
+            # — typically a human running `/ticket-auto <ID>` by hand — may
+            # already be mid-phase on this ticket. Leave the queue entry in
+            # place (not consumed) so the next cycle re-checks rather than
+            # dropping the dispatch on the floor.
+            foreign = _foreign_run_for_tid(self._state_dir, tid)
+            if foreign is not None and foreign.detected:
+                print(
+                    f"fleetd[{os.getpid()}]: deferring {tid} — {foreign.detail}"
+                )
+                continue
+
             # The supervisor assigns generations, not the queue entry.
             # This ensures a restarted worker always gets a generation
             # higher than any fenced predecessor.
@@ -2672,6 +3072,11 @@ class Supervisor:
                 adopted=False,  # we forked it — not adopted
                 session_id=session_id,
             )
+            # Ownership is recorded at dispatch: this is what scopes severity
+            # >= 2 intervention to fleet-managed work and keeps a human's
+            # manual run out of the fleet's kill scope.
+            _store_record_spawn(
+                str(self._state_dir), tid, pid, generation, reason, session_id)
             consumed.add(tid)
             print(
                 f"fleetd[{os.getpid()}]: spawned {tid} (pid {pid}, "
@@ -2683,6 +3088,75 @@ class Supervisor:
             self._sync_health()
 
         return consumed
+
+    # ── phase dispatch (task 4.17) ─────────────────────────────────────────
+
+    def spawn_phase(self, tid, step_id, log_file, table=None, **kwargs):
+        """Spawn one phase worker and register it as a killable child.
+
+        The module-level `spawn_phase_worker` (task 4.4) does the fork; this
+        adds the one thing that function cannot do on its own — record the
+        pid in `self._children`, the table `self.kill_worker`/`kill_worker()`
+        already reads. Without this a hung phase worker is invisible to the
+        exact escalation path (cooperative-stop → SIGINT → SIGTERM →
+        SIGKILL) a ticket-level worker already gets: `spawn_phase_worker`'s
+        caller wiring the two together, rather than a second kill
+        implementation, is the reuse task 4.1/4.17 ask for.
+
+        `kwargs` passes through to `spawn_phase_worker` (`hb_log_file`,
+        `from_step`, `attempt`, `counters`, `env_file`, `extra_env`, `reason`,
+        `cmd_override`, ...); `generation` is resolved here, the same way
+        `_consume_queue` resolves it for a ticket-level spawn, so a caller
+        never has to fence-check by hand. `hb_log_file`, when given, is also
+        kept on the child record — `emit_phase_liveness_heartbeats` (task
+        4.18) needs it every cycle, not just at spawn time.
+        """
+        generation = self._resolve_generation(tid)
+        reason = kwargs.pop('reason', 'phase-dispatch')
+        hb_log_file = kwargs.get('hb_log_file', '')
+        pid, session_id, spawn = spawn_phase_worker(
+            tid, step_id, generation, str(self._state_dir), log_file,
+            table=table, reason=reason,
+            claude_bin=kwargs.pop('claude_bin', self._claude_bin),
+            claude_cmd=kwargs.pop('claude_cmd', self._claude_cmd),
+            **kwargs,
+        )
+        self._children.add(
+            tid=tid, pid=pid, generation=generation, reason=reason,
+            adopted=False, phase=spawn.phase, session_id=session_id,
+            start_ticks=_pid_start_time(pid), hb_log_file=hb_log_file,
+        )
+        return pid, session_id, spawn
+
+    def emit_phase_liveness_heartbeats(self):
+        """Write one liveness heartbeat per live phase worker (task 4.18).
+
+        The router's backgrounded watchdog wrote `|watchdog|alive|` on its
+        own timer, which `fleet-detect.sh:411`'s heartbeat dimension reads as
+        one half of stall detection (the other half, `_detect_activity_stall`,
+        is independent and already applies unmodified to a phase-dispatched
+        ticket — it reads `{tid}-activity.log`, written by the agent's own
+        hook, regardless of what spawned the agent). A phase-dispatched
+        ticket has no such watchdog, so without this call the heartbeat
+        dimension is silent for it and every phase-dispatched ticket falls
+        back to activity-only severity — losing the KILL+RESTART tier and the
+        pinger-exhaustion escalation the heartbeat dimension alone carries.
+
+        Called once per detection cycle, before detection runs, so a stale
+        write from THIS cycle is what `detect_stalls` reads THIS cycle — not
+        an emit-on-schedule liveness claim: `phase_liveness_heartbeat` itself
+        still writes nothing unless the pid-plus-start-ticks check passes.
+        Only children with a `phase` and `hb_log_file` recorded are
+        candidates — a ticket-level spawn has neither, by design.
+        """
+        if _phase_mod is None:  # pragma: no cover - import guard
+            return
+        for child in list(self._children):
+            if not child.get('phase') or not child.get('hb_log_file'):
+                continue
+            _phase_mod.phase_liveness_heartbeat(
+                child['tid'], child['phase'], child['hb_log_file'],
+                child['pid'], start_ticks=child.get('start_ticks'))
 
     # ── kill (group 7) ───────────────────────────────────────────────────
 
@@ -2800,6 +3274,85 @@ class Supervisor:
 
     # ── run ─────────────────────────────────────────────────────────────────
 
+    # ── OTel exporter supervision ──────────────────────────────────────────
+
+    def _otel_log_dir(self):
+        return os.environ.get('FLEET_PIPELINE_LOG_DIR') or str(self._state_dir)
+
+    def maybe_spawn_otel(self, now=None):
+        """Start the exporter if enabled, not running, and past its backoff.
+
+        Called on startup and on every cycle, so a crashed exporter comes back
+        without fleetd restarting. Returns the pid, or None.
+        """
+        if not otel_enabled() or self._otel_pid is not None:
+            return None
+        now = time.time() if now is None else now
+        if now < self._otel_next_attempt:
+            return None
+
+        sid = otel_service_id()
+        try:
+            pid, session_id = spawn_worker(
+                sid, 0, str(self._state_dir), reason='otel-exporter',
+                cmd_override=_otel_cmd(self._otel_log_dir()),
+            )
+        except Exception as exc:
+            # Never fatal: telemetry failing to start must not stop fleetd
+            # supervising tickets.
+            print(f"fleetd[{os.getpid()}]: otel exporter spawn failed: {exc}",
+                  file=sys.stderr)
+            self._otel_failures += 1
+            self._otel_next_attempt = now + self._otel_backoff()
+            return None
+
+        self._otel_pid = pid
+        self._children.add(sid, pid, generation=0, reason='otel-exporter',
+                           session_id=session_id)
+        print(f"fleetd[{os.getpid()}]: otel exporter started (pid {pid}) "
+              f"watching {self._otel_log_dir()}")
+        return pid
+
+    def _otel_backoff(self):
+        idx = min(self._otel_failures, len(_OTEL_RESPAWN_BACKOFF)) - 1
+        return _OTEL_RESPAWN_BACKOFF[max(idx, 0)]
+
+    def _handle_otel_exit(self, pid, exit_code, exit_type):
+        """Record an exporter exit and schedule a respawn.
+
+        Deliberately not the ticket path: no exit record, no circuit breaker,
+        no pipeline-log line, no reconciliation. The exporter has no ticket
+        state to reconcile and no pipeline log of its own.
+        """
+        sid = otel_service_id()
+        self._children.remove(sid)
+        self._otel_pid = None
+        clean = (exit_type == 'exit' and exit_code == 0)
+        if clean:
+            self._otel_failures = 0
+        else:
+            self._otel_failures += 1
+        self._otel_next_attempt = time.time() + self._otel_backoff()
+        print(
+            f"fleetd[{os.getpid()}]: otel exporter (pid {pid}) exited "
+            f"({exit_type}, code={exit_code}); "
+            f"respawn in {self._otel_backoff()}s"
+        )
+
+    def stop_otel(self, grace_secs=5):
+        """Stop the exporter through the same kill escalation as any worker."""
+        if self._otel_pid is None:
+            return
+        pid, sid = self._otel_pid, otel_service_id()
+        self._otel_pid = None
+        try:
+            kill_worker(sid, pid, 0, str(self._state_dir),
+                        reason='fleetd-shutdown', grace_secs=grace_secs)
+        except Exception as exc:
+            print(f"fleetd[{os.getpid()}]: otel exporter stop failed: {exc}",
+                  file=sys.stderr)
+        self._children.remove(sid)
+
     def run_observe(self, cmd_override=None):
         """Daemon main loop: detect, reap, spawn (if enabled), repeat.
 
@@ -2826,6 +3379,10 @@ class Supervisor:
         health = HealthServer(self._bind, self._port)
         health.start(self)
         print(f"fleetd[{os.getpid()}]: health endpoint on {self._bind}:{self._port}")
+
+        # Telemetry starts after the health endpoint and before the first
+        # detection cycle, so a trace exists for work this run does.
+        self.maybe_spawn_otel()
 
         shutdown_event = threading.Event()
 
@@ -2855,6 +3412,10 @@ class Supervisor:
                 # 4. Consume spawn queue (no-op when spawn is disabled).
                 self._consume_queue(cmd_override=cmd_override)
 
+                # 4b. Restart the exporter if it died (no-op when disabled,
+                # already running, or still inside its backoff window).
+                self.maybe_spawn_otel()
+
                 # 4. Wait for next interval or shutdown.
                 if shutdown_event.wait(timeout=self._cycle_interval):
                     break
@@ -2865,6 +3426,7 @@ class Supervisor:
             # Cooperative shutdown: stop health server, release lock.
             # In future groups we'll also attempt cooperative stop of all
             # workers before exiting.
+            self.stop_otel()
             health.shutdown()
             self._reaper.close()
             self.release_lock()

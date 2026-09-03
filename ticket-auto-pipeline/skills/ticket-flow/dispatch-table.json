@@ -1,0 +1,485 @@
+{
+  "schema_version": 1,
+  "description": "Canonical machine-readable dispatch table for the ticket-auto router. Transcribed from skills/ticket-auto/SKILL.md's Dispatch Loop section. Two consumers read this file: the SKILL.md dispatch-table generator (skills/ticket-flow/gen-dispatch-table.py), which renders the markdown table between the GENERATED markers in SKILL.md, and fleetd's phase-dispatch module, which loads it as its phase-sequencing structure. Neither the markdown table nor the Python implementation is the source of truth — this file is.",
+  "source_of_truth_note": "Entry order is significant: it is the render order of SKILL.md's table. Edit this file, then run the generator; never hand-edit the generated section.",
+  "step_variables": {
+    "APPRAISE_FROM": "Per-phase resume step for /ticket-appraise, emitted by detect-resume.sh.",
+    "REPRODUCE_FROM": "Per-phase resume step for /ticket-reproduce.",
+    "EXEC_FROM": "Per-phase resume step for /ticket-appraise-exec.",
+    "IMPLEMENT_FROM": "Per-phase resume step for /ticket-implement.",
+    "VERIFY_FROM": "Per-phase resume step for /ticket-verify."
+  },
+  "cycle_counters": {
+    "VERIFY_ATTEMPTS": "Verify retry counter, derived by detect-resume.sh from VERIFY terminal lines.",
+    "ITERATION": "PR-review iteration counter, derived from PR-REVIEW terminal lines carrying a canonical VERDICT token.",
+    "RECONCILE_CYCLE": "Gate hold -> re-approve -> re-hold counter.",
+    "PR_FEEDBACK_CYCLE": "PR comment reconciliation counter, derived from the cycle#N marker in the pr-reconcile terminal line."
+  },
+  "steps": [
+    {
+      "step_id": "STEP_1",
+      "table_label": "`STEP_1`",
+      "table_action": "Spawn `ticket-appraise` agent",
+      "table_type": "Agent",
+      "action": "agent",
+      "aliases": [],
+      "spawn": {
+        "step": "appraise",
+        "phase": "APPRAISE",
+        "skill": "/ticket-appraise",
+        "from_step_var": "APPRAISE_FROM",
+        "extra_flags": null,
+        "next_phase": "APPRAISE",
+        "description": "Investigate the ticket and produce complexity score",
+        "instructions": "Follow the skill exactly."
+      },
+      "pre_dispatch": [
+        {
+          "kind": "flow_trigger",
+          "trigger": "appraise-start",
+          "data": {
+            "complexity": "simple"
+          },
+          "on_failure": "gate_stop",
+          "description": "Claim the ticket before the spawn so Linear reflects that work has started. Idempotent; complexity defaults to simple and is corrected in STEP_4."
+        }
+      ],
+      "post_dispatch": [],
+      "description": "Appraise: investigation and complexity scoring."
+    },
+    {
+      "step_id": "STEP_1_5",
+      "table_label": "`STEP_1_5`",
+      "table_action": "Spawn `ticket-reproduce` agent",
+      "table_type": "Agent",
+      "action": "agent",
+      "aliases": [],
+      "condition": "bug tickets only",
+      "spawn": {
+        "step": "reproduce",
+        "phase": "REPRODUCE",
+        "skill": "/ticket-reproduce",
+        "from_step_var": "REPRODUCE_FROM",
+        "extra_flags": null,
+        "next_phase": "REPRODUCE",
+        "description": "Reproduce the bug and capture evidence",
+        "instructions": "Follow the skill exactly."
+      },
+      "pre_dispatch": [],
+      "post_dispatch": [],
+      "description": "Reproduce: confirm the bug manifests before any implementation work. Gate-stops with REPRO_NOT_CONFIRMED or REPRO_BLOCKED."
+    },
+    {
+      "step_id": "STEP_2",
+      "table_label": "`STEP_2`",
+      "table_action": "Spawn `ticket-appraise-exec` agent",
+      "table_type": "Agent",
+      "action": "agent",
+      "aliases": [],
+      "spawn": {
+        "step": "exec",
+        "phase": "EXEC",
+        "skill": "/ticket-appraise-exec",
+        "from_step_var": "EXEC_FROM",
+        "extra_flags": null,
+        "next_phase": "EXEC",
+        "description": "Create implementation artifacts (simple-fix.md or OpenSpec change)",
+        "instructions": "Follow the skill exactly."
+      },
+      "pre_dispatch": [],
+      "post_dispatch": [],
+      "description": "Exec: artifact creation. Gate-stops with EXEC_NO_ARTIFACT when no artifact is produced."
+    },
+    {
+      "step_id": "STEP_2_5",
+      "table_label": "`STEP_2_5`",
+      "table_action": "Run `bash gate-check.sh --mode entry`",
+      "table_type": "**Bash only**",
+      "action": "bash",
+      "aliases": [
+        "STEP_3"
+      ],
+      "bash": {
+        "script": "gate-check.sh",
+        "args": [
+          "{TICKET_ID}",
+          "{LOG_FILE}",
+          "{HB_LOG_FILE}",
+          "--mode",
+          "entry"
+        ],
+        "exit_codes": {
+          "0": "auto-approved — loop back to state detection",
+          "1": "held — write META|gate-held|info|held, finalize with exit 0, stop",
+          "2": "gate-stop — structural failure, finalize with exit 1"
+        }
+      },
+      "pre_dispatch": [],
+      "post_dispatch": [],
+      "description": "Approval gate. Deterministic bash, no Claude agent involved."
+    },
+    {
+      "step_id": "STEP_3",
+      "table_label": "`STEP_3`",
+      "table_action": "Alias for `STEP_2_5` — run `bash gate-check.sh --mode entry`",
+      "table_type": "**Bash only**",
+      "action": "alias",
+      "alias_of": "STEP_2_5",
+      "aliases": [],
+      "description": "Alias entry. detect-resume.sh can emit either STEP_2_5 or STEP_3 for the gate; both dispatch identically."
+    },
+    {
+      "step_id": "STEP_3_5",
+      "table_label": "`STEP_3_5`",
+      "table_action": "Spawn `ticket-gate-reconcile` agent",
+      "table_type": "Agent",
+      "action": "agent",
+      "aliases": [],
+      "loop": {
+        "counter": "RECONCILE_CYCLE",
+        "max_iterations": 3,
+        "exit_condition": "RECONCILE_CYCLE >= 3",
+        "gate_stop_code": "RECONCILE_EXHAUSTED",
+        "checked": "pre_dispatch",
+        "description": "Caps the hold -> re-approve -> re-hold cycle."
+      },
+      "spawn": {
+        "step": "reconcile",
+        "phase": "GATE",
+        "skill": "/ticket-gate-reconcile",
+        "from_step_var": null,
+        "extra_flags": null,
+        "next_phase": "GATE",
+        "description": "Reconcile comments after gate hold and re-approval",
+        "instructions": "Follow the skill exactly. Load context from env.sh, pipeline log, and artifact files."
+      },
+      "pre_dispatch": [],
+      "post_dispatch": [],
+      "description": "Gate reconcile. Spawned only when a held ticket is re-approved."
+    },
+    {
+      "step_id": "STEP_4",
+      "table_label": "`STEP_4`",
+      "table_action": "Spawn `ticket-implement` agent, run `return-completeness-check.sh` (openspec tickets only), then `outcome-label-check.sh`",
+      "table_type": "Agent + Bash",
+      "action": "agent",
+      "aliases": [],
+      "spawn": {
+        "step": "implement",
+        "phase": "IMPLEMENT",
+        "skill": "/ticket-implement",
+        "from_step_var": "IMPLEMENT_FROM",
+        "extra_flags": "--from-auto --mode extract",
+        "next_phase": "IMPLEMENT",
+        "description": "Implement the changes described in the artifact",
+        "instructions": "Use Serena for all code navigation. For openspec tickets: first read tasks.md in full, then proceed task by task. Pre-warm by reading all task descriptions before starting implementation."
+      },
+      "pre_dispatch": [],
+      "post_dispatch": [
+        {
+          "kind": "bash",
+          "script": "return-completeness-check.sh",
+          "order": "between spawn_capture and spawn_agent_post",
+          "enforcement": "warn-only",
+          "description": "Openspec tickets only. Phase 1 logs META|gate-warn|info|RETURN_INCOMPLETE and never flips done to fail. Phase 2+ (enforce mode) MUST map a non-zero exit to spawn_agent_post RESULT=fail."
+        },
+        {
+          "kind": "bash",
+          "script": "outcome-label-check.sh",
+          "description": "Always runs after implement. Writes META|outcome-label|info|<Smooth|Rough|Hard>, which the auto-merge check reads."
+        },
+        {
+          "kind": "flow_trigger",
+          "trigger": "implement-complete",
+          "on_failure": "log_and_continue",
+          "description": "Ready → Review once implementation is committed and pushed. The router fires this one itself (SKILL.md:897-910); every other lifecycle trigger (human-approve, pr-review-pass-done/uat, uat-pass) is fired by the phase skill that earns it, so it travels with the phase and needs no owner in the dispatch layer."
+        },
+        {
+          "kind": "bash",
+          "script": "planned-feedback-write.sh",
+          "function": "planned_feedback_write",
+          "description": "Emits planner feedback for planned tickets; no-op for unplanned."
+        },
+        {
+          "kind": "inspector",
+          "phase": "IMPLEMENT",
+          "step": "phase-inspector-implement",
+          "skill": "/guidance-extractor",
+          "blocking": false,
+          "description": "RLVR Phase 1 advisory inspection. Spawned only when assemble_inspector_context yields INSPECTOR_INSTRUCTIONS. Captured with ATTEMPT=inspector so it appends rather than overwriting the implement agent's own capture."
+        }
+      ],
+      "description": "Implement. The one phase that overrides the generic post-spawn ordering: the completeness gate must see the agent's return before the router commits the phase as done."
+    },
+    {
+      "step_id": "STEP_4_5",
+      "table_label": "`STEP_4_5`",
+      "table_action": "Verify retry sub-loop (see below)",
+      "table_type": "Router-managed loop",
+      "action": "loop",
+      "aliases": [],
+      "loop": {
+        "counter": "VERIFY_ATTEMPTS",
+        "max_iterations": 2,
+        "exit_condition": "VERIFY_ATTEMPTS >= 2",
+        "gate_stop_code": "VERIFY_EXHAUSTED",
+        "checked": "post_dispatch",
+        "body": "verify -> (on FAIL) re-implement with --from-auto -> outcome-label-check -> verify",
+        "description": "Hard cap of 2 total attempts (1 initial + 1 retry), reduced from 3: verify agent instability means a third attempt rarely succeeds."
+      },
+      "precondition": {
+        "variable": "VERIFY_LAST",
+        "equals": "fail",
+        "then_dispatch_first": "STEP_4",
+        "then_from_step_var": "IMPLEMENT_FROM",
+        "else": "dispatch verify directly",
+        "description": "VERIFY_LAST=fail means the pipeline crashed after a terminal verify FAIL but before the re-implement step ran. Resuming straight into verify would re-run against the same unfixed code, so re-implement is dispatched first and verify follows. A code supervisor MUST evaluate this before the spawn — it is dispatch-relevant control flow that the step->action table alone does not express."
+      },
+      "spawn": {
+        "step": "verify",
+        "phase": "VERIFY",
+        "skill": "/ticket-verify",
+        "from_step_var": "VERIFY_FROM",
+        "extra_flags": "--from-auto --mode extract",
+        "next_phase": "VERIFY",
+        "description": "Run Playwright UAT verification",
+        "instructions": "Follow the skill exactly. Use per-criterion checkpointing: after each criterion passes, write VERIFY|checkpoint|done|criterion-{N}-pass to LOG_FILE. If the agent crashes, resume from the last checkpoint — do not restart from criterion 1. PHASE_RESULT_ATTEMPT=$(({VERIFY_ATTEMPTS} + 1)) — emit this verbatim as the ATTEMPT field of your phase result block.",
+        "attempt_expr": "VERIFY_ATTEMPTS + 1",
+        "loop_bearing": true,
+        "verdict_tokens": [
+          "PASS",
+          "FAIL"
+        ]
+      },
+      "pre_dispatch": [
+        {
+          "kind": "preflight",
+          "checks": [
+            "mcp__plugin_playwright_playwright__browser_navigate",
+            "mcp__linear-server__get_issue"
+          ],
+          "on_failure": "log META|preflight|fail|VERIFY_PREFLIGHT_FAILED and proceed — the failure still counts as an attempt",
+          "description": "Confirm Playwright and Linear MCP are reachable before spawning an agent that would inevitably fail without them."
+        },
+        {
+          "kind": "env",
+          "export": "CLAUDE_LOG_FILE",
+          "value": "/tmp/ticket-auto-{TICKET-ID}-verify-$(date +%s).log",
+          "description": "Crash diagnostics path that survives agent crashes."
+        }
+      ],
+      "post_dispatch": [
+        {
+          "kind": "bash",
+          "script": "phase-result-parse.sh",
+          "args": [
+            "--phase",
+            "VERIFY"
+          ],
+          "blocking": false,
+          "description": "Advisory, observe-only. Takes the LAST block in the capture file, which is this attempt's."
+        },
+        {
+          "kind": "inspector",
+          "phase": "VERIFY",
+          "step": "phase-inspector-verify",
+          "skill": "/guidance-extractor",
+          "blocking": false,
+          "description": "Runs before the retry/advance decision but does not affect it."
+        }
+      ],
+      "description": "Verify with router-managed retry. On PASS the pipeline advances to STEP_4_6."
+    },
+    {
+      "step_id": "STEP_4_6",
+      "table_label": "`STEP_4_6`",
+      "table_action": "PR review + iteration sub-loop (see below)",
+      "table_type": "Router-managed loop",
+      "action": "loop",
+      "aliases": [],
+      "loop": {
+        "counter": "ITERATION",
+        "max_iterations": 3,
+        "exit_condition": "ITERATION >= 3",
+        "gate_stop_code": "PR_REVIEW_EXHAUSTED",
+        "gate_stop_code_note": "Named in fleetd-phase-supervisor task 4.6, having shipped unnamed. Every consumer of a gate-stop code (pipeline-postmortem.sh's exit-path and severity maps, pipeline-finalize.sh's outcome line) already has a default branch, so adding a name breaks none of them; leaving it unnamed made pipeline-finalize.sh record the literal outcome \"stopped: gate-stop \" for the pipeline's most-travelled loop — a run that stopped without recording why. Now documented alongside VERIFY_EXHAUSTED and PR_FEEDBACK_EXHAUSTED.",
+        "checked": "post_dispatch",
+        "body": "pr-review -> (on WARN) gate-check.sh --mode reapprove -> pr-iterate -> implement -> outcome-label-check -> flow.sh implement-complete -> verify -> pr-review",
+        "description": "Router-managed pr-review -> pr-iterate -> re-implement -> verify -> pr-review cycle."
+      },
+      "spawn": {
+        "step": "pr-review",
+        "phase": "PR-REVIEW",
+        "skill": "/ticket-pr-review",
+        "from_step_var": null,
+        "extra_flags": null,
+        "next_phase": "PR-REVIEW",
+        "description": "Review the PR for code quality and correctness",
+        "instructions": "Follow the skill exactly. Return verdict: ✅ ✅, ⚠️, or ❌. PHASE_RESULT_ATTEMPT=$(({ITERATION} + 1)) — emit this verbatim as the ATTEMPT field of your phase result block.",
+        "attempt_expr": "ITERATION + 1",
+        "loop_bearing": true,
+        "verdict_tokens": [
+          "OK",
+          "WARN",
+          "BLOCK"
+        ],
+        "verdict_routing": {
+          "OK": "advance to STEP_5",
+          "WARN": "if ITERATION < 3, reapprove-gate then run the loop body; else gate-stop",
+          "BLOCK": "gate-stop",
+          "unparseable": "PR_REVIEW_VERDICT_UNPARSEABLE"
+        }
+      },
+      "sub_steps": [
+        {
+          "step": "pr-iterate",
+          "phase": "PR-REVIEW",
+          "skill": "/ticket-pr-iterate",
+          "next_phase": "PR-REVIEW",
+          "description": "Iterate on PR feedback",
+          "instructions": "Apply the requested changes from the PR review."
+        }
+      ],
+      "pre_dispatch": [],
+      "post_dispatch": [
+        {
+          "kind": "inspector",
+          "phase": "PR-REVIEW",
+          "step": "phase-inspector-pr-review",
+          "skill": "/guidance-extractor",
+          "blocking": false,
+          "description": "Advisory inspection; does not affect the verdict routing."
+        },
+        {
+          "kind": "auto_merge",
+          "conditions": [
+            "AUTONOMY is auto or semi-auto (manual never merges)",
+            "COMPLEXITY = simple",
+            "META|outcome-label|info| reads Smooth",
+            "the PR head is not INTEGRATION_BRANCH"
+          ],
+          "command": "gh pr merge <pr> --squash --auto",
+          "description": "Runs after an OK verdict. The outcome is read from the META|outcome-label|info| line — the confirmed Linear label — never from the IMPLEMENT terminal line, which does not carry Smooth/Rough/Hard."
+        }
+      ],
+      "description": "PR review with router-managed iteration."
+    },
+    {
+      "step_id": "STEP_5",
+      "table_label": "`STEP_5`",
+      "table_action": "Spawn `ticket-document`, then `wiki-maintenance` (sequential)",
+      "table_type": "Agent",
+      "action": "agent_sequence",
+      "aliases": [],
+      "fail_action": "warn-continue",
+      "sequence": [
+        {
+          "step": "document",
+          "phase": "MAINTENANCE",
+          "skill": "/ticket-document",
+          "next_phase": "MAINTENANCE",
+          "description": "Generate ai-context.md documentation",
+          "instructions": "Follow the skill exactly."
+        },
+        {
+          "step": "wiki-maintenance",
+          "phase": "MAINTENANCE",
+          "skill": "/wiki-maintenance",
+          "next_phase": "MAINTENANCE",
+          "description": "Process wiki errata and update documentation",
+          "instructions": "Follow the skill exactly."
+        }
+      ],
+      "pre_dispatch": [],
+      "post_dispatch": [],
+      "description": "Documentation and wiki maintenance. Non-blocking: a failure warns and the pipeline continues."
+    },
+    {
+      "step_id": "STEP_5_5",
+      "table_label": "`STEP_5_5`",
+      "table_action": "PR comment reconciliation",
+      "table_type": "Agent",
+      "action": "agent",
+      "aliases": [],
+      "loop": {
+        "counter": "PR_FEEDBACK_CYCLE",
+        "max_iterations": 3,
+        "exit_condition": "PR_FEEDBACK_CYCLE >= 3",
+        "gate_stop_code": "PR_FEEDBACK_EXHAUSTED",
+        "checked": "pre_dispatch",
+        "description": "Caps repeated human review rounds. The terminal line MUST carry a cycle#N counter or the cap never advances past 0."
+      },
+      "spawn": {
+        "step": "pr-reconcile",
+        "phase": "PR-REVIEW",
+        "skill": "/ticket-pr-iterate",
+        "from_step_var": null,
+        "extra_flags": null,
+        "next_phase": "PR-REVIEW",
+        "description": "Reconcile PR comments from human reviewers",
+        "instructions": "Check for new human comments on the open PR. Apply amend/push-back/clean logic.",
+        "loop_bearing": true,
+        "terminal_msg_expr": "cycle#$((PR_FEEDBACK_CYCLE + 1)) reconciled"
+      },
+      "pre_dispatch": [],
+      "post_dispatch": [],
+      "description": "PR comment reconciliation for human reviewer feedback after the automated review passed."
+    },
+    {
+      "step_id": "STEP_6",
+      "table_label": "`STEP_6`",
+      "table_action": "Retro check + optional `ticket-retro` + outcome write",
+      "table_type": "Bash + Agent",
+      "action": "bash_then_optional_agent",
+      "aliases": [],
+      "retro_trigger_conditions": [
+        "a META|gate-stop|fail| line fired during this run",
+        "the run lacks both a VERIFY|verify|done|PASS line and a PR-REVIEW|pr-review|done|OK line",
+        "a |fallback| event appears in the heartbeat log (also writes META|drift|warn|)",
+        "VERIFY_EXHAUSTED appears anywhere in the log (sub-shell visibility safety net)",
+        "a VERIFY|verify|fail| line appears (same sub-shell concern)"
+      ],
+      "spawn": {
+        "step": "retro",
+        "phase": "MAINTENANCE",
+        "skill": "/ticket-retro",
+        "conditional_on": "NEEDS_RETRO"
+      },
+      "post_dispatch": [
+        {
+          "kind": "worktree",
+          "function": "release_worktree",
+          "blocking": false,
+          "description": "Ordered after STEP_5 so the document agents still have worktree access for git diff/log."
+        },
+        {
+          "kind": "finalize",
+          "script": "pipeline-finalize.sh",
+          "description": "Writes META|outcome. Called at every exit point, not only here; a tail-check idempotency guard prevents double-writing on crash-resume."
+        }
+      ],
+      "description": "Report: retro auto-trigger evaluation, worktree release, outcome write."
+    },
+    {
+      "step_id": "done",
+      "table_label": "`done`",
+      "table_action": "Exit 0",
+      "table_type": "—",
+      "action": "terminal",
+      "exit_code": 0,
+      "aliases": [],
+      "description": "Pipeline complete."
+    },
+    {
+      "step_id": "*",
+      "table_label": "`*` (unknown)",
+      "table_action": "Log error, exit 1",
+      "table_type": "—",
+      "action": "error",
+      "exit_code": 1,
+      "aliases": [],
+      "log_line": "META|router-error|fail|Unknown RESUME_STEP: {RESUME_STEP}",
+      "description": "Default case for an unrecognised RESUME_STEP."
+    }
+  ]
+}

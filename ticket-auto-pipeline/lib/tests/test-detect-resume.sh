@@ -216,6 +216,41 @@ test_resume_step_2_5_on_exec_create_artifact_done() {
   [ "$(_field "$out" RESUME_STEP)" = "STEP_2_5" ]
 }
 
+# Like _detect_resume_with_log but echoes the resulting pipeline log rather
+# than the result block, so tests can assert on the lines the script writes
+# (zombie detection reports itself in the log, not in DETECT_RESUME_RESULT).
+_detect_resume_log_after() {
+  local ticket_id="$1"
+  shift
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/logs"
+  local line
+  for line in "$@"; do
+    echo "$line" >>"$tmpdir/logs/${ticket_id}-pipeline.log"
+  done
+  (cd "$tmpdir" && bash "$DETECT_SH" "$ticket_id" >/dev/null 2>&1) || true
+  cat "$tmpdir/logs/${ticket_id}-pipeline.log"
+  rm -rf "$tmpdir"
+}
+
+# Backgrounds a process whose cmdline is exactly $1, setting FAKE_PID.
+# Deliberately not a command substitution: a background job started inside
+# `$( )` does not survive the substitution subshell, so the process under
+# test would already be gone by the time the assertion runs.
+_fake_worker() {
+  bash -c "exec -a \"$1\" sleep 20" &
+  FAKE_PID=$!
+  sleep 0.3
+}
+
+# Kills a _fake_worker and reaps it, so no test leaves an orphan behind.
+_reap() {
+  [ -n "$1" ] || return 0
+  kill "$1" 2>/dev/null || true
+  wait "$1" 2>/dev/null || true
+}
+
 # ── Zombie detection ──────────────────────────────────────────────────────────
 
 test_zombie_detection_triggers_on_old_waiting() {
@@ -283,6 +318,80 @@ test_zombie_detection_skips_non_phase_waiting() {
   resume_step=$(_field "$out" RESUME_STEP)
   # Without any real phase entries, should default to STEP_1
   [ "$resume_step" = "STEP_1" ]
+}
+
+# ── Worker liveness (zombie suppression) ─────────────────────────────────────
+
+_old_ts() { date -u -d "10 minutes ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "2020-01-01T00:00:00Z"; }
+
+test_zombie_fires_when_no_other_worker_alive() {
+  # Baseline, and the regression guard for the self-match defect: this script
+  # lives under .../ticket-auto-pipeline/... and is invoked with the ticket id
+  # as argv[1], so the old `pgrep -f "ticket-auto.*<ID>"` matched its OWN
+  # cmdline and reported "alive" unconditionally. With ancestry excluded and
+  # nothing else running the ticket, the zombie must be reported.
+  local out
+  out=$(_detect_resume_log_after "ZBL-1" \
+    "$(_old_ts)|META|schema|info|2" \
+    "$(_old_ts)|IMPLEMENT|implement|waiting|agent running")
+  grep -q 'zombie-detected' <<<"$out"
+}
+
+test_zombie_suppressed_by_live_phase_worker() {
+  # A fleetd-spawned phase worker's cmdline is `/ticket-<phase> <ID>`, which
+  # the old ticket-auto-only pattern could never match — the miss re-dispatched
+  # the phase on top of the run still holding it.
+  local out rc
+  _fake_worker "claude -p /ticket-implement ZBL-2 --from-auto"
+  out=$(_detect_resume_log_after "ZBL-2" \
+    "$(_old_ts)|META|schema|info|2" \
+    "$(_old_ts)|IMPLEMENT|implement|waiting|agent running")
+  if grep -q 'zombie-detected' <<<"$out"; then rc=1; else rc=0; fi
+  _reap "$FAKE_PID"
+  return $rc
+}
+
+test_zombie_suppressed_by_run_registry_pid() {
+  # The registry is the authoritative source when fleetd spawned the run.
+  local out rc state
+  _fake_worker "sleep-for-ZBL-3"
+  state=$(mktemp -d)
+  echo "{\"tid\":\"ZBL-3\",\"pid\":${FAKE_PID},\"generation\":1}" >"${state}/ZBL-3-run.json"
+  export FLEET_STATE_DIR="$state"
+  out=$(_detect_resume_log_after "ZBL-3" \
+    "$(_old_ts)|META|schema|info|2" \
+    "$(_old_ts)|IMPLEMENT|implement|waiting|agent running")
+  unset FLEET_STATE_DIR
+  if grep -q 'zombie-detected' <<<"$out"; then rc=1; else rc=0; fi
+  _reap "$FAKE_PID"
+  rm -rf "$state"
+  return $rc
+}
+
+test_zombie_not_suppressed_by_dead_registry_pid() {
+  # A registry row is evidence only while its pid is alive. A stale row from a
+  # crashed worker must not mask the zombie it left behind.
+  local out state
+  state=$(mktemp -d)
+  echo '{"tid":"ZBL-4","pid":999999999,"generation":1}' >"${state}/ZBL-4-run.json"
+  export FLEET_STATE_DIR="$state"
+  out=$(_detect_resume_log_after "ZBL-4" \
+    "$(_old_ts)|META|schema|info|2" \
+    "$(_old_ts)|IMPLEMENT|implement|waiting|agent running")
+  unset FLEET_STATE_DIR
+  rm -rf "$state"
+  grep -q 'zombie-detected' <<<"$out"
+}
+
+test_zombie_liveness_ignores_prefix_collision() {
+  # A live worker on ZBL-50 must not vouch for ZBL-5.
+  local out
+  _fake_worker "claude -p /ticket-implement ZBL-50 --from-auto"
+  out=$(_detect_resume_log_after "ZBL-5" \
+    "$(_old_ts)|META|schema|info|2" \
+    "$(_old_ts)|IMPLEMENT|implement|waiting|agent running")
+  _reap "$FAKE_PID"
+  grep -q 'zombie-detected' <<<"$out"
 }
 
 # ── Pipe-safe field extraction ────────────────────────────────────────────────
@@ -610,6 +719,11 @@ for fn in \
   test_artifact_type_simple_fix_from_create_artifact_line \
   test_resume_step_2_5_on_exec_create_artifact_done \
   test_zombie_detection_triggers_on_old_waiting \
+  test_zombie_fires_when_no_other_worker_alive \
+  test_zombie_suppressed_by_live_phase_worker \
+  test_zombie_suppressed_by_run_registry_pid \
+  test_zombie_not_suppressed_by_dead_registry_pid \
+  test_zombie_liveness_ignores_prefix_collision \
   test_zombie_detection_skips_non_phase_waiting \
   test_msg_field_preserves_embedded_pipes \
   test_schema_v1_accepted_with_warning \

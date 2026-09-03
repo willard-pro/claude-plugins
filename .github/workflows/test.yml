@@ -26,5 +26,18 @@ jobs:
       - name: Format check (shfmt)
         run: make fmt-check
 
+      - name: Generated-section drift check
+        run: make check-generated
+
       - name: Unit tests
         run: make test
+
+      # Deliberately AFTER the main run, and only here. The suite above runs
+      # with no opentelemetry installed, which is what keeps "fleetd works
+      # without its one optional dependency" continuously verified rather than
+      # assumed. This step then installs it and re-runs the exporter tests, so
+      # the real SDK path is covered too and an upstream API change is caught.
+      - name: OTel exporter against the real SDK
+        run: |
+          python3 -m pip install --quiet -r fleet-controller/fleetd/requirements-otel.txt
+          python3 -m pytest fleet-controller/fleetd/tests/test_otel.py -v
