@@ -560,6 +560,78 @@ test_get_team_returns_states_labels() {
   echo "$result" | jq -e '.states | type == "array"' >/dev/null
 }
 
+# get_team() must paginate labels.nodes (issue #280) — a single unpaginated
+# fetch silently drops any label past Linear's default page-size cutoff.
+# This mock serves 3 pages, branching on the `after` cursor in the request
+# variables, and asserts all 3 pages' labels land in the merged result —
+# not just page 1.
+test_get_team_paginates_labels_across_multiple_pages() {
+  local result
+  result=$(bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() {
+      local payload=\"\$1\"
+      local after
+      after=\$(echo \"\$payload\" | jq -r '.variables.after // \"none\"')
+      if [ \"\$after\" = \"cur2\" ]; then
+        echo '{\"data\":{\"team\":{\"id\":\"t1\",\"name\":\"Willard\",\"states\":{\"nodes\":[]},\"labels\":{\"nodes\":[{\"id\":\"l3\",\"name\":\"claimed\"}],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}}}'
+      elif [ \"\$after\" = \"cur1\" ]; then
+        echo '{\"data\":{\"team\":{\"id\":\"t1\",\"name\":\"Willard\",\"states\":{\"nodes\":[]},\"labels\":{\"nodes\":[{\"id\":\"l2\",\"name\":\"feature\"}],\"pageInfo\":{\"hasNextPage\":true,\"endCursor\":\"cur2\"}}}}}'
+      else
+        echo '{\"data\":{\"team\":{\"id\":\"t1\",\"name\":\"Willard\",\"states\":{\"nodes\":[{\"id\":\"s1\",\"name\":\"Todo\",\"type\":\"unstarted\"}]},\"labels\":{\"nodes\":[{\"id\":\"l1\",\"name\":\"bug\"}],\"pageInfo\":{\"hasNextPage\":true,\"endCursor\":\"cur1\"}}}}}'
+      fi
+    }
+    get_team 't1'
+  " 2>/dev/null) || true
+  echo "$result" | jq -e '
+    (.labels | length == 3) and
+    ((.labels | map(.id) | sort) == ["l1","l2","l3"]) and
+    (.states | length == 1)
+  ' >/dev/null
+}
+
+# Backward compat: a team under the page-size cutoff (hasNextPage: false on
+# page 1) must resolve in exactly one linear_graphql call — pagination must
+# not add a spurious extra round-trip for the common case.
+test_get_team_single_page_no_extra_call() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  echo 0 >"$tmpfile"
+  local result
+  result=$(bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() {
+      local n
+      n=\$(cat '$tmpfile')
+      n=\$((n + 1))
+      echo \"\$n\" > '$tmpfile'
+      echo '{\"data\":{\"team\":{\"id\":\"t1\",\"name\":\"Willard\",\"states\":{\"nodes\":[{\"id\":\"s1\",\"name\":\"Todo\",\"type\":\"unstarted\"}]},\"labels\":{\"nodes\":[{\"id\":\"l1\",\"name\":\"bug\"},{\"id\":\"l2\",\"name\":\"claimed\"}],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}}}'
+    }
+    get_team 't1'
+  " 2>/dev/null) || true
+  local calls
+  calls=$(cat "$tmpfile")
+  rm -f "$tmpfile"
+  echo "$result" | jq -e '.labels | length == 2' >/dev/null && [ "$calls" = "1" ]
+}
+
+# Linear rejects `after` without `first` (CannotUseWithoutAny) — the first
+# page's request must omit the `after` variable entirely (not send it as
+# null/empty), and only start supplying it once a cursor exists.
+test_get_team_first_page_omits_after_variable() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo \"\$1\" > '$tmpfile'; echo '{\"data\":{\"team\":{\"id\":\"t1\",\"name\":\"Willard\",\"states\":{\"nodes\":[]},\"labels\":{\"nodes\":[],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}}}'; }
+    get_team 't1'
+  " >/dev/null 2>/dev/null || true
+  local has_after
+  has_after=$(jq -r '.variables | has("after")' "$tmpfile" 2>/dev/null) || true
+  rm -f "$tmpfile"
+  [ "$has_after" = "false" ]
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -607,7 +679,10 @@ for fn in \
   test_retry_503_then_200_succeeds \
   test_save_comment_success \
   test_get_comments_returns_array \
-  test_get_team_returns_states_labels; do
+  test_get_team_returns_states_labels \
+  test_get_team_paginates_labels_across_multiple_pages \
+  test_get_team_single_page_no_extra_call \
+  test_get_team_first_page_omits_after_variable; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

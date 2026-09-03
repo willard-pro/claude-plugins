@@ -296,22 +296,82 @@ normalize_comments() {
 }
 
 # Fetch team states and labels. Returns JSON: {states: [...], labels: [...]}
+#
+# labels is a paginated GraphQL connection (Linear's default page size is 50).
+# Teams accumulate 50+ labels naturally from planner-generated labels
+# (blocked-by:*, INIT-*), so a single unpaginated fetch silently drops every
+# label past the first page — see issue #280. This loops with first:100,
+# merging labels.nodes across pages until labels.pageInfo.hasNextPage is
+# false. `after` is only sent from the second page onward: Linear rejects
+# `after` without `first` (CannotUseWithoutAny), so the first-page query
+# variant omits the $after variable entirely rather than sending it empty.
+# states is NOT paginated — teams rarely exceed 50 workflow states, and the
+# issue is scoped to labels only.
 get_team() {
   local team_id="$1"
-  local query
-  query=$(jq -n --arg tid "$team_id" '{
-    query: "query($tid: String!) { team(id: $tid) { id name states { nodes { id name type } } labels { nodes { id name } } } }",
-    variables: {tid: $tid}
-  }')
-  local resp
-  resp=$(linear_graphql "$query")
-  # Type guard: verify .data.team exists before querying sub-fields
-  if ! _jq_guard "$resp" ".data.team" "object"; then
-    echo "get_team: unexpected response shape" >&2
-    echo '{"states":[],"labels":[]}'
-    return 1
-  fi
-  echo "$resp" | jq '{states: .data.team.states.nodes, labels: .data.team.labels.nodes}'
+  local page_size="${LINEAR_TEAM_LABELS_PAGE_SIZE:-100}"
+  local max_pages=100 # safety cap: 100 pages * 100/page = 10k labels
+  local cursor="" has_next="true" page=0
+  local states_json="[]" labels_json="[]"
+
+  while [ "$has_next" = "true" ]; do
+    page=$((page + 1))
+    if [ "$page" -gt "$max_pages" ]; then
+      echo "get_team: exceeded max_pages ($max_pages) fetching labels — returning partial result" >&2
+      break
+    fi
+
+    local query resp
+    if [ -z "$cursor" ]; then
+      # First page: no $after variable — Linear rejects `after` without `first`
+      # (CannotUseWithoutAny), so the paginated variant is only used once a
+      # cursor exists.
+      query=$(jq -n --arg tid "$team_id" --argjson first "$page_size" '{
+        query: "query($tid: String!, $first: Int!) { team(id: $tid) { id name states { nodes { id name type } } labels(first: $first) { nodes { id name } pageInfo { hasNextPage endCursor } } } }",
+        variables: {tid: $tid, first: $first}
+      }')
+    else
+      query=$(jq -n --arg tid "$team_id" --argjson first "$page_size" --arg after "$cursor" '{
+        query: "query($tid: String!, $first: Int!, $after: String) { team(id: $tid) { id name states { nodes { id name type } } labels(first: $first, after: $after) { nodes { id name } pageInfo { hasNextPage endCursor } } } }",
+        variables: {tid: $tid, first: $first, after: $after}
+      }')
+    fi
+
+    resp=$(linear_graphql "$query")
+
+    # Type guard: verify .data.team exists before querying sub-fields.
+    # A guard failure on page 1 preserves the original error contract exactly
+    # (empty {states:[],labels:[]}, exit 1). A guard failure on a later page
+    # is treated as best-effort: keep what's already been merged and stop.
+    if ! _jq_guard "$resp" ".data.team" "object"; then
+      echo "get_team: unexpected response shape" >&2
+      if [ "$page" -eq 1 ]; then
+        echo '{"states":[],"labels":[]}'
+        return 1
+      fi
+      break
+    fi
+
+    # states is captured from page 1 only — it isn't paginated, so every page
+    # carries the same full list, but only the first page is trusted for it
+    # (no assumption that later pages repeat it correctly).
+    if [ "$page" -eq 1 ]; then
+      states_json=$(echo "$resp" | jq -c '.data.team.states.nodes')
+    fi
+
+    local page_labels
+    page_labels=$(echo "$resp" | jq -c '.data.team.labels.nodes')
+    labels_json=$(jq -cn --argjson a "$labels_json" --argjson b "$page_labels" '$a + $b')
+
+    has_next=$(echo "$resp" | jq -r '.data.team.labels.pageInfo.hasNextPage // false')
+    cursor=$(echo "$resp" | jq -r '.data.team.labels.pageInfo.endCursor // empty')
+    # Safety: hasNextPage true with no cursor would loop forever — stop.
+    if [ "$has_next" = "true" ] && [ -z "$cursor" ]; then
+      has_next="false"
+    fi
+  done
+
+  jq -cn --argjson states "$states_json" --argjson labels "$labels_json" '{states: $states, labels: $labels}'
 }
 
 # Update an issue.
