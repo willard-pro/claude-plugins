@@ -17,6 +17,46 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.25 (2026-09-03)
+
+Closes #231 — 74 unit tests in `test-planner-crosscheck*.sh` passed cleanly
+while every one of the 7 initiatives run against the checkers so far found
+new, real false-positive classes none of the hand-written cases covered
+(VS-1: 82 raw findings, later initiatives 6/34/25/2/1 more with prior fixes
+already in place) — the same defect class as #138/#144: synthetic tests
+that never cross the real Specify-output boundary pass regardless of
+whether the checkers actually work on real LLM output.
+
+The issue's literal recommendation — archive the 7 initiatives' sanitized
+`proposal.md`/`specs/*.md` as fixtures — turned out to be genuinely
+available on disk in the environment this fix was built in
+(`REPOS_ROOT/.ticket-auto/initiatives/*`, confirming VS-1 ==
+`INIT-1788043814-1898`), but that content is unreleased business planning
+data for a real product. Deciding what "sanitized" means for it and
+accepting the public-repo disclosure risk is a human maintainer's call, not
+something to make unilaterally inside an automated issue-fix run — see
+`fixtures/crosscheck/README.md`'s "Adding a real fixture" section for the
+process once an operator signs off on donating one.
+
+- New `lib/tests/test-planner-crosscheck-fixtures.sh`: a data-driven runner
+  that discovers every subdirectory of `lib/tests/fixtures/crosscheck/`
+  containing an `expected.json`, copies its artifacts into an isolated
+  `REPOS_ROOT`, and asserts the real `planner_crosscheck_run` (the same
+  function `SKILL.md`'s dispatch loop calls, not a mock) reports the
+  expected blocking/warn/accepted counts. Dropping in a new fixture
+  directory is the only step needed to add a regression case.
+- New `lib/tests/fixtures/crosscheck/`: 4 synthetic-but-pattern-derived
+  fixtures, each built from a specific false-positive shape CHANGELOG.md
+  already documents as having occurred on a real initiative and been fixed
+  — the #224 compound two-symbol citation pairing bug, the #227
+  external-`blocked-by`-ref exemption, the #220 legitimate-trivial-Signals
+  exemption (VS-2 / `INIT-1788079196-3438`), and a deliberately warn-only
+  `CONTRACT_UNDEFINED` case. `fixtures/crosscheck/README.md` documents the
+  format and states plainly that these are synthetic placeholders, not the
+  genuine VS-1/etc. artifacts.
+- Wired into `Makefile`'s `test-planner` target, after
+  `test-planner-crosscheck.sh`.
+
 ## ticket-auto-pipeline 0.38.2 (2026-09-03)
 
 `_resolve_type_label()` (`gate-check.sh`) matched a ticket's Type label
