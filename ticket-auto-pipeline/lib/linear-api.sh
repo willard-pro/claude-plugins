@@ -481,7 +481,13 @@ create_issue() {
   }')
   [ -n "$project_id" ] && input=$(echo "$input" | jq --arg v "$project_id" '. + {projectId: $v}')
   [ -n "$parent_id" ] && input=$(echo "$input" | jq --arg v "$parent_id" '. + {parentId: $v}')
-  [ -n "$label_ids" ] && input=$(echo "$input" | jq --argjson l "$label_ids" '. + {labelIds: $l}')
+  if [ -n "$label_ids" ]; then
+    if ! echo "$label_ids" | jq -e 'type == "array"' >/dev/null 2>&1; then
+      echo "create_issue: label_ids must be a JSON array string, got: $label_ids" >&2
+      return 1
+    fi
+    input=$(echo "$input" | jq --argjson l "$label_ids" '. + {labelIds: $l}')
+  fi
 
   local query
   query=$(jq -n --argjson input "$input" '{
