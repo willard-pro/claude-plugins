@@ -632,6 +632,31 @@ test_get_team_first_page_omits_after_variable() {
   [ "$has_after" = "false" ]
 }
 
+# Code review fix: a guard failure on page 2+ (e.g. a transient API error
+# mid-pagination) must be a hard failure — return 1, not a truncated-but-
+# "successful" partial label set. Silently returning page 1's labels only
+# would be the exact silent-truncation bug #280 was filed to fix, just
+# triggered by a transient error instead of missing pagination.
+test_get_team_page_two_guard_failure_is_hard_error() {
+  local rc=0
+  local result
+  result=$(bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() {
+      local payload=\"\$1\"
+      local after
+      after=\$(echo \"\$payload\" | jq -r '.variables.after // \"none\"')
+      if [ \"\$after\" = \"cur1\" ]; then
+        echo 'not valid json — simulates a transient API error'
+      else
+        echo '{\"data\":{\"team\":{\"id\":\"t1\",\"name\":\"Willard\",\"states\":{\"nodes\":[]},\"labels\":{\"nodes\":[{\"id\":\"l1\",\"name\":\"bug\"}],\"pageInfo\":{\"hasNextPage\":true,\"endCursor\":\"cur1\"}}}}}'
+      fi
+    }
+    get_team 't1'
+  " 2>/dev/null) || rc=$?
+  [ "$rc" -eq 1 ] && ! echo "$result" | jq -e '.labels | length == 1' >/dev/null 2>&1
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -682,7 +707,8 @@ for fn in \
   test_get_team_returns_states_labels \
   test_get_team_paginates_labels_across_multiple_pages \
   test_get_team_single_page_no_extra_call \
-  test_get_team_first_page_omits_after_variable; do
+  test_get_team_first_page_omits_after_variable \
+  test_get_team_page_two_guard_failure_is_hard_error; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

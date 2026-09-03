@@ -340,16 +340,15 @@ get_team() {
     resp=$(linear_graphql "$query")
 
     # Type guard: verify .data.team exists before querying sub-fields.
-    # A guard failure on page 1 preserves the original error contract exactly
-    # (empty {states:[],labels:[]}, exit 1). A guard failure on a later page
-    # is treated as best-effort: keep what's already been merged and stop.
+    # A guard failure on ANY page — including a later one — is a hard
+    # failure, not a best-effort partial result: silently returning a
+    # truncated-but-successful label set on a page>=2 hiccup is exactly the
+    # silent-truncation failure mode issue #280 was filed to fix, just
+    # triggered by a transient API error instead of missing pagination.
     if ! _jq_guard "$resp" ".data.team" "object"; then
-      echo "get_team: unexpected response shape" >&2
-      if [ "$page" -eq 1 ]; then
-        echo '{"states":[],"labels":[]}'
-        return 1
-      fi
-      break
+      echo "get_team: unexpected response shape (page $page)" >&2
+      echo '{"states":[],"labels":[]}'
+      return 1
     fi
 
     # states is captured from page 1 only — it isn't paginated, so every page
