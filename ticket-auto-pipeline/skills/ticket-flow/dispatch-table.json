@@ -189,6 +189,12 @@
           "description": "Always runs after implement. Writes META|outcome-label|info|<Smooth|Rough|Hard>, which the auto-merge check reads."
         },
         {
+          "kind": "flow_trigger",
+          "trigger": "implement-complete",
+          "on_failure": "log_and_continue",
+          "description": "Ready → Review once implementation is committed and pushed. The router fires this one itself (SKILL.md:897-910); every other lifecycle trigger (human-approve, pr-review-pass-done/uat, uat-pass) is fired by the phase skill that earns it, so it travels with the phase and needs no owner in the dispatch layer."
+        },
+        {
           "kind": "bash",
           "script": "planned-feedback-write.sh",
           "function": "planned_feedback_write",

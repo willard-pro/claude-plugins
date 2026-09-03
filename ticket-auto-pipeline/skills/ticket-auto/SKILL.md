@@ -1134,11 +1134,21 @@ After PR review ✅, check auto-merge eligibility. Both `auto` and `semi-auto` m
 written by `outcome-label-check.sh` — the confirmed Linear label — not from the IMPLEMENT
 terminal line, which never carries the Smooth/Rough/Hard value:
 
+**Resolve the PR number before the guard, not after.** The integration-PR
+guard reads `$_pr_num`, so it has to be assigned first. It used to be assigned
+*below* the guard, inside the eligibility block — which meant the guard ran
+`gh pr view ""`, got an empty head ref, never matched `INTEGRATION_BRANCH`, and
+guarded nothing. An integration PR could be auto-merged by the very code
+written to stop it.
+
 ```bash
+_pr_num=$(grep '^[^|]*|PR-REVIEW|checkout-pr|done|' "{LOG_FILE}" | tail -1 | cut -d'|' -f5-)
+
 # Auto-merge guard: integration PRs must never be auto-merged.
 # This is the second guard (the first is in epic_branch_open_pr itself).
-# If this ticket's PR targets an epic integration branch, skip auto-merge.
-if [ -n "{INTEGRATION_BRANCH}" ]; then
+# An integration PR is one whose HEAD is the epic branch; a ticket PR merely
+# targets it as its base.
+if [ -n "$_pr_num" ] && [ -n "{INTEGRATION_BRANCH}" ]; then
   _pr_head=$(gh pr view "$_pr_num" --json headRefName --jq '.headRefName' 2>/dev/null || true)
   if [ "$_pr_head" = "{INTEGRATION_BRANCH}" ]; then
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|pr-auto-merge|skip|INTEGRATION_PR_GUARD: $_pr_num is integration PR, not auto-merging" >> "{LOG_FILE}"
@@ -1148,11 +1158,8 @@ fi
 
 if { [ "{AUTONOMY}" = "auto" ] || [ "{AUTONOMY}" = "semi-auto" ]; } && [ "{COMPLEXITY}" = "simple" ]; then
   OUTCOME=$(grep '^[^|]*|META|outcome-label|info|' "{LOG_FILE}" | tail -1 | cut -d'|' -f5-)
-  if [ "$OUTCOME" = "Smooth" ]; then
-    _pr_num=$(grep '^[^|]*|PR-REVIEW|checkout-pr|done|' "{LOG_FILE}" | tail -1 | cut -d'|' -f5-)
-    if [ -n "$_pr_num" ]; then
-      gh pr merge "$_pr_num" --squash --auto || true
-    fi
+  if [ "$OUTCOME" = "Smooth" ] && [ -n "$_pr_num" ]; then
+    gh pr merge "$_pr_num" --squash --auto || true
   fi
 fi
 ```

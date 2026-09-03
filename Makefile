@@ -107,6 +107,7 @@ test-fleetd:
 	python3 -m pytest fleet-controller/fleetd/tests/test_phase_dispatch.py -v
 	python3 -m pytest fleet-controller/fleetd/tests/test_gate_hold.py -v
 	python3 -m pytest fleet-controller/fleetd/tests/test_preamble.py -v
+	python3 -m pytest fleet-controller/fleetd/tests/test_orchestration.py -v
 	python3 -m pytest fleet-controller/fleetd/tests/test_otel.py -v
 	python3 -m pytest ticket-auto-pipeline/skills/ticket-auto/tests/test_dashboard_fleet.py -v
 
