@@ -1302,6 +1302,137 @@ class WorkerStdioAndEnvTest(unittest.TestCase):
         self.assertNotIn('GEN2', gen1_file.read_text(),
                          "the second generation must not overwrite the first")
 
+    def test_run_registry_records_start_ticks(self):
+        """The run registry carries the worker's /proc start ticks.
+
+        `_ticket_worker_alive` (detect-resume.sh) pairs pid with start ticks
+        to defeat PID reuse, and tolerates the field being absent — so a
+        missing value disarms the guard silently rather than failing. This
+        test is the only thing that notices.
+        """
+        from fleetd.supervisor import spawn_worker, _pid_start_time
+
+        pid, _ = spawn_worker(
+            tid='TST-TICKS', generation=1, state_dir=str(self.workspace),
+            cmd_override=[sys.executable, '-c', 'import time; time.sleep(1)'],
+        )
+        try:
+            entry = json.loads(
+                (self.workspace / 'TST-TICKS-run.json').read_text())
+            self.assertEqual(entry['pid'], str(pid))
+            self.assertIn('start_ticks', entry,
+                          "start_ticks must be recorded or the PID-reuse "
+                          "guard in detect-resume.sh is inert")
+            self.assertEqual(entry['start_ticks'], str(_pid_start_time(pid)),
+                             "recorded ticks must match /proc field 22 for "
+                             "the live worker")
+        finally:
+            os.waitpid(pid, 0)
+
+    def test_phase_worker_gets_its_own_registry_and_stdio_files(self):
+        """A ticket's phases run in sequence and must not overwrite each other.
+
+        The ticket-level `{tid}-run.json` answers "is this ticket running".
+        With per-phase dispatch a reader also needs "which phase is running",
+        and a second phase reusing the ticket-level file would answer with the
+        phase that just finished.
+        """
+        from fleetd.supervisor import spawn_worker
+
+        pid, _ = spawn_worker(
+            tid='TST-PH', generation=1, state_dir=str(self.workspace),
+            phase='VERIFY',
+            cmd_override=[sys.executable, '-c', 'import time; time.sleep(1)'],
+        )
+        try:
+            phase_run = self.workspace / 'TST-PH-verify-run.json'
+            self.assertTrue(phase_run.is_file(),
+                            "phase spawn must write a phase-scoped registry")
+            self.assertFalse((self.workspace / 'TST-PH-run.json').is_file(),
+                             "phase spawn must not claim the ticket-level file")
+            entry = json.loads(phase_run.read_text())
+            self.assertEqual(entry['phase'], 'VERIFY')
+            self.assertEqual(entry['tid'], 'TST-PH')
+            # The registry write is the parent's and is already done; the
+            # stdio files are opened by the child after fork, so this one
+            # has to be waited for.
+            stderr_file = self.workspace / 'TST-PH-verify-gen1.stderr'
+            deadline = time.time() + 5
+            while time.time() < deadline and not stderr_file.is_file():
+                time.sleep(0.05)
+            self.assertTrue(stderr_file.is_file(),
+                            "phase stdio must be namespaced too")
+        finally:
+            os.waitpid(pid, 0)
+
+    def test_phase_worker_environment_reaches_the_process(self):
+        """The env fleetd builds is the env the phase actually runs with.
+
+        This is the whole of task 4.16's claim — that a value fleetd owns is
+        configured rather than requested — so it is asserted against the real
+        forked process, not against the dict that was passed in.
+        """
+        from fleetd.supervisor import spawn_worker
+
+        out = self.workspace / 'TST-ENV-verify-gen1.json'
+        pid, _ = spawn_worker(
+            tid='TST-ENV', generation=1, state_dir=str(self.workspace),
+            phase='VERIFY',
+            extra_env={'LOG_FILE': '/w/logs/TST-ENV-pipeline.log',
+                       'FLEET_PHASE': 'VERIFY'},
+            cmd_override=[
+                sys.executable, '-c',
+                'import os; print(os.environ["LOG_FILE"], '
+                'os.environ["FLEET_PHASE"])'],
+        )
+        os.waitpid(pid, 0)
+        deadline = time.time() + 5
+        while time.time() < deadline and not (
+                out.is_file() and out.stat().st_size > 0):
+            time.sleep(0.05)
+        self.assertIn('/w/logs/TST-ENV-pipeline.log', out.read_text())
+        self.assertIn('VERIFY', out.read_text())
+
+    def test_phase_prompt_replaces_the_ticket_auto_invocation(self):
+        """`-p` carries one phase, and nothing else about the spawn changes."""
+        from fleetd.supervisor import _build_worker_cmd
+
+        default = _build_worker_cmd('CRE-9', claude_bin='claude')
+        phased = _build_worker_cmd('CRE-9', claude_bin='claude',
+                                   prompt='/ticket-verify CRE-9 --from-auto')
+        self.assertIn('/ticket-auto CRE-9 --auto --from-planned', default)
+        self.assertIn('/ticket-verify CRE-9 --from-auto', phased)
+        self.assertNotIn('/ticket-auto CRE-9 --auto --from-planned', phased)
+        # Everything that is not the prompt is identical — session handling,
+        # output format and permission mode are properties of a headless
+        # worker, not of which phase it runs.
+        def strip(cmd):
+            return [a for a in cmd if not a.startswith('/ticket-')]
+
+        self.assertEqual(strip(default), strip(phased))
+
+    def test_spawn_phase_worker_builds_from_the_canonical_table(self):
+        """End to end: a step id in, a forked phase worker out."""
+        from fleetd.supervisor import spawn_phase_worker
+
+        pid, session_id, spawn = spawn_phase_worker(
+            'TST-SPW', 'STEP_4_5', 1, str(self.workspace),
+            log_file='/w/logs/TST-SPW-pipeline.log',
+            counters={'VERIFY_ATTEMPTS': 0}, attempt=1,
+            cmd_override=[sys.executable, '-c', 'import time; time.sleep(1)'],
+        )
+        try:
+            self.assertEqual(spawn.phase, 'VERIFY')
+            self.assertEqual(spawn.step, 'verify')
+            self.assertTrue(spawn.prompt.startswith('/ticket-verify TST-SPW'))
+            self.assertTrue(session_id)
+            entry = json.loads(
+                (self.workspace / 'TST-SPW-verify-run.json').read_text())
+            self.assertEqual(entry['pid'], str(pid))
+            self.assertEqual(entry['phase'], 'VERIFY')
+        finally:
+            os.waitpid(pid, 0)
+
     def test_redirection_failure_does_not_abort_spawn(self):
         """A stdio-redirect failure still lets the worker spawn and exec."""
         from fleetd.supervisor import Supervisor

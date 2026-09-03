@@ -44,6 +44,9 @@ from fleetd.phase_dispatch import (  # noqa: E402
     phase_terminal_write,
     route_exit_code,
     router_token,
+    PhaseSpawnError,
+    build_phase_spawn,
+    DEFAULT_PHASE_FLAGS,
     EXIT_ROUTE_CONTINUE,
     EXIT_ROUTE_GATE_STOP,
     EXIT_ROUTE_RETRY,
@@ -337,3 +340,118 @@ class TestTerminalWrite(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestPhaseSpawnConstruction(unittest.TestCase):
+    """Task 4.4 — turning a table row into a `claude -p` invocation.
+
+    The prompt is asserted against the real table rather than a fixture for
+    the same reason as the loading tests: a fixture would keep passing while
+    the shipped `instructions` changed underneath it.
+    """
+
+    def setUp(self):
+        self.table = DispatchTable.load(TABLE_PATH)
+
+    def test_prompt_is_a_slash_command_for_the_step_s_skill(self):
+        spawn = build_phase_spawn(self.table, 'STEP_1', 'CRE-9', '/w/log')
+        self.assertTrue(spawn.prompt.startswith('/ticket-appraise CRE-9 '))
+        self.assertEqual(spawn.phase, 'APPRAISE')
+        self.assertEqual(spawn.step, 'appraise')
+
+    def test_extra_flags_from_the_table_are_used_verbatim(self):
+        spawn = build_phase_spawn(self.table, 'STEP_4', 'CRE-9', '/w/log')
+        self.assertIn('--from-auto --mode extract', spawn.prompt)
+
+    def test_steps_without_extra_flags_get_the_router_default(self):
+        spawn = build_phase_spawn(self.table, 'STEP_1', 'CRE-9', '/w/log')
+        self.assertIn(f'CRE-9 {DEFAULT_PHASE_FLAGS}', spawn.prompt)
+
+    def test_from_step_is_appended_as_the_router_appends_it(self):
+        spawn = build_phase_spawn(self.table, 'STEP_1', 'CRE-9', '/w/log',
+                                  from_step='step-3')
+        self.assertIn('--from-step step-3', spawn.prompt)
+
+    def test_no_from_step_means_no_flag(self):
+        spawn = build_phase_spawn(self.table, 'STEP_1', 'CRE-9', '/w/log')
+        self.assertNotIn('--from-step', spawn.prompt)
+
+    def test_attempt_expression_is_resolved_to_a_literal(self):
+        """The agent must never receive an unevaluated `$((… + 1))`."""
+        spawn = build_phase_spawn(
+            self.table, 'STEP_4_5', 'CRE-9', '/w/log',
+            counters={'VERIFY_ATTEMPTS': 1})
+        self.assertIn('PHASE_RESULT_ATTEMPT=2', spawn.prompt)
+        self.assertNotIn('$((', spawn.prompt)
+        self.assertNotIn('{VERIFY_ATTEMPTS}', spawn.prompt)
+
+    def test_iteration_counter_is_resolved_for_pr_review(self):
+        spawn = build_phase_spawn(
+            self.table, 'STEP_4_6', 'CRE-9', '/w/log',
+            counters={'ITERATION': 2})
+        self.assertIn('PHASE_RESULT_ATTEMPT=3', spawn.prompt)
+        self.assertNotIn('$((', spawn.prompt)
+
+    def test_log_paths_become_real_environment_not_prompt_exports(self):
+        """Task 4.16 — a value fleetd owns is configured, not requested.
+
+        The router has to ask the agent to `export LOG_FILE=…` because it
+        cannot set another process's environment. fleetd forks the phase, so
+        it can — and a real env var cannot be half-applied the way a sourced
+        env file swallowed by `|| true` can.
+        """
+        spawn = build_phase_spawn(
+            self.table, 'STEP_1', 'CRE-9', '/w/logs/CRE-9-pipeline.log',
+            hb_log_file='/w/logs/CRE-9-hb.log',
+            claude_log_file='/tmp/CRE-9-claude.log')
+        self.assertEqual(spawn.env['LOG_FILE'], '/w/logs/CRE-9-pipeline.log')
+        self.assertEqual(spawn.env['HB_LOG_FILE'], '/w/logs/CRE-9-hb.log')
+        self.assertEqual(spawn.env['CLAUDE_LOG_FILE'], '/tmp/CRE-9-claude.log')
+        self.assertEqual(spawn.env['HUSKY'], '0')
+        self.assertNotIn('export LOG_FILE', spawn.prompt)
+
+    def test_phase_identity_is_in_the_environment(self):
+        spawn = build_phase_spawn(self.table, 'STEP_4_5', 'CRE-9', '/w/log')
+        self.assertEqual(spawn.env['FLEET_PHASE'], 'VERIFY')
+        self.assertEqual(spawn.env['FLEET_STEP'], 'verify')
+        self.assertEqual(spawn.env['FLEET_DISPATCH_STEP_ID'], 'STEP_4_5')
+        self.assertEqual(spawn.env['FLEET_TICKET_ID'], 'CRE-9')
+
+    def test_attempt_is_stamped_into_the_environment(self):
+        spawn = build_phase_spawn(self.table, 'STEP_4_5', 'CRE-9', '/w/log',
+                                  attempt=2)
+        self.assertEqual(spawn.env['PHASE_RESULT_ATTEMPT'], '2')
+
+    def test_no_attempt_means_no_variable(self):
+        spawn = build_phase_spawn(self.table, 'STEP_4_5', 'CRE-9', '/w/log')
+        self.assertNotIn('PHASE_RESULT_ATTEMPT', spawn.env)
+
+    def test_extra_env_overrides_defaults(self):
+        spawn = build_phase_spawn(self.table, 'STEP_1', 'CRE-9', '/w/log',
+                                  extra_env={'REPOS_ROOT': '/repos'})
+        self.assertEqual(spawn.env['REPOS_ROOT'], '/repos')
+
+    def test_loop_bearing_flag_comes_from_the_table(self):
+        self.assertTrue(
+            build_phase_spawn(self.table, 'STEP_4_5', 'C-1', '/l').loop_bearing)
+        self.assertFalse(
+            build_phase_spawn(self.table, 'STEP_1', 'C-1', '/l').loop_bearing)
+
+    def test_the_gate_alias_is_not_spawnable(self):
+        """STEP_3 resolves to a bash gate, which has no agent to spawn."""
+        with self.assertRaises(PhaseSpawnError):
+            build_phase_spawn(self.table, 'STEP_3', 'CRE-9', '/w/log')
+
+    def test_every_agent_step_in_the_table_can_be_built(self):
+        """Drift guard: a new agent step must not need new code here."""
+        built = 0
+        for step_id in self.table.step_ids():
+            step = self.table.get(step_id)
+            if not (step.get('spawn') or {}).get('skill'):
+                continue
+            spawn = build_phase_spawn(self.table, step_id, 'CRE-1', '/w/log')
+            self.assertTrue(spawn.prompt.startswith('/'))
+            self.assertTrue(spawn.phase, f'{step_id} has no phase')
+            built += 1
+        self.assertGreaterEqual(built, 6)
+

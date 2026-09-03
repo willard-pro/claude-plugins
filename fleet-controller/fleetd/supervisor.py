@@ -41,6 +41,15 @@ try:
 except ImportError:  # pragma: no cover - exporter unavailable
     _otel_mod = None
 
+# Phase-level dispatch. Unlike the two above, a missing phase_dispatch is not
+# survivable for a phase spawn — there is no degraded mode in which fleetd
+# dispatches a phase without knowing the dispatch table — so the failure is
+# raised at the call, not swallowed at import.
+try:
+    from fleetd import phase_dispatch as _phase_mod
+except ImportError:  # pragma: no cover - phase dispatch unavailable
+    _phase_mod = None
+
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
@@ -1464,9 +1473,25 @@ def _remove_consumed_entries(state_dir, consumed_tids):
 # ── Worker spawning ────────────────────────────────────────────────────────
 
 def _write_run_registry(state_dir, tid, pid, generation, reason='dispatched',
-                        session_id=None):
-    """Write a run registry entry with the REAL pid (not a sentinel)."""
-    run_file = Path(state_dir) / f'{tid}-run.json'
+                        session_id=None, start_ticks=None, phase=''):
+    """Write a run registry entry with the REAL pid (not a sentinel).
+
+    `start_ticks` is field 22 of `/proc/<pid>/stat` — the process start time
+    in clock ticks since boot. Readers pair it with the pid to defeat PID
+    reuse: `kill -0` succeeds for whatever process now occupies a recycled
+    pid, but its start ticks will not match the one recorded here. The guard
+    in `_ticket_worker_alive` (detect-resume.sh) tolerates the field being
+    absent, so omitting it does not break a reader — it silently disarms it,
+    which is why this is written unconditionally on Linux rather than
+    opportunistically.
+    """
+    # A phase worker gets its own `{tid}-{phase}-run.json` rather than
+    # overwriting the ticket-level file: several phases run in sequence under
+    # one ticket, and a reader asking "is anything working on this ticket"
+    # must see the live phase, not the last one to finish. `_ticket_worker_alive`
+    # (detect-resume.sh) already globs both shapes.
+    suffix = f'-{phase.lower()}' if phase else ''
+    run_file = Path(state_dir) / f'{tid}{suffix}-run.json'
     entry = {
         'tid': tid,
         'pid': str(pid),
@@ -1476,6 +1501,10 @@ def _write_run_registry(state_dir, tid, pid, generation, reason='dispatched',
     }
     if session_id:
         entry['session_id'] = session_id
+    if start_ticks:
+        entry['start_ticks'] = str(start_ticks)
+    if phase:
+        entry['phase'] = phase
     run_file.write_text(json.dumps(entry))
 
 
@@ -1518,8 +1547,16 @@ def _cmd_already_sets_permission_mode(cmd_str):
     return any(marker in cmd_str for marker in _PERMISSION_FLAG_MARKERS)
 
 
-def _build_worker_cmd(tid, claude_bin=None, claude_cmd=None, session_id=None):
-    """Build the argument list for spawning a ticket-auto worker.
+def _build_worker_cmd(tid, claude_bin=None, claude_cmd=None, session_id=None,
+                      prompt=None):
+    """Build the argument list for spawning a worker.
+
+    `prompt` replaces the default whole-ticket `/ticket-auto` invocation with
+    a single-phase one built by `phase_dispatch.build_phase_spawn` (task 4.4).
+    Only the `-p` payload differs: session id, output format and permission
+    handling are identical, because a phase worker is the same kind of
+    headless session as a ticket worker — it simply runs one step of the
+    pipeline instead of all of them.
 
     `claude_cmd` (or the CLAUDE_CMD env var) is a shell-style command line —
     e.g. "claude-deepseek 2 --bypass" — that replaces the bare binary name
@@ -1539,7 +1576,7 @@ def _build_worker_cmd(tid, claude_bin=None, claude_cmd=None, session_id=None):
     """
     cmd_str = claude_cmd or CLAUDE_CMD
     prefix = shlex.split(cmd_str) if cmd_str else [claude_bin or CLAUDE_BIN]
-    args = ['-p', f'/ticket-auto {tid} --auto --from-planned',
+    args = ['-p', prompt or f'/ticket-auto {tid} --auto --from-planned',
             '--output-format', 'json']
     if session_id:
         args += ['--session-id', session_id]
@@ -1574,7 +1611,8 @@ class SpawnError(Exception):
 
 
 def spawn_worker(tid, generation, state_dir, reason='dispatched',
-                 cmd_override=None, claude_bin=None, claude_cmd=None):
+                 cmd_override=None, claude_bin=None, claude_cmd=None,
+                 prompt=None, phase='', extra_env=None):
     """Fork and exec a worker for `tid`. Returns the child PID.
 
     The child is placed in its own process group so that kill escalation
@@ -1590,13 +1628,21 @@ def spawn_worker(tid, generation, state_dir, reason='dispatched',
     claude invocation. This allows tests to spawn a simple Python process.
     claude_bin/claude_cmd: forwarded to _build_worker_cmd when cmd_override
     is not given — see its docstring.
+
+    prompt/phase/extra_env: phase dispatch (task 4.4). `prompt` replaces the
+    whole-ticket invocation with one phase's; `phase` namespaces the stdio and
+    run-registry files so a ticket's successive phases do not overwrite each
+    other's records; `extra_env` carries what `spawn_agent_pre` would have
+    exported in the agent prompt — see `phase_dispatch.build_phase_spawn`.
     """
     session_id = str(uuid.uuid4())
     cmd = cmd_override if cmd_override is not None else _build_worker_cmd(
-        tid, claude_bin=claude_bin, claude_cmd=claude_cmd, session_id=session_id)
+        tid, claude_bin=claude_bin, claude_cmd=claude_cmd,
+        session_id=session_id, prompt=prompt)
 
-    stdout_path = Path(state_dir) / f'{tid}-gen{generation}.json'
-    stderr_path = Path(state_dir) / f'{tid}-gen{generation}.stderr'
+    slug = f'{tid}-{phase.lower()}' if phase else tid
+    stdout_path = Path(state_dir) / f'{slug}-gen{generation}.json'
+    stderr_path = Path(state_dir) / f'{slug}-gen{generation}.stderr'
 
     pid = os.fork()
     if pid == 0:
@@ -1644,6 +1690,12 @@ def spawn_worker(tid, generation, state_dir, reason='dispatched',
         if start_ticks:
             worker_env['FLEET_WORKER_START_TICKS'] = start_ticks
         worker_env.update(_NON_INTERACTIVE_ENV)
+        # Last, so a phase's own LOG_FILE/HB_LOG_FILE win over anything
+        # inherited from the daemon's environment — fleetd may itself have
+        # been started with a LOG_FILE set, and a phase writing its bracket
+        # into the wrong log is silent and unrecoverable.
+        if extra_env:
+            worker_env.update({k: str(v) for k, v in extra_env.items()})
 
         try:
             os.execvpe(cmd[0], cmd, worker_env)
@@ -1654,9 +1706,49 @@ def spawn_worker(tid, generation, state_dir, reason='dispatched',
             os._exit(127)
 
     # Parent: record the real PID (and session id) in the run registry.
+    # Read the child's start ticks here rather than in the child before exec:
+    # the child's own value is the pre-exec fork, and exec preserves the pid
+    # and start time, so the parent's read of /proc/<pid>/stat is the same
+    # number and needs no cooperation from the child.
     _write_run_registry(state_dir, tid, pid, generation, reason,
-                        session_id=session_id)
+                        session_id=session_id,
+                        start_ticks=_pid_start_time(pid), phase=phase)
     return pid, session_id
+
+
+def spawn_phase_worker(tid, step_id, generation, state_dir, log_file,
+                       table=None, hb_log_file='', claude_log_file='',
+                       from_step='', attempt=None, counters=None,
+                       env_file='', extra_env=None, reason='phase-dispatch',
+                       claude_bin=None, claude_cmd=None, cmd_override=None):
+    """Fork one worker for a single dispatch-table phase (tasks 4.4, 4.5).
+
+    Returns `(pid, session_id, spawn)` where `spawn` is the `PhaseSpawn` that
+    produced the invocation — callers need its `phase`/`next_phase` to resolve
+    the bracket later, and returning it saves them rebuilding it.
+
+    Everything about the fork is `spawn_worker`'s: process group, stdio split,
+    non-interactive env, run registry, reaping. This adds only the two things
+    that are phase-specific — the `-p` payload and the phase's environment —
+    plus the `workers` row that lets a reader ask which phase a live PID is
+    running rather than only which ticket.
+    """
+    if _phase_mod is None:  # pragma: no cover - import guard
+        raise SpawnError('fleetd.phase_dispatch is unavailable')
+    table = table or _phase_mod.DispatchTable.load()
+    spawn = _phase_mod.build_phase_spawn(
+        table, step_id, tid, log_file, hb_log_file=hb_log_file,
+        claude_log_file=claude_log_file, from_step=from_step, attempt=attempt,
+        counters=counters, env_file=env_file, extra_env=extra_env,
+    )
+    pid, session_id = spawn_worker(
+        tid, generation, state_dir, reason=reason, cmd_override=cmd_override,
+        claude_bin=claude_bin, claude_cmd=claude_cmd,
+        prompt=spawn.prompt, phase=spawn.phase, extra_env=spawn.env,
+    )
+    _store_record_spawn(state_dir, tid, pid, generation, reason, session_id,
+                        phase=spawn.phase)
+    return pid, session_id, spawn
 
 
 # ── Child reaping (self-pipe trick) ────────────────────────────────────────

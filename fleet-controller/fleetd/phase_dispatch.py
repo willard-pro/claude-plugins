@@ -453,3 +453,143 @@ def phase_terminal_write(phase, step, outcome, log_file, hb_log_file='',
             f'{phase}/{step}: {stderr_tail}'
         )
     return True
+
+
+# ── Phase spawn construction (tasks 4.4 / 4.16) ─────────────────────────────
+#
+# The router delivers a phase's operating context two ways, and fleetd has to
+# split them because a top-level `claude -p` session is not a subagent:
+#
+# * **Values become real process environment.** `spawn_agent_pre` prefixes the
+#   Agent prompt with `export LOG_FILE=…; export HB_LOG_FILE=…` because it has
+#   no other channel — a subagent shares the router's process and can only be
+#   told, not configured. fleetd forks the phase itself, so it sets these in
+#   `execvpe`'s environment, exactly as it already does for `FLEET_WORKER_PID`
+#   and `FLEET_STATE_DIR`. This is strictly stronger than the prompt form: the
+#   preamble sources its env file with `|| true`, so a missing or unwritable
+#   env file silently yields a phase running with no `REPOS_ROOT` and no
+#   `LINEAR_API_KEY` (task 4.16). A real env var cannot be half-applied.
+#
+# * **Shell function definitions stay prompt-embedded.** `source
+#   heartbeat.sh` defines functions inside the agent's own Bash tool
+#   invocations. Functions are not inheritable through `execvpe`, so this half
+#   genuinely cannot move, and the instruction is preserved verbatim.
+#
+# Flags stay where they already are: the phase skills parse their arguments
+# out of `$ARGUMENTS` as natural language today (`SKILL.md:954,1042`), so
+# promoting `--from-step` or `--mode extract` to a real CLI flag would require
+# changing every skill's argument handling for no behavioural gain, and would
+# leave the manual `/ticket-verify` path parsing a different grammar than the
+# automated one. They remain part of the slash-command line.
+
+# Env vars fleetd sets on a phase worker that the router instead embeds as
+# `export` statements in the agent prompt.
+_PROMPT_EXPORTED_VARS = ('LOG_FILE', 'HB_LOG_FILE', 'CLAUDE_LOG_FILE')
+
+DEFAULT_PHASE_FLAGS = '--from-auto'
+
+PhaseSpawn = namedtuple(
+    'PhaseSpawn',
+    'step_id step phase skill prompt env attempt loop_bearing next_phase',
+)
+PhaseSpawn.__doc__ = """Everything needed to fork one phase worker.
+
+prompt — the `-p` argument: a slash-command line plus the table's per-phase
+         instructions, matching what `spawn_agent_pre` prints as
+         AGENT_PROMPT so the automated and manual paths give an agent the
+         same words.
+env    — variables to merge into the worker's process environment.
+"""
+
+
+class PhaseSpawnError(RuntimeError):
+    """A dispatch-table step cannot be turned into a phase spawn."""
+
+
+def _spawn_spec(table, step_id):
+    """The `spawn` block for a step, or raise if the step does not spawn."""
+    step = table.get(step_id)
+    spawn = step.get('spawn') or {}
+    if not spawn.get('skill'):
+        raise PhaseSpawnError(
+            f'step {step_id!r} (action {step.get("action")!r}) declares no '
+            f'agent spawn; it is orchestration, not a phase worker'
+        )
+    return step, spawn
+
+
+def _render_instructions(text, counters):
+    """Substitute `{COUNTER}` and the table's `$((… + 1))` attempt idiom.
+
+    The instructions carry the router's own counter syntax verbatim — e.g.
+    `PHASE_RESULT_ATTEMPT=$(({VERIFY_ATTEMPTS} + 1))`. fleetd owns those
+    counters (`docs/phase-result-schema.md:249` — counters are caller-owned),
+    so it resolves them to a literal here rather than shipping an agent a
+    shell expression it would have to evaluate against variables it does not
+    have.
+    """
+    if not text:
+        return ''
+    for name, value in (counters or {}).items():
+        text = text.replace('$(({%s} + 1))' % name, str(int(value) + 1))
+        text = text.replace('{%s}' % name, str(value))
+    return text
+
+
+def build_phase_spawn(table, step_id, tid, log_file, hb_log_file='',
+                      claude_log_file='', from_step='', attempt=None,
+                      counters=None, env_file='', extra_env=None):
+    """Build the prompt and environment for one phase worker.
+
+    `counters` supplies the loop counters the table's instructions interpolate
+    (`VERIFY_ATTEMPTS`, `ITERATION`); `attempt` is the 1-based attempt number
+    stamped into the environment so the agent reads it rather than guessing —
+    the same contract `spawn_agent_pre`'s `ATTEMPT` spawn-meta field carries.
+    """
+    step, spawn = _spawn_spec(table, step_id)
+    phase = (spawn.get('phase') or '').upper()
+    skill = spawn['skill']
+
+    flags = spawn.get('extra_flags') or DEFAULT_PHASE_FLAGS
+    if from_step:
+        flags = f'{flags} --from-step {from_step}'
+
+    counters = dict(counters or {})
+    instructions = _render_instructions(spawn.get('instructions', ''), counters)
+
+    prompt = f'{skill} {tid} {flags}'.strip()
+    if instructions:
+        prompt = f'{prompt}. {instructions}'
+
+    env = {
+        'LOG_FILE': str(log_file or ''),
+        'HB_LOG_FILE': str(hb_log_file or ''),
+        'CLAUDE_LOG_FILE': str(claude_log_file or ''),
+        # The router exports this in its prompt prefix to keep git hooks from
+        # blocking a non-interactive commit.
+        'HUSKY': '0',
+        'FLEET_TICKET_ID': str(tid),
+        'FLEET_PHASE': phase,
+        'FLEET_STEP': str(spawn.get('step') or ''),
+        'FLEET_DISPATCH_STEP_ID': str(step_id),
+    }
+    if env_file:
+        # Named explicitly so the preamble's `source` target is a value rather
+        # than a path the agent reconstructs from the ticket id.
+        env['FLEET_TICKET_ENV_FILE'] = str(env_file)
+    if attempt is not None:
+        env['PHASE_RESULT_ATTEMPT'] = str(attempt)
+    if extra_env:
+        env.update({k: str(v) for k, v in extra_env.items()})
+
+    return PhaseSpawn(
+        step_id=step_id,
+        step=spawn.get('step') or '',
+        phase=phase,
+        skill=skill,
+        prompt=prompt,
+        env=env,
+        attempt=attempt,
+        loop_bearing=bool(spawn.get('loop_bearing')),
+        next_phase=(spawn.get('next_phase') or phase),
+    )
