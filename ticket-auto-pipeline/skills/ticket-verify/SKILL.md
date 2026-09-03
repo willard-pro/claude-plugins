@@ -33,6 +33,7 @@ When `--from-auto` is present, VERIFY is a loop-bearing phase: additionally foll
 - **Browser session**: after starting Playwright, write `hb-wrap.sh api "browser-session" "ok" "browser session established"`; if session fails, write `hb-wrap.sh api "browser-session" "fail" "browser session failed"`
 - **Navigation**: after each page navigation, write `hb-wrap.sh api "browser-navigate" "ok" "navigated to <url>" '{"url":"...","title":"..."}'`
 - **Session resume**: if browser session was lost and resumed, write `hb-wrap.sh fallback "browser-resume" "fired" "session lost, rebuilding plan" '{"reason":"Playwright session lost"}'`
+- **Criterion progress (long-running step)**: the Playwright navigation and criterion loop is one of the two steps enumerated in [pipeline-heartbeat-format.md § Long-running steps](../../pipeline-heartbeat-format.md#long-running-steps-enumerated). A single criterion can absorb minutes of navigation, waiting and retry with no bracketing entry in between. Before starting each criterion, write `hb-wrap.sh heartbeat "step-progress" "ok" "verify: criterion N of M" '{"step":"execute-steps","done":"N","total":"M"}'`. This is distinct from the per-criterion `VERIFY|checkpoint|done|` pipeline-log entry, which is written *after* a criterion passes and so says nothing while one is in flight. Advisory: nothing gates on these events.
 - **Verdict**: after the final pass/fail determination, write `hb-wrap.sh decision "verification-verdict" "fired" "PASS|FAIL" '{"verdict":"PASS|FAIL","criteria_met":"N","criteria_total":"M"}'`
 
 ### Step dispatch

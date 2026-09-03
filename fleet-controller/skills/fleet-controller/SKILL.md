@@ -1,6 +1,6 @@
 ---
 name: fleet-controller
-description: Monitors all active ticket-auto pipelines using 12 detection engines (phase failures, stalls, zombies, loops, abandonment, flow failures, auto-mode blocks, tool errors, planner feedback, blocked-by resolution, initiative dispatch, epic-branch readiness) and escalates autonomously through OBSERVE → WARN → KILL → KILL+RESTART severity levels. All interventions execute through fleet lib functions — no silent mutations outside the declared tool set.
+description: Monitors all active ticket-auto pipelines using 14 detection engines (phase failures, stalls, zombies, loops, abandonment, flow failures, auto-mode blocks, tool errors, planner feedback, blocked-by resolution, initiative dispatch, epic-branch readiness, runaway tool-call rate, workspace misconfiguration) and escalates autonomously through OBSERVE → WARN → KILL → KILL+RESTART severity levels. All interventions execute through fleet lib functions — no silent mutations outside the declared tool set.
 allowed-tools: Bash, Read, Agent
 ---
 
@@ -106,7 +106,7 @@ Aggregate `META|planner-feedback` entries from pipeline logs across all active w
 
 ## Detection Rules
 
-The fleet controller runs 12 detection engines against every active pipeline:
+The fleet controller runs 14 detection engines against every active pipeline:
 
 | Detector | What it catches | Severity |
 |----------|----------------|----------|

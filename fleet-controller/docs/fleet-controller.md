@@ -1,6 +1,6 @@
 # Fleet Controller — Architecture & Operations
 
-Parent orchestrator above ticket-planner and ticket-auto. Dispatches planned tickets from initiative epics, monitors all active pipeline health via 12 detection engines, escalates autonomously through OBSERVE → WARN → KILL → KILL+RESTART severity levels, and aggregates execution feedback back to the planner. Bash-only — zero Claude agents, zero LLM reasoning. All detection and intervention is deterministic.
+Parent orchestrator above ticket-planner and ticket-auto. Dispatches planned tickets from initiative epics, monitors all active pipeline health via 14 detection engines, escalates autonomously through OBSERVE → WARN → KILL → KILL+RESTART severity levels, and aggregates execution feedback back to the planner. Bash-only — zero Claude agents, zero LLM reasoning. All detection and intervention is deterministic.
 
 ## Architecture Overview
 

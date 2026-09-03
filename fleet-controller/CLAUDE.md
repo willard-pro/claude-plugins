@@ -4,7 +4,7 @@ Plugin-level guidance for Claude Code when working inside this plugin directory.
 
 ## Plugin purpose
 
-Parent orchestrator above ticket-planner and ticket-auto. Fleet controller dispatches planned tickets from initiative epics, monitors all active pipeline health via 12 detection engines, and aggregates execution feedback back to the planner. Bash-only — zero Claude agents, zero LLM reasoning. All detection and intervention is deterministic.
+Parent orchestrator above ticket-planner and ticket-auto. Fleet controller dispatches planned tickets from initiative epics, monitors all active pipeline health via 14 detection engines, and aggregates execution feedback back to the planner. Bash-only — zero Claude agents, zero LLM reasoning. All detection and intervention is deterministic.
 
 ## Directory layout
 
@@ -65,7 +65,7 @@ The pipeline log gains one new `META` step: `META|worker-exit|done|fail|code=<N>
 | File | Exports |
 |------|---------|
 | `fleet-config.sh` | Configuration defaults: `FLEET_STATE_DIR`, `FLEET_KILL_GRACE_SECS`, `FLEET_KILL_VERIFY`, `FLEET_FENCE_ENFORCE`, `FLEET_QUEUE_LOCK_TIMEOUT`. State-directory resolver: `_fleet_state_dir <workspace>`. |
-| `fleet-detect.sh` | 12 detection engines: `detect_phase_failures`, `detect_stalls`, `detect_zombies`, `detect_loops`, `detect_abandoned`, `detect_flow_failures`, `detect_auto_mode_blocks`, `detect_tool_errors`, `detect_planner_feedback`, `detect_blocked_by`, `detect_initiative_dispatch`, `detect_epic_branch_ready`. Aggregator: `fleet_detect_all` outputs JSON. Sourceable library — no `set -euo pipefail`. |
+| `fleet-detect.sh` | 14 detection engines: `detect_phase_failures`, `detect_stalls`, `detect_zombies`, `detect_loops`, `detect_abandoned`, `detect_flow_failures`, `detect_auto_mode_blocks`, `detect_tool_errors`, `detect_planner_feedback`, `detect_blocked_by`, `detect_initiative_dispatch`, `detect_epic_branch_ready`, `detect_runaway_calls`, `detect_workspace_config`. Aggregator: `fleet_detect_all` outputs JSON. Sourceable library — no `set -euo pipefail`. |
 | `fleet-intervene.sh` | Intervention executor: `fleet_kill_pipeline` (verified escalation with PID-reuse guard), `fleet_can_restart`, `fleet_restart_pipeline`, `fleet_stop_background`. flow.sh mutex-aware, `FLEET_DRY_RUN` guard. |
 | `fleet-monitor.sh` | Monitor loop: `fleet_monitor_cycle` (one detection + intervention pass), `fleet_monitor_loop` (continuous polling with stop-file gating). Spawn queue consumption integrated with `flock` serialization. Dual-mode: interactive (ACTION:spawn-restart) or cron (JSONL queue). |
 | `fleet-store.sh` | Read-only bash access to the fleet state store via the `sqlite3` CLI: `fleet_store_ready`, `fleet_store_sql`, `fleet_store_pipeline_rows`, `fleet_store_owner`, `fleet_store_is_owned`, `fleet_store_position`, `fleet_store_last_activity_epoch`, `fleet_store_in_flight`, `fleet_store_fence_allows`. Every function degrades to "no store" rather than failing, so a host with no fleetd — or no sqlite3 — keeps working on the file path. Ticket ids are validated against an identifier alphabet before reaching an SQL string, not escaped. |
@@ -83,7 +83,7 @@ Fleet controller depends on two libraries defined in `ticket-auto-pipeline/`:
 
 These are sourced via `_source_if_missing` from `~/.claude/skills/lib/` (synced by the ticket-auto-pipeline SessionStart hook). Fleet controller does NOT maintain its own copies — it bridges to the canonical sources.
 
-## Detection engines (12 total)
+## Detection engines (14 total)
 
 | # | Detector | What it catches | Severity range |
 |---|----------|----------------|----------------|
@@ -99,6 +99,8 @@ These are sourced via `_source_if_missing` from `~/.claude/skills/lib/` (synced 
 | 10 | `detect_blocked_by` | Tickets with `blocked-by:{ID}` where blocker is Done | 0–1 |
 | 11 | `detect_initiative_dispatch` | `state:execution` epics with undispatched planned tickets | 0–1 |
 | 12 | `detect_epic_branch_ready` | Directive-carrying `state:execution` epics with all children Done; when `FLEET_EPIC_AUTO_PR=true`, actuates by calling `epic_branch_open_pr` once per tracked repo (never auto-merged) | 0–1 |
+| 13 | `detect_runaway_calls` | Tool-call count within the current open spawn bracket above `FLEET_RUNAWAY_CALL_THRESHOLD`. Per-ticket. The inverse of `detect_stalls`' activity dimension: a runaway agent never stops calling tools, which looks as healthy to the watchdog as a stalled one looks dead | 0–1 |
+| 14 | `detect_workspace_config` | Fleet-wide. The pipeline log directory is missing, is not a directory, or is unreadable. `FLEET_PIPELINE_LOG_DIR` defaults to the *relative* `./logs`, so a fleetd started from the wrong working directory monitors nothing and reports a clean bill of health — this is the only engine that fires when there is no pipeline to inspect. An existing but empty directory is a genuinely idle fleet and stays silent | 0–1 |
 
 ## Fleet state store (SQLite)
 
@@ -179,6 +181,7 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 | `FLEET_STORE_ENABLE` | true | Set `false` to disable the state store entirely — fleetd stops writing it and every detection engine falls back to reading the log files, which is the pre-store behaviour |
 | `FLEET_STORE_EVENT_RETENTION_DAYS` | 30 | Age past which `log_events`/`activity_events` projection rows are pruned. Projections only — nothing fleetd authored is ever pruned, and anything dropped returns on a rebuild |
 | `FLEET_ACTIVITY_LOG_MAX_LINES` | 500 | Ring cap on `{tid}-activity.log`. Read by the hook, not the detector: only the last line's age and the current bracket's line count have consumers |
+| `FLEET_RUNAWAY_CALL_THRESHOLD` | 300 | Tool calls within one open spawn bracket above which `detect_runaway_calls` emits WARN. The mirror image of the activity-stall signal: a stalled agent stops calling tools, a runaway one never stops, and both keep the router's watchdog chirping. Counted per bracket rather than per log, so a long ticket is not flagged for being long. Must stay below `FLEET_ACTIVITY_LOG_MAX_LINES` — the activity log is ring-capped, so the count saturates there and a threshold above the cap is unreachable. WARN-only by design; a high call count is evidence, never proof |
 | `FLEET_MAX_RESTARTS` | 2 | Max automatic restarts before giving up |
 | `FLEET_AUTO_DISPATCH` | false | Must be `true` to enable automatic dispatch of planned tickets from initiative epics. Detection still runs and reports; dispatch is the actuation step. Human approval gate still stops every auto-dispatched ticket. |
 | `FLEET_AUTO_RESTART` | true | Automatic restarts are enabled by default; set to `false` to opt out |

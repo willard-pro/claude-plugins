@@ -17,6 +17,7 @@ If `--from-auto` is present in the arguments, follow the auto-pipeline preamble 
 - **Test command**: if BE_TEST_RUNNER found, write `hb-wrap.sh heartbeat "test-command" "BE_TEST_RUNNER configured" '{"cmd":"<cmd>"}'`; elif BE_TEST_CMD found, write `hb-wrap.sh heartbeat "test-command" "BE_TEST_CMD configured" '{"cmd":"<cmd>"}'`; if absent, write `hb-wrap.sh heartbeat "test-command" "skip" "no BE_TEST_CMD or BE_TEST_RUNNER"`
 - **Artifact path**: after detecting the plan artifact, write `hb-wrap.sh decision "artifact-path" "info" "artifact detected" '{"type":"simple-fix|openspec"}'`
 - **Implementation mode**: after detect-path, write `hb-wrap.sh decision "implementation-mode" "fired" "simple|openspec" '{"mode":"..."}'`
+- **Code-writing progress (long-running step)**: the code-writing stage is one of the two steps enumerated in [pipeline-heartbeat-format.md § Long-running steps](../../pipeline-heartbeat-format.md#long-running-steps-enumerated). It routinely runs for many minutes inside a single step, and to anything reading the heartbeat log that silence is indistinguishable from a hang. After completing each file (simple-fix) or each task (openspec), write `hb-wrap.sh heartbeat "step-progress" "ok" "implement: <file-or-task> (N of M)" '{"step":"implement-changes","done":"N","total":"M"}'`. Advisory: nothing gates on these events and omitting them never fails the phase — it only leaves the fleet detector guessing.
 
 ### Step dispatch
 **Context restoration when skipping early steps:**

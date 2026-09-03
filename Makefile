@@ -21,6 +21,7 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-spawn-helper.sh
 	bash ticket-auto-pipeline/lib/tests/test-worker-hooks.sh
 	bash ticket-auto-pipeline/lib/tests/test-agent-activity.sh
+	bash ticket-auto-pipeline/lib/tests/test-tool-error-capture.sh
 	bash ticket-auto-pipeline/lib/tests/test-error-handler.sh
 	bash ticket-auto-pipeline/lib/tests/test-trajectory.sh
 	bash ticket-auto-pipeline/lib/tests/test-verifier-result.sh
@@ -31,6 +32,7 @@ test-lib:
 	bash fleet-controller/lib/tests/test-fleet-detect.sh
 	bash fleet-controller/lib/tests/test-fleet-detect-new.sh
 	bash fleet-controller/lib/tests/test-fleet-detect-activity.sh
+	bash fleet-controller/lib/tests/test-fleet-detect-signals.sh
 	bash fleet-controller/lib/tests/test-fleet-store-parity.sh
 	bash fleet-controller/lib/tests/test-detect-epic-branch-ready.sh
 	bash fleet-controller/lib/tests/test-fleet-intervene.sh

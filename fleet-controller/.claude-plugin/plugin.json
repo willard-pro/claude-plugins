@@ -1,7 +1,7 @@
 {
   "name": "fleet-controller",
-  "version": "0.10.0",
-  "description": "Parent orchestrator above ticket-planner and ticket-auto — dispatches planned tickets, monitors pipeline health via 12 detection engines, manages epic branch lifecycle (create, sync, GC), aggregates execution feedback. Bash-only detection + intervention; no Claude agents.",
+  "version": "0.11.0",
+  "description": "Parent orchestrator above ticket-planner and ticket-auto — dispatches planned tickets, monitors pipeline health via 14 detection engines, manages epic branch lifecycle (create, sync, GC), aggregates execution feedback. Bash-only detection + intervention; no Claude agents.",
   "author": {
     "name": "John Willard"
   },
