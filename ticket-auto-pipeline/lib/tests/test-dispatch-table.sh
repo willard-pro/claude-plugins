@@ -75,7 +75,7 @@ loops = {s["step_id"]: s["loop"] for s in steps if "loop" in s}
 expected = {
     "STEP_3_5": ("RECONCILE_CYCLE", 3, "RECONCILE_EXHAUSTED"),
     "STEP_4_5": ("VERIFY_ATTEMPTS", 2, "VERIFY_EXHAUSTED"),
-    "STEP_4_6": ("ITERATION", 3, None),
+    "STEP_4_6": ("ITERATION", 3, "PR_REVIEW_EXHAUSTED"),
     "STEP_5_5": ("PR_FEEDBACK_CYCLE", 3, "PR_FEEDBACK_EXHAUSTED"),
 }
 assert set(loops) == set(expected), f"loop steps drifted: {sorted(loops)}"
@@ -84,6 +84,13 @@ for sid, (counter, cap, code) in expected.items():
     assert got["counter"] == counter, f"{sid} counter {got['counter']} != {counter}"
     assert got["max_iterations"] == cap, f"{sid} cap {got['max_iterations']} != {cap}"
     assert got["gate_stop_code"] == code, f"{sid} code {got['gate_stop_code']!r} != {code!r}"
+
+# STEP_4_6 shipped with a null code; fleetd-phase-supervisor task 4.6 named it.
+# An unnamed cap makes pipeline-finalize.sh write "stopped: gate-stop " — a run
+# that stopped without recording why — so the invariant is now that every
+# router-managed cap names its exhaustion.
+for sid, got in loops.items():
+    assert got.get("gate_stop_code"), f"{sid} exhausts with no named gate-stop code"
 PY
 }
 

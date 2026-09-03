@@ -474,6 +474,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|<CODE>" >> "$LOG_FILE"
 | `REPRO_NOT_CONFIRMED` | Reproduce skill determined bug does not manifest on UAT (Step 1.5) |
 | `REPRO_BLOCKED` | Reproduce skill blocked — insufficient detail in ticket (Step 1.5) |
 | `PR_FEEDBACK_EXHAUSTED` | `PR_FEEDBACK_CYCLE` reached 3 — reconciliation cycle capped, needs human review (Step 5.5) |
+| `PR_REVIEW_EXHAUSTED` | `ITERATION` reached 3 — the pr-review → pr-iterate → re-implement → verify cycle is capped, needs human review (Step 4.6) |
 | `BRANCH_DIRECTIVE_INVALID` | Parent epic has a malformed `## Branch Directive` block — gate-stop, no fallback (Step 0.5) |
 | `CODE_REVIEW_EXHAUSTED` | Code-review fix-and-re-review loop reached 3 cycles with medium+ severity findings still open (Step 4b) |
 | `RECONCILE_EXHAUSTED` | `RECONCILE_CYCLE` reached 3 — gate hold → re-approve → re-hold cycle capped, needs human review (Step 3.5) |

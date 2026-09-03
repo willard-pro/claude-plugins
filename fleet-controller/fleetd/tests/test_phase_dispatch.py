@@ -46,6 +46,10 @@ from fleetd.phase_dispatch import (  # noqa: E402
     router_token,
     PhaseSpawnError,
     build_phase_spawn,
+    evaluate_loop,
+    LOOP_DISPATCH,
+    LOOP_GATE_STOP,
+    LOOP_NOT_LOOPED,
     write_spawn_meta,
     write_phase_start_marker,
     DEFAULT_PHASE_FLAGS,
@@ -517,4 +521,99 @@ class TestHookIdentityFiles(unittest.TestCase):
         self.assertTrue(path.name.startswith('ticket-auto-CRE-9-start-VERIFY-'))
         self.assertTrue(path.name.endswith('.ts'))
         self.assertGreater(int(path.read_text()), 0)
+
+
+class TestLoopCaps(unittest.TestCase):
+    """Task 4.6 — the four router-managed cycle caps.
+
+    Every value comes from the table. These tests read the caps from the same
+    file the code does rather than asserting literals, so raising a cap in the
+    JSON does not require editing a test — the thing being asserted is the
+    rule, not the number.
+    """
+
+    def setUp(self):
+        self.table = DispatchTable.load(TABLE_PATH)
+
+    def _loop(self, step_id):
+        return self.table.loop(step_id)
+
+    def test_the_table_declares_exactly_four_loops(self):
+        self.assertEqual(len(self.table.loop_steps()), 4)
+
+    def test_a_non_loop_step_is_reported_as_such(self):
+        d = evaluate_loop(self.table, 'STEP_1', {})
+        self.assertEqual(d.action, LOOP_NOT_LOOPED)
+
+    def test_under_the_cap_dispatches(self):
+        for step_id in self.table.loop_steps():
+            loop = self._loop(step_id)
+            counters = {loop['counter']: loop['max_iterations'] - 1}
+            d = evaluate_loop(self.table, step_id, counters)
+            self.assertEqual(d.action, LOOP_DISPATCH, step_id)
+
+    def test_at_the_cap_gate_stops(self):
+        for step_id in self.table.loop_steps():
+            loop = self._loop(step_id)
+            counters = {loop['counter']: loop['max_iterations']}
+            d = evaluate_loop(self.table, step_id, counters)
+            self.assertEqual(d.action, LOOP_GATE_STOP, step_id)
+
+    def test_exhaustion_uses_the_table_s_named_code(self):
+        """Never an invented one: these names are the log contract."""
+        for step_id in self.table.loop_steps():
+            loop = self._loop(step_id)
+            d = evaluate_loop(self.table, step_id,
+                              {loop['counter']: loop['max_iterations']})
+            self.assertEqual(d.gate_stop_code, loop['gate_stop_code'], step_id)
+            self.assertTrue(d.gate_stop_code,
+                            f'{step_id} exhausts without a named code')
+
+    def test_every_loop_names_a_gate_stop_code(self):
+        """STEP_4_6 shipped with `null` here; task 4.6 named it."""
+        for step_id in self.table.loop_steps():
+            self.assertTrue(self._loop(step_id).get('gate_stop_code'),
+                            f'{step_id} has no gate_stop_code')
+
+    def test_the_pr_review_cap_is_the_code_the_router_also_writes(self):
+        d = evaluate_loop(self.table, 'STEP_4_6', {'ITERATION': 3})
+        self.assertEqual(d.gate_stop_code, 'PR_REVIEW_EXHAUSTED')
+
+    def test_a_cap_asked_about_at_the_wrong_moment_does_not_apply(self):
+        """A post-dispatch cap must not refuse the attempt it is counting.
+
+        Verify's cap is checked after the phase runs. Applying it before would
+        cost a ticket its final allowed attempt.
+        """
+        d = evaluate_loop(self.table, 'STEP_4_5', {'VERIFY_ATTEMPTS': 99},
+                          when='pre_dispatch')
+        self.assertEqual(d.action, LOOP_DISPATCH)
+        self.assertIn('post_dispatch', d.detail)
+
+    def test_a_cap_asked_about_at_its_own_moment_applies(self):
+        d = evaluate_loop(self.table, 'STEP_4_5', {'VERIFY_ATTEMPTS': 99},
+                          when='post_dispatch')
+        self.assertEqual(d.action, LOOP_GATE_STOP)
+
+    def test_a_missing_counter_reads_as_zero_not_as_exhausted(self):
+        """A fresh ticket has written no counter yet."""
+        d = evaluate_loop(self.table, 'STEP_4_5', {})
+        self.assertEqual(d.action, LOOP_DISPATCH)
+        self.assertEqual(d.value, 0)
+
+    def test_an_unparseable_counter_reads_as_zero(self):
+        d = evaluate_loop(self.table, 'STEP_4_5', {'VERIFY_ATTEMPTS': 'x'})
+        self.assertEqual(d.action, LOOP_DISPATCH)
+
+    def test_caps_are_not_duplicated_as_python_constants(self):
+        """The limit reported is the table's, whatever the table says."""
+        import fleetd.phase_dispatch as mod
+        src = Path(mod.__file__).read_text()
+        for step_id in self.table.loop_steps():
+            loop = self._loop(step_id)
+            self.assertNotIn(f"max_iterations = {loop['max_iterations']}", src)
+            self.assertNotIn(f"'{loop['gate_stop_code']}'", src,
+                             f"{loop['gate_stop_code']} is defined in Python as "
+                             f"well as in the table — two authorities on one "
+                             f"log-contract string")
 

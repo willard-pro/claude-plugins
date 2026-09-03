@@ -666,3 +666,78 @@ def write_phase_start_marker(tid, phase, meta_dir=None):
     path = meta_dir / f'ticket-auto-{tid}-start-{phase}-{stamp}.ts'
     path.write_text(str(stamp))
     return path
+
+
+# ── Retry loops (task 4.6) ──────────────────────────────────────────────────
+#
+# Four steps in the table declare a `loop`, and each names the counter it
+# advances, its cap, when the cap is checked, and the gate-stop code to write
+# on exhaustion. All four values are read from the table — a cap duplicated as
+# a Python constant is the drift the canonical file exists to prevent, and
+# Group 5's coverage test asserts exactly that it is not duplicated here.
+#
+# The counters themselves stay caller-owned. `META|phase-result`'s `ATTEMPT`
+# field is explicitly not their source (`docs/phase-result-schema.md:249`):
+# it is the agent's report of which attempt it believed it was on, which is
+# the wrong authority for deciding whether another attempt is allowed.
+
+LOOP_DISPATCH = 'dispatch'
+LOOP_GATE_STOP = 'gate-stop'
+LOOP_NOT_LOOPED = 'not-a-loop'
+
+# STEP_4_6's cap shipped as `gate_stop_code: null` — SKILL.md routed it to a
+# bare gate-stop with no name, and `pipeline-log-format.md`'s table had no
+# entry. Task 4.6 named it `PR_REVIEW_EXHAUSTED`, **in the table**, alongside
+# the log-format doc, `pipeline-postmortem.sh` and SKILL.md's own prose, so
+# the router and fleetd write the identical code. Deliberately not defined as
+# a constant here: a code named in Python as well as in the table is two
+# authorities on one string, which is the drift D3 removes.
+#
+# The reasoning, since it is a change to the log contract: every consumer
+# already has a default branch, so adding a name breaks none of them, while an
+# unnamed code made `pipeline-finalize.sh` record the literal outcome
+# "stopped: gate-stop " for the pipeline's most-travelled loop — a run that
+# stopped without recording why.
+
+LoopDecision = namedtuple(
+    'LoopDecision',
+    'action counter value limit gate_stop_code checked detail',
+)
+
+
+def evaluate_loop(table, step_id, counters, when=None):
+    """Decide whether a loop-bearing step may run another iteration.
+
+    `when` is `'pre_dispatch'` or `'post_dispatch'`; pass it to ask only about
+    the moment this step's cap is actually checked. A pre-dispatch cap
+    (reconcile, PR-feedback) refuses to spawn the next iteration; a
+    post-dispatch cap (verify, PR-review) lets the iteration run and refuses
+    the one after it. Asking at the wrong moment returns `dispatch` rather
+    than an answer, so a caller cannot accidentally apply a post-dispatch cap
+    before the phase has had its attempt.
+    """
+    loop = table.loop(step_id)
+    if not loop:
+        return LoopDecision(LOOP_NOT_LOOPED, '', 0, 0, '', '', '')
+
+    counter = loop.get('counter') or ''
+    limit = int(loop.get('max_iterations') or 0)
+    checked = loop.get('checked') or ''
+    code = loop.get('gate_stop_code') or ''
+
+    if when and checked and when != checked:
+        return LoopDecision(LOOP_DISPATCH, counter, 0, limit, code, checked,
+                            f'cap is checked at {checked}, not {when}')
+
+    try:
+        value = int((counters or {}).get(counter, 0))
+    except (TypeError, ValueError):
+        value = 0
+
+    if limit and value >= limit:
+        return LoopDecision(
+            LOOP_GATE_STOP, counter, value, limit, code, checked,
+            f'{counter} reached {value} of {limit}',
+        )
+    return LoopDecision(LOOP_DISPATCH, counter, value, limit, code, checked,
+                        f'{counter}={value} of {limit}')

@@ -7,7 +7,8 @@
 # Usage: pipeline-postmortem.sh {TICKET_ID} --exit-code {CODE}
 #
 # Called by the router's EXIT trap on every exit path (gate-stop,
-# VERIFY_EXHAUSTED, PR_FEEDBACK_EXHAUSTED, router-error, STEP_6).
+# VERIFY_EXHAUSTED, PR_FEEDBACK_EXHAUSTED, PR_REVIEW_EXHAUSTED, router-error,
+# STEP_6).
 # Also called by fleet-controller on fleet-kill (opt-in).
 #
 # Exit code: always 0 (fail-soft — analysis failures never block the trap).
@@ -251,6 +252,7 @@ _derive_exit_path() {
     case "$_code" in
     VERIFY_EXHAUSTED) echo "verify-exhausted" ;;
     PR_FEEDBACK_EXHAUSTED) echo "pr-feedback-exhausted" ;;
+    PR_REVIEW_EXHAUSTED) echo "pr-review-exhausted" ;;
     *) echo "gate-stop:${_code}" ;;
     esac
     return
@@ -321,7 +323,7 @@ _pm_map_severity() {
     EXEC_NO_ARTIFACT | APPROVAL_REVOKED | BRANCH_DIRECTIVE_INVALID)
       _base=0
       ;; # P0 — structural failures
-    VERIFY_EXHAUSTED | PR_FEEDBACK_EXHAUSTED)
+    VERIFY_EXHAUSTED | PR_FEEDBACK_EXHAUSTED | PR_REVIEW_EXHAUSTED)
       _base=1
       ;; # P1 — retry exhaustion
     *)
@@ -329,7 +331,7 @@ _pm_map_severity() {
       ;; # P1 — other gate-stops
     esac
     ;;
-  verify-exhausted | pr-feedback-exhausted)
+  verify-exhausted | pr-feedback-exhausted | pr-review-exhausted)
     _base=1
     ;; # P1 — retry exhaustion (bare-string branch)
   router-error)

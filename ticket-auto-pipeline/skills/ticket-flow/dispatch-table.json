@@ -295,8 +295,8 @@
         "counter": "ITERATION",
         "max_iterations": 3,
         "exit_condition": "ITERATION >= 3",
-        "gate_stop_code": null,
-        "gate_stop_code_note": "SKILL.md routes this cap to a bare gate-stop with no named code, unlike the other three router-managed loops. pipeline-log-format.md's gate-stop table has no entry for it. Naming it is a change to the log contract, not a transcription decision, so this file records the gap rather than inventing a code.",
+        "gate_stop_code": "PR_REVIEW_EXHAUSTED",
+        "gate_stop_code_note": "Named in fleetd-phase-supervisor task 4.6, having shipped unnamed. Every consumer of a gate-stop code (pipeline-postmortem.sh's exit-path and severity maps, pipeline-finalize.sh's outcome line) already has a default branch, so adding a name breaks none of them; leaving it unnamed made pipeline-finalize.sh record the literal outcome \"stopped: gate-stop \" for the pipeline's most-travelled loop — a run that stopped without recording why. Now documented alongside VERIFY_EXHAUSTED and PR_FEEDBACK_EXHAUSTED.",
         "checked": "post_dispatch",
         "body": "pr-review -> (on WARN) gate-check.sh --mode reapprove -> pr-iterate -> implement -> outcome-label-check -> flow.sh implement-complete -> verify -> pr-review",
         "description": "Router-managed pr-review -> pr-iterate -> re-implement -> verify -> pr-review cycle."
