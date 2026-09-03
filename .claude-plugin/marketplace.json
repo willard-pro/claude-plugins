@@ -21,7 +21,7 @@
     },
     {
       "name": "ticket-auto-pipeline",
-      "version": "0.34.0",
+      "version": "0.34.1",
       "source": "./ticket-auto-pipeline",
       "description": "Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. Bundles 20+ skills, state machine config, pipeline safety gates, and retrospective analysis."
     },

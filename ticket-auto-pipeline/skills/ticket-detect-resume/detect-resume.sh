@@ -192,6 +192,105 @@ else
   fi
 fi
 
+# ── Worker liveness ────────────────────────────────────────────────────────
+# Answers one question for zombie detection: is some *other* live process
+# still working this ticket?
+#
+# The original test was a bare `pgrep -f "ticket-auto.*${TICKET_ID}"`, which
+# got both halves of that question wrong.
+#
+#   * It only ever matches a ticket-level `claude -p '/ticket-auto <ID> …'`
+#     worker. It cannot match a fleetd-spawned *phase* worker, whose cmdline
+#     is `claude -p '/ticket-appraise <ID> …'`, and it matches nothing at all
+#     on the interactive path, where phases run as in-process Agent-tool
+#     subagents with no cmdline of their own. Each miss reads as "the agent
+#     is gone", so a live bracket is declared a zombie and its phase is
+#     re-dispatched on top of the run still holding it.
+#   * It also matches *this script* and its own ancestry: detect-resume.sh
+#     lives under `.../ticket-auto-pipeline/skills/…` and is invoked with the
+#     ticket id as argv[1], so `ticket-auto.*<ID>` matches its own cmdline.
+#     A self-match reports "alive" unconditionally and suppresses zombie
+#     detection entirely.
+#
+# The ancestry exclusion is the substantive part, not a tidy-up. The process
+# that resumes a ticket is normally a descendant of the worker running it, so
+# an ancestor being alive says nothing about whether the *previous* generation
+# that opened this waiting bracket survived — which is the only thing the
+# zombie check is asking. Evidence must come from a process outside our own
+# chain.
+#
+# Ordered authoritative-first: the fleet run registry records the pid fleetd
+# actually spawned, so it is consulted before the process table.
+
+# Pids from this process up to init, used to exclude our own chain.
+# Usage: _proc_ancestry   → newline-separated pid list on stdout
+_proc_ancestry() {
+  local pid=$$ guard=0
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ] && [ "$guard" -lt 64 ]; do
+    echo "$pid"
+    pid=$(awk '{print $4}' "/proc/$pid/stat" 2>/dev/null || echo "")
+    case "$pid" in '' | *[!0-9]*) break ;; esac
+    guard=$((guard + 1))
+  done
+}
+
+# Usage: _ticket_worker_alive <ticket_id>   → 0 alive elsewhere, 1 gone
+_ticket_worker_alive() {
+  local tid="$1"
+  [ -n "$tid" ] || return 1
+
+  local ancestry
+  ancestry=$(_proc_ancestry)
+
+  # 1. Fleet run registry (authoritative when fleetd spawned the run).
+  #    Both the ticket-level file and any phase-scoped sibling count.
+  local state_dir="${FLEET_STATE_DIR:-$PWD/logs}"
+  if [ -d "$state_dir" ]; then
+    local run_file pid ticks current
+    for run_file in "${state_dir}/${tid}-run.json" "${state_dir}/${tid}-"*"-run.json"; do
+      [ -f "$run_file" ] || continue
+      pid=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('pid',''))" \
+        "$run_file" 2>/dev/null || echo "")
+      case "$pid" in '' | *[!0-9]*) continue ;; esac
+      if [ "$pid" -le 1 ] || grep -qx "$pid" <<<"$ancestry"; then continue; fi
+      kill -0 "$pid" 2>/dev/null || continue
+
+      # PID-reuse guard, mirroring spawn-helper.sh: a recycled pid is a
+      # different process and must not be read as this worker still running.
+      ticks=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('start_ticks',''))" \
+        "$run_file" 2>/dev/null || echo "")
+      if [ -n "$ticks" ] && [ -r "/proc/$pid/stat" ]; then
+        current=$(awk '{print $22}' "/proc/$pid/stat" 2>/dev/null || echo "")
+        if [ -n "$current" ] && [ "$current" != "$ticks" ]; then continue; fi
+      fi
+      return 0
+    done
+  fi
+
+  # 2. Process table, covering every shape a worker cmdline actually takes:
+  #    the ticket-level router (`-p '/ticket-auto <ID> …'`) and any per-phase
+  #    skill invocation (`-p '/ticket-implement <ID> …'`), generalising the
+  #    pattern `_fleet_tid_live` (fleet-controller/lib/fleet-reconcile.sh)
+  #    already uses. Both halves of the anchoring matter: requiring whitespace
+  #    between the skill name and the id keeps the pattern from matching any
+  #    path that merely contains "ticket-auto" — this script's own cmdline is
+  #    one — and the trailing (non-digit|end) guard keeps CRE-9 from matching
+  #    a live CRE-90 worker.
+  local pat found
+  for pat in "ticket-auto[[:space:]]+${tid}([^0-9]|$)" "/ticket-[a-z-]+[[:space:]]+${tid}([^0-9]|$)"; do
+    found=$(pgrep -f "$pat" 2>/dev/null || true)
+    [ -n "$found" ] || continue
+    local candidate
+    while read -r candidate; do
+      [ -n "$candidate" ] || continue
+      if grep -qx "$candidate" <<<"$ancestry"; then continue; fi
+      return 0
+    done <<<"$found"
+  done
+
+  return 1
+}
+
 # ── Zombie detection ───────────────────────────────────────────────────────
 # Detect steps stuck on "waiting" where the agent process is gone.
 # A zombie is: status=waiting, timestamp > 5 min old, no agent process alive.
@@ -233,7 +332,7 @@ if [ -s "$LOG_FILE" ]; then
       _z_epoch=$(date -d "$_z_iso" +%s 2>/dev/null || echo 0)
       if [ "$_z_epoch" -gt 0 ] && [ "$_z_epoch" -lt "$_zombie_cutoff" ]; then
         # Older than 5 minutes — check for agent process
-        if ! pgrep -f "ticket-auto.*${TICKET_ID}" >/dev/null 2>&1; then
+        if ! _ticket_worker_alive "$TICKET_ID"; then
           _plog "$LOG_FILE" "$_z_phase" "$_z_step" "fail" "zombie-detected: ${_z_phase} ${_z_step}"
           hb_gate "zombie-detection" "fail" "zombie detected: ${_z_phase}/${_z_step} — re-running phase"
 
