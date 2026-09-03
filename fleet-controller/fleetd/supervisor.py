@@ -2044,6 +2044,33 @@ def _log_reached_terminal(state_dir, tid):
     return False
 
 
+def _foreign_run_for_tid(state_dir, tid):
+    """Read a ticket's log/activity state and ask `detect_foreign_run`.
+
+    The pure decision lives in `phase_dispatch.detect_foreign_run` (task
+    4.19) — this just supplies the two file reads it needs from the same
+    `{tid}-pipeline.log` / `{tid}-activity.log` paths every other consumer of
+    this state dir uses (`_log_reached_terminal`, `fleet-detect.sh`). Always
+    called with `fleetd_owns_worker=False`: every caller has already checked
+    `self._children.get(tid) is None` before reaching here.
+
+    A missing/unreadable phase_dispatch import, or a missing pipeline log,
+    both degrade to "no foreign run detected" — the same fail-open posture
+    the rest of the interlock's own design commentary describes for a log
+    that does not exist yet.
+    """
+    if _phase_mod is None:  # pragma: no cover - import guard
+        return None
+    log_file = Path(state_dir) / f'{tid}-pipeline.log'
+    try:
+        log_lines = [ln for ln in log_file.read_text().splitlines() if ln]
+    except OSError:
+        log_lines = []
+    activity_log = Path(state_dir) / f'{tid}-activity.log'
+    return _phase_mod.detect_foreign_run(
+        tid, log_lines, str(activity_log), False)
+
+
 # ── Epic view (pure state-dir derivation) ─────────────────────────────────
 
 def _list_epics(state_dir, workers):
@@ -2999,6 +3026,18 @@ class Supervisor:
                 print(
                     f"fleetd[{os.getpid()}]: skipping {tid} — pipeline log "
                     f"already terminal, removing stale queue entry"
+                )
+                continue
+
+            # Dual-invocation interlock (design.md task 4.19): someone else
+            # — typically a human running `/ticket-auto <ID>` by hand — may
+            # already be mid-phase on this ticket. Leave the queue entry in
+            # place (not consumed) so the next cycle re-checks rather than
+            # dropping the dispatch on the floor.
+            foreign = _foreign_run_for_tid(self._state_dir, tid)
+            if foreign is not None and foreign.detected:
+                print(
+                    f"fleetd[{os.getpid()}]: deferring {tid} — {foreign.detail}"
                 )
                 continue
 

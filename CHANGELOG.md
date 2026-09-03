@@ -17,6 +17,32 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## fleet-controller 0.21.2 (2026-09-03)
+
+A 5-agent review of the `feat/fleetd-agent-liveness` branch's fleetd
+phase-dispatch work checked whether fleetd's new spawn paths follow the same
+sequencing as the router and leave the plain `/ticket-auto` path unaffected.
+One real gap surfaced: `phase_dispatch.detect_foreign_run` (the
+dual-invocation interlock, task 4.19) had no caller anywhere in
+`supervisor.py` — not just on the not-yet-live phase-dispatch path, but on
+the currently-live ticket-level spawn path too. Nothing stopped fleetd from
+dispatching a ticket a human was concurrently running `/ticket-auto <ID>`
+against by hand; both would append to the same pipeline log and could race
+`flow.sh` mutations against the same Linear issue.
+
+- Fix: `_consume_queue_locked` now checks `detect_foreign_run` before
+  spawning each queued ticket. A detected foreign run defers the queue entry
+  (left in place, re-checked next cycle) instead of forking a second worker
+  over it.
+- New tests: `DualInvocationInterlockTest` in `test_supervisor.py` — a live
+  foreign session blocks the spawn and leaves the queue entry intact, a
+  stale/crashed bracket (the orphan case) still spawns normally, and a
+  ticket with no prior pipeline log is unaffected.
+- Doc fix: `ticket-auto-pipeline/CLAUDE.md` no longer claims the spawn ctx
+  file is "still consumed by `tool-error-capture.sh`" — that hook moved to
+  session-id resolution and dropped its ctx-file fallback; the line
+  contradicted the same file's own hook table.
+
 ## ticket-auto-pipeline 0.30.0 (2026-09-02)
 
 **Phase results are machine-readable.** fleet-controller's entire view of a run is

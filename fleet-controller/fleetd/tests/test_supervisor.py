@@ -1092,6 +1092,131 @@ class SpawnAndReapTest(unittest.TestCase):
             sup.release_lock()
 
 
+class DualInvocationInterlockTest(unittest.TestCase):
+    """The dual-invocation interlock (task 4.19) actually gates the live
+    ticket-level spawn path — `_consume_queue` — not just its own unit
+    tests. `phase_dispatch.detect_foreign_run` is exercised directly in
+    test_phase_dispatch.py; these tests are the wiring, not the decision.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _append_queue_entry(self, tid, reason, generation=1):
+        queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+        entry = {
+            'tid': tid,
+            'reason': reason,
+            'generation': generation,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+        with open(queue_file, 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+
+    def _write_open_bracket(self, tid):
+        log_file = self.workspace / f'{tid}-pipeline.log'
+        log_file.write_text(
+            '2026-09-03T09:00:00Z|IMPLEMENT|implement|waiting|'
+            'Agent launched\n')
+
+    def _write_activity(self, tid, seconds_ago):
+        stamp = datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+        act_file = self.workspace / f'{tid}-activity.log'
+        act_file.write_text(
+            stamp.strftime('%Y-%m-%dT%H:%M:%SZ') + '|IMPLEMENT|Edit\n')
+
+    def test_a_live_foreign_run_is_not_double_spawned(self):
+        """A human running `/ticket-auto` by hand blocks fleetd's own
+        dispatch of the same ticket — the exact race task 4.19 exists to
+        prevent."""
+        from fleetd.supervisor import Supervisor
+
+        self._append_queue_entry('TST-F1', 'test-foreign')
+        self._write_open_bracket('TST-F1')
+        self._write_activity('TST-F1', seconds_ago=30)
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=5)
+            consumed = sup._consume_queue(cmd_override=cmd)
+
+            self.assertEqual(
+                consumed, set(),
+                "a live foreign run must not be consumed/spawned")
+            self.assertIsNone(
+                sup._children.get('TST-F1'),
+                "fleetd must not fork a second worker over a foreign run")
+
+            queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+            remaining = [
+                json.loads(ln)
+                for ln in queue_file.read_text().splitlines() if ln.strip()
+            ]
+            self.assertEqual(
+                [e['tid'] for e in remaining], ['TST-F1'],
+                "the queue entry must be left in place so the next cycle "
+                "re-checks rather than dropping the dispatch")
+        finally:
+            sup.release_lock()
+
+    def test_a_crashed_orphan_is_still_recovered(self):
+        """An open bracket with stale activity is a crash to recover, not a
+        foreign run — it must still spawn normally."""
+        from fleetd.supervisor import Supervisor
+
+        self._append_queue_entry('TST-F2', 'test-orphan')
+        self._write_open_bracket('TST-F2')
+        self._write_activity('TST-F2', seconds_ago=4000)  # stale
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1)
+            consumed = sup._consume_queue(cmd_override=cmd)
+            self.assertEqual(
+                consumed, {'TST-F2'},
+                "a stale/crashed bracket is an orphan, not a foreign run, "
+                "and reconciliation must still be able to spawn it")
+        finally:
+            sup.release_lock()
+
+    def test_no_open_bracket_spawns_normally(self):
+        """A ticket with no pipeline log yet (first dispatch ever) is
+        unaffected by the interlock."""
+        from fleetd.supervisor import Supervisor
+
+        self._append_queue_entry('TST-F3', 'test-first-dispatch')
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1)
+            consumed = sup._consume_queue(cmd_override=cmd)
+            self.assertEqual(consumed, {'TST-F3'})
+        finally:
+            sup.release_lock()
+
+
 # ── Group 7: Kill escalation tests ───────────────────────────────────────
 
 
