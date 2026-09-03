@@ -126,6 +126,121 @@ test_update_issue_all_fields() {
   return $result
 }
 
+# Issue #284: legacy positional call sites (flow.sh) must keep working
+# unchanged — same 4-arg shape, exact values land in the mutation input.
+test_update_issue_positional_backward_compat_values() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo \"\$1\" > '$tmpfile'; echo '{\"data\":{\"issueUpdate\":{\"success\":true,\"issue\":{\"id\":\"i1\",\"identifier\":\"WIL-1\"}}}}'; }
+    update_issue 'i1' 'state-1' '[\"label-1\"]' 'assignee-1'
+  " 2>/dev/null
+  jq -e '.variables.input == {"stateId":"state-1","labelIds":["label-1"],"assigneeId":"assignee-1"}' "$tmpfile" >/dev/null 2>&1
+  local result=$?
+  rm -f "$tmpfile"
+  return $result
+}
+
+# Issue #284: --title alone, no positional args at all.
+test_update_issue_title_flag_only() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo \"\$1\" > '$tmpfile'; echo '{\"data\":{\"issueUpdate\":{\"success\":true,\"issue\":{\"id\":\"i1\",\"identifier\":\"WIL-1\"}}}}'; }
+    update_issue 'i1' --title 'New Title'
+  " 2>/dev/null
+  jq -e '.variables.input == {"title":"New Title"}' "$tmpfile" >/dev/null 2>&1
+  local result=$?
+  rm -f "$tmpfile"
+  return $result
+}
+
+# Issue #284: --description alone.
+test_update_issue_description_flag_only() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo \"\$1\" > '$tmpfile'; echo '{\"data\":{\"issueUpdate\":{\"success\":true,\"issue\":{\"id\":\"i1\",\"identifier\":\"WIL-1\"}}}}'; }
+    update_issue 'i1' --description 'New Description'
+  " 2>/dev/null
+  jq -e '.variables.input == {"description":"New Description"}' "$tmpfile" >/dev/null 2>&1
+  local result=$?
+  rm -f "$tmpfile"
+  return $result
+}
+
+# Issue #284: multiple new flags combined (title + project + parent + priority) —
+# and confirms omitted fields (state/labels/assignee/description) are NOT present.
+test_update_issue_multiple_flags_combined() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo \"\$1\" > '$tmpfile'; echo '{\"data\":{\"issueUpdate\":{\"success\":true,\"issue\":{\"id\":\"i1\",\"identifier\":\"WIL-1\"}}}}'; }
+    update_issue 'i1' --title 'Rescoped title' --project 'proj-1' --parent 'par-1' --priority 2
+  " 2>/dev/null
+  jq -e '.variables.input == {"title":"Rescoped title","projectId":"proj-1","parentId":"par-1","priority":2}' "$tmpfile" >/dev/null 2>&1
+  local result=$?
+  rm -f "$tmpfile"
+  return $result
+}
+
+# Issue #284: positional state/labels/assignee combined with a new named flag
+# (the concrete CRE-67 rescope shape: keep state/labels, change title).
+test_update_issue_flags_combined_with_positional() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo \"\$1\" > '$tmpfile'; echo '{\"data\":{\"issueUpdate\":{\"success\":true,\"issue\":{\"id\":\"i1\",\"identifier\":\"WIL-1\"}}}}'; }
+    update_issue 'i1' 'state-1' '' 'assignee-1' --title 'SPA-fallback-only title' --description 'trimmed AC1'
+  " 2>/dev/null
+  jq -e '.variables.input == {"stateId":"state-1","assigneeId":"assignee-1","title":"SPA-fallback-only title","description":"trimmed AC1"}' "$tmpfile" >/dev/null 2>&1
+  local result=$?
+  rm -f "$tmpfile"
+  return $result
+}
+
+# Issue #284: omitted fields must not appear in the input at all, not even as null.
+test_update_issue_omitted_fields_absent() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo \"\$1\" > '$tmpfile'; echo '{\"data\":{\"issueUpdate\":{\"success\":true,\"issue\":{\"id\":\"i1\",\"identifier\":\"WIL-1\"}}}}'; }
+    update_issue 'i1' --title 'Only title'
+  " 2>/dev/null
+  jq -e '.variables.input | (has("description") or has("projectId") or has("parentId") or has("priority") or has("stateId") or has("labelIds") or has("assigneeId")) | not' "$tmpfile" >/dev/null 2>&1
+  local result=$?
+  rm -f "$tmpfile"
+  return $result
+}
+
+# Issue #284: an unrecognized flag is a hard error, not a silent no-op.
+test_update_issue_unknown_flag_errors() {
+  local rc=0
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo '{\"data\":{\"issueUpdate\":{\"success\":true}}}'; }
+    update_issue 'i1' --bogus 'x'
+  " >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ]
+}
+
+# Issue #284: --priority must be numeric.
+test_update_issue_invalid_priority_errors() {
+  local rc=0
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo '{\"data\":{\"issueUpdate\":{\"success\":true}}}'; }
+    update_issue 'i1' --priority 'not-a-number'
+  " >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 1 ]
+}
+
 # ── get_me test (mock linear_graphql) ────────────────────────────────────────
 
 test_get_me_returns_viewer() {
@@ -320,6 +435,14 @@ for fn in \
   test_normalize_dot_comments_shape \
   test_update_issue_skips_empty_state_id \
   test_update_issue_all_fields \
+  test_update_issue_positional_backward_compat_values \
+  test_update_issue_title_flag_only \
+  test_update_issue_description_flag_only \
+  test_update_issue_multiple_flags_combined \
+  test_update_issue_flags_combined_with_positional \
+  test_update_issue_omitted_fields_absent \
+  test_update_issue_unknown_flag_errors \
+  test_update_issue_invalid_priority_errors \
   test_get_me_returns_viewer \
   test_check_api_key_exits_4_when_unset \
   test_check_api_key_finds_key_in_current_dir_dotenv \

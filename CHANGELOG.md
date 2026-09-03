@@ -57,6 +57,43 @@ process once an operator signs off on donating one.
 - Wired into `Makefile`'s `test-planner` target, after
   `test-planner-crosscheck.sh`.
 
+## ticket-auto-pipeline 0.38.3 (2026-09-03)
+
+`update_issue()` (`lib/linear-api.sh`) accepted only `state_id`/`label_ids`/
+`assignee_id` — the pipeline could move a ticket through states and relabel
+it, but had no way to rescope one. `IssueUpdateInput` supports `title`,
+`description`, `projectId`, `parentId`, and `priority`, none of which were
+reachable through the helper, so any rescope (e.g. an adversarial-review
+BLOCKED verdict shrinking a ticket's scope, as with CRE-67) required a
+hand-rolled `linear_graphql` mutation at the call site. Filed as
+[#284](https://github.com/willard-pro/claude-plugins/issues/284).
+
+- Fix: `update_issue()` now also accepts named flags —
+  `--state`/`--labels`/`--assignee`/`--title`/`--description`/`--project`/
+  `--parent`/`--priority` — usable instead of or alongside the original 4
+  positional args. Detection is unambiguous: after `<issue_id>`, if the next
+  argument does not start with `--`, up to 3 positional args are consumed
+  for `state_id`/`label_ids`/`assignee_id` exactly as before; whatever
+  remains is parsed strictly as `--flag value` pairs. An unrecognized flag
+  returns 1 instead of silently no-opping. The existing dynamic
+  `jq '. + {field: $v}'` input-building extends the same way to the 5 new
+  fields — a field is only added to the mutation input when non-empty.
+  `--priority` is validated numeric before being sent.
+- The one real call site (`skills/ticket-flow/flow.sh`) is unchanged — it
+  still calls the legacy 4-arg positional form.
+- New tests in `lib/tests/test-linear-api.sh`: positional-only backward
+  compatibility (exact values), `--title`-only, `--description`-only,
+  multiple new flags combined, new flags combined with positional
+  state/labels/assignee (the CRE-67 rescope shape), omitted fields staying
+  absent from the mutation input, an unknown flag returning 1, and a
+  non-numeric `--priority` returning 1.
+- `create_issue()` is intentionally not added here — tracked separately as
+  [#283](https://github.com/willard-pro/claude-plugins/issues/283); this
+  change keeps the input-building pattern (`jq --arg`/`--argjson`, omit
+  empty fields) consistent with `planner_linear_build_issue_input()` in
+  `ticket-planner/lib/planner-linear-api.sh` so a follow-up `create_issue()`
+  can share the same shape if useful.
+
 ## ticket-auto-pipeline 0.38.2 (2026-09-03)
 
 `_resolve_type_label()` (`gate-check.sh`) matched a ticket's Type label
