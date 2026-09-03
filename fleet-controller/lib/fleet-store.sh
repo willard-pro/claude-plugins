@@ -139,6 +139,29 @@ fleet_store_in_flight() {
 ORDER BY tid;" "${1:-}"
 }
 
+# Session ids reach an SQL string, so they are validated rather than escaped.
+# fleetd stamps a uuid4 before exec (supervisor.py); the pattern here matches
+# that alphabet and rejects everything else.
+_fleet_store_safe_session() {
+  case "$1" in
+  '' | *[!A-Za-z0-9_-]*) return 1 ;;
+  esac
+  return 0
+}
+
+# Resolve a Stop/StopFailure hook payload's session_id to the worker row that
+# spawned it: `tid|generation`, most recent match first, empty when
+# unresolvable. Mirrors `store.py`'s `worker_by_session` — the replacement
+# for globbing `*-run.json` for a matching session_id, which breaks once a
+# ticket has several concurrent phase-worker rows.
+# Usage: fleet_store_worker_by_session <session_id> [workspace]
+fleet_store_worker_by_session() {
+  local session_id="$1" workspace="${2:-}"
+  _fleet_store_safe_session "$session_id" || return 1
+  fleet_store_sql "SELECT tid || '|' || generation FROM workers \
+WHERE session_id = '${session_id}' ORDER BY id DESC LIMIT 1;" "$workspace"
+}
+
 # Generation fence, preserving the file-based semantics exactly: unfenced is
 # allowed, fenced with no caller generation fails closed, and a caller
 # generation at or below the fenced one is refused as superseded.

@@ -8,9 +8,26 @@
 # This hook only records that a turn ended this way, not why each retry
 # failed.
 #
-# Same session_id -> tid/generation resolution as stop-capture.sh. Silently
+# Same session_id -> tid resolution as stop-capture.sh: the fleet state
+# store's `workers` table (fleet-store.sh) when fleetd is co-installed and
+# has a store for this workspace, falling back to scanning
+# `{FLEET_STATE_DIR}/*-run.json` when the store is unavailable. Silently
 # exits 0 when unresolvable — must never affect non-fleet Claude Code usage.
 set -eo pipefail
+
+# Discover and source fleet-store.sh for the store-backed resolution path.
+# Same discovery order as stop-capture.sh / lib/spawn-helper.sh.
+_sf_store_sh=""
+for _f_cand in \
+  "$(dirname "${BASH_SOURCE[0]}")/../../fleet-controller/lib/fleet-store.sh" \
+  "$HOME/.claude/skills/fleet-controller/lib/fleet-store.sh" \
+  "$HOME/.claude/plugins/fleet-controller/lib/fleet-store.sh"; do
+  [ -f "$_f_cand" ] && {
+    source "$_f_cand"
+    _sf_store_sh="$_f_cand"
+    break
+  }
+done
 
 read -r hook_json
 
@@ -21,14 +38,22 @@ SESSION_ID=$(echo "$hook_json" | python3 -c "import json,sys; print(json.load(sy
 [ -d "$FLEET_STATE_DIR" ] || exit 0
 
 TID=""
-for run_file in "$FLEET_STATE_DIR"/*-run.json; do
-  [ -f "$run_file" ] || continue
-  found_session=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('session_id',''))" "$run_file" 2>/dev/null || echo "")
-  if [ "$found_session" = "$SESSION_ID" ]; then
-    TID=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('tid',''))" "$run_file" 2>/dev/null || echo "")
-    break
-  fi
-done
+
+if [ -n "$_sf_store_sh" ] && declare -f fleet_store_worker_by_session >/dev/null 2>&1; then
+  found=$(fleet_store_worker_by_session "$SESSION_ID" "$FLEET_STATE_DIR" 2>/dev/null || echo "")
+  [ -n "$found" ] && TID="${found%%|*}"
+fi
+
+if [ -z "$TID" ]; then
+  for run_file in "$FLEET_STATE_DIR"/*-run.json; do
+    [ -f "$run_file" ] || continue
+    found_session=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('session_id',''))" "$run_file" 2>/dev/null || echo "")
+    if [ "$found_session" = "$SESSION_ID" ]; then
+      TID=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('tid',''))" "$run_file" 2>/dev/null || echo "")
+      break
+    fi
+  done
+fi
 
 [ -z "$TID" ] && exit 0
 

@@ -10,13 +10,34 @@
 # point for. Does NOT fire on SIGINT or SIGKILL; exit capture (fleetd's own
 # reaper) covers those cases, with this field simply absent.
 #
-# Resolution: the hook payload carries session_id, not a ticket id — fleetd
-# generates the session id at spawn and records it in {tid}-run.json, so
-# this hook matches back to a ticket by scanning run-registry files for the
-# matching session_id. Silently exits 0 when unresolvable (not a
-# fleet-managed worker, e.g. an interactive session) — this hook must never
-# affect non-fleet Claude Code usage.
+# Resolution: the hook payload carries session_id, not a ticket id. Resolved
+# via the fleet state store's `workers` table (fleet-store.sh,
+# fleet_store_worker_by_session) when fleetd is co-installed and has a store
+# for this workspace — the store is the authoritative source for a phase
+# worker's tid+generation now that several worker rows can coexist per
+# ticket. Falls back to scanning `{FLEET_STATE_DIR}/*-run.json` for the
+# matching session_id when the store is unavailable (no fleet-controller
+# installed, sqlite3 missing, or the store not yet initialized) — that file
+# convention remains the ticket-level path's registry until task 11.4's
+# store migration is complete fleet-wide. Silently exits 0 when unresolvable
+# (not a fleet-managed worker, e.g. an interactive session) — this hook must
+# never affect non-fleet Claude Code usage.
 set -eo pipefail
+
+# Discover and source fleet-store.sh for the store-backed resolution path.
+# Look relative to this script (monorepo), then installed plugin paths —
+# same discovery order lib/spawn-helper.sh uses for fleet-config.sh.
+_stop_store_sh=""
+for _s_cand in \
+  "$(dirname "${BASH_SOURCE[0]}")/../../fleet-controller/lib/fleet-store.sh" \
+  "$HOME/.claude/skills/fleet-controller/lib/fleet-store.sh" \
+  "$HOME/.claude/plugins/fleet-controller/lib/fleet-store.sh"; do
+  [ -f "$_s_cand" ] && {
+    source "$_s_cand"
+    _stop_store_sh="$_s_cand"
+    break
+  }
+done
 
 read -r hook_json
 
@@ -30,15 +51,26 @@ LAST_MSG=$(echo "$hook_json" | python3 -c "import json,sys; print(json.load(sys.
 # ── Resolve TID + generation by session_id ───────────────────────────────────
 TID=""
 GENERATION=""
-for run_file in "$FLEET_STATE_DIR"/*-run.json; do
-  [ -f "$run_file" ] || continue
-  found_session=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('session_id',''))" "$run_file" 2>/dev/null || echo "")
-  if [ "$found_session" = "$SESSION_ID" ]; then
-    TID=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('tid',''))" "$run_file" 2>/dev/null || echo "")
-    GENERATION=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('generation',''))" "$run_file" 2>/dev/null || echo "")
-    break
+
+if [ -n "$_stop_store_sh" ] && declare -f fleet_store_worker_by_session >/dev/null 2>&1; then
+  found=$(fleet_store_worker_by_session "$SESSION_ID" "$FLEET_STATE_DIR" 2>/dev/null || echo "")
+  if [ -n "$found" ]; then
+    TID="${found%%|*}"
+    GENERATION="${found#*|}"
   fi
-done
+fi
+
+if [ -z "$TID" ]; then
+  for run_file in "$FLEET_STATE_DIR"/*-run.json; do
+    [ -f "$run_file" ] || continue
+    found_session=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('session_id',''))" "$run_file" 2>/dev/null || echo "")
+    if [ "$found_session" = "$SESSION_ID" ]; then
+      TID=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('tid',''))" "$run_file" 2>/dev/null || echo "")
+      GENERATION=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('generation',''))" "$run_file" 2>/dev/null || echo "")
+      break
+    fi
+  done
+fi
 
 [ -z "$TID" ] && exit 0
 [ -z "$GENERATION" ] && exit 0

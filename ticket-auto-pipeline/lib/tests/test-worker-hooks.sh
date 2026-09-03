@@ -6,6 +6,7 @@ set -eo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOOKS_DIR="$(cd "$SCRIPT_DIR/../../hooks" && pwd)"
+FLEET_SCHEMA_SQL="$SCRIPT_DIR/../../../fleet-controller/fleetd/schema.sql"
 
 _TEST_TMPDIRS=()
 _mktemp_test_dir() {
@@ -45,6 +46,18 @@ _write_run_file() {
   cat >"$state_dir/$filename" <<EOF
 {"tid": "$tid", "session_id": "$session_id", "generation": $generation}
 EOF
+}
+
+_store_insert_worker() {
+  # _store_insert_worker <state_dir> <tid> <session_id> <generation>
+  local state_dir="$1" tid="$2" session_id="$3" generation="$4"
+  command -v sqlite3 >/dev/null 2>&1 || return 1
+  sqlite3 -batch "$state_dir/fleet-state.db" <"$FLEET_SCHEMA_SQL" >/dev/null 2>&1 || true
+  sqlite3 -batch "$state_dir/fleet-state.db" "
+INSERT INTO tickets (tid) VALUES ('$tid');
+INSERT INTO workers (tid, phase, pid, generation, session_id, status)
+  VALUES ('$tid', 'implement', 1, $generation, '$session_id', 'running');
+" >/dev/null 2>&1
 }
 
 FILTER="${1:-}"
@@ -107,6 +120,27 @@ test_capture_preserves_existing_hook_file_keys() {
     grep -q "final answer" "$state_dir/TST-1-gen1-hook.json"
 }
 
+test_capture_resolves_via_store_when_no_run_file() {
+  command -v sqlite3 >/dev/null 2>&1 || return 0
+  local state_dir
+  state_dir=$(_mktemp_test_dir)
+  _store_insert_worker "$state_dir" "TST-3" "sess-store" 2
+  echo '{"session_id":"sess-store","last_assistant_message":"resolved via store"}' |
+    FLEET_STATE_DIR="$state_dir" "$HOOKS_DIR/stop-capture.sh" >/dev/null 2>&1
+  grep -q "resolved via store" "$state_dir/TST-3-gen2-hook.json"
+}
+
+test_capture_falls_back_to_file_when_store_has_no_match() {
+  command -v sqlite3 >/dev/null 2>&1 || return 0
+  local state_dir
+  state_dir=$(_mktemp_test_dir)
+  _store_insert_worker "$state_dir" "TST-OTHER" "sess-unrelated" 1
+  _write_run_file "$state_dir" "TST-4" "sess-file-only" 1
+  echo '{"session_id":"sess-file-only","last_assistant_message":"from file registry"}' |
+    FLEET_STATE_DIR="$state_dir" "$HOOKS_DIR/stop-capture.sh" >/dev/null 2>&1
+  grep -q "from file registry" "$state_dir/TST-4-gen1-hook.json"
+}
+
 # ── stop-failure.sh ────────────────────────────────────────────────────────
 
 test_failure_appends_worker_api_error_line() {
@@ -138,6 +172,17 @@ test_failure_noop_when_session_not_found() {
   ! grep -q "worker-api-error" "$state_dir/TST-2-pipeline.log"
 }
 
+test_failure_resolves_via_store_when_no_run_file() {
+  command -v sqlite3 >/dev/null 2>&1 || return 0
+  local state_dir
+  state_dir=$(_mktemp_test_dir)
+  _store_insert_worker "$state_dir" "TST-5" "sess-store-fail" 1
+  : >"$state_dir/TST-5-pipeline.log"
+  echo '{"session_id":"sess-store-fail"}' |
+    FLEET_STATE_DIR="$state_dir" "$HOOKS_DIR/stop-failure.sh" >/dev/null 2>&1
+  grep -q "META|worker-api-error|warn" "$state_dir/TST-5-pipeline.log"
+}
+
 # ── dispatch ─────────────────────────────────────────────────────────────
 
 for fn in \
@@ -147,9 +192,12 @@ for fn in \
   test_capture_noop_when_state_dir_unset \
   test_capture_rejects_path_traversal_tid \
   test_capture_preserves_existing_hook_file_keys \
+  test_capture_resolves_via_store_when_no_run_file \
+  test_capture_falls_back_to_file_when_store_has_no_match \
   test_failure_appends_worker_api_error_line \
   test_failure_noop_when_pipeline_log_missing \
-  test_failure_noop_when_session_not_found; do
+  test_failure_noop_when_session_not_found \
+  test_failure_resolves_via_store_when_no_run_file; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

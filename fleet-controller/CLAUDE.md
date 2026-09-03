@@ -47,6 +47,42 @@ fleet-controller/
 
 **HTTP control surface (on-demand, loopback-bound):** alongside `GET /health`, fleetd serves `POST /dispatch` (scoped dispatch of one epic against the running daemon — same `fleet_dispatch_initiative` the skill and auto-sweep call, spawns immediately instead of waiting for the poll cycle), `POST /stop` (epic-scoped stop: purge queue, escalate-kill workers, write `stop-{epic}.json`; the single bash implementation is `fleet_stop_initiative`, also reachable via the skill's `stop` subcommand with the daemon down), and read-only `GET /workers`, `GET /workers/<tid>` (phase/anomalies/tokens/confidence per worker), `GET /queue`, `GET /epics`. Use these as an alternative to the `/fleet-controller dispatch` skill (on-demand, no restart-to-reconfigure) and to the fleet dashboard (per-ticket detail without re-rendering the whole fleet). Dispatch is the single start/resume/un-stop entry point: a stop-file gates every dispatch trigger path until an explicit `resume: true` clears it; the auto-sweep never clears. See README "HTTP API" for request/response shapes.
 
+## Phase-level dispatch (two invocation modes)
+
+fleetd can run a ticket through the pipeline two ways:
+
+- **Ticket-level** (the original mode, still the default): fleetd spawns one
+  `claude -p '/ticket-auto {tid} --auto'` worker, and that worker — an LLM
+  reading `ticket-auto/SKILL.md`'s dispatch table — sequences every phase
+  itself inside one long-lived process.
+- **Phase-level**: fleetd spawns one short-lived `claude -p '/ticket-<phase>
+  {tid} ...'` worker per phase and sequences them itself in Python, deciding
+  done/fail deterministically from exit code, log markers and
+  `META|phase-result` rather than reading agent prose.
+
+Both modes read the same canonical file, `ticket-auto-pipeline/skills/ticket-flow/dispatch-table.json`
+— the manual path's rendered `SKILL.md` table and phase-dispatch's in-memory
+phase sequence are two views of one JSON, which is what keeps a table edit
+from silently diverging the two paths (a coverage test asserts every
+`step_id` has a phase-dispatch handler; see "Dispatch table" in
+`ticket-auto-pipeline/CLAUDE.md`).
+
+Four `fleetd/` modules implement the phase-level path, each replacing one
+slice of what the router (an LLM) does inline on the manual path:
+
+| Module | Replaces | What it owns |
+|--------|----------|---------------|
+| `preamble.py` | `SKILL.md` Steps 0.1–0.6 | Once-per-ticket setup: env file, pipeline-log schema line, branch context, Linear preflight. Calls `ticket-auto-pipeline/lib/ticket-preamble.sh` rather than reimplementing it — idempotent, so fleetd re-entering mid-ticket after a restart just gets the same result back. |
+| `phase_dispatch.py` | The router's step-to-step sequencing | Loads the dispatch table, builds and forks each phase's `claude -p` command, records dispatch position and worker rows in the state store as it goes (so resume never needs to re-derive position from the log), evaluates the four loop-type steps' caps, and opens/closes each phase's log bracket. |
+| `gate_hold.py` | The router's `GATE_HELD`/`RECONCILE_CYCLE` handling | A held ticket as a `tickets` row (`gate_held`, `reconcile_cycle`), reconciled on its own `FLEET_GATE_RECONCILE_INTERVAL` cadence rather than every detection sweep — an indefinite human-approval wait survives a fleetd restart because it was never a process to begin with. |
+| `orchestration.py` | The non-agent steps the router interleaves between phase spawns | Executor for each step's `pre_dispatch`/`post_dispatch` array in the dispatch table — `return-completeness-check.sh`, `outcome-label-check.sh`, `flow.sh` triggers, auto-merge, worktree release. Declared in the table, not enumerated in Python, for the same reason `phase_dispatch.py` loads the table instead of transcribing it. |
+
+**Rollout is not yet switched on.** Both paths are fully implemented and
+tested; fleetd still dispatches every ticket through the ticket-level path
+by default. Moving the default to phase-level is a separate, later step —
+feature-flag first, compare outcomes on a subset, then promote — tracked
+outside this file.
+
 ## Worker exit records & recovery
 
 Every worker exit — natural or fleet-killed — is persisted per-generation, never overwriting a prior generation's record:
@@ -74,7 +110,7 @@ The pipeline log gains one new `META` step: `META|worker-exit|done|fail|code=<N>
 | `fleet-detect.sh` | 14 detection engines: `detect_phase_failures`, `detect_stalls`, `detect_zombies`, `detect_loops`, `detect_abandoned`, `detect_flow_failures`, `detect_auto_mode_blocks`, `detect_tool_errors`, `detect_planner_feedback`, `detect_blocked_by`, `detect_initiative_dispatch`, `detect_epic_branch_ready`, `detect_runaway_calls`, `detect_workspace_config`. Aggregator: `fleet_detect_all` outputs JSON. Sourceable library — no `set -euo pipefail`. |
 | `fleet-intervene.sh` | Intervention executor: `fleet_kill_pipeline` (verified escalation with PID-reuse guard), `fleet_can_restart`, `fleet_restart_pipeline`, `fleet_stop_background`. flow.sh mutex-aware, `FLEET_DRY_RUN` guard. |
 | `fleet-monitor.sh` | Monitor loop: `fleet_monitor_cycle` (one detection + intervention pass), `fleet_monitor_loop` (continuous polling with stop-file gating). Spawn queue consumption integrated with `flock` serialization. Dual-mode: interactive (ACTION:spawn-restart) or cron (JSONL queue). |
-| `fleet-store.sh` | Read-only bash access to the fleet state store via the `sqlite3` CLI: `fleet_store_ready`, `fleet_store_sql`, `fleet_store_pipeline_rows`, `fleet_store_owner`, `fleet_store_is_owned`, `fleet_store_position`, `fleet_store_last_activity_epoch`, `fleet_store_in_flight`, `fleet_store_fence_allows`. Every function degrades to "no store" rather than failing, so a host with no fleetd — or no sqlite3 — keeps working on the file path. Ticket ids are validated against an identifier alphabet before reaching an SQL string, not escaped. |
+| `fleet-store.sh` | Read-only bash access to the fleet state store via the `sqlite3` CLI: `fleet_store_ready`, `fleet_store_sql`, `fleet_store_pipeline_rows`, `fleet_store_owner`, `fleet_store_is_owned`, `fleet_store_position`, `fleet_store_last_activity_epoch`, `fleet_store_in_flight`, `fleet_store_fence_allows`, `fleet_store_worker_by_session` (session_id → `tid\|generation`, the `ticket-auto-pipeline/hooks/stop-capture.sh` and `stop-failure.sh` resolution path). Every function degrades to "no store" rather than failing, so a host with no fleetd — or no sqlite3 — keeps working on the file path. Ticket ids and session ids are validated against an identifier alphabet before reaching an SQL string, not escaped. |
 | `fleet-registry.sh` | Run registry + generation fence helpers: `registry_write`, `registry_read`, `registry_pid`, `registry_generation`, `registry_exists`, `registry_clear`, `fence_write`, `fence_read`, `fence_is_superseded`, `fence_clear`. Per-ticket JSON files; no shared-file races. |
 | `fleetd/otel.py` | OTel exporter — derives GenAI-convention spans from the pipeline and activity logs, ships OTLP. Pure stdlib at import time; the `opentelemetry` dependency is lazy and inside the exporter process. Supervised by fleetd under the fixed id `otel-exporter`. |
 | `fleet-dashboard.sh` | Dashboard renderer: `fleet_render_dashboard` / `fleet_render_dashboard_from_data` (terminal health table) and `fleet_write_report` / `fleet_write_report_from_data` (markdown report). |
