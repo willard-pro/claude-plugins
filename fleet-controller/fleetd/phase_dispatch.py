@@ -458,6 +458,142 @@ def phase_terminal_write(phase, step, outcome, log_file, hb_log_file='',
     return True
 
 
+# ── Dual-invocation interlock (task 4.19) ───────────────────────────────────
+#
+# Nothing stops fleetd phase-dispatching a ticket a human is concurrently
+# running `/ticket-auto <ID>` against. Both append to the same
+# `logs/{ID}-pipeline.log`, race the same bracket guards, and can interleave
+# `flow.sh` mutations against one Linear issue.
+#
+# The obvious design — a lock file both paths take — does not work here. The
+# manual path is an LLM following SKILL.md prose, so a lock it is *asked* to
+# take is a lock that is sometimes not taken, and a lock that is usually
+# honoured is worse than none: it converts a visible collision into a rare one
+# nobody is looking for any more.
+#
+# So the interlock is one fleetd can enforce alone, from evidence the other
+# party emits whether or not it cooperates. A ticket is being run by someone
+# else when all three hold:
+#
+#   1. its pipeline log has an **open bracket** — a `|waiting|` line with no
+#      matching terminal, meaning some orchestrator is mid-phase;
+#   2. fleetd has **no live worker** of its own for that ticket;
+#   3. its activity log shows a **tool call within the freshness window** —
+#      an agent is making tool calls right now.
+#
+# The third condition carries the whole design. Conditions 1 and 2 alone are
+# the *orphan* case — a worker that died mid-phase — which startup
+# reconciliation already owns and must keep owning. A stale activity log with
+# an open bracket is a crash to recover; a fresh one is a session to stay out
+# of. Collapsing them would make every crash recovery look like a human at the
+# keyboard, and fleetd would stop recovering anything.
+
+DEFAULT_FOREIGN_ACTIVITY_SECS = 300
+
+FOREIGN_NONE = ''
+FOREIGN_ACTIVE_RUN = 'active-foreign-run'
+
+ForeignRun = namedtuple('ForeignRun', 'detected reason detail age_secs')
+
+
+def foreign_activity_window_secs():
+    """Seconds of activity-log silence after which a run is not 'in progress'.
+
+    300s by default, matching `FLEET_ACTIVITY_WARN_SECS`'s neighbourhood
+    rather than its exact value: this is not a health threshold, it is "could
+    a person still be mid-phase here". A human reading output and thinking
+    between tool calls is normal; five minutes of nothing is not a session
+    fleetd needs to keep clear of.
+    """
+    raw = os.environ.get('FLEET_FOREIGN_ACTIVITY_SECS',
+                         str(DEFAULT_FOREIGN_ACTIVITY_SECS))
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_FOREIGN_ACTIVITY_SECS
+    return value if value > 0 else DEFAULT_FOREIGN_ACTIVITY_SECS
+
+
+def has_open_bracket(log_lines):
+    """Whether the log's last phase bracket is unresolved.
+
+    Scans backwards for the first line that is either a `|waiting|` or a
+    terminal, and answers on that one. Counting waiting-vs-terminal totals
+    instead would be wrong on any log carrying a suppressed duplicate or a
+    legacy zombie bracket, and both are common.
+    """
+    for line in reversed(list(log_lines or [])):
+        parts = line.split('|')
+        if len(parts) < 4:
+            continue
+        status = parts[3]
+        if status == 'waiting':
+            return True
+        if status in ('done', 'fail', 'skip'):
+            return False
+    return False
+
+
+def last_activity_epoch(activity_log):
+    """Epoch seconds of the newest entry in `{tid}-activity.log`, or None.
+
+    The file is written per tool call by `hooks/agent-activity.sh` in the
+    agent's own process, so it is the one liveness signal an orchestrator
+    cannot manufacture on the agent's behalf — which is exactly why it is the
+    discriminator here.
+    """
+    try:
+        lines = [ln for ln in Path(activity_log).read_text().splitlines()
+                 if ln.strip()]
+    except (OSError, TypeError):
+        return None
+    for line in reversed(lines):
+        stamp = line.split('|', 1)[0].strip()
+        try:
+            parsed = datetime.strptime(stamp, '%Y-%m-%dT%H:%M:%SZ')
+        except ValueError:
+            continue
+        return parsed.replace(tzinfo=timezone.utc).timestamp()
+    return None
+
+
+def detect_foreign_run(tid, log_lines, activity_log, fleetd_owns_worker,
+                       now=None, window=None):
+    """Whether someone other than fleetd is currently running this ticket.
+
+    `fleetd_owns_worker` is the caller's answer to "do I have a live worker
+    for this tid" — the store's `running_workers` row or the run registry,
+    injected rather than looked up so this stays a pure decision.
+
+    Returns a `ForeignRun`. `detected` False is the ordinary case and includes
+    the orphan: an open bracket with a stale activity log is a crash to
+    recover, and must not be mistaken for a session to keep clear of.
+    """
+    if fleetd_owns_worker:
+        return ForeignRun(False, FOREIGN_NONE, 'fleetd owns this ticket', None)
+    if not has_open_bracket(log_lines):
+        return ForeignRun(False, FOREIGN_NONE, 'no open bracket', None)
+
+    last = last_activity_epoch(activity_log)
+    if last is None:
+        return ForeignRun(False, FOREIGN_NONE,
+                          'open bracket, no agent activity recorded', None)
+
+    now = time.time() if now is None else now
+    window = foreign_activity_window_secs() if window is None else window
+    age = int(now - last)
+    if age > window:
+        # The orphan case, and deliberately not a foreign run: this is what
+        # reconciliation exists for.
+        return ForeignRun(False, FOREIGN_NONE,
+                          f'open bracket, activity stale ({age}s)', age)
+
+    return ForeignRun(
+        True, FOREIGN_ACTIVE_RUN,
+        f'{tid} has an open bracket with agent activity {age}s ago and no '
+        f'fleetd worker — another orchestrator is running it', age)
+
+
 # ── The spawn bracket, opening half (task 4.12) ─────────────────────────────
 #
 # `spawn_agent_pre` does six things. The split for fleetd is decided by what

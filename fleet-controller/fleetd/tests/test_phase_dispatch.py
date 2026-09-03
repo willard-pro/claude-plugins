@@ -349,6 +349,106 @@ if __name__ == '__main__':
     unittest.main()
 
 
+class TestForeignRunInterlock(unittest.TestCase):
+    """Task 4.19 — staying out of a session fleetd does not own.
+
+    The line these tests defend is between a *foreign run* and an *orphan*.
+    Both look like an open bracket with no fleetd worker; only the activity
+    log tells them apart, and getting it wrong in one direction interleaves
+    two orchestrators on one Linear issue while getting it wrong in the other
+    stops fleetd recovering from any crash at all.
+    """
+
+    NOW = 1_760_000_000.0
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.activity = Path(self._tmp.name) / 'CRE-5-activity.log'
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _activity(self, seconds_ago):
+        from datetime import datetime, timezone
+        stamp = datetime.fromtimestamp(self.NOW - seconds_ago, timezone.utc)
+        self.activity.write_text(
+            stamp.strftime('%Y-%m-%dT%H:%M:%SZ') + '|IMPLEMENT|Edit\n')
+        return self.activity
+
+    OPEN = ['2026-09-03T09:00:00Z|IMPLEMENT|implement|waiting|Agent launched']
+    CLOSED = OPEN + ['2026-09-03T09:20:00Z|IMPLEMENT|implement|done|ok']
+
+    def test_a_live_foreign_session_is_detected(self):
+        found = phase_dispatch.detect_foreign_run(
+            'CRE-5', self.OPEN, self._activity(30), False, now=self.NOW)
+        self.assertTrue(found.detected)
+        self.assertEqual(found.reason, phase_dispatch.FOREIGN_ACTIVE_RUN)
+        self.assertEqual(found.age_secs, 30)
+
+    def test_a_stale_activity_log_is_an_orphan_not_a_foreign_run(self):
+        # The distinction the whole design rests on. Treating this as foreign
+        # would stop reconciliation recovering from any crash.
+        found = phase_dispatch.detect_foreign_run(
+            'CRE-5', self.OPEN, self._activity(4000), False, now=self.NOW)
+        self.assertFalse(found.detected)
+        self.assertIn('stale', found.detail)
+
+    def test_fleetds_own_worker_is_never_foreign(self):
+        found = phase_dispatch.detect_foreign_run(
+            'CRE-5', self.OPEN, self._activity(5), True, now=self.NOW)
+        self.assertFalse(found.detected)
+
+    def test_a_resolved_bracket_is_not_a_run_in_progress(self):
+        found = phase_dispatch.detect_foreign_run(
+            'CRE-5', self.CLOSED, self._activity(5), False, now=self.NOW)
+        self.assertFalse(found.detected)
+        self.assertIn('no open bracket', found.detail)
+
+    def test_a_missing_activity_log_does_not_block_dispatch(self):
+        # A ticket a human started before the activity hook existed, or on a
+        # host where it never fired, must not be permanently undispatchable.
+        found = phase_dispatch.detect_foreign_run(
+            'CRE-5', self.OPEN, '/nonexistent/CRE-5-activity.log', False,
+            now=self.NOW)
+        self.assertFalse(found.detected)
+
+    def test_open_bracket_is_read_from_the_last_bracket_line_only(self):
+        # A log carrying an older unresolved bracket followed by a resolved
+        # one is not open. Counting waiting-vs-terminal totals would say it is,
+        # and legacy zombie brackets make that common.
+        lines = [
+            '2026-09-03T08:00:00Z|APPRAISE|appraise|waiting|zombie',
+            '2026-09-03T09:00:00Z|IMPLEMENT|implement|waiting|Agent launched',
+            '2026-09-03T09:20:00Z|IMPLEMENT|implement|done|ok',
+        ]
+        self.assertFalse(phase_dispatch.has_open_bracket(lines))
+        self.assertTrue(phase_dispatch.has_open_bracket(lines[:2]))
+
+    def test_a_skip_terminal_also_closes_a_bracket(self):
+        lines = self.OPEN + [
+            '2026-09-03T09:20:00Z|IMPLEMENT|implement|skip|nothing to do']
+        self.assertFalse(phase_dispatch.has_open_bracket(lines))
+
+    def test_the_window_is_configurable(self):
+        os.environ['FLEET_FOREIGN_ACTIVITY_SECS'] = '60'
+        try:
+            self.assertEqual(phase_dispatch.foreign_activity_window_secs(), 60)
+            found = phase_dispatch.detect_foreign_run(
+                'CRE-5', self.OPEN, self._activity(120), False, now=self.NOW)
+            self.assertFalse(found.detected)
+        finally:
+            os.environ.pop('FLEET_FOREIGN_ACTIVITY_SECS', None)
+
+    def test_a_nonsense_window_falls_back_to_the_default(self):
+        os.environ['FLEET_FOREIGN_ACTIVITY_SECS'] = 'soon'
+        try:
+            self.assertEqual(
+                phase_dispatch.foreign_activity_window_secs(),
+                phase_dispatch.DEFAULT_FOREIGN_ACTIVITY_SECS)
+        finally:
+            os.environ.pop('FLEET_FOREIGN_ACTIVITY_SECS', None)
+
+
 class TestBracketOpen(unittest.TestCase):
     """Task 4.12 — the opening half, through the same shared bash writer."""
 
