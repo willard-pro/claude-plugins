@@ -788,6 +788,7 @@ def capture_phase_return(tid, phase, text, attempt=None, lib_dir=None,
         bash_cmd += ' ATTEMPT="$CPR_ATTEMPT"'
     env = {
         **os.environ,
+        'CLAUDE_SKILLS_LIB': os.environ.get('CLAUDE_SKILLS_LIB', str(lib)),
         'CPR_HELPER': str(helper),
         'CPR_TID': str(tid or ''),
         'CPR_PHASE': str(phase or ''),
