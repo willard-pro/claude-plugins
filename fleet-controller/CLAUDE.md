@@ -15,6 +15,8 @@ fleet-controller/
   lib/                            # Shared bash libraries
   lib/tests/                      # Test suites
   fleetd/                         # Python 3 supervisor daemon (stdlib-only)
+  fleetd/schema.sql               # Fleet state store schema (SQLite, v1)
+  fleetd/store.py                 # State store module — fleetd is its sole writer
   docs/                           # Architecture and reference docs
 ```
 
@@ -66,6 +68,7 @@ The pipeline log gains one new `META` step: `META|worker-exit|done|fail|code=<N>
 | `fleet-detect.sh` | 12 detection engines: `detect_phase_failures`, `detect_stalls`, `detect_zombies`, `detect_loops`, `detect_abandoned`, `detect_flow_failures`, `detect_auto_mode_blocks`, `detect_tool_errors`, `detect_planner_feedback`, `detect_blocked_by`, `detect_initiative_dispatch`, `detect_epic_branch_ready`. Aggregator: `fleet_detect_all` outputs JSON. Sourceable library — no `set -euo pipefail`. |
 | `fleet-intervene.sh` | Intervention executor: `fleet_kill_pipeline` (verified escalation with PID-reuse guard), `fleet_can_restart`, `fleet_restart_pipeline`, `fleet_stop_background`. flow.sh mutex-aware, `FLEET_DRY_RUN` guard. |
 | `fleet-monitor.sh` | Monitor loop: `fleet_monitor_cycle` (one detection + intervention pass), `fleet_monitor_loop` (continuous polling with stop-file gating). Spawn queue consumption integrated with `flock` serialization. Dual-mode: interactive (ACTION:spawn-restart) or cron (JSONL queue). |
+| `fleet-store.sh` | Read-only bash access to the fleet state store via the `sqlite3` CLI: `fleet_store_ready`, `fleet_store_sql`, `fleet_store_pipeline_rows`, `fleet_store_owner`, `fleet_store_is_owned`, `fleet_store_position`, `fleet_store_last_activity_epoch`, `fleet_store_in_flight`, `fleet_store_fence_allows`. Every function degrades to "no store" rather than failing, so a host with no fleetd — or no sqlite3 — keeps working on the file path. Ticket ids are validated against an identifier alphabet before reaching an SQL string, not escaped. |
 | `fleet-registry.sh` | Run registry + generation fence helpers: `registry_write`, `registry_read`, `registry_pid`, `registry_generation`, `registry_exists`, `registry_clear`, `fence_write`, `fence_read`, `fence_is_superseded`, `fence_clear`. Per-ticket JSON files; no shared-file races. |
 | `fleet-dashboard.sh` | Dashboard renderer: `fleet_render_dashboard` / `fleet_render_dashboard_from_data` (terminal health table) and `fleet_write_report` / `fleet_write_report_from_data` (markdown report). |
 | `fleet-dispatch.sh` | Planned-ticket dispatch. Reads initiative epics from Linear via `lib/linear-api.sh`, validates `state:execution`, ensures the epic branch exists in **every** working repo under `REPOS_ROOT` before enqueue (multi-repo precondition — creation failure in any repo gate-stops with `EPIC_BRANCH_UNAVAILABLE`; sync failure in one repo warns and continues), resolves `blocked-by` dependencies, orders tickets by explicit dispatch rank (`Urgent`→`High`→`Medium`→`Low`→`No priority` last), writes spawn queue JSONL with `generation` field via shared `_fleet_queue_append` (flock, retry, dead-letter). Respects `FLEET_MAX_CONCURRENT` and `FLEET_DRY_RUN`. |
@@ -96,6 +99,29 @@ These are sourced via `_source_if_missing` from `~/.claude/skills/lib/` (synced 
 | 10 | `detect_blocked_by` | Tickets with `blocked-by:{ID}` where blocker is Done | 0–1 |
 | 11 | `detect_initiative_dispatch` | `state:execution` epics with undispatched planned tickets | 0–1 |
 | 12 | `detect_epic_branch_ready` | Directive-carrying `state:execution` epics with all children Done; when `FLEET_EPIC_AUTO_PR=true`, actuates by calling `epic_branch_open_pr` once per tracked repo (never auto-merged) | 0–1 |
+
+## Fleet state store (SQLite)
+
+`fleetd/store.py` over `fleetd/schema.sql`. One database holding fleet-controller's operational state, replacing both the per-ticket JSON file conventions and the habit of answering "what is happening right now" by globbing `logs/*-pipeline.log` and re-parsing them on every sweep.
+
+**Authorship decides authority.** Two classes of table, and the distinction is the design:
+
+| Class | Tables | Authority |
+|-------|--------|-----------|
+| fleetd-authored | `tickets`, `workers`, `phase_runs` | Authoritative. fleetd performed the dispatch, so it knows these first-hand rather than inferring them. Nothing else writes them. |
+| projection | `log_events`, `phase_results`, `activity_events` | The append-only logs remain the source of truth. On disagreement the log wins. All are rebuildable from the logs alone. |
+
+**fleetd is the sole writer.** Every phase is an independent `claude -p` process and every tool call fires a `PostToolUse` hook; letting either write here would put dozens of uncoordinated short-lived writers on the write path. They keep appending to their logs — no change required of them — and fleetd ingests. WAL mode lets detectors and dashboards read while the writer works. Bash reads through `lib/fleet-store.sh`, which uses `sqlite3 -readonly`.
+
+**Location and lifecycle.** `${FLEET_STATE_DIR}/fleet-state.db` (falling back to the workspace, via the same `_fleet_state_dir` resolver every other piece of fleet state uses), so it inherits the reboot-surviving lifecycle the run registry and fence markers already have. No separate backup: everything that matters for recovery is either derivable from the logs or re-imported from the registry files on next start. `log_events` and `activity_events` are pruned past `FLEET_STORE_EVENT_RETENTION_DAYS` (default 30) — safe because they are projections, and retention is about query cost, not durability. Deleting the database costs a slow cold start, never data.
+
+**Startup.** `scan_workers` runs `_store_bootstrap` after registry adoption: `import_legacy_state` adopts surviving `*-run.json` and `*-fence` files, then `ingest_workspace` projects the logs. Idempotent, and also the recovery path when the database has been deleted. Each detection cycle calls `_store_sync` first, which ingests only the bytes written since the last pass.
+
+**Fail-soft everywhere.** Every store call in `supervisor.py` goes through `_store_do`, which swallows all exceptions and warns once per distinct failure. A supervisor that cannot open its store must still supervise processes: losing the store costs a slower cold start, losing the supervisor loses the fleet. `FLEET_STORE_ENABLE=false` disables it entirely.
+
+**Fence files are still written.** `_write_fence_files` writes both the store row and the `{tid}-fence` marker. `flow.sh`'s fence guard runs inside a worker and still reads the file; dropping it would let a superseded generation's Linear mutations through, which is the one thing the fence exists to prevent. The file goes away when every consumer reads the store.
+
+**Detector input.** `fleet-detect.sh` reads pipeline-log lines through one seam, `_pipeline_rows`, which returns store rows when a store is available and file lines otherwise. One seam rather than a store-backed variant per engine: the filtering, thresholds and severities stay literally the same code, which is what makes the parity assertion (`lib/tests/test-fleet-store-parity.sh`) cheap and meaningful. The heartbeat-log engines (`detect_stalls`' heartbeat dimension, `detect_loops`) and the Linear-API engines are unaffected — the store does not ingest those inputs.
 
 ## Severity scale
 
@@ -150,6 +176,8 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 | `FLEET_ZOMBIE_SECS` | 900 | Unresolved waiting entry threshold |
 | `FLEET_ACTIVITY_WARN_SECS` | 240 | Agent-activity staleness → WARN. Second, independent liveness input to `detect_stalls`, read from `{tid}-activity.log` (written per tool call by `ticket-auto-pipeline/hooks/agent-activity.sh`) and applied only while a spawn bracket is open. The watchdog `alive` line proves the *router* is running; this proves the *agent* is. 240s is deliberately well under `FLEET_STALL_WARN_SECS` — an agent that has made no tool call in 4 minutes is anomalous even though a router waiting 4 minutes is not |
 | `FLEET_ACTIVITY_STALE_SECS` | 900 | Agent-activity staleness → KILL. Capped at WARN for tickets with no fleetd run-registry entry, so a human running `/ticket-auto` by hand — who reads output and thinks between tool calls — is never escalated to an intervention |
+| `FLEET_STORE_ENABLE` | true | Set `false` to disable the state store entirely — fleetd stops writing it and every detection engine falls back to reading the log files, which is the pre-store behaviour |
+| `FLEET_STORE_EVENT_RETENTION_DAYS` | 30 | Age past which `log_events`/`activity_events` projection rows are pruned. Projections only — nothing fleetd authored is ever pruned, and anything dropped returns on a rebuild |
 | `FLEET_ACTIVITY_LOG_MAX_LINES` | 500 | Ring cap on `{tid}-activity.log`. Read by the hook, not the detector: only the last line's age and the current bracket's line count have consumers |
 | `FLEET_MAX_RESTARTS` | 2 | Max automatic restarts before giving up |
 | `FLEET_AUTO_DISPATCH` | false | Must be `true` to enable automatic dispatch of planned tickets from initiative epics. Detection still runs and reports; dispatch is the actuation step. Human approval gate still stops every auto-dispatched ticket. |

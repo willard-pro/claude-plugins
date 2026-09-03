@@ -26,6 +26,7 @@ test-lib:
 	bash fleet-controller/lib/tests/test-fleet-detect.sh
 	bash fleet-controller/lib/tests/test-fleet-detect-new.sh
 	bash fleet-controller/lib/tests/test-fleet-detect-activity.sh
+	bash fleet-controller/lib/tests/test-fleet-store-parity.sh
 	bash fleet-controller/lib/tests/test-detect-epic-branch-ready.sh
 	bash fleet-controller/lib/tests/test-fleet-intervene.sh
 	bash fleet-controller/lib/tests/test-fleet-dashboard.sh
@@ -94,6 +95,7 @@ test-lib:
 test-fleetd:
 	@echo "=== fleetd supervisor tests (must run from repo root) ==="
 	python3 -m pytest fleet-controller/fleetd/tests/test_supervisor.py -v
+	python3 -m pytest fleet-controller/fleetd/tests/test_store.py -v
 
 test-planner:
 	@echo "=== ticket-planner unit tests ==="

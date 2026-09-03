@@ -25,6 +25,14 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+# The state store. Imported defensively: a supervisor that cannot open its
+# store must still supervise processes, because the store is an accelerant
+# for state queries, not the thing that keeps workers alive.
+try:
+    from fleetd import store as _store_mod
+except ImportError:  # pragma: no cover - store unavailable
+    _store_mod = None
+
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
@@ -902,8 +910,116 @@ def _write_stop_files(tid, state_dir):
             pass
 
 
+# ── State store (fail-soft) ────────────────────────────────────────────────
+# fleetd is the store's sole writer, and every call below is wrapped so that a
+# store failure degrades fleet-controller to its pre-store behaviour instead of
+# taking the supervisor down with it. Losing the store costs a slower cold
+# start; losing the supervisor loses the fleet.
+
+FLEET_STORE_ENABLE = os.environ.get('FLEET_STORE_ENABLE', 'true') != 'false'
+
+_STORE_WARNED = set()
+
+
+def _store_warn(message):
+    """Warn once per distinct message — a per-cycle failure must not become a
+    per-cycle log flood."""
+    if message in _STORE_WARNED:
+        return
+    _STORE_WARNED.add(message)
+    print(f'fleetd[{os.getpid()}]: state store unavailable — {message}',
+          file=sys.stderr)
+
+
+def _store_do(state_dir, action, what):
+    """Run `action(store)` against the state store, swallowing every failure.
+
+    Short-lived connections rather than one long-held handle: these calls are
+    rare (spawn, exit, kill, one ingest per detection cycle), fleetd is the
+    only writer process, and not holding a connection across the daemon's
+    lifetime removes a whole class of stale-handle bug.
+    """
+    if not FLEET_STORE_ENABLE or _store_mod is None:
+        return None
+    st = None
+    try:
+        st = _store_mod.open_store(state_dir)
+        return action(st)
+    except Exception as exc:  # noqa: BLE001 - deliberately total
+        _store_warn(f'{what}: {exc}')
+        return None
+    finally:
+        if st is not None:
+            try:
+                st.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _store_bootstrap(state_dir):
+    """First-start adoption: take over the JSON file conventions the store
+    replaces, then project the existing logs.
+
+    Runs on every start, not just the first: it is idempotent, and it is also
+    the recovery path for a deleted database — in-flight tickets are recovered
+    from the registry files and the logs rather than orphaned.
+    """
+    def _run(st):
+        imported = st.import_legacy_state(state_dir)
+        counts = st.ingest_workspace(state_dir)
+        return imported, counts
+    return _store_do(state_dir, _run, 'bootstrap')
+
+
+def _store_sync(state_dir):
+    """Project any log lines written since the last cycle.
+
+    Runs before detection so the engines read a store that is current. Only
+    unread bytes are parsed, which is the cost the store removes: the old path
+    re-parsed every log on every sweep.
+    """
+    return _store_do(state_dir, lambda st: st.ingest_workspace(state_dir), 'sync')
+
+
+def _store_record_spawn(state_dir, tid, pid, generation, reason, session_id,
+                        phase=''):
+    return _store_do(
+        state_dir,
+        lambda st: st.record_worker_spawn(
+            tid, pid, generation=generation, phase=phase, reason=reason,
+            session_id=session_id or '',
+            start_ticks=str(_pid_start_time(pid) or '')),
+        'record spawn')
+
+
+def _store_record_exit(state_dir, tid, pid, exit_code, exit_type,
+                       killed_by_fleet=False):
+    def _run(st):
+        for worker in st.running_workers(tid):
+            if worker['pid'] == pid:
+                st.record_worker_exit(
+                    worker['id'], exit_code=exit_code, exit_type=exit_type,
+                    status='killed' if killed_by_fleet else 'exited')
+                return worker['id']
+        return None
+    return _store_do(state_dir, _run, 'record exit')
+
+
+def _store_record_fence(state_dir, tid, generation):
+    return _store_do(state_dir, lambda st: st.set_fence(tid, generation),
+                     'record fence')
+
+
 def _write_fence_files(tid, generation, state_dir):
-    """Write a generation fence marker so the next spawn uses a higher generation."""
+    """Write a generation fence marker so the next spawn uses a higher generation.
+
+    Written to both the store (authoritative for fleetd) and the marker file
+    (which flow.sh's fence guard still reads from inside a worker). The file
+    stays until every consumer reads the store — dropping it here would let a
+    superseded worker's Linear mutations through, which is the one thing the
+    fence exists to prevent.
+    """
+    _store_record_fence(state_dir, tid, generation)
     fence_file = Path(state_dir) / f'{tid}-fence'
     entry = {
         'tid': tid,
@@ -1900,6 +2016,25 @@ class Supervisor:
                 f"fleetd[{os.getpid()}]: adopted {adopted_count} surviving "
                 f"worker(s) from previous instance"
             )
+
+        # Bootstrap the state store after adoption, not before: scan_registry
+        # has by now cleared the registry files of workers that did not
+        # survive, so what the store imports is the set that is genuinely
+        # still running. Idempotent, and also the recovery path when the
+        # database has been deleted — projections rebuild from the logs
+        # instead of the in-flight tickets being orphaned.
+        result = _store_bootstrap(str(self._state_dir))
+        if result is not None:
+            imported, counts = result
+            if imported['workers'] or imported['fences'] or counts['files']:
+                print(
+                    f"fleetd[{os.getpid()}]: state store — imported "
+                    f"{imported['workers']} worker(s), {imported['fences']} "
+                    f"fence(s); projected {counts['pipeline']} pipeline and "
+                    f"{counts['activity']} activity line(s) from "
+                    f"{counts['files']} log file(s)"
+                )
+
         self._sync_health()
 
     def reconcile_orphaned_tickets(self, scope_tids=None):
@@ -2049,6 +2184,10 @@ class Supervisor:
         """
         self._cycle_cache = CycleCache()
         completed_at = datetime.now(timezone.utc).isoformat()
+
+        # Project new log lines before the engines read them, so store-backed
+        # detection sees the same history a file-backed read would.
+        _store_sync(str(self._state_dir))
 
         result = self._detection.run(str(self._state_dir), cache=self._cycle_cache)
 
@@ -2524,6 +2663,8 @@ class Supervisor:
                         action=action or 'reconcile-pending',
                         suppressed_retry_reason=suppressed,
                     )
+                    _store_record_exit(
+                        str(self._state_dir), tid, pid, exit_code, exit_type)
                     status = 'done' if (exit_type == 'exit' and exit_code == 0) else 'fail'
                     _append_pipeline_log_line(
                         str(self._state_dir), tid, 'META', 'worker-exit', status,
@@ -2672,6 +2813,11 @@ class Supervisor:
                 adopted=False,  # we forked it — not adopted
                 session_id=session_id,
             )
+            # Ownership is recorded at dispatch: this is what scopes severity
+            # >= 2 intervention to fleet-managed work and keeps a human's
+            # manual run out of the fleet's kill scope.
+            _store_record_spawn(
+                str(self._state_dir), tid, pid, generation, reason, session_id)
             consumed.add(tid)
             print(
                 f"fleetd[{os.getpid()}]: spawned {tid} (pid {pid}, "

@@ -16,7 +16,82 @@ if [ -f "$_CONFIG_DIR/fleet-config.sh" ]; then
   source "$_CONFIG_DIR/fleet-config.sh"
 fi
 
+# Read-only access to the fleet state store. Every engine below prefers store
+# rows to re-parsing the pipeline log, and falls back to the file when there is
+# no store — which is the normal state on a host running the pipeline manually.
+if [ -f "$_CONFIG_DIR/fleet-store.sh" ]; then
+  source "$_CONFIG_DIR/fleet-store.sh"
+fi
+
 # ── Helpers ──────────────────────────────────────────────────────────────────────
+
+# ── Pipeline-log input source ────────────────────────────────────────────────────
+# The one seam through which every pipeline-log-driven engine reads. When the
+# fleet state store is available the lines come from `log_events`, parsed once at
+# ingest; otherwise they come from the file, exactly as before.
+#
+# Deliberately a single seam rather than a store-backed variant of each engine:
+# two code paths per detector would double the surface that has to be kept in
+# agreement, and the parity requirement — same findings, same severities — is
+# only cheap to assert when the filtering logic is literally the same code.
+
+# Emits `lineno:line`, the shape `grep -n` produces.
+# Usage: _pipeline_rows <tid> [workspace]
+_pipeline_rows() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+
+  if declare -f fleet_store_pipeline_rows >/dev/null 2>&1 &&
+    declare -f fleet_store_ready >/dev/null 2>&1 &&
+    fleet_store_ready "$workspace"; then
+    local rows
+    rows=$(fleet_store_pipeline_rows "$tid" "$workspace" 2>/dev/null || true)
+    if [ -n "$rows" ]; then
+      printf '%s\n' "$rows"
+      return 0
+    fi
+  fi
+
+  local log_file="${workspace}/${tid}-pipeline.log"
+  [ -f "$log_file" ] || return 1
+  command grep -n '' "$log_file" 2>/dev/null || true
+}
+
+# Emits the lines without their numbers.
+# Usage: _pipeline_lines <tid> [workspace]
+_pipeline_lines() {
+  _pipeline_rows "$1" "${2:-}" | command sed 's/^[0-9]*://'
+}
+
+# True when this ticket has any pipeline history at all — the store-aware
+# replacement for `[ -f "$log_file" ]`.
+# Usage: _pipeline_has_history <tid> [workspace]
+_pipeline_has_history() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  [ -f "${workspace}/${tid}-pipeline.log" ] && return 0
+  local first
+  first=$(_pipeline_rows "$tid" "$workspace" | head -1)
+  [ -n "$first" ]
+}
+
+# Age in seconds of the ticket's last pipeline entry; 999999 when there is none,
+# matching _last_entry_age_secs.
+# Usage: _pipeline_last_age_secs <tid> [workspace]
+_pipeline_last_age_secs() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local last_iso
+  last_iso=$(_pipeline_lines "$tid" "$workspace" | tail -1 | awk -F'|' '{print $1}')
+  if [ -z "$last_iso" ]; then
+    echo "999999"
+    return
+  fi
+  local last_epoch now_epoch
+  last_epoch=$(date -d "$last_iso" +%s 2>/dev/null || echo "0")
+  now_epoch=$(date -u +%s)
+  echo $((now_epoch - last_epoch))
+}
 
 # Get the age of the last log entry in seconds. Returns 999999 if no entries.
 # Arg: log_file
@@ -87,18 +162,19 @@ _last_msg() {
 detect_phase_failures() {
   local tid="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
-  local log_file="${workspace}/${tid}-pipeline.log"
 
-  if [ ! -f "$log_file" ]; then
+  if ! _pipeline_has_history "$tid" "$workspace"; then
     echo "0"
     return
   fi
 
   local severity=0
+  local lines
+  lines=$(_pipeline_lines "$tid" "$workspace")
 
   # Check for gate-stop codes first (separate classification)
   local gate_stop
-  gate_stop=$(command grep '|META|gate-stop|fail|' "$log_file" 2>/dev/null | tail -1 || true)
+  gate_stop=$(printf '%s\n' "$lines" | command grep '|META|gate-stop|fail|' 2>/dev/null | tail -1 || true)
 
   if [ -n "$gate_stop" ]; then
     local code
@@ -117,7 +193,7 @@ detect_phase_failures() {
 
   # Check for general phase failures (non-MAINTENANCE, non-META)
   local phase_failures
-  phase_failures=$(command grep -v '|MAINTENANCE|' "$log_file" | command grep -v '|META|' | command grep -c '|fail|' 2>/dev/null || true)
+  phase_failures=$(printf '%s\n' "$lines" | command grep -v '|MAINTENANCE|' | command grep -v '|META|' | command grep -c '|fail|' 2>/dev/null || true)
 
   if [ "$phase_failures" -gt 0 ]; then
     # First occurrence → WARN
@@ -137,12 +213,12 @@ detect_phase_failures() {
 _spawn_bracket_open() {
   local tid="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
-  local log_file="${workspace}/${tid}-pipeline.log"
-
-  [ -f "$log_file" ] || return 1
+  local rows
+  rows=$(_pipeline_rows "$tid" "$workspace") || return 1
+  [ -n "$rows" ] || return 1
 
   local last_waiting
-  last_waiting=$(command grep -n '|waiting|' "$log_file" 2>/dev/null | tail -1 || true)
+  last_waiting=$(printf '%s\n' "$rows" | command grep '|waiting|' | tail -1 || true)
   [ -z "$last_waiting" ] && return 1
 
   local lineno="${last_waiting%%:*}"
@@ -151,8 +227,11 @@ _spawn_bracket_open() {
   phase=$(echo "$line" | awk -F'|' '{print $2}')
   step=$(echo "$line" | awk -F'|' '{print $3}')
 
+  # Scoped to rows *after* the waiting entry by line number rather than by
+  # `tail -n +N`: with the store the row set can be a suffix of the file (old
+  # projection rows pruned), and only the recorded line number is stable.
   local has_terminal
-  has_terminal=$(tail -n "+$((lineno + 1))" "$log_file" 2>/dev/null | command grep -E -c "\|${phase}\|${step}\|(done|fail|skip)\|" 2>/dev/null || true)
+  has_terminal=$(printf '%s\n' "$rows" | awk -F: -v n="$lineno" '$1 > n' | command sed 's/^[0-9]*://' | command grep -E -c "\|${phase}\|${step}\|(done|fail|skip)\|" 2>/dev/null || true)
   has_terminal="${has_terminal:-0}"
 
   [ "$has_terminal" -eq 0 ]
@@ -171,6 +250,13 @@ _fleet_owns_ticket() {
   local tid="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
   local run_file=""
+
+  # The store is the durable form of this question: it records ownership at
+  # dispatch rather than inferring it from a file's existence.
+  if declare -f fleet_store_ready >/dev/null 2>&1 && fleet_store_ready "$workspace"; then
+    fleet_store_is_owned "$tid" "$workspace"
+    return $?
+  fi
 
   if declare -f _fleet_run_file >/dev/null 2>&1; then
     run_file=$(_fleet_run_file "$tid" "$workspace" 2>/dev/null || true)
@@ -303,17 +389,19 @@ detect_stalls() {
 detect_zombies() {
   local tid="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
-  local log_file="${workspace}/${tid}-pipeline.log"
 
-  if [ ! -f "$log_file" ]; then
+  if ! _pipeline_has_history "$tid" "$workspace"; then
     echo "0"
     return
   fi
 
+  local rows
+  rows=$(_pipeline_rows "$tid" "$workspace" || true)
+
   # Find all |waiting| lines, with line numbers so the terminal search below
   # can be scoped to lines *after* each waiting entry.
   local lines
-  lines=$(command grep -n '|waiting|' "$log_file" 2>/dev/null || true)
+  lines=$(printf '%s\n' "$rows" | command grep '|waiting|' 2>/dev/null || true)
 
   if [ -z "$lines" ]; then
     echo "0"
@@ -344,7 +432,7 @@ detect_zombies() {
     # own line — a terminal line from an earlier cycle must not mask a
     # currently-stalled waiting entry for the same phase/step.
     local has_terminal
-    has_terminal=$(tail -n "+$((lineno + 1))" "$log_file" 2>/dev/null | command grep -E -c "\|${phase}\|${step}\|(done|fail|skip)\|" 2>/dev/null || true)
+    has_terminal=$(printf '%s\n' "$rows" | awk -F: -v n="$lineno" '$1 > n' | command sed 's/^[0-9]*://' | command grep -E -c "\|${phase}\|${step}\|(done|fail|skip)\|" 2>/dev/null || true)
     has_terminal="${has_terminal:-0}"
 
     if [ "$has_terminal" -eq 0 ] && [ "$age" -ge "$zombie_threshold" ]; then
@@ -400,21 +488,20 @@ detect_loops() {
 detect_abandoned() {
   local tid="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
-  local log_file="${workspace}/${tid}-pipeline.log"
 
-  if [ ! -f "$log_file" ]; then
+  if ! _pipeline_has_history "$tid" "$workspace"; then
     echo "0"
     return
   fi
 
   # Check if pipeline has an outcome (completed normally)
-  if command grep -q '|META|outcome|' "$log_file" 2>/dev/null; then
+  if _pipeline_lines "$tid" "$workspace" | command grep -q '|META|outcome|' 2>/dev/null; then
     echo "0"
     return
   fi
 
   local age
-  age=$(_last_entry_age_secs "$log_file")
+  age=$(_pipeline_last_age_secs "$tid" "$workspace")
 
   local warn_secs=$((${FLEET_ABANDON_WARN_HOURS:-1} * 3600))
   local kill_secs=$((${FLEET_ABANDON_KILL_HOURS:-4} * 3600))
@@ -458,9 +545,8 @@ detect_flow_failures() {
 detect_auto_mode_blocks() {
   local tid="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
-  local log_file="${workspace}/${tid}-pipeline.log"
 
-  if [ ! -f "$log_file" ]; then
+  if ! _pipeline_has_history "$tid" "$workspace"; then
     echo "0"
     return
   fi
@@ -469,7 +555,7 @@ detect_auto_mode_blocks() {
 
   # Source 1: check-approval|fail entries in pipeline log
   local pipeline_blocks
-  pipeline_blocks=$(command grep -c '|check-approval|fail|' "$log_file" 2>/dev/null || true)
+  pipeline_blocks=$(_pipeline_lines "$tid" "$workspace" | command grep -c '|check-approval|fail|' 2>/dev/null || true)
   pipeline_blocks=$((pipeline_blocks + 0))
   block_count=$((block_count + pipeline_blocks))
 
@@ -539,16 +625,15 @@ detect_tool_errors() {
 detect_planner_feedback() {
   local tid="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
-  local log_file="${workspace}/${tid}-pipeline.log"
 
-  if [ ! -f "$log_file" ]; then
+  if ! _pipeline_has_history "$tid" "$workspace"; then
     echo "0"
     return
   fi
 
   # Find META|planner-feedback entries
   local fb_entries
-  fb_entries=$(command grep '|META|planner-feedback|' "$log_file" 2>/dev/null || true)
+  fb_entries=$(_pipeline_lines "$tid" "$workspace" | command grep '|META|planner-feedback|' 2>/dev/null || true)
   [ -z "$fb_entries" ] && echo "0" && return
 
   # For each feedback entry, check if this ticket's feedback has already
