@@ -751,6 +751,20 @@ to create the Linear epic that represents this initiative. You are phase 8 of 10
    (${state_dir}/artifacts/specs/INDEX.md) for context.
 2. Create a Linear epic using the Linear API. The epic represents this initiative.
 
+## Humanize the epic description before creation (issue #285) — MANDATORY
+
+Compose \$EPIC_DESCRIPTION from the proposal and spec index — the initiative's
+motivation, scope, and the set of child tickets it will produce. Once that text
+is fully written, and before it is ever passed to \`planner_linear_create_issue\`,
+run it through the **humanizer** skill to strip AI-sounding prose (inflated-
+importance phrasing, hedging, stock transitions — see that skill's own pattern
+catalog) from the free-text portions. Per the humanizer's own rules: keep every
+fact and claim intact, invent nothing, and preserve any heading/list/table
+structure you used exactly as written — it rewrites prose, not structure. The
+epic body has no ticket-auto-pipeline section-template contract (that applies
+only to child tickets — see Ticket Gen), so there is no fixed heading set to
+preserve here beyond your own organization of the proposal.
+
 ## Idompotency — CRITICAL
 
 Before calling the Linear API, use the idempotency helpers to check if this
@@ -1111,6 +1125,48 @@ echo "Parent epic: \$EPIC_ID"
 2. For each ticket in dependency order (use topological sort — tickets with no
    dependencies first), create a Linear ticket as a child of \${EPIC_ID}.
 
+## Body section contract (issue #285) — MANDATORY
+
+ticket-auto-pipeline's gate-check (\`lib/gate-check.sh\` Check 2.7c, via
+\`lib/planned-ticket-body-check.sh\`'s \`check_planned_body\`) rejects any
+planned-labeled ticket whose body is missing required \`##\` sections for its
+type — several phases, and possibly hours, after this phase runs. Compose
+every ticket body against that same contract from the start, mirroring the
+canonical headings in ticket-auto-pipeline's \`templates/{type}.md\` files
+(read the file matching this ticket's type — \$TYPE_LABEL, derived from the
+spec the same way it is derived for the Labels list further below — for full
+authoring guidance: wording, table columns, placeholder shape):
+
+**Every ticket, regardless of type:**
+- \`## Acceptance Criteria\` — atomic \`- [ ]\` observable facts, one per line, no "and"
+- \`## Test User\` — role/email + password, non-empty
+- \`## Scope\` — a \`| Layer | Service | Area |\` table, non-empty
+
+**feature / improvement tickets also need:**
+- \`## Navigation Path\` — click-by-click (\`Menu > Submenu > Page\`), never a URL
+
+**bug tickets also need:**
+- \`## Steps to Reproduce\` — numbered steps
+- \`## Test Data Prerequisites\` — what must exist before verification can run
+
+A heading present but left empty fails the gate-check exactly like a missing
+heading — never emit a heading with no content under it. The pre-creation
+validation below checks this mechanically, so a ticket missing a section is
+caught here, not by ticket-auto's gate three phases later.
+
+## Humanize the composed body (issue #285) — MANDATORY
+
+Once a ticket's \$description (the \`## Planner Context\` block plus every
+section above) is fully composed, and before it is passed to
+\`planner_validate_ticket\` or \`planner_linear_create_issue\`, run it through
+the **humanizer** skill to strip AI-sounding prose (inflated-importance
+phrasing, hedging, stock transitions — see that skill's own pattern catalog)
+from the free-text portions. Per the humanizer's own rules: keep every fact
+and claim intact, invent nothing, and preserve every \`##\` heading, table, and
+checklist item exactly as written, and leave the \`## Planner Context\` block's
+field values untouched — the humanizer rewrites prose inside sections, never
+heading text, table/checklist syntax, or Planner Context field values.
+
 ## Pre-creation validation (MANDATORY)
 
 Before creating ANY ticket, run the validators:
@@ -1204,12 +1260,17 @@ context_json=\$(jq -nc \\
 # Generate Planner Context block
 planner_context=\$(planner_context_generate "\$context_json")
 
-# 4. Validate each generated ticket description with planned-ticket-check.sh
-description="<full ticket description with Planner Context block>"
-if ! planner_validate_ticket "\$description" "true"; then
+# 4. Validate each generated ticket description — Planner Context block
+#    structure (planned-ticket-check.sh) AND, via \$TYPE_LABEL, required body
+#    sections for this ticket's type (planned-ticket-body-check.sh — issue
+#    #285). description here is the humanized text from the step above: the
+#    Planner Context block plus every section from "Body section contract"
+#    above, filled in and non-empty.
+description="<full ticket description with Planner Context block and required section headings, humanized>"
+if ! planner_validate_ticket "\$description" "true" "\$TYPE_LABEL"; then
   rc=\$?
   if [ "\$rc" -eq 3 ]; then
-    echo "FATAL: planned-ticket-check.sh not available — cannot create any tickets"
+    echo "FATAL: planned-ticket-check.sh or planned-ticket-body-check.sh not available — cannot create any tickets"
     planner_state_write "${initiative_id}" "TicketGen" "validate" "fail" "Validator unavailable (exit 3) — hard stop"
     exit 3
   fi

@@ -17,6 +17,39 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.24 (2026-09-03)
+
+Planner-generated ticket bodies didn't follow ticket-auto-pipeline's required
+section template, and the gap wasn't caught until ticket-auto's gate-check
+(`NO_TEMPLATE_FOR_TYPE` / `PLANNED_BODY_INCOMPLETE`) rejected the ticket
+several phases later — WIL-71 hit exactly this, three of four required
+sections missing, worked around by hand-editing the Linear description
+mid-session instead of fixed at the source. Filed as
+[#285](https://github.com/willard-pro/claude-plugins/issues/285).
+
+- Fix: `planner_validate_ticket` (`planner-ticket-validate.sh`) now accepts an
+  optional third `ticket_type` argument and, when given, additionally calls
+  ticket-auto-pipeline's `check_planned_body`
+  (`planned-ticket-body-check.sh`) — the same required-`##`-section check the
+  gate-check runs — against the composed description before the ticket is
+  ever created. A ticket missing a required section is not created; the
+  failure surfaces as a planner error at generation time.
+- TicketGen's phase prompt (`planner-phase-prompts.sh`) now spells out the
+  canonical section headings per ticket type (mirroring
+  `ticket-auto-pipeline/templates/{bug,feature,improvement,security,chore}.md`)
+  and passes the resolved `$TYPE_LABEL` into the validation call above.
+- Both TicketGen's and EpicGen's phase prompts now instruct the agent to run
+  the composed description through the **humanizer** skill before any
+  create/save call — after structural headings are filled in, so they
+  survive untouched — keeping every fact/claim intact per the skill's own
+  rules.
+- `planner-doctor.sh` now also reports whether
+  `planned-ticket-body-check.sh` resolves, alongside the existing
+  `planned-ticket-check.sh` row.
+- New tests: `test-planner-body-template-humanizer.sh` (canonical headings
+  and humanizer instructions present in both generated prompts), plus
+  body-section-check cases added to `test-planner-generation.sh`.
+
 ## fleet-controller 0.21.2 (2026-09-03)
 
 A 5-agent review of the `feat/fleetd-agent-liveness` branch's fleetd

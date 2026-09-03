@@ -355,6 +355,7 @@ Run `/ticket-planner doctor` to see whether each one resolves on this install.
 | Script | Owning plugin | What it owns | Planner call site |
 |---|---|---|---|
 | `planned-ticket-check.sh` | ticket-auto-pipeline | Planner Context block **structure** — required fields, `Schema-Version`, confidence range, and the `Target Symbols` grammar (`_validate_target_symbols`: each `;`-separated entry must be `symbol:file` or `symbol:file:line` — a zero-colon bare path is rejected). Also the canonical `_extract_md_section` / `_extract_field` markdown helpers. | `planner_validate_ticket` (`planner-ticket-validate.sh`), before every Ticket Gen create; `branch_directive_source_md_helpers` (`branch-directive-gen.sh`), in the Epic Gen idempotency check |
+| `planned-ticket-body-check.sh` | ticket-auto-pipeline | Ticket **body** section completeness — the `##` headings gate-check's Check 2.7c requires per type (`check_planned_body`), sourced from `templates/{bug,feature,improvement,security,chore}.md` ([#285](https://github.com/willard-pro/claude-plugins/issues/285)) | `planner_validate_ticket` (`planner-ticket-validate.sh`), before every Ticket Gen create, when called with a `ticket_type` argument |
 | `branch-directive-check.sh` | ticket-auto-pipeline | Branch Directive block schema and enums | `_resolve_branch_directive_checker` (`branch-directive-gen.sh`) — generated blocks are round-trip tested against it |
 | `grill-seal.sh` | grill-me | Validated Business Intent seal verification | `planner_intent_gate` (`planner-intent-gate.sh`) |
 

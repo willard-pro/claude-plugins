@@ -136,6 +136,7 @@ test-planner:
 	bash ticket-planner/lib/tests/test-planner-crosscheck-deps.sh
 	bash ticket-planner/lib/tests/test-planner-crosscheck.sh
 	bash ticket-planner/lib/tests/test-planner-doctor.sh
+	bash ticket-planner/lib/tests/test-planner-body-template-humanizer.sh
 
 test-planner-intent-gate:
 	@echo "=== planner intent gate tests ==="

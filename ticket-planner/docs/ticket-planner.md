@@ -86,7 +86,7 @@ Crosscheck → EpicGen → TicketGen → Completed
 | 6 | **Consensus** | Resolves review findings into a settled, actionable plan | Finalized proposal | — |
 | 7 | **Crosscheck** | *(not an agent — bash)* Runs the citation ([#172](https://github.com/willard-pro/claude-plugins/issues/172)) and cross-ticket propagation ([#173](https://github.com/willard-pro/claude-plugins/issues/173)) linters against the settled artifacts and the live repo | `META|crosscheck` findings in state.log | Blocking finding halts the dispatch loop before the create gate is even checked ([#178](https://github.com/willard-pro/claude-plugins/issues/178)) |
 | 8 | **EpicGen** | Creates the initiative epic in Linear | Linear epic with `INIT-{id}` and `epic` labels | Idempotency: records intent before creation, checks existence by initiative ID |
-| 9 | **TicketGen** | Creates planned child tickets in Backlog with full labels and Planner Context blocks, validates dependency DAG, sets `state:execution` on epic | Linear tickets, `state:execution` label on epic | `planner-deps-check.sh` (acyclicity), `planner-context-gen.sh` (block format), `planned-ticket-check.sh` (validation before creation) |
+| 9 | **TicketGen** | Creates planned child tickets in Backlog with full labels, Planner Context blocks, and ticket-auto-pipeline's required body sections (humanized before creation — [#285](https://github.com/willard-pro/claude-plugins/issues/285)), validates dependency DAG, sets `state:execution` on epic | Linear tickets, `state:execution` label on epic | `planner-deps-check.sh` (acyclicity), `planner-context-gen.sh` (block format), `planned-ticket-check.sh` (Planner Context block validation), `planned-ticket-body-check.sh` (required `##` section validation before creation — [#285](https://github.com/willard-pro/claude-plugins/issues/285)) |
 | 10 | **Completed** | Terminal phase — writes completion summary, no further transitions permitted. Dispatched automatically in the same invocation as TicketGen, never left for a separate `resume` ([#226](https://github.com/willard-pro/claude-plugins/issues/226)) | Completed state log entry, `COMPLETED.md` | Phase transition validator rejects any transition from Completed; `planner_completion_verify` refuses to report the run finished without both outputs |
 
 **Phase merge notes:** The original 12-phase design separated Proposal, OpenSpec, StoryGen, and Execution as standalone phases. These were merged into Specify (Proposal + OpenSpec) and TicketGen (StoryGen + Execution labelling) to reduce phase count from 12 to 9. The merged phases handle all the same work — no capability was removed. Crosscheck (#178) was added later as phase 7, bringing the count to 10 — it is not a merge artifact, it is new deterministic validation the original design didn't have.
@@ -146,7 +146,7 @@ A crash between step 1 and step 3 produces exactly one entity on resume: the int
 
 ## Contracts
 
-The planner produces against four frozen consumption-side contracts. These are specified in earlier OpenSpec changes and are not re-specified here.
+The planner produces against five frozen consumption-side contracts. These are specified in earlier OpenSpec changes and are not re-specified here.
 
 ### 1. Planner Context Block
 
@@ -166,11 +166,31 @@ The planner produces against four frozen consumption-side contracts. These are s
 | Generated | ISO 8601 | When the context was created |
 | Regenerate | boolean | Whether re-planning is recommended |
 
-**Validator:** `planned-ticket-check.sh` (exit 0 = valid, 1 = malformed, 2 = low confidence + not pre-approved).
+**Validator:** `planned-ticket-check.sh` (exit 0 = valid, 1 = malformed, 2 = low confidence + not pre-approved). The ticket *body* — the required `##` sections below the Planner Context block — is validated separately by `planned-ticket-body-check.sh`'s `check_planned_body`, called from `planner_validate_ticket`'s third (`ticket_type`) argument ([#285](https://github.com/willard-pro/claude-plugins/issues/285)); see "2. Body section contract" below.
 
 **Generator:** `planner-context-gen.sh` — takes structured JSON, validates all fields, emits formatted markdown. Generate against the validator, not the schema document.
 
-### 2. Labels
+### 2. Body section contract
+
+Every planned ticket's body must carry the `##` sections ticket-auto-pipeline's
+gate-check (`lib/gate-check.sh` Check 2.7c) requires before a planned ticket can
+leave the approve gate — the canonical set lives in ticket-auto-pipeline's
+`templates/{bug,feature,improvement,security,chore}.md` files and is enforced
+by `planned-ticket-body-check.sh`'s `check_planned_body`:
+
+- **Universal:** `## Acceptance Criteria`, `## Test User`, `## Scope` (a `| Layer | Service | Area |` table)
+- **feature / improvement:** + `## Navigation Path`
+- **bug:** + `## Steps to Reproduce`, `## Test Data Prerequisites`
+
+TicketGen's phase prompt (`planner-phase-prompts.sh`) instructs the agent to
+compose every ticket body against this set from the start, and
+`planner_validate_ticket` (`planner-ticket-validate.sh`) mechanically checks it
+before creation when called with a `ticket_type` argument — a ticket missing a
+required section is not created; the failure surfaces as a planner error at
+generation time, not as a `PLANNED_BODY_INCOMPLETE` gate-stop several phases
+later in ticket-auto ([#285](https://github.com/willard-pro/claude-plugins/issues/285)).
+
+### 3. Labels
 
 | Label | Pattern | Set by | Lifecycle |
 |-------|---------|--------|-----------|
@@ -181,13 +201,13 @@ The planner produces against four frozen consumption-side contracts. These are s
 | `state:execution` | exact | Epic Gen (on epic) | Marks initiative ready for dispatch. |
 | `Type` labels | exact | Ticket Gen | `bug`/`feature`/`improvement`/`security`/`chore`. Drives template selection. |
 
-### 3. Artifact Plane
+### 4. Artifact Plane
 
 `planner-artifacts.sh` (in `ticket-auto-pipeline/lib/`) resolves per-ticket artifact directories from the Planner Context block's Initiative field. Path: `${REPOS_ROOT}/.ticket-auto/initiatives/{INIT}/tickets/{TID}/planner/`.
 
 Per-initiative artifacts (proposal, specs) live under `${REPOS_ROOT}/.ticket-auto/initiatives/{INIT}/artifacts/`.
 
-### 4. Feedback
+### 5. Feedback
 
 `fleet-feedback.sh` aggregates `META|planner-feedback` entries from pipeline logs, grouped by initiative ID. `planned-feedback-write.sh` (post-implement hook in ticket-auto) emits these entries.
 
@@ -323,7 +343,7 @@ When an initiative carries the `Regenerate` flag (set to `true` in the Planner C
 | Planner Context block generation | Proposal and spec authoring |
 | Directive block generation (branch naming) | — |
 | Confidence signal derivation | Review critique generation |
-| Pre-creation validation (`planned-ticket-check.sh`) | Ticket body content |
+| Pre-creation validation (`planned-ticket-check.sh`, `planned-ticket-body-check.sh` — [#285](https://github.com/willard-pro/claude-plugins/issues/285)) | Ticket body content, humanized (issue #285) |
 | Auto-dispatch detection and enqueuing | Re-planning decisions |
 
 The router never reasons about content. Phases never mutate state directly (they write log entries the router reads).

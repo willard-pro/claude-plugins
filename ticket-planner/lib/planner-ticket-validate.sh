@@ -9,8 +9,13 @@
 # for entity-creating phases (EpicGen, TicketGen).
 #
 # Usage:
-#   planner_validate_ticket <description> [has_planned_label]
-#     Validates a ticket description against planned-ticket-check.sh.
+#   planner_validate_ticket <description> [has_planned_label] [ticket_type]
+#     Validates a ticket description against planned-ticket-check.sh (Planner
+#     Context block structure) and, when ticket_type is given, against
+#     planned-ticket-body-check.sh's check_planned_body (required ## sections
+#     for that type — issue #285). Catches the same gap ticket-auto-pipeline's
+#     gate-check (Check 2.7c) would otherwise catch several phases later, at
+#     ticket-creation time instead.
 #     Returns: 0 if valid, 1 if invalid (reports reason to stderr).
 #
 #   planner_record_intent <initiative_id> <phase> <entity_type> <entity_key>
@@ -35,12 +40,16 @@ _source_if_missing() {
 
 # Validate a generated ticket description before creating it in Linear.
 # Uses planned-ticket-check.sh inline (source + call) to validate the
-# Planner Context block without needing a Linear ticket ID.
+# Planner Context block without needing a Linear ticket ID. When ticket_type
+# is given, also runs planned-ticket-body-check.sh's check_planned_body
+# against the same description, inline, to catch a body missing required
+# sections (issue #285) before the ticket is ever created.
 #
-# Usage: planner_validate_ticket <description> [has_planned_label]
-# Returns: 0 if valid, 1 if invalid (error on stderr), 2 if low confidence.
+# Usage: planner_validate_ticket <description> [has_planned_label] [ticket_type]
+# Returns: 0 if valid, 1 if invalid (error on stderr), 2 if low confidence,
+#          3 if a validator library is unavailable (hard stop).
 planner_validate_ticket() {
-  local description="$1" has_planned_label="${2:-true}"
+  local description="$1" has_planned_label="${2:-true}" ticket_type="${3:-}"
 
   if [ -z "$description" ]; then
     echo "planner-validate: empty description" >&2
@@ -79,7 +88,7 @@ planner_validate_ticket() {
   check_planned_ticket "PLANNER-PREVIEW" "$description" "$has_planned_label" 2>/dev/null || exit_code=$?
 
   case "$exit_code" in
-  0) return 0 ;;
+  0) ;; # Planner Context block valid — fall through to the body-section check
   1)
     echo "planner-validate: ticket failed validation (malformed/missing fields)" >&2
     echo "  CHECK_RESULT=${CHECK_RESULT:-unknown}" >&2
@@ -95,6 +104,45 @@ planner_validate_ticket() {
     return 1
     ;;
   esac
+
+  # ── Body-section completeness (issue #285) ──────────────────────────────
+  # planned-ticket-check.sh above validates only the Planner Context metadata
+  # block. It never checks whether the body itself has the sections
+  # ticket-auto-pipeline's gate-check (Check 2.7c, planned-ticket-body-check.sh)
+  # requires before a planned ticket can leave the approve gate. Skipped when
+  # the caller doesn't pass a ticket_type — existing callers that validate only
+  # the Planner Context block keep prior behavior.
+  if [ -n "$ticket_type" ]; then
+    if ! declare -f check_planned_body >/dev/null 2>&1; then
+      local body_checker
+      body_checker="$(dirname "$checker")/planned-ticket-body-check.sh"
+      [ -f "$body_checker" ] && source "$body_checker"
+    fi
+    if ! declare -f check_planned_body >/dev/null 2>&1; then
+      echo "planner-validate: planned-ticket-body-check.sh not found — HARD STOP (body validator unavailable)" >&2
+      return 3 # Fail closed: missing validator is a hard stop
+    fi
+
+    # has_planned_label="false" here on purpose: this is a pre-creation preview
+    # of $description, not yet a real Linear ticket, so there is no artifact
+    # plane directory to prefer — check_planned_body must validate exactly the
+    # text this call is about to send to Linear, not a stale body.md.
+    local body_exit_code=0
+    check_planned_body "PLANNER-PREVIEW" "$ticket_type" "$description" "false" 2>/dev/null || body_exit_code=$?
+    case "$body_exit_code" in
+    0) return 0 ;;
+    1)
+      echo "planner-validate: ticket body missing required section(s) for type '${ticket_type}': ${BODY_CHECK_MISSING:-unknown}" >&2
+      return 1
+      ;;
+    *)
+      echo "planner-validate: body-section check failed (exit ${body_exit_code}, missing='${BODY_CHECK_MISSING:-unknown}')" >&2
+      return 1
+      ;;
+    esac
+  fi
+
+  return 0
 }
 
 # ── Idempotency helpers ────────────────────────────────────────────────────────
