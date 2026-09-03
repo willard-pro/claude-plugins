@@ -157,11 +157,12 @@ class ChildTable:
     """
 
     def __init__(self):
-        # {tid: {pid, started_at, generation, reason, adopted, phase, anomalies}}
+        # {tid: {pid, started_at, generation, reason, adopted, phase,
+        #        anomalies, start_ticks, hb_log_file}}
         self._workers = {}
 
     def add(self, tid, pid, generation=0, reason='', adopted=False, phase='',
-            anomalies='', session_id=None):
+            anomalies='', session_id=None, start_ticks=None, hb_log_file=''):
         self._workers[tid] = {
             'tid': tid,
             'pid': pid,
@@ -172,6 +173,12 @@ class ChildTable:
             'phase': phase,
             'anomalies': anomalies,
             'session_id': session_id,
+            # Phase-worker liveness heartbeat inputs (task 4.18). Empty/None
+            # for a ticket-level spawn, which has no per-cycle heartbeat
+            # writer of its own — the router's backgrounded watchdog already
+            # covers it.
+            'start_ticks': start_ticks,
+            'hb_log_file': hb_log_file,
         }
 
     def remove(self, tid):
@@ -1027,6 +1034,26 @@ def _store_record_fence(state_dir, tid, generation):
                      'record fence')
 
 
+def _store_record_position(state_dir, tid, step_id, source='dispatch'):
+    """Record `tid`'s dispatch position (task 4.3, design.md D7).
+
+    Called at the moment fleetd decides to spawn `step_id` — recording is
+    strictly simpler than reconstructing, since the supervisor performing
+    the dispatch already knows where it is. `source='dispatch'` here always;
+    `'adopted'` is written only once, by `phase_dispatch.resolve_dispatch_position`
+    for a ticket a human started manually.
+    """
+    return _store_do(
+        state_dir,
+        lambda st: st.record_position(tid, step_id, source=source),
+        'record position')
+
+
+def _store_get_position(state_dir, tid):
+    return _store_do(state_dir, lambda st: st.get_position(tid),
+                     'get position')
+
+
 # ── OTel exporter lifecycle (D11, task 8.5) ────────────────────────────────
 # The exporter is supervised with the same primitives as any other worker —
 # fork/exec via spawn_worker, a run-registry entry, ChildReaper reaping, kill
@@ -1775,6 +1802,9 @@ def spawn_phase_worker(tid, step_id, generation, state_dir, log_file,
     )
     _store_record_spawn(state_dir, tid, pid, generation, reason, session_id,
                         phase=spawn.phase)
+    # Position is recorded here, not inferred afterwards — this dispatch
+    # call is the one place fleetd knows it for certain (design.md D7).
+    _store_record_position(state_dir, tid, step_id, source='dispatch')
     return pid, session_id, spawn
 
 
@@ -2361,6 +2391,11 @@ class Supervisor:
         """
         self._cycle_cache = CycleCache()
         completed_at = datetime.now(timezone.utc).isoformat()
+
+        # Phase-worker liveness heartbeats (task 4.18) are written before
+        # detection runs, so a line emitted THIS cycle is visible to
+        # `detect_stalls` THIS cycle rather than one cycle late.
+        self.emit_phase_liveness_heartbeats()
 
         # Project new log lines before the engines read them, so store-backed
         # detection sees the same history a file-backed read would.
@@ -3014,6 +3049,75 @@ class Supervisor:
             self._sync_health()
 
         return consumed
+
+    # ── phase dispatch (task 4.17) ─────────────────────────────────────────
+
+    def spawn_phase(self, tid, step_id, log_file, table=None, **kwargs):
+        """Spawn one phase worker and register it as a killable child.
+
+        The module-level `spawn_phase_worker` (task 4.4) does the fork; this
+        adds the one thing that function cannot do on its own — record the
+        pid in `self._children`, the table `self.kill_worker`/`kill_worker()`
+        already reads. Without this a hung phase worker is invisible to the
+        exact escalation path (cooperative-stop → SIGINT → SIGTERM →
+        SIGKILL) a ticket-level worker already gets: `spawn_phase_worker`'s
+        caller wiring the two together, rather than a second kill
+        implementation, is the reuse task 4.1/4.17 ask for.
+
+        `kwargs` passes through to `spawn_phase_worker` (`hb_log_file`,
+        `from_step`, `attempt`, `counters`, `env_file`, `extra_env`, `reason`,
+        `cmd_override`, ...); `generation` is resolved here, the same way
+        `_consume_queue` resolves it for a ticket-level spawn, so a caller
+        never has to fence-check by hand. `hb_log_file`, when given, is also
+        kept on the child record — `emit_phase_liveness_heartbeats` (task
+        4.18) needs it every cycle, not just at spawn time.
+        """
+        generation = self._resolve_generation(tid)
+        reason = kwargs.pop('reason', 'phase-dispatch')
+        hb_log_file = kwargs.get('hb_log_file', '')
+        pid, session_id, spawn = spawn_phase_worker(
+            tid, step_id, generation, str(self._state_dir), log_file,
+            table=table, reason=reason,
+            claude_bin=kwargs.pop('claude_bin', self._claude_bin),
+            claude_cmd=kwargs.pop('claude_cmd', self._claude_cmd),
+            **kwargs,
+        )
+        self._children.add(
+            tid=tid, pid=pid, generation=generation, reason=reason,
+            adopted=False, phase=spawn.phase, session_id=session_id,
+            start_ticks=_pid_start_time(pid), hb_log_file=hb_log_file,
+        )
+        return pid, session_id, spawn
+
+    def emit_phase_liveness_heartbeats(self):
+        """Write one liveness heartbeat per live phase worker (task 4.18).
+
+        The router's backgrounded watchdog wrote `|watchdog|alive|` on its
+        own timer, which `fleet-detect.sh:411`'s heartbeat dimension reads as
+        one half of stall detection (the other half, `_detect_activity_stall`,
+        is independent and already applies unmodified to a phase-dispatched
+        ticket — it reads `{tid}-activity.log`, written by the agent's own
+        hook, regardless of what spawned the agent). A phase-dispatched
+        ticket has no such watchdog, so without this call the heartbeat
+        dimension is silent for it and every phase-dispatched ticket falls
+        back to activity-only severity — losing the KILL+RESTART tier and the
+        pinger-exhaustion escalation the heartbeat dimension alone carries.
+
+        Called once per detection cycle, before detection runs, so a stale
+        write from THIS cycle is what `detect_stalls` reads THIS cycle — not
+        an emit-on-schedule liveness claim: `phase_liveness_heartbeat` itself
+        still writes nothing unless the pid-plus-start-ticks check passes.
+        Only children with a `phase` and `hb_log_file` recorded are
+        candidates — a ticket-level spawn has neither, by design.
+        """
+        if _phase_mod is None:  # pragma: no cover - import guard
+            return
+        for child in list(self._children):
+            if not child.get('phase') or not child.get('hb_log_file'):
+                continue
+            _phase_mod.phase_liveness_heartbeat(
+                child['tid'], child['phase'], child['hb_log_file'],
+                child['pid'], start_ticks=child.get('start_ticks'))
 
     # ── kill (group 7) ───────────────────────────────────────────────────
 

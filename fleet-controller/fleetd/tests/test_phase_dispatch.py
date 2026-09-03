@@ -58,6 +58,13 @@ from fleetd.phase_dispatch import (  # noqa: E402
     EXIT_ROUTE_GATE_STOP,
     EXIT_ROUTE_RETRY,
     FLOW_STATE_ASSERTION_EXIT,
+    GATE_HOLD_RESUME_STEPS,
+    ResumeAdoptError,
+    adopt_position_via_detect_resume,
+    detect_resume_script_path,
+    last_verify_checkpoint,
+    parse_detect_resume_block,
+    resolve_dispatch_position,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -66,6 +73,10 @@ TABLE_PATH = (
     / 'dispatch-table.json'
 )
 TICKET_AUTO_LIB = REPO_ROOT / 'ticket-auto-pipeline' / 'lib'
+DETECT_RESUME_SCRIPT = (
+    REPO_ROOT / 'ticket-auto-pipeline' / 'skills' / 'ticket-detect-resume'
+    / 'detect-resume.sh'
+)
 
 
 def _phase_result_line(phase='VERIFY', verdict='PASS', parse_status='ok',
@@ -847,3 +858,335 @@ class TestLoopCaps(unittest.TestCase):
                              f"well as in the table — two authorities on one "
                              f"log-contract string")
 
+
+
+class TestDetectResumeBlockParsing(unittest.TestCase):
+    """Pure parse of the `DETECT_RESUME_RESULT` block (task 4.3, D7)."""
+
+    def test_parses_the_shipped_grammar(self):
+        text = (
+            'some stderr noise before the block\n'
+            'DETECT_RESUME_RESULT\n'
+            '  RESUME_STEP:        STEP_2\n'
+            '  COMPLEXITY:         simple\n'
+            '  AUTONOMY:           auto\n'
+            'END_DETECT_RESUME_RESULT\n'
+            'trailing noise after\n'
+        )
+        fields = parse_detect_resume_block(text)
+        self.assertEqual(fields['RESUME_STEP'], 'STEP_2')
+        self.assertEqual(fields['COMPLEXITY'], 'simple')
+        self.assertEqual(fields['AUTONOMY'], 'auto')
+        self.assertNotIn('trailing noise after', fields)
+
+    def test_no_block_yields_empty_fields(self):
+        self.assertEqual(parse_detect_resume_block('nothing here'), {})
+
+    def test_empty_value_is_kept_as_empty_string(self):
+        text = 'DETECT_RESUME_RESULT\n  BRANCH:             \nEND_DETECT_RESUME_RESULT\n'
+        self.assertEqual(parse_detect_resume_block(text)['BRANCH'], '')
+
+
+class TestAdoptPositionAgainstTheRealScript(unittest.TestCase):
+    """`detect-resume.sh` is invoked at most once per ticket (D7) — these run
+    the shipped script for real rather than a hand-written fixture, so a
+    change to its `RESUME_STEP` vocabulary is caught here, not in production.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.project_dir = Path(self._tmp.name)
+        (self.project_dir / 'logs').mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _env(self):
+        env = dict(os.environ)
+        env['CLAUDE_SKILLS_LIB'] = str(TICKET_AUTO_LIB)
+        return env
+
+    def test_no_prior_log_adopts_step_1(self):
+        step, fields = adopt_position_via_detect_resume(
+            'CRE-4301', project_dir=self.project_dir,
+            script=DETECT_RESUME_SCRIPT)
+        self.assertEqual(step, 'STEP_1')
+        self.assertEqual(fields['RESUME_STEP'], 'STEP_1')
+
+    def test_appraise_done_adopts_step_2(self):
+        log = self.project_dir / 'logs' / 'CRE-4302-pipeline.log'
+        log.write_text(
+            '2026-01-01T00:00:00Z|META|schema|info|2\n'
+            '2026-01-01T00:00:01Z|APPRAISE|appraise|done|ok\n'
+        )
+        step, fields = adopt_position_via_detect_resume(
+            'CRE-4302', project_dir=self.project_dir,
+            script=DETECT_RESUME_SCRIPT)
+        self.assertEqual(step, 'STEP_2')
+
+    def test_completed_pipeline_adopts_done(self):
+        log = self.project_dir / 'logs' / 'CRE-4303-pipeline.log'
+        log.write_text(
+            '2026-01-01T00:00:00Z|META|schema|info|2\n'
+            '2026-01-01T00:00:01Z|META|outcome|info|completed: STEP_6\n'
+        )
+        step, _fields = adopt_position_via_detect_resume(
+            'CRE-4303', project_dir=self.project_dir,
+            script=DETECT_RESUME_SCRIPT)
+        self.assertEqual(step, 'done')
+
+    def test_schema_mismatch_raises_rather_than_returning_a_bogus_step(self):
+        log = self.project_dir / 'logs' / 'CRE-4304-pipeline.log'
+        log.write_text('2026-01-01T00:00:00Z|META|schema|info|99\n')
+        with self.assertRaises(ResumeAdoptError):
+            adopt_position_via_detect_resume(
+                'CRE-4304', project_dir=self.project_dir,
+                script=DETECT_RESUME_SCRIPT)
+
+    def test_missing_script_is_reported_not_swallowed(self):
+        with tempfile.TemporaryDirectory() as empty:
+            with self.assertRaises(ResumeAdoptError):
+                adopt_position_via_detect_resume(
+                    'CRE-4305', project_dir=self.project_dir,
+                    script=Path(empty) / 'no-such-script.sh')
+
+    def test_default_script_path_resolves_under_the_repo_checkout(self):
+        # No CLAUDE_SKILLS_LIB, no installed skills dir override — falls
+        # back to the checkout, matching dispatch_table_path's own fallback.
+        self.assertEqual(detect_resume_script_path(lib_dir=TICKET_AUTO_LIB),
+                         DETECT_RESUME_SCRIPT)
+
+
+class _FakePositionStore:
+    """The two `FleetStore` methods `resolve_dispatch_position` calls."""
+
+    def __init__(self, position=None):
+        self._position = position
+        self.recorded = []
+
+    def get_position(self, tid):
+        return self._position
+
+    def record_position(self, tid, position, source='dispatch'):
+        self.recorded.append((tid, position, source))
+        self._position = {'position': position, 'source': source}
+
+
+class TestResolveDispatchPosition(unittest.TestCase):
+    """design.md D7 — a store-recorded position wins; adoption runs once."""
+
+    def test_recorded_position_is_returned_without_adopting(self):
+        store = _FakePositionStore(
+            position={'position': 'STEP_4', 'source': 'dispatch'})
+        step, source, fields = resolve_dispatch_position(
+            store, 'CRE-1', script=Path('/does/not/exist.sh'))
+        self.assertEqual((step, source, fields), ('STEP_4', 'dispatch', {}))
+        self.assertEqual(store.recorded, [])  # no second write
+
+    def test_no_recorded_position_adopts_and_records_it(self):
+        store = _FakePositionStore(position=None)
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'logs').mkdir()
+            step, source, fields = resolve_dispatch_position(
+                store, 'CRE-2', project_dir=tmp,
+                script=DETECT_RESUME_SCRIPT)
+        self.assertEqual(step, 'STEP_1')
+        self.assertEqual(source, 'adopted')
+        self.assertEqual(fields.get('RESUME_STEP'), 'STEP_1')
+        self.assertEqual(store.recorded, [('CRE-2', 'STEP_1', 'adopted')])
+
+    def test_a_gate_hold_resume_step_is_not_a_dispatch_table_step_id(self):
+        # Confirms the vocabulary a caller must branch on before treating an
+        # adopted position as spawnable — gate_hold.py (D14) owns these.
+        self.assertEqual(GATE_HOLD_RESUME_STEPS,
+                         frozenset({'GATE_HELD', 'GATE_STILL_HELD'}))
+
+
+if __name__ == '__main__':
+    unittest.main()
+
+
+class TestVerifyCheckpointResume(unittest.TestCase):
+    """task 4.7's fourth channel — mid-run VERIFY crash resume."""
+
+    def test_resumes_at_the_last_checkpoint_step_name(self):
+        lines = [
+            '2026-01-01T00:00:01Z|VERIFY|build-plan|done|ok',
+            '2026-01-01T00:00:02Z|VERIFY|checkpoint|done|criterion-1-pass',
+            '2026-01-01T00:00:03Z|VERIFY|checkpoint|done|criterion-2-pass',
+        ]
+        # Matches detect-resume.sh's own (slightly surprising) behaviour: the
+        # literal step name of the last `|done|` entry, unmodified — verified
+        # against the real script in TestVerifyCheckpointParity below.
+        self.assertEqual(last_verify_checkpoint(lines), 'checkpoint')
+
+    def test_browser_state_cannot_be_resumed_so_falls_back_to_build_plan(self):
+        for substep in ('browser-session', 'navigate', 'execute-steps'):
+            lines = [f'2026-01-01T00:00:01Z|VERIFY|{substep}|done|ok']
+            self.assertEqual(last_verify_checkpoint(lines), 'build-plan',
+                             f'substep={substep}')
+
+    def test_no_completed_substep_returns_empty(self):
+        self.assertEqual(last_verify_checkpoint([]), '')
+        self.assertEqual(
+            last_verify_checkpoint(['2026-01-01T00:00:01Z|VERIFY|verify|waiting|']),
+            '')
+
+    def test_the_verify_terminal_and_inspector_lines_are_excluded(self):
+        lines = [
+            '2026-01-01T00:00:01Z|VERIFY|checkpoint|done|criterion-1-pass',
+            '2026-01-01T00:00:02Z|VERIFY|phase-inspector-verify|done|ok',
+            '2026-01-01T00:00:03Z|VERIFY|verify|done|PASS',
+        ]
+        self.assertEqual(last_verify_checkpoint(lines), 'checkpoint')
+
+    def test_a_different_phases_done_line_is_ignored(self):
+        lines = ['2026-01-01T00:00:01Z|IMPLEMENT|implement|done|ok']
+        self.assertEqual(last_verify_checkpoint(lines), '')
+
+
+class TestVerifyCheckpointParity(unittest.TestCase):
+    """The Python reconstruction must match the real script's VERIFY_FROM —
+    not a hand-picked "sensible" answer, the one production actually uses,
+    since a divergence here would resume a retried worker from the wrong
+    sub-step silently.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.project_dir = Path(self._tmp.name)
+        (self.project_dir / 'logs').mkdir()
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _real_verify_from(self, tid, log_lines):
+        log = self.project_dir / 'logs' / f'{tid}-pipeline.log'
+        log.write_text(
+            '2026-01-01T00:00:00Z|META|schema|info|2\n'
+            + '\n'.join(log_lines) + ('\n' if log_lines else '')
+        )
+        env = dict(os.environ)
+        env['CLAUDE_SKILLS_LIB'] = str(TICKET_AUTO_LIB)
+        proc = subprocess.run(
+            ['bash', str(DETECT_RESUME_SCRIPT), tid],
+            capture_output=True, text=True, timeout=60,
+            cwd=str(self.project_dir), env=env,
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        fields = parse_detect_resume_block(proc.stdout)
+        return fields.get('VERIFY_FROM', '')
+
+    def test_parity_across_fixtures(self):
+        fixtures = [
+            ('CRE-P1', [
+                '2026-01-01T00:00:01Z|VERIFY|build-plan|done|ok',
+                '2026-01-01T00:00:02Z|VERIFY|checkpoint|done|criterion-1-pass',
+                '2026-01-01T00:00:03Z|VERIFY|checkpoint|done|criterion-2-pass',
+            ]),
+            ('CRE-P2', [
+                '2026-01-01T00:00:01Z|VERIFY|build-plan|done|ok',
+                '2026-01-01T00:00:02Z|VERIFY|checkpoint|done|criterion-1-pass',
+                '2026-01-01T00:00:03Z|VERIFY|navigate|done|ok',
+            ]),
+            ('CRE-P3', []),
+            ('CRE-P4', [
+                '2026-01-01T00:00:01Z|VERIFY|browser-session|done|ok',
+            ]),
+        ]
+        for tid, lines in fixtures:
+            with self.subTest(tid=tid):
+                real = self._real_verify_from(tid, lines)
+                mine = last_verify_checkpoint(lines)
+                self.assertEqual(mine, real, f'{tid}: {lines}')
+
+
+class TestDriftPreventionCoverage(unittest.TestCase):
+    """Group 5 — the table is canonical (design.md D3); a Python map that
+    silently falls out of step with it is exactly the failure the canonical
+    file exists to prevent.
+
+    Coverage here is narrower than "every step_id has code": `DispatchTable`
+    loads the JSON directly rather than transcribing it (task 4.2), and
+    `evaluate_loop` reads `max_iterations`/`gate_stop_code` straight off the
+    table rather than a Python copy (task 4.6, asserted from the other
+    direction by `TestLoopCaps.test_caps_are_not_duplicated_as_python_constants`)
+    — for those, nothing can drift because there is only one copy.
+
+    A loop-bearing step and a verdict-bearing phase are *not* the same thing
+    — this was the first thing the coverage test actually caught while being
+    written: STEP_3_5 (GATE-reconcile) declares a `loop` in the table, but
+    `LOOP_BEARING_PHASES` deliberately excludes GATE (design.md D12 — it is
+    classified on deterministic evidence, the same checks `gate-check.sh`
+    performs, not on a PASS/FAIL/OK/WARN vocabulary it never emits), so
+    `table.loop_steps()` is not a usable reference set for verdict coverage.
+    The real, table-independent risk is `LOOP_BEARING_PHASES` and
+    `_FAILING_VERDICTS` (task 4.9's rung-2 pair) drifting from *each other* —
+    both gate the same "does this phase have a verdict, and what counts as a
+    failure" decision in `classify_phase`, and a phase added to one without
+    the other degrades silently rather than raising: added to
+    `LOOP_BEARING_PHASES` alone, `_FAILING_VERDICTS.get(phase, frozenset())`
+    returns an empty failing set and every claimed verdict reads as `done`.
+
+    Task 5.2's other half — that `max_iterations`/`gate_stop_code` values
+    actually used at cap match the table's — is already asserted for all
+    four loop-bearing steps by `TestLoopCaps.test_at_the_cap_gate_stops` and
+    `.test_exhaustion_uses_the_table_s_named_code`; cited per task 5.4 rather
+    than re-asserted here.
+
+    Task 5.3's regression guard was verified by hand, not committed as a
+    meta-test (no other test in this suite tests a test): temporarily
+    dropping 'VERIFY' from `LOOP_BEARING_PHASES` failed
+    `test_loop_bearing_phases_and_failing_verdicts_name_the_same_phases`
+    with exactly the asymmetry it describes, confirming the guard watches
+    the thing it claims to; restored immediately after.
+
+    Task 5.4's scope acknowledgement: this guards ~19 lines of dispatch
+    sequencing, not the ~650 lines of per-step orchestration logic at
+    `SKILL.md:664-1310` that actually encode pipeline behaviour. Tasks
+    4.10-4.12 (preamble, between-phase orchestration, spawn bracket) are what
+    keep *that* from drifting — via table generation and the `orchestration.py`
+    executor holding no step list of its own (D20) — not this test.
+    """
+
+    def setUp(self):
+        self.table = DispatchTable.load(TABLE_PATH)
+
+    def test_every_real_step_id_resolves_without_raising(self):
+        # The entry point every other assertion here builds on: a step_id
+        # the table declares must be dispatchable, not just enumerable.
+        for step_id in self.table.step_ids():
+            with self.subTest(step_id=step_id):
+                self.table.get(step_id)  # raises DispatchTableError on drift
+
+    def test_every_step_with_a_spawn_block_builds_a_phase_spawn(self):
+        # A step declaring `spawn.skill` must actually build — a gap here is
+        # a step the table thinks dispatches an agent and the module cannot
+        # turn into one.
+        for step_id in self.table.step_ids():
+            step = self.table.get(step_id)
+            if not (step.get('spawn') or {}).get('skill'):
+                continue
+            with self.subTest(step_id=step_id):
+                spawn = build_phase_spawn(
+                    self.table, step_id, 'CRE-COVERAGE',
+                    '/w/logs/CRE-COVERAGE-pipeline.log')
+                self.assertTrue(spawn.skill)
+                self.assertTrue(spawn.prompt)
+
+    def test_loop_bearing_phases_and_failing_verdicts_name_the_same_phases(self):
+        # The pair task 4.9's rung 2 actually reads together — see the class
+        # docstring for why `table.loop_steps()` is not the reference set.
+        self.assertEqual(LOOP_BEARING_PHASES,
+                         frozenset(phase_dispatch._FAILING_VERDICTS))
+
+    def test_gate_reconcile_is_loop_bearing_but_not_verdict_bearing(self):
+        # Documents the exact asymmetry the class docstring explains, so a
+        # future reader does not "fix" LOOP_BEARING_PHASES by adding GATE.
+        self.assertIn('STEP_3_5', self.table.loop_steps())
+        self.assertEqual(self.table.phase_of('STEP_3_5'), 'GATE')
+        self.assertNotIn('GATE', LOOP_BEARING_PHASES)
+
+
+if __name__ == '__main__':
+    unittest.main()

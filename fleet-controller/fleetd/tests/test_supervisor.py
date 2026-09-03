@@ -1524,6 +1524,44 @@ class KillEscalationTest(unittest.TestCase):
         finally:
             sup.release_lock()
 
+    def test_a_hung_phase_worker_is_killable_through_the_same_path(self):
+        """Task 4.17 — `Supervisor.spawn_phase` registers the phase worker
+        as a normal child, so a hung phase subprocess gets the identical
+        cooperative-stop -> SIGINT -> SIGTERM -> SIGKILL escalation a
+        ticket-level worker gets, through the same `kill_worker`."""
+        from fleetd.supervisor import Supervisor
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            cmd = _make_ignoring_worker(sleep_secs=30)
+            pid, session_id, spawn = sup.spawn_phase(
+                'TST-KPHASE', 'STEP_4_5',
+                log_file=str(self.workspace / 'logs' / 'TST-KPHASE-pipeline.log'),
+                counters={'VERIFY_ATTEMPTS': 0}, attempt=1, cmd_override=cmd,
+            )
+            self.assertTrue(_pid_is_alive(pid), "phase worker should be alive")
+            child = sup._children.get('TST-KPHASE')
+            self.assertIsNotNone(child, "spawn_phase must register a child")
+            self.assertEqual(child['pid'], pid)
+            self.assertEqual(child['phase'], 'VERIFY')
+
+            result = sup.kill_worker('TST-KPHASE', grace_secs=1)
+            self.assertTrue(result.success, f"kill should succeed: {result.error}")
+            self.assertEqual(result.method, 'SIGKILL',
+                             "SIGTERM-ignoring phase worker should reach SIGKILL")
+            self.assertFalse(_pid_is_alive(pid),
+                             "phase worker should be dead after SIGKILL")
+            self.assertIsNone(sup._children.get('TST-KPHASE'),
+                              "phase worker should be removed from child table")
+        finally:
+            sup.release_lock()
+
     def test_descendants_die_with_worker(self):
         """Killing a worker also terminates its child processes."""
         from fleetd.supervisor import Supervisor
@@ -1674,6 +1712,85 @@ class KillEscalationTest(unittest.TestCase):
             self.assertEqual(fence_data['tid'], 'TST-K1')
             self.assertIn('fenced_generation', fence_data)
         finally:
+            sup.release_lock()
+
+
+class PhaseLivenessHeartbeatTest(unittest.TestCase):
+    """Task 4.18 — the watchdog replacement, wired to fire every cycle."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _sup(self):
+        from fleetd.supervisor import Supervisor
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        return sup
+
+    def test_spawn_phase_records_hb_log_file_and_start_ticks(self):
+        sup = self._sup()
+        try:
+            hb = str(self.workspace / 'logs' / 'TST-HB1-heartbeat.log')
+            pid, _sid, _spawn = sup.spawn_phase(
+                'TST-HB1', 'STEP_4_5',
+                log_file=str(self.workspace / 'logs' / 'TST-HB1-pipeline.log'),
+                hb_log_file=hb, counters={'VERIFY_ATTEMPTS': 0}, attempt=1,
+                cmd_override=_make_ignoring_worker(sleep_secs=30),
+            )
+            child = sup._children.get('TST-HB1')
+            self.assertEqual(child['hb_log_file'], hb)
+            self.assertTrue(child['start_ticks'])
+        finally:
+            sup.kill_worker('TST-HB1', grace_secs=1)
+            sup.release_lock()
+
+    def test_emit_writes_a_heartbeat_for_a_live_phase_worker(self):
+        sup = self._sup()
+        try:
+            hb_path = self.workspace / 'logs'
+            hb_path.mkdir(parents=True, exist_ok=True)
+            hb = str(hb_path / 'TST-HB2-heartbeat.log')
+            sup.spawn_phase(
+                'TST-HB2', 'STEP_4_5',
+                log_file=str(hb_path / 'TST-HB2-pipeline.log'),
+                hb_log_file=hb, counters={'VERIFY_ATTEMPTS': 0}, attempt=1,
+                cmd_override=_make_ignoring_worker(sleep_secs=30),
+            )
+            sup.emit_phase_liveness_heartbeats()
+            self.assertIn('|watchdog|alive|', Path(hb).read_text())
+        finally:
+            sup.kill_worker('TST-HB2', grace_secs=1)
+            sup.release_lock()
+
+    def test_a_ticket_level_child_is_not_a_candidate(self):
+        # A ticket-level spawn has no `phase`/`hb_log_file` — emitting for it
+        # would be a second, redundant watchdog on top of its own.
+        sup = self._sup()
+        queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+        entry = {
+            'tid': 'TST-HB3', 'reason': 'test-hb', 'generation': 1,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+        with open(queue_file, 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+        try:
+            cmd = _make_worker_cmd(sleep_secs=5)
+            consumed = sup._consume_queue(cmd_override=cmd)
+            self.assertEqual(consumed, {'TST-HB3'})
+            # Should not raise, and should write nothing for TST-HB3 (no hb
+            # file recorded on a ticket-level child, so nothing to write to).
+            sup.emit_phase_liveness_heartbeats()
+        finally:
+            sup.kill_worker('TST-HB3', grace_secs=1)
             sup.release_lock()
 
 

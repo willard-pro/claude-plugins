@@ -1092,3 +1092,220 @@ def evaluate_loop(table, step_id, counters, when=None):
         )
     return LoopDecision(LOOP_DISPATCH, counter, value, limit, code, checked,
                         f'{counter}={value} of {limit}')
+
+
+# ── Dispatch position / resume (task 4.3, design.md D7) ─────────────────────
+#
+# fleetd records its own dispatch position rather than reconstructing it.
+# `store.record_position`/`get_position` (Group 3B) already hold the column;
+# what this section adds is the one case a supervisor cannot know first-hand
+# — a ticket a human started manually, before fleetd ever dispatched it, so
+# no `dispatch`-sourced position exists yet. `detect-resume.sh` is invoked
+# exactly once for such a ticket, to derive its initial position, which is
+# then recorded with `source='adopted'` so every later call is a store read.
+
+
+class ResumeAdoptError(RuntimeError):
+    """`detect-resume.sh` could not be run to adopt an initial position."""
+
+
+def detect_resume_script_path(lib_dir=None):
+    """Location of `detect-resume.sh`.
+
+    It ships in the `ticket-detect-resume` skill, not in `lib/`, but the
+    installed layout still puts `skills/lib` and every other skill directory
+    as siblings — the same shape `dispatch_table_path` already relies on.
+    """
+    env = os.environ.get('FLEET_DETECT_RESUME_SCRIPT')
+    if env:
+        return Path(env)
+    lib = Path(lib_dir) if lib_dir else ticket_auto_lib_dir()
+    candidate = lib.parent / 'ticket-detect-resume' / 'detect-resume.sh'
+    if candidate.is_file():
+        return candidate
+    return (
+        _PLUGIN_ROOT / 'ticket-auto-pipeline' / 'skills'
+        / 'ticket-detect-resume' / 'detect-resume.sh'
+    )
+
+
+def parse_detect_resume_block(text):
+    """Parse the `DETECT_RESUME_RESULT` block into a dict.
+
+    Same `key: value` grammar `parse_result_block` (preamble.py) reads for
+    `TICKET_PREAMBLE_RESULT` — unknown keys pass through rather than being
+    rejected, since this parser only ever consumes `RESUME_STEP`.
+    """
+    fields = {}
+    in_block = False
+    for line in (text or '').splitlines():
+        stripped = line.strip()
+        if stripped == 'DETECT_RESUME_RESULT':
+            in_block = True
+            continue
+        if stripped == 'END_DETECT_RESUME_RESULT':
+            break
+        if not in_block:
+            continue
+        key, sep, value = stripped.partition(':')
+        if sep:
+            fields[key.strip()] = value.strip()
+    return fields
+
+
+# `detect-resume.sh` reports these two states for a ticket parked at a gate
+# hold. Neither is a dispatch-table step_id — `gate_hold.py` (D14) owns that
+# state as a row in `tickets`, not a position to resume dispatch from — so a
+# caller adopting a position must route them there rather than trying to
+# spawn a step named "GATE_HELD".
+GATE_HOLD_RESUME_STEPS = frozenset({'GATE_HELD', 'GATE_STILL_HELD'})
+
+# Terminal states `detect-resume.sh` can report that are not a step_id either.
+_NON_STEP_RESUME_STEPS = GATE_HOLD_RESUME_STEPS | {'SCHEMA_MISMATCH'}
+
+
+def adopt_position_via_detect_resume(tid, project_dir=None, script=None,
+                                     timeout=60):
+    """Derive `tid`'s initial dispatch position, calling `detect-resume.sh`.
+
+    Only ever called when the store holds no recorded position for `tid` —
+    see `resolve_dispatch_position`. `project_dir` is the ticket's workspace
+    (the directory holding `logs/`), matching how the router invokes the
+    script today; it becomes the subprocess's cwd because the script derives
+    `LOG_FILE` from `$PWD`.
+
+    Returns `(step_id, fields)`. `step_id` is one of the dispatch table's
+    real step ids, `'done'`, or one of `GATE_HOLD_RESUME_STEPS` — callers
+    that only want a spawnable step_id must check membership first.
+    """
+    script = Path(script) if script else detect_resume_script_path()
+    if not script.is_file():
+        raise ResumeAdoptError(f'detect-resume.sh not found at {script}')
+
+    # Unlike `ticket-preamble.sh`, `detect-resume.sh` does not self-locate
+    # its libraries from its own script path — it sources
+    # `${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}/heartbeat.sh` etc., the
+    # convention every other pipeline consumer of that variable uses too.
+    # `setdefault` respects a caller's own override (a test's fixture lib
+    # dir) and otherwise supplies the same resolution `ticket_auto_lib_dir`
+    # already gives every other shell-out in this module.
+    env = dict(os.environ)
+    env.setdefault('CLAUDE_SKILLS_LIB', str(ticket_auto_lib_dir()))
+
+    try:
+        proc = subprocess.run(
+            ['bash', str(script), tid],
+            capture_output=True, text=True, timeout=timeout,
+            cwd=str(project_dir) if project_dir else None, env=env,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise ResumeAdoptError(
+            f'detect-resume.sh failed for {tid}: {exc}'
+        ) from exc
+
+    if proc.returncode != 0:
+        stderr_tail = (proc.stderr or '').strip().splitlines()[-3:]
+        raise ResumeAdoptError(
+            f'detect-resume.sh exited {proc.returncode} for {tid}: '
+            f'{stderr_tail}'
+        )
+
+    fields = parse_detect_resume_block(proc.stdout)
+    step = fields.get('RESUME_STEP', '')
+    if not step:
+        raise ResumeAdoptError(
+            f'detect-resume.sh produced no RESUME_STEP for {tid}'
+        )
+    if step == 'SCHEMA_MISMATCH':
+        raise ResumeAdoptError(
+            f'detect-resume.sh reported SCHEMA_MISMATCH for {tid} '
+            f'(log version {fields.get("SCHEMA_LOG_VERSION")}, expected '
+            f'{fields.get("SCHEMA_EXPECTED")})'
+        )
+    return step, fields
+
+
+def resolve_dispatch_position(store, tid, project_dir=None, script=None,
+                              timeout=60):
+    """The step_id fleetd should dispatch next for `tid` (design.md D7).
+
+    Reads the store's recorded position first — fleetd always knows where it
+    left off, because it wrote the position itself at the last dispatch
+    (`record_position`, called at spawn time). Only a ticket with *no*
+    recorded position at all — one a human started manually, before fleetd
+    ever touched it — falls through to the one-time `detect-resume.sh`
+    adoption, whose result is recorded immediately so every subsequent call
+    is a store read and never a second shell-out.
+
+    Returns `(step_id, source, fields)`. `fields` is the parsed
+    `DETECT_RESUME_RESULT` block on adoption, `{}` otherwise — a dispatch-
+    sourced position carries no such block because fleetd already knows the
+    context it recorded the position with.
+    """
+    existing = store.get_position(tid)
+    if existing is not None:
+        return existing['position'], existing['source'], {}
+
+    step, fields = adopt_position_via_detect_resume(
+        tid, project_dir=project_dir, script=script, timeout=timeout)
+    store.record_position(tid, step, source='adopted')
+    return step, 'adopted', fields
+
+
+# ── Mid-run crash resume (task 4.7, phase-result-schema.md's fourth channel) ─
+#
+# `docs/phase-result-schema.md` enumerates five channels a code supervisor
+# needs beyond `META|phase-result`. Four already have an owner elsewhere in
+# this module: outcome label and auto-merge eligibility are read by
+# `orchestration.py`'s `bash`/`auto_merge` runners (task 4.11); implement
+# completeness is `return-completeness-check.sh`, run the same way, its
+# `enforcement: warn-only` table field — not a hardcoded rule here — deciding
+# whether a failure blocks (task 4.11's `_is_blocking`); retry/iteration caps
+# are `evaluate_loop` (task 4.6). This is the fifth: the phase-result block is
+# terminal-only, so an agent that crashes mid-VERIFY never emits one, which is
+# exactly when resume matters.
+#
+# Scoped to VERIFY because it is the only phase phase-result-schema.md names
+# for this channel — the only one that writes incremental per-criterion
+# progress mid-attempt. The other phases' `*_FROM` sub-step values
+# (`APPRAISE_FROM`, `IMPLEMENT_FROM`, ...) exist only inside
+# `detect-resume.sh`'s one-time adoption reconstruction —
+# `resolve_dispatch_position` already returns them via its `fields` return
+# value — not as a normal-path concern: fleetd always knows which step_id it
+# dispatched, so there is nothing to reconstruct for those phases between one
+# fleetd dispatch and the next. VERIFY differs because the crash can happen
+# *inside* the attempt fleetd is already resuming.
+
+# `detect-resume.sh`'s own browser-state correction (`:451-453`): a checkpoint
+# written mid-navigation cannot be resumed by a fresh worker with no browser
+# session, so all three normalize back to the phase's start.
+_VERIFY_UNRESUMABLE_SUBSTEPS = frozenset(
+    {'browser-session', 'navigate', 'execute-steps'})
+
+
+def last_verify_checkpoint(log_lines):
+    """The `--from-step` value a retried VERIFY worker should resume from.
+
+    Mirrors `detect-resume.sh`'s `VERIFY_FROM` derivation exactly — the last
+    `|VERIFY|<step>|done|` entry's step field, with `verify` and
+    `phase-inspector-*` excluded, then the same browser-state correction —
+    so a Python reimplementation cannot silently diverge from the bash one.
+    Read directly rather than shelled out to, per D7: this is a per-attempt
+    reconstruction fleetd performs on its own dispatch path, not the one-time
+    adoption `resolve_dispatch_position` owns.
+
+    Returns `''` when no resumable sub-step has completed, matching the
+    bash script's empty-string default.
+    """
+    last_step = ''
+    for line in log_lines:
+        fields = line.split('|', 4)
+        if len(fields) < 5 or fields[1] != 'VERIFY' or fields[3] != 'done':
+            continue
+        step = fields[2]
+        if step == 'verify' or step.startswith('phase-inspector-'):
+            continue
+        last_step = step
+    if last_step in _VERIFY_UNRESUMABLE_SUBSTEPS:
+        return 'build-plan'
+    return last_step
