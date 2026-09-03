@@ -267,6 +267,89 @@ else
 fi
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# planner-ticket-validate.sh — body-section validation (issue #285)
+#
+# planner_validate_ticket's optional third argument (ticket_type) wires in
+# ticket-auto-pipeline's check_planned_body (planned-ticket-body-check.sh) so
+# a planner-generated ticket missing a required ## section is rejected at
+# creation time instead of ticket-auto's gate-check catching it phases later.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_PC_HEADER='## Planner Context
+**Schema-Version:** 1
+**Initiative:** INIT-TEST
+**Epic:** EPIC-1
+**Confidence:** 0.9
+**Strategy:** Balanced
+**Decision:** Do the thing
+**Affected Services:** gateway
+**Target Symbols:** Foo.bar:src/foo.ts:10
+**Pre-approved:** true
+**Generated:** 2026-01-01T00:00:00Z
+**Regenerate:** false
+'
+
+COMPLETE_FEATURE_DESC="${_PC_HEADER}
+## Acceptance Criteria
+- [ ] Export button appears on the list
+## Test User
+\`admin@example.com\` — password \`admin\`
+## Scope
+| Layer | Service | Area |
+| ----- | ------- | ---- |
+| FE    | gateway | list |
+## Navigation Path
+\`Menu > List > Export\`"
+
+INCOMPLETE_FEATURE_DESC="${_PC_HEADER}
+## Acceptance Criteria
+- [ ] Export button appears on the list"
+
+COMPLETE_BUG_DESC="${_PC_HEADER}
+## Acceptance Criteria
+- [ ] Save button is enabled
+## Test User
+\`admin@example.com\` — password \`admin\`
+## Scope
+| Layer | Service | Area |
+| ----- | ------- | ---- |
+| FE    | gateway | form |
+## Steps to Reproduce
+1. Log in as admin
+2. Navigate to Settings
+## Test Data Prerequisites
+At least one active record."
+
+echo "--- validate: complete feature body passes with ticket_type ---"
+if planner_validate_ticket "$COMPLETE_FEATURE_DESC" "true" "feature" 2>/dev/null; then
+  pass "complete feature body passes body-section check"
+else
+  fail "complete feature body passes body-section check" "rejected"
+fi
+
+echo "--- validate: complete bug body passes with ticket_type ---"
+if planner_validate_ticket "$COMPLETE_BUG_DESC" "true" "bug" 2>/dev/null; then
+  pass "complete bug body passes body-section check"
+else
+  fail "complete bug body passes body-section check" "rejected"
+fi
+
+echo "--- validate: incomplete feature body rejected with ticket_type ---"
+err=$(planner_validate_ticket "$INCOMPLETE_FEATURE_DESC" "true" "feature" 2>&1 1>/dev/null) && rc=0 || rc=$?
+if [ "$rc" -eq 1 ] && echo "$err" | grep -q "missing required section"; then
+  pass "incomplete feature body rejected (rc=1, reports missing sections)"
+else
+  fail "incomplete feature body rejected" "rc=$rc err='$err'"
+fi
+
+echo "--- validate: incomplete body without ticket_type keeps prior behavior ---"
+if planner_validate_ticket "$INCOMPLETE_FEATURE_DESC" "true" 2>/dev/null; then
+  pass "no ticket_type → body-section check skipped, Planner Context check alone passes"
+else
+  fail "no ticket_type → body-section check skipped" "rejected"
+fi
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # planner-ticket-validate.sh — idempotency
 # ═══════════════════════════════════════════════════════════════════════════════
 

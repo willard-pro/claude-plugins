@@ -185,6 +185,23 @@ planner_doctor_run() {
     _issues=$((_issues + 1))
   fi
 
+  # planned-ticket-body-check.sh lives alongside planned-ticket-check.sh in the
+  # same lib/ directory in every install location (marketplace cache, skills
+  # lib sync, relative checkout) — checked here as a sibling of whatever copy
+  # of planned-ticket-check.sh resolved above, matching how planner_validate_ticket
+  # (planner-ticket-validate.sh) itself resolves it (#285).
+  local body_checker=""
+  if [ -n "$planned_checker" ]; then
+    body_checker="$(dirname "$planned_checker")/planned-ticket-body-check.sh"
+    [ -f "$body_checker" ] || body_checker=""
+  fi
+  if [ -n "$body_checker" ]; then
+    _row "planned-ticket-body-check.sh" "ok" "$body_checker" "ticket-auto-pipeline" ""
+  else
+    _row "planned-ticket-body-check.sh" "missing" "" "ticket-auto-pipeline" "not found — ticket body-section validation will hard-stop when planner_validate_ticket is called with a ticket_type"
+    _issues=$((_issues + 1))
+  fi
+
   branch_checker=$(_resolve_branch_directive_checker 2>/dev/null)
   if [ -n "$branch_checker" ]; then
     _row "branch-directive-check.sh" "ok" "$branch_checker" "ticket-auto-pipeline" ""
