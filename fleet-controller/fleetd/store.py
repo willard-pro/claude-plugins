@@ -260,6 +260,24 @@ class FleetStore:
             gate_hold_reason=reason if held else '',
             gate_held_at=_now_iso() if held else '')
 
+    def held_tickets(self):
+        """Every ticket parked at its approval gate, oldest hold first.
+
+        The input to the gate-hold reconciliation pass (D14). Oldest first
+        because a ticket held longest is the one whose human has had most time
+        to act, so it is the likeliest to be releasable — and because a fleet
+        with more held tickets than one pass can probe should make progress on
+        the front of the queue rather than the back.
+        """
+        rows = self.conn.execute(
+            'SELECT * FROM tickets WHERE gate_held = 1 '
+            'ORDER BY gate_held_at ASC, tid ASC').fetchall()
+        return [dict(r) for r in rows]
+
+    def bump_reconcile_cycle(self, tid, cycle):
+        """Record the reconcile cycle a released hold is entering."""
+        self.update_ticket(tid, reconcile_cycle=int(cycle))
+
     def set_owner(self, tid, owner):
         if owner not in ('fleetd', 'manual'):
             raise ValueError(f"owner must be 'fleetd' or 'manual', got {owner!r}")

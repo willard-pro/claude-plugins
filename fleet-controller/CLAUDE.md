@@ -17,6 +17,8 @@ fleet-controller/
   fleetd/                         # Python 3 supervisor daemon (stdlib-only)
   fleetd/schema.sql               # Fleet state store schema (SQLite, v1)
   fleetd/store.py                 # State store module — fleetd is its sole writer
+  fleetd/phase_dispatch.py        # Phase-level dispatch — table loader, classifier, spawn construction, loop caps
+  fleetd/gate_hold.py             # Gate-hold reconciliation on its own cadence (a hold is a row, not a process)
   fleetd/otel.py                  # OTel exporter — the ONLY module with a third-party dep
   fleetd/requirements-otel.txt    # That dep, optional and deliberately not project-wide
   docs/                           # Architecture and reference docs
@@ -243,6 +245,7 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 | `FLEET_ZOMBIE_SECS` | 900 | Unresolved waiting entry threshold |
 | `FLEET_ACTIVITY_WARN_SECS` | 240 | Agent-activity staleness → WARN. Second, independent liveness input to `detect_stalls`, read from `{tid}-activity.log` (written per tool call by `ticket-auto-pipeline/hooks/agent-activity.sh`) and applied only while a spawn bracket is open. The watchdog `alive` line proves the *router* is running; this proves the *agent* is. 240s is deliberately well under `FLEET_STALL_WARN_SECS` — an agent that has made no tool call in 4 minutes is anomalous even though a router waiting 4 minutes is not |
 | `FLEET_ACTIVITY_STALE_SECS` | 900 | Agent-activity staleness → KILL. Capped at WARN for tickets with no fleetd run-registry entry, so a human running `/ticket-auto` by hand — who reads output and thinks between tool calls — is never escalated to an intervention |
+| `FLEET_GATE_RECONCILE_INTERVAL` | 300 | Seconds between gate-hold reconciliation passes — deliberately its own cadence, not a step of the detection sweep. Detection reads local logs and runs every 30s; a held-ticket re-check is a Linear round trip per held ticket, and a human attaching an `approved` label is not a sub-minute-latency event. The probe re-runs `gate-check.sh --mode entry` (never `--mode reapprove`, which writes `APPROVAL_REVOKED` on any non-pass and would gate-stop a ticket nobody has looked at yet) against a scratch log, appending its lines to the real pipeline log only when the answer changed — a ticket held over a weekend must not accumulate one identical `GATE\|gate\|fail\|held:` line per pass |
 | `FLEET_STORE_ENABLE` | true | Set `false` to disable the state store entirely — fleetd stops writing it and every detection engine falls back to reading the log files, which is the pre-store behaviour |
 | `FLEET_STORE_EVENT_RETENTION_DAYS` | 30 | Age past which `log_events`/`activity_events` projection rows are pruned. Projections only — nothing fleetd authored is ever pruned, and anything dropped returns on a rebuild |
 | `FLEET_ACTIVITY_LOG_MAX_LINES` | 500 | Ring cap on `{tid}-activity.log`. Read by the hook, not the detector: only the last line's age and the current bracket's line count have consumers |
