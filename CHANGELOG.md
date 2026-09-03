@@ -17,6 +17,22 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.38.2 (2026-09-03)
+
+`_resolve_type_label()` (`gate-check.sh`) matched a ticket's Type label
+against a fixed set of lowercase literals without lowercasing the label
+first. Real Linear labels are commonly title-cased (`Feature`, `Bug`) — this
+is how they're seeded in this workspace's own team — so the match silently
+failed for every planned ticket, and the entry gate hard-stopped with
+`NO_TEMPLATE_FOR_TYPE — no template for task type '<none>'`. Filed as
+[#281](https://github.com/willard-pro/claude-plugins/issues/281), found
+while running `/ticket-auto WIL-70`.
+
+- Fix: label is now trimmed and lowercased before the `case` match, matching
+  the case-insensitive convention `validate-linear-config.sh` already uses.
+- Added regression tests for title-cased, and all-uppercase Type labels
+  in `test-gate-no-template.sh`.
+
 ## ticket-planner 0.8.24 (2026-09-03)
 
 Planner-generated ticket bodies didn't follow ticket-auto-pipeline's required

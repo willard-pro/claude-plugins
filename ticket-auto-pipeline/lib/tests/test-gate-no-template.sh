@@ -94,6 +94,21 @@ _run_output "Type resolver: no type label → empty" "" \
   _resolve_type_label "planned,frontend"
 _run_output "Type resolver: empty labels → empty" "" \
   _resolve_type_label ""
+_run_output "Type resolver: title-cased 'Feature' matches case-insensitively" "feature" \
+  _resolve_type_label "Complex,claimed,Feature,planned"
+_run_output "Type resolver: title-cased 'Bug' matches case-insensitively" "bug" \
+  _resolve_type_label "Bug,planned"
+_run_output "Type resolver: uppercase 'CHORE' matches case-insensitively" "chore" \
+  _resolve_type_label "planned,CHORE"
+_titlecased_type=$(_resolve_type_label "Complex,claimed,Feature,planned")
+_titlecased_template=$(resolve_template "$_titlecased_type" 2>/dev/null) || true
+if [ "$_titlecased_template" = "templates/feature.md" ]; then
+  echo "PASS: title-cased 'Feature' resolves to templates/feature.md"
+  ((PASS++)) || true
+else
+  echo "FAIL: title-cased 'Feature' should resolve to templates/feature.md (got '$_titlecased_template')"
+  ((FAIL++)) || true
+fi
 
 # ── Test: resolve_template + check_planned_body integration ───────────────────
 
