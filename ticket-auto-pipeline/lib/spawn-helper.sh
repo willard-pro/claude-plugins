@@ -531,6 +531,137 @@ EOF
   return 0
 }
 
+# ── phase_terminal_write ─────────────────────────────────────────────────────────
+# Writes a phase's terminal pipeline-log marker — the `{PHASE}|{step}|done|` /
+# `|fail|` line that resolves an open bracket — plus the matching heartbeat and
+# claude-log entries.
+#
+# Extracted from spawn_agent_post so that the line grammar has exactly ONE
+# writer with two callers (design.md D13). On the manual path the router calls
+# spawn_agent_post, which calls this. On the automated path fleetd classifies a
+# finished phase itself (D12) and calls this directly, because it bypasses the
+# router entirely and the marker would otherwise have no writer at all.
+#
+# The writer must be a process that OUTLIVES the agent: a crashed, timed-out or
+# SIGKILLed agent never writes anything, and those are precisely the cases the
+# marker exists to record. That is why this is not the phase skill's job.
+#
+# Everything spawn_agent_post does around this — stopping the pinger and
+# watchdog, reaping helpers, sweeping orphans, reading the spawn-meta file — is
+# deliberately NOT here. Those are the manual path's bracket teardown; fleetd
+# owns its own worker lifecycle and must not inherit them.
+#
+# Usage: phase_terminal_write PHASE=<phase> STEP=<step> RESULT=<done|fail> \
+#          [MSG=<message>] [VERDICT=<PASS|FAIL|OK|WARN|BLOCK>] \
+#          [NEXT_PHASE=<phase>] [FAIL_ACTION=<stop|warn-continue>] \
+#          [LOG_FILE=<path>] [HB_LOG_FILE=<path>] [CLAUDE_LOG_FILE=<path>]
+#
+# PHASE and STEP are normalized here (phase uppercased, step lowercased) rather
+# than by the caller, so both callers produce byte-identical lines.
+phase_terminal_write() {
+  local PHASE="" STEP="" RESULT="" MSG="" VERDICT="" NEXT_PHASE=""
+  local FAIL_ACTION="" LOG_FILE="" HB_LOG_FILE="" CLAUDE_LOG_FILE=""
+
+  local arg
+  for arg in "$@"; do
+    case "$arg" in
+    PHASE=*) PHASE="${arg#PHASE=}" ;;
+    STEP=*) STEP="${arg#STEP=}" ;;
+    RESULT=*) RESULT="${arg#RESULT=}" ;;
+    MSG=*) MSG="${arg#MSG=}" ;;
+    VERDICT=*) VERDICT="${arg#VERDICT=}" ;;
+    NEXT_PHASE=*) NEXT_PHASE="${arg#NEXT_PHASE=}" ;;
+    FAIL_ACTION=*) FAIL_ACTION="${arg#FAIL_ACTION=}" ;;
+    LOG_FILE=*) LOG_FILE="${arg#LOG_FILE=}" ;;
+    HB_LOG_FILE=*) HB_LOG_FILE="${arg#HB_LOG_FILE=}" ;;
+    CLAUDE_LOG_FILE=*) CLAUDE_LOG_FILE="${arg#CLAUDE_LOG_FILE=}" ;;
+    *)
+      echo "phase_terminal_write: unknown parameter '$arg'" >&2
+      return 1
+      ;;
+    esac
+  done
+
+  case "$VERDICT" in
+  "" | PASS | FAIL | OK | WARN | BLOCK) ;;
+  *)
+    echo "phase_terminal_write: VERDICT must be one of PASS|FAIL|OK|WARN|BLOCK, got '$VERDICT'" >&2
+    return 1
+    ;;
+  esac
+
+  local phase_lower="" phase_upper=""
+  [ -n "$STEP" ] && phase_lower=$(echo "$STEP" | tr '[:upper:]' '[:lower:]')
+  # Normalize phase to uppercase for detect-resume.sh compatibility
+  [ -n "$PHASE" ] && phase_upper=$(echo "$PHASE" | tr '[:lower:]' '[:upper:]')
+  phase_upper="${phase_upper:-UNKNOWN}"
+
+  case "$RESULT" in
+  done)
+    local done_msg="${MSG:-agent done}"
+    [ -n "$VERDICT" ] && done_msg="${VERDICT} — ${done_msg}"
+    if [ -n "${LOG_FILE:-}" ]; then
+      # Tail-scoped (not whole-file): a whole-file grep would suppress every
+      # done line after the first for loop phases (pr-review iterate, verify
+      # retry), where the same PHASE|STEP recurs across brackets. Matches the
+      # pre-guard's tail-check semantics (see spawn_agent_pre above).
+      local last_line
+      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
+      if echo "$last_line" | grep -q "|$phase_upper|${phase_lower:-unknown}|done|"; then
+        : # already written, skip (back-to-back duplicate)
+      else
+        _plog "$LOG_FILE" "$phase_upper" "${phase_lower:-unknown}" "done" "${done_msg}"
+      fi
+    fi
+    if [ -n "${HB_LOG_FILE:-}" ]; then
+      hb_heartbeat "agent-returned" "${phase_lower:-agent} done — ${done_msg}"
+      if [ -n "$NEXT_PHASE" ]; then
+        hb_heartbeat "phase-transition" "${PHASE:-} → ${NEXT_PHASE}"
+      fi
+    fi
+    if [ -n "${CLAUDE_LOG_FILE:-}" ]; then
+      cl_write "$phase_upper" "${phase_lower:-unknown}" "done" "${done_msg}"
+    fi
+    ;;
+
+  fail)
+    local fail_msg="${MSG:-Agent failed}"
+    [ -n "$VERDICT" ] && fail_msg="${VERDICT} — ${fail_msg}"
+    local fail_action="${FAIL_ACTION:-stop}"
+    local suffix=""
+    [ "$fail_action" = "warn-continue" ] && suffix=" — continuing"
+
+    if [ -n "${LOG_FILE:-}" ]; then
+      local last_line
+      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
+      if echo "$last_line" | grep -q "|$phase_upper|${phase_lower:-unknown}|fail|"; then
+        : # already written, skip (back-to-back duplicate)
+      else
+        _plog "$LOG_FILE" "$phase_upper" "${phase_lower:-unknown}" "fail" "${fail_msg}${suffix}"
+      fi
+    fi
+    if [ -n "${HB_LOG_FILE:-}" ]; then
+      hb_heartbeat "agent-returned" "${phase_lower:-agent} failed${suffix}"
+    fi
+    if [ -n "${CLAUDE_LOG_FILE:-}" ]; then
+      local last_hb="unknown"
+      [ -n "${HB_LOG_FILE:-}" ] && [ -f "$HB_LOG_FILE" ] && last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
+      cl_write "$phase_upper" "context" "fail" "${phase_lower:-agent} agent failed (${fail_action}) — last_hb: ${last_hb}"
+      if [ "$fail_action" = "stop" ]; then
+        cl_write RETRO hint info "sub-agent spawn failure in $phase_upper phase — check agent isolation, tool availability, and CLAUDE_LOG_FILE export for diagnostics"
+      fi
+    fi
+    ;;
+
+  *)
+    echo "phase_terminal_write: RESULT must be 'done' or 'fail', got '$RESULT'" >&2
+    return 1
+    ;;
+  esac
+
+  return 0
+}
+
 # ── spawn_agent_post ─────────────────────────────────────────────────────────────
 # Post-spawn boilerplate: stops the heartbeat pinger and writes the done or fail
 # log entry. Call this after the agent returns.
@@ -631,11 +762,9 @@ spawn_agent_post() {
     return 1
   fi
 
-  local phase_lower="" phase_upper=""
-  [ -n "${STEP:-}" ] && phase_lower=$(echo "${STEP:-}" | tr '[:upper:]' '[:lower:]')
-  # Normalize phase to uppercase for detect-resume.sh compatibility
-  [ -n "${PHASE:-}" ] && phase_upper=$(echo "${PHASE:-}" | tr '[:lower:]' '[:upper:]')
-  phase_upper="${phase_upper:-UNKNOWN}"
+  # PHASE/STEP normalization deliberately lives in phase_terminal_write, not
+  # here: both callers of that helper must produce byte-identical log lines,
+  # so the rule has one home.
 
   # Stop watchdog and heartbeat pinger
   if [ -n "${HB_LOG_FILE:-}" ]; then
@@ -690,68 +819,17 @@ spawn_agent_post() {
   # from a crashed run is exactly the case where HB_LOG_FILE may be unset here.
   spawn_sweep_orphans "$TICKET_ID"
 
-  case "$RESULT" in
-  done)
-    local done_msg="${MSG:-agent done}"
-    [ -n "$VERDICT" ] && done_msg="${VERDICT} — ${done_msg}"
-    if [ -n "${LOG_FILE:-}" ]; then
-      # Tail-scoped (not whole-file): a whole-file grep would suppress every
-      # done line after the first for loop phases (pr-review iterate, verify
-      # retry), where the same PHASE|STEP recurs across brackets. Matches the
-      # pre-guard's tail-check semantics (see spawn_agent_pre above).
-      local last_line
-      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
-      if echo "$last_line" | grep -q "|$phase_upper|${phase_lower:-unknown}|done|"; then
-        : # already written, skip (back-to-back duplicate)
-      else
-        _plog "$LOG_FILE" "$phase_upper" "${phase_lower:-unknown}" "done" "${done_msg}"
-      fi
-    fi
-    if [ -n "${HB_LOG_FILE:-}" ]; then
-      hb_heartbeat "agent-returned" "${phase_lower:-agent} done — ${done_msg}"
-      if [ -n "$NEXT_PHASE" ]; then
-        hb_heartbeat "phase-transition" "${PHASE:-} → ${NEXT_PHASE}"
-      fi
-    fi
-    if [ -n "${CLAUDE_LOG_FILE:-}" ]; then
-      cl_write "$phase_upper" "${phase_lower:-unknown}" "done" "${done_msg}"
-    fi
-    ;;
-
-  fail)
-    local fail_msg="${MSG:-Agent failed}"
-    [ -n "$VERDICT" ] && fail_msg="${VERDICT} — ${fail_msg}"
-    local fail_action="${FAIL_ACTION:-stop}"
-    local suffix=""
-    [ "$fail_action" = "warn-continue" ] && suffix=" — continuing"
-
-    if [ -n "${LOG_FILE:-}" ]; then
-      local last_line
-      last_line=$(tail -1 "${LOG_FILE}" 2>/dev/null || true)
-      if echo "$last_line" | grep -q "|$phase_upper|${phase_lower:-unknown}|fail|"; then
-        : # already written, skip (back-to-back duplicate)
-      else
-        _plog "$LOG_FILE" "$phase_upper" "${phase_lower:-unknown}" "fail" "${fail_msg}${suffix}"
-      fi
-    fi
-    if [ -n "${HB_LOG_FILE:-}" ]; then
-      hb_heartbeat "agent-returned" "${phase_lower:-agent} failed${suffix}"
-    fi
-    if [ -n "${CLAUDE_LOG_FILE:-}" ]; then
-      local last_hb="unknown"
-      [ -n "${HB_LOG_FILE:-}" ] && [ -f "$HB_LOG_FILE" ] && last_hb=$(tail -1 "$HB_LOG_FILE" 2>/dev/null | cut -d'|' -f2-4 || echo "unknown")
-      cl_write "$phase_upper" "context" "fail" "${phase_lower:-agent} agent failed (${fail_action}) — last_hb: ${last_hb}"
-      if [ "$fail_action" = "stop" ]; then
-        cl_write RETRO hint info "sub-agent spawn failure in $phase_upper phase — check agent isolation, tool availability, and CLAUDE_LOG_FILE export for diagnostics"
-      fi
-    fi
-    ;;
-
-  *)
-    echo "spawn_agent_post: RESULT must be 'done' or 'fail', got '$RESULT'" >&2
-    return 1
-    ;;
-  esac
+  phase_terminal_write \
+    PHASE="$PHASE" \
+    STEP="$STEP" \
+    RESULT="$RESULT" \
+    MSG="$MSG" \
+    VERDICT="$VERDICT" \
+    NEXT_PHASE="$NEXT_PHASE" \
+    FAIL_ACTION="${FAIL_ACTION:-stop}" \
+    LOG_FILE="${LOG_FILE:-}" \
+    HB_LOG_FILE="${HB_LOG_FILE:-}" \
+    CLAUDE_LOG_FILE="${CLAUDE_LOG_FILE:-}" || return 1
 
   # Meta file persists until next spawn_agent_pre overwrites it.
   # This allows duplicate spawn_agent_post calls to read PHASE/STEP

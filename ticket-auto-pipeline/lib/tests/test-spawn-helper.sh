@@ -1358,6 +1358,94 @@ test_watchdog_exits_at_iteration_cap_when_pid_unset() {
 
 # ── spawn_agent_post wait/reaping (Bug #4 fix) ─────────────────────────────────
 
+# ── phase_terminal_write (design.md D13) ─────────────────────────────────────
+# The writing half of spawn_agent_post, extracted so fleetd can resolve a
+# bracket on the automated path without going through the router. These tests
+# exercise it the way fleetd will: called directly, with no spawn-meta file, no
+# pinger and no watchdog in play.
+
+test_phase_terminal_write_emits_done_marker() {
+  local tmpdir log
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PTW1-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|2" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    phase_terminal_write PHASE=implement STEP=Implement RESULT=done \
+      MSG="committed 3 files" LOG_FILE="$log"
+  )
+  # Phase uppercased, step lowercased — the grammar detect-resume.sh keys on.
+  grep -q '|IMPLEMENT|implement|done|committed 3 files$' "$log"
+}
+
+test_phase_terminal_write_prefixes_verdict() {
+  local tmpdir log
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PTW2-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|2" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    phase_terminal_write PHASE=VERIFY STEP=verify RESULT=done \
+      VERDICT=PASS MSG="3/3 criteria" LOG_FILE="$log"
+  )
+  grep -q '|VERIFY|verify|done|PASS — 3/3 criteria$' "$log"
+}
+
+test_phase_terminal_write_marks_warn_continue() {
+  local tmpdir log
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PTW3-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|2" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    phase_terminal_write PHASE=MAINTENANCE STEP=document RESULT=fail \
+      MSG="no diff" FAIL_ACTION=warn-continue LOG_FILE="$log"
+  )
+  grep -q '|MAINTENANCE|document|fail|no diff — continuing$' "$log"
+}
+
+test_phase_terminal_write_rejects_bad_verdict() {
+  local tmpdir log
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PTW4-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|2" >"$log"
+  ! (
+    source "$LIB_DIR/spawn-helper.sh"
+    phase_terminal_write PHASE=VERIFY STEP=verify RESULT=done \
+      VERDICT=MAYBE LOG_FILE="$log" 2>/dev/null
+  )
+}
+
+test_phase_terminal_write_suppresses_back_to_back_duplicate() {
+  # A duplicate resolution of the same bracket must not double-write, or the
+  # loop counters detect-resume.sh derives from terminal lines overcount.
+  local tmpdir log count
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PTW5-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|2" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    phase_terminal_write PHASE=VERIFY STEP=verify RESULT=done VERDICT=PASS LOG_FILE="$log"
+    phase_terminal_write PHASE=VERIFY STEP=verify RESULT=done VERDICT=PASS LOG_FILE="$log"
+  )
+  count=$(grep -c '|VERIFY|verify|done|' "$log")
+  [ "$count" = "1" ]
+}
+
+test_spawn_agent_post_still_writes_through_the_helper() {
+  # The router path must be unchanged by the extraction: same line, same shape.
+  local tmpdir log
+  tmpdir=$(_mktemp_test_dir)
+  log="$tmpdir/TEST-PTW6-pipeline.log"
+  echo "2026-06-02T10:00:00Z|META|schema|info|2" >"$log"
+  (
+    source "$LIB_DIR/spawn-helper.sh"
+    spawn_agent_post TICKET_ID=TEST-PTW6 RESULT=done PHASE=APPRAISE \
+      STEP=appraise MSG="complexity=simple" LOG_FILE="$log"
+  )
+  grep -q '|APPRAISE|appraise|done|complexity=simple$' "$log"
+}
+
 test_spawn_agent_post_waits_for_captured_pids() {
   # Verify spawn_agent_post reads PINGER_PID/WATCHDOG_PID from spawn-meta
   # and attempts to wait for them after writing stop files.
@@ -1758,6 +1846,12 @@ for fn in \
   test_watchdog_exits_when_worker_pid_dies \
   test_watchdog_exits_at_iteration_cap_when_pid_unset \
   test_spawn_agent_post_waits_for_captured_pids \
+  test_phase_terminal_write_emits_done_marker \
+  test_phase_terminal_write_prefixes_verdict \
+  test_phase_terminal_write_marks_warn_continue \
+  test_phase_terminal_write_rejects_bad_verdict \
+  test_phase_terminal_write_suppresses_back_to_back_duplicate \
+  test_spawn_agent_post_still_writes_through_the_helper \
   test_f10_guard_clears_stale_stop_files_from_prior_phase \
   test_f10_guard_still_blocks_external_kill \
   test_f10_guard_succeeds_when_no_stop_files_exist \
