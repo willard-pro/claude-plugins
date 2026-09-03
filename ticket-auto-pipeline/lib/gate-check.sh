@@ -654,8 +654,10 @@ _resolve_type_label() {
   local labels="$1"
   local IFS=','
   for label in $labels; do
-    # Trim whitespace
-    label=$(echo "$label" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    # Trim whitespace and lowercase — Linear labels are commonly title-cased
+    # (e.g. "Feature"), and this match must be case-insensitive to match the
+    # convention already used by validate-linear-config.sh.
+    label=$(echo "$label" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//' | tr '[:upper:]' '[:lower:]')
     case "$label" in
     bug | feature | improvement | security | chore | refactor)
       echo "$label"
