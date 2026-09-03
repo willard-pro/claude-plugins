@@ -19,6 +19,7 @@ fleet-controller/
   fleetd/store.py                 # State store module — fleetd is its sole writer
   fleetd/phase_dispatch.py        # Phase-level dispatch — table loader, classifier, spawn construction, loop caps
   fleetd/gate_hold.py             # Gate-hold reconciliation on its own cadence (a hold is a row, not a process)
+  fleetd/preamble.py              # Once-per-ticket preamble caller — env file, log init, branch context, preflight
   fleetd/otel.py                  # OTel exporter — the ONLY module with a third-party dep
   fleetd/requirements-otel.txt    # That dep, optional and deliberately not project-wide
   docs/                           # Architecture and reference docs

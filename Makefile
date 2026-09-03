@@ -18,6 +18,7 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-heartbeat.sh
 	bash ticket-auto-pipeline/lib/tests/test-capture-transcript.sh
 	bash ticket-auto-pipeline/lib/tests/test-reconcile-comments.sh
+	bash ticket-auto-pipeline/lib/tests/test-ticket-preamble.sh
 	bash ticket-auto-pipeline/lib/tests/test-spawn-helper.sh
 	bash ticket-auto-pipeline/lib/tests/test-worker-hooks.sh
 	bash ticket-auto-pipeline/lib/tests/test-agent-activity.sh
@@ -105,6 +106,7 @@ test-fleetd:
 	python3 -m pytest fleet-controller/fleetd/tests/test_store.py -v
 	python3 -m pytest fleet-controller/fleetd/tests/test_phase_dispatch.py -v
 	python3 -m pytest fleet-controller/fleetd/tests/test_gate_hold.py -v
+	python3 -m pytest fleet-controller/fleetd/tests/test_preamble.py -v
 	python3 -m pytest fleet-controller/fleetd/tests/test_otel.py -v
 	python3 -m pytest ticket-auto-pipeline/skills/ticket-auto/tests/test_dashboard_fleet.py -v
 
