@@ -328,13 +328,12 @@ get_team() {
 #                                 [--title <str>] [--description <str>]
 #                                 [--project <id>] [--parent <id>] [--priority <0-4>]
 #
-# Detection is unambiguous, not clever: after <issue_id>, if the next
-# argument does NOT start with "--", up to 3 positional args are consumed
-# for state_id/label_ids/assignee_id (shape 1) exactly as before. Whatever
-# remains — the whole remainder in pure flag mode, or just the tail after
-# 3 positional args in combined mode — is parsed strictly as --flag value
-# pairs. An unrecognized --flag is a hard error (return 1) rather than a
-# silent no-op.
+# Detection is unambiguous, not clever: after <issue_id>, up to 3 leading
+# args are consumed as state_id/label_ids/assignee_id (shape 1) ONE AT A
+# TIME, stopping the instant an arg starts with "--" — so 0, 1, 2, or 3
+# legacy positionals may precede the flags in a single call. Whatever
+# remains is parsed strictly as --flag value pairs. An unrecognized --flag
+# is a hard error (return 1) rather than a silent no-op.
 #
 # Only non-empty fields are added to the IssueUpdateInput; omitted/empty
 # fields are left untouched on the Linear issue (unchanged behavior for
@@ -346,15 +345,21 @@ update_issue() {
   local state_id="" label_ids="" assignee_id=""
   local title="" description="" project_id="" parent_id="" priority=""
 
-  # Legacy positional mode: only entered when a positional-shaped call is
-  # actually present (next arg is not a --flag). Consumes at most 3 args.
+  # Legacy positional mode: consume at most 3 leading args, but stop as
+  # soon as a --flag is seen — re-checked before EACH slot, not just once,
+  # so a call with 1 or 2 legacy positionals followed by flags parses
+  # correctly instead of swallowing the flag token as a positional value.
   if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
     state_id="${1:-}"
-    [ $# -gt 0 ] && shift
+    shift
+  fi
+  if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
     label_ids="${1:-}"
-    [ $# -gt 0 ] && shift
+    shift
+  fi
+  if [ $# -gt 0 ] && [[ "$1" != --* ]]; then
     assignee_id="${1:-}"
-    [ $# -gt 0 ] && shift
+    shift
   fi
 
   while [ $# -gt 0 ]; do

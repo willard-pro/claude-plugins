@@ -204,6 +204,38 @@ test_update_issue_flags_combined_with_positional() {
   return $result
 }
 
+# Issue #284 regression: exactly 1 legacy positional (state only) before a
+# flag must not swallow the flag token as label_ids.
+test_update_issue_one_positional_then_flag() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo \"\$1\" > '$tmpfile'; echo '{\"data\":{\"issueUpdate\":{\"success\":true,\"issue\":{\"id\":\"i1\",\"identifier\":\"WIL-1\"}}}}'; }
+    update_issue 'i1' 'state-1' --title 'New Title'
+  " 2>/dev/null
+  jq -e '.variables.input == {"stateId":"state-1","title":"New Title"}' "$tmpfile" >/dev/null 2>&1
+  local result=$?
+  rm -f "$tmpfile"
+  return $result
+}
+
+# Issue #284 regression: exactly 2 legacy positionals (state + labels) before
+# a flag must not swallow the flag token as assignee_id.
+test_update_issue_two_positional_then_flag() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo \"\$1\" > '$tmpfile'; echo '{\"data\":{\"issueUpdate\":{\"success\":true,\"issue\":{\"id\":\"i1\",\"identifier\":\"WIL-1\"}}}}'; }
+    update_issue 'i1' 'state-1' '[\"label-1\"]' --description 'New Description'
+  " 2>/dev/null
+  jq -e '.variables.input == {"stateId":"state-1","labelIds":["label-1"],"description":"New Description"}' "$tmpfile" >/dev/null 2>&1
+  local result=$?
+  rm -f "$tmpfile"
+  return $result
+}
+
 # Issue #284: omitted fields must not appear in the input at all, not even as null.
 test_update_issue_omitted_fields_absent() {
   local tmpfile
@@ -440,6 +472,8 @@ for fn in \
   test_update_issue_description_flag_only \
   test_update_issue_multiple_flags_combined \
   test_update_issue_flags_combined_with_positional \
+  test_update_issue_one_positional_then_flag \
+  test_update_issue_two_positional_then_flag \
   test_update_issue_omitted_fields_absent \
   test_update_issue_unknown_flag_errors \
   test_update_issue_invalid_priority_errors \
