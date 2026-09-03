@@ -1,0 +1,6 @@
+{
+  "blocking": 0,
+  "warn": 0,
+  "accepted": 0,
+  "notes": "Two genuinely trivial copy-only tickets whose Signals blocks share the same all-zero/false services_identified/symbols_resolved/prior_art_found combination (differing elsewhere so they are not byte-identical) — planner-crosscheck-signals.sh (#220) documents this combination as the legitimate default for trivial tickets and excludes it from the near-identical SIGNALS_UNIFORM pass, distinct from the VS-2 (INIT-1788079196-3438) copy-paste bug the check exists to catch. Regression: must stay clean."
+}

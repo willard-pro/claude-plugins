@@ -1,0 +1,6 @@
+{
+  "blocking": 0,
+  "warn": 0,
+  "accepted": 0,
+  "notes": "A `blocked-by:` label naming an existing Linear issue ID (WIL-83) rather than a sibling spec slug — planner_deps_is_external_ref (#227) exempts this shape from DANGLING_BLOCKED_BY because it names a cross-initiative prerequisite that already exists outside this ticket set, not a broken same-set reference. Regression: must stay clean."
+}

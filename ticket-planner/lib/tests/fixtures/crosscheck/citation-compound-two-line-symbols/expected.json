@@ -1,0 +1,6 @@
+{
+  "blocking": 0,
+  "warn": 0,
+  "accepted": 0,
+  "notes": "Compound two-symbol citation (A()/B():path:line1,line2) where each symbol resolves near its own line — modeled on the #224 false-positive fixed in ticket-planner 0.8.13 (CHANGELOG, Evidence-Based initiative's ebc-e spec), where the checker paired both symbols against the first line number only and false-flagged CITATION_SYMBOL_MISMATCH on the second. Regression: must stay clean."
+}

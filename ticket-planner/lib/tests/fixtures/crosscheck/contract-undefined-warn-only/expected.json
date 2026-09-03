@@ -1,0 +1,6 @@
+{
+  "blocking": 0,
+  "warn": 1,
+  "accepted": 0,
+  "notes": "A spec paragraph declaring a structure 'gains new fields for ...' in prose only, with no backtick-quoted field names anywhere in the paragraph — a genuine CONTRACT_UNDEFINED per planner-crosscheck-contracts.sh (#175). This is deliberately warn-level (PLANNER_CROSSCHECK_WARN_CODES): an ambiguous upstream shape is a prompt for human judgment, not proof of a defect, so it must not block Crosscheck. Regression: must stay a single documented warn, never escalate to blocking."
+}
