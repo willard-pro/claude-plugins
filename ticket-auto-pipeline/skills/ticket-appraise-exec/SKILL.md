@@ -707,10 +707,14 @@ Post a comment via the Linear access strategy (bash `save_comment` when `LINEAR_
 
 **Open questions:**
 {From notes.md Open Questions — or "None"}
+{If any Open Questions bullet is tagged `[needs-human]`, append this line directly after the Open Questions block:}
+⚠️ Answer the `[needs-human]` question(s) above in a comment before adding the `approved` label — approving without answering first will trigger an extra gate-reconcile hold cycle.
 
 **Next step:**
 {First concrete action from notes.md Next Steps}
 ```
+
+If notes.md's Open Questions section has no `[needs-human]`-tagged bullet (empty, "None", or only `[agent-resolvable]` bullets already resolved), omit the warning line — post the Open Questions block as-is.
 
 [ -n "$LOG_FILE" ] && echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|EXEC|post-linear|done|Comment posted" >> "$LOG_FILE"
 
