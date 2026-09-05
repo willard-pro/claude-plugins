@@ -336,6 +336,14 @@ operator opens once — `--fleet` covers the whole workspace in one pane and pic
 pipelines on its next refresh, so nothing needs to be spawned per run. Printing the two
 commands costs nothing and works identically inside and outside tmux.
 
+Stamp run identity with `--new`: unlike fleetd's phase-level preamble, which re-enters
+`run_identity_stamp` once per phase and must rehydrate the same open run, a `/ticket-auto`
+invocation is one long-lived process spanning every phase, so each router process really is
+a new run.
+```bash
+bash ~/.claude/skills/lib/run-identity.sh stamp "{TICKET-ID}" "$LOG_FILE" --new
+```
+
 Log the resolved autonomy mode immediately after log init. Guard the write so a
 resume doesn't silently re-append (or silently switch modes mid-pipeline after gate
 decisions were already made under the old mode) — an explicit `mode-change` event is

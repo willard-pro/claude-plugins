@@ -673,6 +673,19 @@ test_router_gate_held_message_mentions_open_questions() {
   }
 }
 
+test_router_run_identity_stamp_reference() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  grep -q 'run-identity\.sh stamp' "$skill_md" || {
+    echo "run-identity.sh stamp not referenced"
+    return 1
+  }
+  grep -q -- '--new' "$skill_md" || {
+    echo "router does not pass --new to run-identity.sh stamp"
+    return 1
+  }
+}
+
 # ── dispatcher ─────────────────────────────────────────────────────────────────
 
 filter="${1:-}"

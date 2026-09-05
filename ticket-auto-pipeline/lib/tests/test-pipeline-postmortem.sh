@@ -286,6 +286,38 @@ test_idempotency_different_run_id_proceeds() {
   return 1
 }
 
+test_run_id_prefers_last_run_id_line_over_head() {
+  _setup
+  _write_log "
+2026-08-08T10:00:30Z|META|run-id|info|{\"run_id\":\"CUSTOM-RUN-1\",\"gen\":null,\"trigger\":\"manual\",\"pid\":1}
+2026-08-08T10:01:00Z|META|gate-stop|fail|EXEC_NO_ARTIFACT
+"
+  _run_pm 1
+  if grep -q '|META|postmortem|info|.*"run_id":"CUSTOM-RUN-1"' "$_log_file" 2>/dev/null; then
+    _teardown
+    return 0
+  fi
+  echo "FAIL: postmortem did not use the META|run-id run_id" >&2
+  _teardown
+  return 1
+}
+
+test_run_id_falls_back_to_head_when_no_run_id_line() {
+  _setup
+  _write_log "
+2026-08-08T10:01:00Z|META|gate-stop|fail|EXEC_NO_ARTIFACT
+"
+  _run_pm 1
+  local _expected="TEST-123-2026-08-08T10:00:00Z"
+  if grep -q "|META|postmortem|info|.*\"run_id\":\"${_expected}\"" "$_log_file" 2>/dev/null; then
+    _teardown
+    return 0
+  fi
+  echo "FAIL: fallback run_id derivation did not match the log's first line" >&2
+  _teardown
+  return 1
+}
+
 test_signature_determinism() {
   _setup
   _write_log "

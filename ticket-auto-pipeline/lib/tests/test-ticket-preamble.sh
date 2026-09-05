@@ -286,6 +286,34 @@ test_unrecognised_autonomy_falls_back_to_manual() {
   return $ok
 }
 
+# ── Run identity (Branch A) ───────────────────────────────────────────────────
+
+# fleetd re-enters the preamble once per phase; run_identity_stamp's own
+# open-run guard is what keeps two calls within one run down to one line —
+# the preamble does not call it any differently the second time.
+test_two_preamble_calls_in_one_run_write_one_run_id_line() {
+  _sandbox_new
+  _preamble TEST-PRE-9 >/dev/null
+  _preamble TEST-PRE-9 >/dev/null
+  local log="$_SANDBOX/logs/TEST-PRE-9-pipeline.log"
+  [ "$(grep -c '|META|run-id|info|' "$log")" -eq 1 ]
+  local ok=$?
+  _sandbox_rm
+  return $ok
+}
+
+test_preamble_starts_a_new_run_after_an_outcome() {
+  _sandbox_new
+  _preamble TEST-PRE-10 >/dev/null
+  local log="$_SANDBOX/logs/TEST-PRE-10-pipeline.log"
+  echo '2026-01-01T00:00:00Z|META|outcome|info|{"status":"done"}' >>"$log"
+  _preamble TEST-PRE-10 >/dev/null
+  [ "$(grep -c '|META|run-id|info|' "$log")" -eq 2 ]
+  local ok=$?
+  _sandbox_rm
+  return $ok
+}
+
 _run "writes env file, log and branch context" test_writes_env_file_log_and_branch_context
 _run "schema line precedes a branch gate-stop" test_schema_line_precedes_a_branch_gate_stop
 _run "non-directive branch failure is not a gate-stop" test_non_directive_branch_failure_is_not_a_gate_stop
@@ -298,6 +326,8 @@ _run "context emits every field for a bare project" test_context_emits_every_fie
 _run "missing TICKET_ID fails with the usage code" test_missing_ticket_id_fails_with_the_usage_code
 _run "unknown parameter fails with the usage code" test_unknown_parameter_fails_with_the_usage_code
 _run "unrecognised autonomy falls back to manual" test_unrecognised_autonomy_falls_back_to_manual
+_run "two preamble calls in one run write one run-id line" test_two_preamble_calls_in_one_run_write_one_run_id_line
+_run "preamble starts a new run after an outcome" test_preamble_starts_a_new_run_after_an_outcome
 
 echo ""
 echo "ticket-preamble: $PASS passed, $FAIL failed"

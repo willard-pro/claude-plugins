@@ -307,6 +307,16 @@ ticket_preamble_run() {
     _plog "$LOG_FILE" "META" "schema" "info" "1"
   fi
 
+  # 0.55 — run identity. No --new here: the router's own Step 0.6 is what
+  # opens a new run once per process; this call site is the fleetd re-entry
+  # path, invoked once per phase, so it must only rehydrate the open run
+  # (run_identity_stamp's own guard makes every call but the first a no-op).
+  source "$_TP_LIB_DIR/run-identity.sh"
+  run_identity_stamp "$TICKET_ID" "$LOG_FILE" || true
+  if [ "$SKIP_PREFLIGHT" != "true" ]; then
+    run_identity_ticket_meta "$TICKET_ID" "$LOG_FILE" || true
+  fi
+
   # 0.5a — branch context: rehydrate a recorded decision, resolve only once.
   local BASE_BRANCH INTEGRATION_BRANCH TICKET_BRANCH BRANCH_SOURCE
   local UAT_POLICY MERGE_POLICY BRANCH_ORIGIN

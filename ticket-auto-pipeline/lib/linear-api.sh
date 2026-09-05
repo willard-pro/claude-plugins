@@ -249,7 +249,7 @@ get_issue() {
   local issue_id="$1"
   local query
   query=$(jq -n --arg id "$issue_id" '{
-    query: "query($id: String!) { issue(id: $id) { id identifier title description priority url createdAt dueDate team { id name } state { id name type } labels { nodes { id name } } project { id name } parent { id identifier title description } assignee { id name } creator { id name } } }",
+    query: "query($id: String!) { issue(id: $id) { id identifier title description priority url createdAt dueDate estimate startedAt completedAt team { id name } state { id name type } labels { nodes { id name } } project { id name } parent { id identifier title description } assignee { id name } creator { id name } } }",
     variables: {id: $id}
   }')
   local resp

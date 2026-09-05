@@ -89,11 +89,21 @@ if [ ! -f "$LOG_FILE" ]; then
 fi
 
 # ── Run ID derivation ────────────────────────────────────────────────────────────
-# Derive a deterministic run_id from the ticket ID + ISO timestamp of the
-# pipeline log's first entry. Same ticket restarted on a different day gets
-# a different run_id — idempotency is within a single pipeline run.
-_first_iso=$(head -1 "$LOG_FILE" 2>/dev/null | cut -d'|' -f1)
-_run_id="${TICKET_ID}-${_first_iso}"
+# Prefer the last META|run-id line's run_id field (Branch A, run-identity.sh) —
+# this makes the idempotency guard below fire once per run instead of once per
+# ticket ever. A log predating run-identity.sh has no such line, so it falls
+# back to the old derivation: the ticket ID + ISO timestamp of the log's first
+# entry. Same ticket restarted on a different day gets a different run_id
+# under the fallback — idempotency there is within a single pipeline run.
+_run_id=""
+_last_run_id_line=$(grep '|META|run-id|info|' "$LOG_FILE" 2>/dev/null | tail -1 || true)
+if [ -n "$_last_run_id_line" ]; then
+  _run_id=$(echo "$_last_run_id_line" | cut -d'|' -f5- | jq -r '.run_id // empty' 2>/dev/null || true)
+fi
+if [ -z "$_run_id" ]; then
+  _first_iso=$(head -1 "$LOG_FILE" 2>/dev/null | cut -d'|' -f1)
+  _run_id="${TICKET_ID}-${_first_iso}"
+fi
 
 # ── Idempotency guard ────────────────────────────────────────────────────────────
 # If a META|postmortem entry with the same run_id already exists, skip analysis.
