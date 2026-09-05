@@ -17,6 +17,47 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## fleet-controller 0.22.1 (2026-09-05)
+
+Branch C of the Commercial Evidence MVP (`next.md` Step 1), the last of the
+three sequenced branches (after ticket-auto-pipeline 0.40.0/0.41.0). fleetd
+already receives the harness `total_cost_usd` in each worker's captured
+stdout envelope and discarded it; `lib/merge-poll.sh` had no periodic caller
+so a PR merged after the pipeline process exited never got its merge truth
+recorded; and fleetd-dispatched runs carried permanent `gen: null` /
+`fleet: null` in `META|version` because `FLEET_GENERATION`/`FLEET_VERSION`
+didn't exist in worker env.
+
+- New `worker_cost_usd(stdout_path)` in `fleetd/phase_dispatch.py` — reads a
+  worker's captured stdout envelope and extracts `total_cost_usd` as a
+  float, `None` on any anomaly (missing file, non-JSON, missing/non-numeric
+  field). Never raises — a cost-extraction bug must not be able to fail a
+  reap or a fleet-kill.
+- Both the reap path and the fleet-kill path call `worker_cost_usd` on the
+  worker's stdout envelope **before** `_sweep_stale_generation_files` runs,
+  add `cost_usd` (nullable) to the `{tid}-gen{N}-exit.json` exit record, and
+  — when a cost value was found — append a `{kind:"cost", tid, run_id, gen,
+  phase, usd, observed_at}` event to `logs/runs.jsonl` via a new
+  `_append_runs_event` (`flock`-guarded, fail-soft, mirrors `run-summary.sh`'s
+  bash `runs_append`). `run_id` is resolved from the last `META|run-id` line
+  only when that line's `gen` matches the reaped worker's generation —
+  otherwise `null`, never a guess.
+- `spawn_worker` stamps `FLEET_GENERATION` and `FLEET_VERSION` (read once
+  from `plugin.json`, fail-soft to `''`) into worker environment alongside
+  the existing `FLEET_WORKER_PID` stamp, so `run-identity.sh`'s
+  `META|run-id`/`META|version` lines carry real values for fleetd-dispatched
+  runs instead of permanent `null`.
+- `run_observe`'s periodic cycle gains a merge-poll sweep every
+  `FLEET_MERGE_POLL_CYCLES` cycles (default 10), shelling out to
+  `lib/merge-poll.sh`'s `merge_poll_sweep` with an outer `timeout=60` —
+  the async complement to `pipeline-finalize.sh`'s one-shot sweep, catching
+  PRs that merge hours after the pipeline process has already exited. A
+  missing script is a no-op, not an error, so a host that hasn't received
+  the ticket-auto-pipeline branch yet keeps running fine.
+- No schema change. Adopted workers (`poll_adopted_workers`) have no
+  captured stdout, so they produce no cost event — a documented gap, not a
+  bug.
+
 ## ticket-auto-pipeline 0.41.0 (2026-09-05)
 
 Branch B of the Commercial Evidence MVP (`next.md` Step 1), sequenced after

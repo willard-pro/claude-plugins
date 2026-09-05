@@ -1149,7 +1149,7 @@ def _append_pipeline_log_line(state_dir, tid, phase, step, status, msg):
 def _write_exit_record(state_dir, tid, generation, pid, exit_code, exit_type,
                        killed_by_fleet, terminal, session_id=None,
                        last_assistant_message=None, action=None,
-                       suppressed_retry_reason=None):
+                       suppressed_retry_reason=None, cost_usd=None):
     """Write {tid}-gen{N}-exit.json — per-generation, no shared-write races.
 
     Follows the same per-ticket no-shared-write pattern as
@@ -1157,6 +1157,10 @@ def _write_exit_record(state_dir, tid, generation, pid, exit_code, exit_type,
     degrades to today's behaviour of recording nothing (Migration Plan).
     Returns the entry dict regardless of whether the write succeeded, so
     callers (and later hook-driven merges) can still act on it in memory.
+
+    `cost_usd` (float or `None`) is the worker's `total_cost_usd` as
+    extracted by `worker_cost_usd` — the same lookup used for the
+    `runs.jsonl` `cost` event (fleet-cost-events capability).
     """
     exit_file = Path(state_dir) / f'{tid}-gen{generation}-exit.json'
     entry = {
@@ -1171,6 +1175,7 @@ def _write_exit_record(state_dir, tid, generation, pid, exit_code, exit_type,
         'session_id': session_id,
         'last_assistant_message': last_assistant_message,
         'action': action,
+        'cost_usd': cost_usd,
     }
     if suppressed_retry_reason:
         entry['suppressed_retry_reason'] = suppressed_retry_reason
@@ -1179,6 +1184,97 @@ def _write_exit_record(state_dir, tid, generation, pid, exit_code, exit_type,
     except OSError:
         pass
     return entry
+
+
+# ── Cost events (fleet-cost-events) ────────────────────────────────────────
+
+def _worker_gen_file(state_dir, tid, phase, generation):
+    """The stdout envelope path for a worker — mirrors spawn_worker's own slug."""
+    slug = f'{tid}-{phase.lower()}' if phase else tid
+    return Path(state_dir) / f'{slug}-gen{generation}.json'
+
+
+def _last_run_id_for_generation(state_dir, tid, generation):
+    """The last `META|run-id` line's run_id, iff its `gen` matches.
+
+    A generation mismatch (a stale run-id line from a prior generation
+    still sitting as "last" due to a race) yields `None` rather than
+    mis-attributing a cost event to the wrong run (design.md Decision 3).
+    """
+    log_file = Path(state_dir) / f'{tid}-pipeline.log'
+    try:
+        lines = log_file.read_text().splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        parts = line.split('|', 4)
+        if len(parts) == 5 and parts[1] == 'META' and parts[2] == 'run-id':
+            try:
+                payload = json.loads(parts[4])
+            except (ValueError, TypeError):
+                return None
+            if payload.get('gen') == generation:
+                return payload.get('run_id')
+            return None
+    return None
+
+
+def _append_runs_event(state_dir, event):
+    """Append one JSON line to runs.jsonl, flock-guarded, fail-soft.
+
+    Mirrors `run-summary.sh`'s bash `runs_append` — same lock-file naming,
+    same append-only target — so bash and Python writers serialize against
+    the same file. Bounded wait (5s) rather than a blocking flock, so a
+    stuck writer elsewhere can never stall a reap or fleet-kill.
+    """
+    runs_file = Path(state_dir) / 'runs.jsonl'
+    try:
+        lock_fd = os.open(f'{runs_file}.lock', os.O_CREAT | os.O_WRONLY, 0o644)
+    except OSError:
+        return
+    try:
+        deadline = time.monotonic() + 5
+        locked = False
+        while time.monotonic() < deadline:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                locked = True
+                break
+            except OSError:
+                time.sleep(0.05)
+        if not locked:
+            return
+        try:
+            with open(runs_file, 'a') as f:
+                f.write(json.dumps(event) + '\n')
+        except OSError:
+            pass
+        finally:
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+    finally:
+        os.close(lock_fd)
+
+
+def _record_cost_event(state_dir, tid, generation, phase, cost_usd):
+    """Append a `cost` event to runs.jsonl when a cost value was found.
+
+    No-op when `cost_usd` is `None` — a missing cost is an honest gap, not
+    an error, and produces no event at all (design.md).
+    """
+    if cost_usd is None:
+        return
+    _append_runs_event(state_dir, {
+        'kind': 'cost',
+        'tid': tid,
+        'run_id': _last_run_id_for_generation(state_dir, tid, generation),
+        'gen': generation,
+        'phase': phase or None,
+        'usd': cost_usd,
+        'observed_at': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+    })
 
 
 def _read_hook_capture(state_dir, tid, generation):
@@ -1395,6 +1491,10 @@ def _signal_process_group(pid, sig):
 
 FLEETD_SPAWN_ENABLED = os.environ.get('FLEETD_SPAWN_ENABLED', '') == '1'
 FLEET_MAX_CONCURRENT = _env_int('FLEET_MAX_CONCURRENT', 3)
+# Cycles between periodic merge-poll sweeps in run_observe (fleet-merge-poll-
+# cadence) — the async complement to pipeline-finalize.sh's one-shot sweep,
+# catching PRs that merge after the pipeline process has already exited.
+FLEET_MERGE_POLL_CYCLES = _env_int('FLEET_MERGE_POLL_CYCLES', 10)
 CLAUDE_BIN = os.environ.get('CLAUDE_BIN', 'claude')
 # Full worker command line (binary + leading args), e.g. "claude-deepseek 2 --bypass".
 # Takes precedence over CLAUDE_BIN when set. The ticket-auto invocation
@@ -1649,6 +1749,30 @@ def _read_own_start_ticks():
         return ''
 
 
+_FLEET_PLUGIN_VERSION = None
+
+
+def _fleet_plugin_version():
+    """The fleet-controller plugin's version string, read once from plugin.json.
+
+    Stamped into worker env as FLEET_VERSION so Branch A's `run-identity.sh`
+    carries a real value in `META|version`'s `fleet` field instead of `null`
+    for fleetd-dispatched runs. Fail-soft to `''` on any read failure — a
+    corrupt or missing plugin.json must not raise on the worker-spawn hot
+    path (design.md Decision/Risk).
+    """
+    global _FLEET_PLUGIN_VERSION
+    if _FLEET_PLUGIN_VERSION is not None:
+        return _FLEET_PLUGIN_VERSION
+    plugin_json = Path(__file__).parent.parent / '.claude-plugin' / 'plugin.json'
+    try:
+        data = json.loads(plugin_json.read_text())
+        _FLEET_PLUGIN_VERSION = str(data.get('version') or '')
+    except (OSError, ValueError, TypeError):
+        _FLEET_PLUGIN_VERSION = ''
+    return _FLEET_PLUGIN_VERSION
+
+
 class SpawnError(Exception):
     """Raised when a worker cannot be spawned."""
 
@@ -1731,6 +1855,8 @@ def spawn_worker(tid, generation, state_dir, reason='dispatched',
 
         worker_env = dict(os.environ)
         worker_env['FLEET_WORKER_PID'] = str(os.getpid())
+        worker_env['FLEET_GENERATION'] = str(generation)
+        worker_env['FLEET_VERSION'] = _fleet_plugin_version()
         # Explicit, not inherited: the hooks (stop-capture.sh, stop-failure.sh)
         # need to resolve their own tid/generation by scanning run-registry
         # files for their session_id, and must not depend on fleetd's own
@@ -2944,6 +3070,11 @@ class Supervisor:
                         action = f'skipped: circuit-breaker ({self._circuit_breaker_reason})'
 
                     hook_capture = _read_hook_capture(str(self._state_dir), tid, generation)
+                    phase = entry.get('phase', '')
+                    cost_usd = None
+                    if _phase_mod is not None:
+                        cost_usd = _phase_mod.worker_cost_usd(
+                            _worker_gen_file(str(self._state_dir), tid, phase, generation))
                     _write_exit_record(
                         str(self._state_dir), tid, generation, pid,
                         exit_code, exit_type,
@@ -2953,7 +3084,9 @@ class Supervisor:
                         last_assistant_message=hook_capture.get('last_assistant_message'),
                         action=action or 'reconcile-pending',
                         suppressed_retry_reason=suppressed,
+                        cost_usd=cost_usd,
                     )
+                    _record_cost_event(str(self._state_dir), tid, generation, phase, cost_usd)
                     _store_record_exit(
                         str(self._state_dir), tid, pid, exit_code, exit_type)
                     status = 'done' if (exit_type == 'exit' and exit_code == 0) else 'fail'
@@ -3301,6 +3434,11 @@ class Supervisor:
         # do not fire it, so hook_capture is simply {} for those; harmless
         # to look up unconditionally.
         hook_capture = _read_hook_capture(state_dir, tid, generation)
+        phase = child.get('phase', '')
+        cost_usd = None
+        if _phase_mod is not None:
+            cost_usd = _phase_mod.worker_cost_usd(
+                _worker_gen_file(state_dir, tid, phase, generation))
         _write_exit_record(
             state_dir, tid, generation, child.get('pid'),
             exit_code=None, exit_type=method,
@@ -3309,12 +3447,43 @@ class Supervisor:
             session_id=child.get('session_id'),
             last_assistant_message=hook_capture.get('last_assistant_message'),
             action='killed-by-fleet',
+            cost_usd=cost_usd,
         )
+        _record_cost_event(state_dir, tid, generation, phase, cost_usd)
         _append_pipeline_log_line(
             state_dir, tid, 'META', 'worker-exit', 'fail',
             f'code=none type={method} gen={generation} killed_by_fleet=true'
         )
         _sweep_stale_generation_files(state_dir, tid, generation)
+
+    def _merge_poll_sweep(self):
+        """Periodic merge-truth sweep — the async complement to the
+        pipeline's own one-shot sweep (fleet-merge-poll-cadence).
+
+        Shells out to Branch B's `lib/merge-poll.sh`, the single merge-truth
+        implementation, so fleetd owns only cadence, not polling logic
+        (design.md). A missing script is a no-op, not an error — fleetd
+        must keep running fine on a host that hasn't received Branch B yet.
+        The outer `timeout=60` bounds worst-case sweep duration independent
+        of the script's own internal `timeout 20` around each `gh` call.
+        """
+        if _phase_mod is None:
+            return
+        lib_dir = _phase_mod.ticket_auto_lib_dir()
+        script = Path(lib_dir) / 'merge-poll.sh'
+        if not script.is_file():
+            return
+        runs_file = self._state_dir / 'runs.jsonl'
+        try:
+            subprocess.run(
+                ['bash', '-c',
+                 'source "$MERGE_POLL_SCRIPT" && merge_poll_sweep "$RUNS_FILE"'],
+                env={**os.environ, 'MERGE_POLL_SCRIPT': str(script),
+                     'RUNS_FILE': str(runs_file)},
+                timeout=60, capture_output=True,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
 
     # ── run ─────────────────────────────────────────────────────────────────
 
@@ -3452,6 +3621,10 @@ class Supervisor:
                 cycle_num += 1
                 if cycle_num % 3 == 0:
                     self.poll_adopted_workers()
+
+                # 3b. Periodic merge-poll sweep (fleet-merge-poll-cadence).
+                if cycle_num % FLEET_MERGE_POLL_CYCLES == 0:
+                    self._merge_poll_sweep()
 
                 # 4. Consume spawn queue (no-op when spawn is disabled).
                 self._consume_queue(cmd_override=cmd_override)
