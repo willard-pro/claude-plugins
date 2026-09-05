@@ -17,6 +17,53 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.40.0 (2026-09-05)
+
+Branch A of the Commercial Evidence MVP (`next.md` Step 1): the pipeline log
+could not prove **which run or version** produced a given outcome — no
+run-id, no plugin/skill version stamp, and a ticket re-run after a hold kept
+appending to the same log with no way to tell the runs apart.
+`pipeline-postmortem.sh` derived its dedup id from the log's first line, so
+its idempotency guard fired once per ticket ever instead of once per run.
+Branches B (`runs.jsonl`, merge truth) and C (fleet-controller cost/env) are
+separate follow-up changes sequenced after this one. Note: 0.39.0 (#298,
+merged earlier the same day) had already consumed the version this change's
+openspec proposal originally targeted — this ships as 0.40.0 instead.
+
+- New `lib/run-identity.sh` — the single writer for `META|run-id` and
+  `META|version` pipeline log lines, called from both the manual router
+  (`skills/ticket-auto/SKILL.md` Step 0.6, with `--new`) and the
+  fleetd-driven preamble (`lib/ticket-preamble.sh`, without `--new`), so
+  there is exactly one implementation of run identity instead of two.
+  `run_identity_current` treats a run as open iff the log's last
+  `META|run-id` line is later than its last `META|outcome` line — a
+  log-based guard, not an env-based one, since `env.sh` is rewritten on
+  every fleetd preamble entry.
+- `META|version` records `ticket_auto` (`plugin.json` version), `fleet`
+  (`FLEET_VERSION`, null until Branch C), `cc` (Claude Code version), and
+  `model_default` (`ANTHROPIC_MODEL`) per run — each field degrades
+  independently to `null` rather than failing the whole line, matching the
+  existing `META|model` precedent.
+- `run_identity_ticket_meta` records `createdAt`/`startedAt`/`estimate`/
+  `priority`/`type`/`planned`/`labels` from Linear, written once per ticket
+  (not once per run). `lib/linear-api.sh`'s `get_issue` query gains
+  `estimate startedAt completedAt` fields to support it.
+- `pipeline-postmortem.sh`'s dedup id now prefers the last `META|run-id`
+  line's `run_id` over the log's first line, falling back to the old
+  derivation for logs that predate this change — makes the idempotency
+  guard fire once per run, fixing the re-dispatch-after-a-hold case.
+- `fleet-controller/fleetd/preamble.py` passes `TICKET_RUN_TRIGGER=fleetd`
+  to the preamble subprocess so `run-identity.sh` can tell fleetd-triggered
+  runs from manual ones without `FLEET_WORKER_PID` being set.
+- New `lib/tests/test-run-identity.sh` (17 tests): the open-run guard, `gen`/
+  version-field null-degradation, `--new`, fleetd-vs-manual trigger
+  detection, ticket-meta once-per-ticket writes and type derivation, and the
+  CLI entrypoint. Extended `test-ticket-preamble.sh`, `test-pipeline-postmortem.sh`,
+  `test-pipeline-phases.sh`, and `fleetd/tests/test_preamble.py` for the
+  wiring into both entry points.
+- Documented the `run-id`/`version`/`ticket-meta` META keys and the "run
+  window" definition in `pipeline-log-format.md`.
+
 ## ticket-planner 0.8.25 (2026-09-03)
 
 Closes #231 — 74 unit tests in `test-planner-crosscheck*.sh` passed cleanly

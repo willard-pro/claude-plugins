@@ -297,6 +297,50 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|model|info|{\"phase\":\"IMPLEMENT\",\"
 
 The model value resolves from the `ANTHROPIC_MODEL` environment variable, falling back to `unknown` when unset or empty (G4: the "router context" branch documented earlier was never implemented). Downstream consumers SHALL treat `unknown` as a first-class identity, never an error. The same model value is also appended as `MODEL=<value>` to the spawn-meta file.
 
+### Run identity entries (Branch A, Commercial Evidence MVP)
+
+Written by `lib/run-identity.sh`, the single writer for these three META keys — both
+`lib/ticket-preamble.sh` (fleetd path) and `skills/ticket-auto/SKILL.md` (manual router)
+call into it rather than each stamping their own.
+
+**Run window**: a "run" is the span from one `META|run-id` line to the next `META|outcome`
+line (or EOF, if the run hasn't ended yet). A pipeline log can hold more than one run —
+a ticket re-dispatched after a hold gets a second one. An **open run** exists iff the log's
+last `META|run-id` line is later (by line position — the log is append-only) than its last
+`META|outcome` line; `run_identity_current` reads this, and `run_identity_stamp` (without
+`--new`) is a no-op whenever it finds one already open, which is what makes fleetd's
+per-phase preamble re-entry collapse to one `META|run-id` line per run.
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|run-id|info|{\"run_id\":\"CRE-123-2026-09-05T18:00:00Z-4821\",\"gen\":null,\"trigger\":\"manual\",\"pid\":4821}" >> "$LOG_FILE"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|version|info|{\"ticket_auto\":\"0.39.0\",\"fleet\":null,\"cc\":\"2.1.261 (Claude Code)\",\"model_default\":null}" >> "$LOG_FILE"
+```
+
+`META|run-id` fields: `run_id` (string, `{TID}-{ISO}-{pid}`), `gen` (integer|null, from
+`FLEET_GENERATION`, null until fleet-controller sets it), `trigger` (`fleetd`|`manual`, from
+`FLEET_WORKER_PID` or `TICKET_RUN_TRIGGER=fleetd`), `pid` (integer).
+
+`META|version` is written alongside `run-id` in the same `run_identity_stamp` call, one line
+per run: `ticket_auto` (this plugin's `plugin.json` version), `fleet` (`FLEET_VERSION`, null
+until fleet-controller sets it), `cc` (`CLAUDE_CODE_VERSION` or `claude --version`),
+`model_default` (`ANTHROPIC_MODEL`). Every field resolves to `null` independently when its
+source is unavailable — same precedent as `META|model`'s `unknown` fallback — so one missing
+source never blocks the write of the other three or of the line itself.
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|ticket-meta|info|{\"createdAt\":\"2026-09-01T00:00:00Z\",\"startedAt\":null,\"estimate\":3,\"priority\":2,\"type\":\"bug\",\"planned\":true,\"labels\":[\"bug\",\"planned\"]}" >> "$LOG_FILE"
+```
+
+`META|ticket-meta` is ticket-scoped, not run-scoped: written once ever per ticket (guarded by
+`grep -q '|META|ticket-meta|'`), since `createdAt`/`estimate`/`priority`/labels don't change
+run to run. Requires `LINEAR_API_KEY`; no-ops silently without it, and fails soft on any
+Linear error (never blocks the caller). `type` is the first ticket label matching a known
+type in `lib/template-select.sh`, or `null` if none match.
+
+All three are additive — schema version stays **1**. A log predating this change has no
+`META|run-id` line; `pipeline-postmortem.sh`'s run_id derivation falls back to its prior
+"ticket ID + log's first line ISO" behavior in that case.
+
 ### Phase-inspector entries (Phase 1 RLVR)
 
 Written by the `guidance-extractor-agent` after each pipeline phase completes (post-IMPLEMENT, post-VERIFY, post-PR-REVIEW). Provides per-phase inspection verdicts by reading `META|verifier-result` entries and checking for known defect patterns. The inspector is advisory only — it never gates the pipeline.

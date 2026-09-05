@@ -27,6 +27,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
@@ -170,6 +171,23 @@ class TestRouting(unittest.TestCase):
         result = preamble.run_preamble('CRE-6', lib_dir=self.lib)
         self.assertFalse(result.ok)
         self.assertEqual(result.action, preamble.ACTION_RETRY_LATER)
+
+    def test_ticket_run_trigger_reaches_the_subprocess_env(self):
+        # run-identity.sh reads TICKET_RUN_TRIGGER to tell a fleetd-driven run
+        # from a manual one when FLEET_WORKER_PID isn't set (e.g. the
+        # ticket-level dispatch path, which forks the router itself rather
+        # than a bare phase worker).
+        self._script('echo "unused"\n')
+        with patch('subprocess.run') as mock_run:
+            mock_run.return_value.returncode = 0
+            mock_run.return_value.stdout = ''
+            mock_run.return_value.stderr = ''
+            preamble.run_preamble('CRE-9', lib_dir=self.lib)
+        _, kwargs = mock_run.call_args
+        self.assertEqual(kwargs['env']['TICKET_RUN_TRIGGER'], 'fleetd')
+        # The rest of the caller's environment must still be present —
+        # this passes the whole environment through, not a replacement.
+        self.assertEqual(kwargs['env']['PATH'], os.environ['PATH'])
 
     def test_a_missing_script_raises_rather_than_failing_quietly(self):
         with self.assertRaises(preamble.PreambleError):

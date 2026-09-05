@@ -174,8 +174,9 @@ def run_preamble(tid, project_dir=None, logs_dir=None, autonomy='',
         args.append('SKIP_PREFLIGHT=true')
 
     try:
-        proc = subprocess.run(args, capture_output=True, text=True,
-                              timeout=timeout)
+        proc = subprocess.run(
+            args, capture_output=True, text=True, timeout=timeout,
+            env={**os.environ, 'TICKET_RUN_TRIGGER': 'fleetd'})
     except (subprocess.TimeoutExpired, OSError) as exc:
         raise PreambleError(f'preamble failed for {tid}: {exc}') from exc
 
