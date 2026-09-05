@@ -54,6 +54,24 @@ def load_steps(table_path):
     return steps
 
 
+def _step_agents(step):
+    """Yield (skill, agent) pairs for every agent spawn a step declares.
+
+    A step has either a single `spawn` block or a `sequence` of them
+    (STEP_5's document + wiki-maintenance); never both. `agent` is `None`
+    for a spawn with no dedicated subagent type yet (falls back to
+    `general-purpose` at dispatch time — see SKILL.md's Agent spawn
+    template).
+    """
+    spawn = step.get("spawn")
+    if spawn and spawn.get("skill"):
+        yield spawn["skill"], spawn.get("agent")
+        return
+    for entry in step.get("sequence") or []:
+        if entry.get("skill"):
+            yield entry["skill"], entry.get("agent")
+
+
 def render(steps):
     """Render the generated block. Entry order in the JSON is the render order."""
     lines = [START_MARKER, PREAMBLE, "", "| RESUME_STEP | Action | Type |", "|-------------|--------|------|"]
@@ -63,6 +81,18 @@ def render(steps):
                 step["table_label"], step["table_action"], step["table_type"]
             )
         )
+    lines.append("")
+    lines.append(
+        "**Agent types** — the `subagent_type` each phase's `Agent` tool "
+        "spawn MUST use (see \"Agent spawn template\" below). A skill with "
+        "no dedicated agent type falls back to `general-purpose`."
+    )
+    lines.append("")
+    lines.append("| Skill | subagent_type |")
+    lines.append("|-------|---------------|")
+    for step in steps:
+        for skill, agent in _step_agents(step):
+            lines.append("| `{}` | `{}` |".format(skill, agent or "general-purpose"))
     lines.append(END_MARKER)
     return "\n".join(lines) + "\n"
 

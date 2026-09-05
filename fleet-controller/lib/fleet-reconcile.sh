@@ -82,8 +82,15 @@ _fleet_tid_live() {
 # Exit code is always 0 (classification is a value, not a failure signal);
 # a missing/empty log classifies as incomplete so the caller decides.
 #
+# "Last line" is the effective last line (_last_effective_line), skipping
+# any trailing `META|worker-exit` entries fleetd appends at reap time —
+# those are an annotation of the exit, not a new pipeline state, and taking
+# the raw last line would misclassify an already-completed pipeline as
+# incomplete the moment fleetd reaps it.
+#
 # The Python mirror _log_reached_terminal (fleetd/supervisor.py) must agree
-# with this function; it has the same three routes. Change both together.
+# with this function; it has the same three routes plus the same
+# worker-exit skip. Change both together.
 fleet_ticket_terminal_state() {
   local tid="$1"
   local log_file="$2"
@@ -93,17 +100,27 @@ fleet_ticket_terminal_state() {
     return 0
   fi
 
-  local last_step last_status last_msg
-  last_step=$(_last_field "$log_file" 3)
-  last_status=$(_last_field "$log_file" 4)
-  last_msg=$(_last_msg "$log_file")
+  # _last_effective_line, not a raw tail -1: fleetd appends
+  # `META|worker-exit|...` after a worker's own generation exits, which
+  # would otherwise become the log's literal last line and misclassify an
+  # already-completed pipeline as `incomplete` on the very next call (e.g.
+  # a stale queue entry would stop being recognized as already-done).
+  local last_line last_step last_status last_msg
+  last_line=$(_last_effective_line "$log_file")
+  last_step=$(echo "$last_line" | awk -F'|' '{print $3}')
+  last_status=$(echo "$last_line" | awk -F'|' '{print $4}')
+  last_msg=$(echo "$last_line" | awk -F'|' '{for(i=5;i<=NF;i++) printf "%s%s", $i, (i<NF?"|":"")}')
 
   # A run that finalized writes META|outcome as its last substantive line
-  # (pipeline-finalize.sh tail-check guarantee). A gate-held run's outcome
-  # summary is "held: gate" — still waiting on the human, not terminal.
+  # (pipeline-finalize.sh tail-check guarantee). A held run's outcome
+  # summary is "held: <kind>" (today only "held: gate" exists, but a
+  # matched exact string here would silently misclassify any future hold
+  # kind — e.g. an external-wait hold from the human-hold-external-wait
+  # plan — as `done` via the catch-all arm below) — still waiting on the
+  # human, not terminal.
   if [ "$last_step" = "outcome" ]; then
     case "$last_msg" in
-    *"held: gate"*)
+    "held: "*)
       echo "gate-held"
       return 0
       ;;

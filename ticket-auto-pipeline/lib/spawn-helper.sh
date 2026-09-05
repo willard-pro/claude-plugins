@@ -335,12 +335,17 @@ ENVEOF
 #
 # Usage: spawn_agent_pre PHASE=<phase> STEP=<step> LOG_FILE=<path> \
 #          HB_LOG_FILE=<path> CLAUDE_LOG_FILE=<path> TICKET_ID=<id> \
-#          SKILL=<skill> [FLAGS=<flags>] [INSTRUCTIONS=<instructions>] \
+#          SKILL=<skill> [FLAGS=<flags>] [AGENT_TYPE=<subagent_type>] \
+#          [INSTRUCTIONS=<instructions>] \
 #          [DESCRIPTION=<desc>] [FROM_STEP=<step>] [ATTEMPT=<int>]
 #
 # Prints to stdout:
 #   AGENT_PROMPT=<the full agent spawn prompt>
-# The orchestrator reads this and passes it to the Agent tool.
+#   AGENT_TYPE=<the subagent_type to pass to the Agent tool>
+# The orchestrator reads both and passes them to the Agent tool. AGENT_TYPE
+# defaults to "general-purpose" when the caller omits it — every dispatch
+# site SHOULD pass the value from SKILL.md's generated "Agent types" table
+# so a phase's tool allowlist and system prompt (agents/*.md) actually bind.
 spawn_agent_pre() {
   local PHASE=""
   local STEP=""
@@ -350,6 +355,12 @@ spawn_agent_pre() {
   local TICKET_ID=""
   local SKILL=""
   local FLAGS="--from-auto"
+  # The subagent_type the caller must use for the Agent tool spawn — looked
+  # up from SKILL.md's generated "Agent types" table (dispatch-table.json's
+  # per-step `agent` field is the source of truth). Defaults to
+  # general-purpose for any dispatch site that has not been updated to pass
+  # it, rather than failing the spawn outright.
+  local AGENT_TYPE="general-purpose"
   local INSTRUCTIONS="Follow the skill exactly. Report only the final handoff output."
   local DESCRIPTION=""
   local FROM_STEP=""
@@ -369,6 +380,7 @@ spawn_agent_pre() {
     TICKET_ID=*) TICKET_ID="${arg#TICKET_ID=}" ;;
     SKILL=*) SKILL="${arg#SKILL=}" ;;
     FLAGS=*) FLAGS="${arg#FLAGS=}" ;;
+    AGENT_TYPE=*) AGENT_TYPE="${arg#AGENT_TYPE=}" ;;
     INSTRUCTIONS=*) INSTRUCTIONS="${arg#INSTRUCTIONS=}" ;;
     DESCRIPTION=*) DESCRIPTION="${arg#DESCRIPTION=}" ;;
     FROM_STEP=*) FROM_STEP="${arg#FROM_STEP=}" ;;
@@ -473,6 +485,7 @@ spawn_agent_pre() {
   local env_prefix="export LOG_FILE=$(_q "${LOG_FILE}"); export HB_LOG_FILE=$(_q "${HB_LOG_FILE}"); export CLAUDE_LOG_FILE=$(_q "${CLAUDE_LOG_FILE}"); export HUSKY=0; source ~/.claude/skills/lib/heartbeat.sh; source /tmp/ticket-auto-$(_q "${TICKET_ID}")-env.sh"
 
   echo "AGENT_PROMPT=Run ${SKILL} ${TICKET_ID} ${FLAGS}. Before starting, run: ${env_prefix}. ${INSTRUCTIONS}"
+  echo "AGENT_TYPE=${AGENT_TYPE}"
 
   # 6. Store spawn metadata for spawn_agent_post
   # SESSION_ID stamps the orchestrator's own session (CLAUDE_CODE_SESSION_ID,

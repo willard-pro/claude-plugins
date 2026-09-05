@@ -1536,6 +1536,37 @@ class WorkerStdioAndEnvTest(unittest.TestCase):
 
         self.assertEqual(strip(default), strip(phased))
 
+    def test_build_worker_cmd_adds_agent_flag_when_given(self):
+        """--agent binds the phase's tool allowlist/system prompt."""
+        from fleetd.supervisor import _build_worker_cmd
+
+        cmd = _build_worker_cmd(
+            'CRE-9', claude_bin='claude',
+            agent='ticket-auto-pipeline:ticket-implement-agent')
+        self.assertIn('--agent', cmd)
+        idx = cmd.index('--agent')
+        self.assertEqual(cmd[idx + 1],
+                          'ticket-auto-pipeline:ticket-implement-agent')
+
+    def test_build_worker_cmd_omits_agent_flag_by_default(self):
+        """A whole-ticket worker gets no --agent — the router needs every
+        tool to dispatch its own phases."""
+        from fleetd.supervisor import _build_worker_cmd
+
+        cmd = _build_worker_cmd('CRE-9', claude_bin='claude')
+        self.assertNotIn('--agent', cmd)
+
+    def test_build_worker_cmd_skips_agent_flag_when_cmd_already_sets_it(self):
+        """CLAUDE_CMD specifying --agent itself takes precedence."""
+        from fleetd.supervisor import _build_worker_cmd
+
+        cmd = _build_worker_cmd(
+            'CRE-9', claude_cmd='claude --agent custom:override',
+            agent='ticket-auto-pipeline:ticket-implement-agent')
+        self.assertEqual(cmd.count('--agent'), 1)
+        idx = cmd.index('--agent')
+        self.assertEqual(cmd[idx + 1], 'custom:override')
+
     def test_spawn_phase_worker_builds_from_the_canonical_table(self):
         """End to end: a step id in, a forked phase worker out."""
         from fleetd.supervisor import spawn_phase_worker
