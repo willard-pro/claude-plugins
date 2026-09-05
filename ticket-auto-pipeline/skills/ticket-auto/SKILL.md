@@ -561,10 +561,15 @@ fi
 
 ### Run freshness gate
 
-For each repo under `REPOS_ROOT`:
+For each repo under `REPOS_ROOT`. Pass `--branch "${BASE_BRANCH}"` (resolved at Step 0.5a,
+well before this gate runs) so the freshness check diffs against the ticket's actual target
+branch instead of literal `HEAD` — repos in this project's local-dev convention run as one
+shared checkout, so `HEAD` is whichever branch happens to be checked out at the moment the
+MAINTENANCE step runs, not necessarily this ticket's target (e.g. a long-lived epic branch
+that has diverged from `develop`/`main`):
 
 ```bash
-eval $(bash "$HOME/.claude/skills/lib/prescan-check.sh" "$repo" --repos-root "$REPOS_ROOT")
+eval $(bash "$HOME/.claude/skills/lib/prescan-check.sh" "$repo" --repos-root "$REPOS_ROOT" --branch "${BASE_BRANCH}")
 ```
 
 Branch on status:

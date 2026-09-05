@@ -48,7 +48,7 @@ EXPECTED_DOCS=(
 
 usage() {
   cat >&2 <<'EOF'
-Usage: prescan-check.sh <repo-path> [--force] [--repos-root <path>]
+Usage: prescan-check.sh <repo-path> [--force] [--repos-root <path>] [--branch <name>]
 
 Evaluates prescan doc freshness for a repo. Emits KEY=value lines:
   PRESCAN_STATUS    fresh | stale | decayed | missing
@@ -56,6 +56,14 @@ Evaluates prescan doc freshness for a repo. Emits KEY=value lines:
   CHANGED_FILES     space-separated list (stale only)
   STALENESS_SCORE   integer 0-100 (stale/decayed only)
   DIRTY             true | false
+
+--branch <name>: evaluate freshness against the ticket's actual target branch
+instead of whatever happens to be checked out. Repos in this project's
+local-dev convention run as a single shared checkout, so literal HEAD is
+whichever branch is checked out at the moment this runs — not necessarily
+the ticket's target (e.g. a long-lived epic branch). When given, this
+fetches origin/<name> (best-effort) and diffs against it; falls back to
+literal HEAD when no branch is given, or the fetch/ref resolution fails.
 
 Exit codes: 0 fresh (skip), 1 stale/decayed (rescan needed), 2 missing (full scan needed)
 EOF
@@ -130,7 +138,7 @@ _derive_source_globs() {
 # ── Churn calculation ─────────────────────────────────────────────────────────
 
 _calc_churn_pct() {
-  local repo="$1" base_sha="$2"
+  local repo="$1" base_sha="$2" diff_ref="${3:-HEAD}"
   local source_globs total_files changed_files
   source_globs=$(_derive_source_globs "$repo")
 
@@ -140,12 +148,15 @@ _calc_churn_pct() {
     glob_args+=("--" "$glob")
   done
 
-  # Count total tracked source files at current HEAD
+  # Count total tracked source files in the current checkout (index/working
+  # tree — not ref-specific; see _resolve_diff_ref for why the diff side
+  # below must not silently default to whatever's checked out).
   total_files=$(git -C "$repo" ls-files -- "${glob_args[@]}" 2>/dev/null | wc -l || echo "0")
   total_files=$(echo "$total_files" | tr -d ' ')
 
-  # Count files changed since base_sha
-  changed_files=$(git -C "$repo" diff --name-only "$base_sha" HEAD -- "${glob_args[@]}" 2>/dev/null | wc -l || echo "0")
+  # Count files changed since base_sha, against the resolved diff target
+  # (origin/<target_branch> when one was given and resolvable, else HEAD).
+  changed_files=$(git -C "$repo" diff --name-only "$base_sha" "$diff_ref" -- "${glob_args[@]}" 2>/dev/null | wc -l || echo "0")
   changed_files=$(echo "$changed_files" | tr -d ' ')
 
   if [ "$total_files" = "0" ]; then
@@ -157,10 +168,33 @@ _calc_churn_pct() {
   echo $(((changed_files * 100) / total_files))
 }
 
+# ── Diff-target ref resolution ─────────────────────────────────────────────────
+# Repos in this project's local-dev convention run as ONE shared checkout (not
+# per-ticket clones), so literal HEAD is whichever branch happens to be
+# checked out at the moment the freshness gate runs — NOT necessarily the
+# ticket's actual target branch (e.g. a long-lived epic branch that has
+# diverged from develop/main). When a target branch is given, best-effort
+# fetch it from origin and diff against origin/<branch> instead of literal
+# HEAD. Falls back to literal HEAD when no branch is given, or the fetch/ref
+# resolution fails — old behavior is fully preserved in that case.
+_resolve_diff_ref() {
+  local repo="$1" target_branch="${2:-}"
+
+  if [ -n "$target_branch" ]; then
+    git -C "$repo" fetch origin "$target_branch" --quiet 2>/dev/null || true
+    if git -C "$repo" rev-parse --verify --quiet "origin/$target_branch" >/dev/null 2>&1; then
+      echo "origin/$target_branch"
+      return 0
+    fi
+  fi
+
+  echo "HEAD"
+}
+
 # ── Decay check ───────────────────────────────────────────────────────────────
 
 _check_decay() {
-  local repo="$1" meta_path="$2"
+  local repo="$1" meta_path="$2" diff_ref="${3:-HEAD}"
   local last_full_dive_sha last_full_dive_ts churn_pct age_days age_sec now_epoch dive_epoch
   local incremental_count
 
@@ -183,7 +217,7 @@ _check_decay() {
   fi
 
   # Check 2: Cumulative churn since last full dive
-  churn_pct=$(_calc_churn_pct "$repo" "$last_full_dive_sha")
+  churn_pct=$(_calc_churn_pct "$repo" "$last_full_dive_sha" "$diff_ref")
   if [ "$churn_pct" -ge "$DECAY_CHURN_PCT" ] 2>/dev/null; then
     STALENESS_SCORE="$churn_pct"
     PRESCAN_STATUS="decayed"
@@ -240,7 +274,7 @@ _check_integrity() {
 # ── Main evaluation ───────────────────────────────────────────────────────────
 
 _evaluate() {
-  local repo="$1" repos_root="$2" force="${3:-false}"
+  local repo="$1" repos_root="$2" force="${3:-false}" target_branch="${4:-}"
   repo=$(cd "$repo" 2>/dev/null && pwd || echo "$repo")
   local slug meta_path docs_dir
 
@@ -311,13 +345,17 @@ _evaluate() {
   fi
 
   # ── Check 5: HEAD unchanged ──────────────────────────────────────────────
-  local head_sha
-  head_sha=$(git -C "$repo" rev-parse HEAD 2>/dev/null || true)
+  # diff_ref resolves to origin/<target_branch> when a target branch was
+  # given and is resolvable after a best-effort fetch; otherwise literal
+  # HEAD (old behavior, fully preserved). See _resolve_diff_ref.
+  local diff_ref head_sha
+  diff_ref=$(_resolve_diff_ref "$repo" "$target_branch")
+  head_sha=$(git -C "$repo" rev-parse "$diff_ref" 2>/dev/null || true)
   if [ "$last_sha" = "$head_sha" ]; then
     _check_dirty "$repo"
     # Even if HEAD hasn't moved, a periodic full re-dive may be needed.
     # Check decay age before declaring fresh.
-    if _check_decay "$repo" "$meta_path"; then
+    if _check_decay "$repo" "$meta_path" "$diff_ref"; then
       PRESCAN_STATUS="fresh"
       PRESCAN_REASON="head_unchanged"
       CHANGED_FILES=""
@@ -338,13 +376,13 @@ _evaluate() {
     glob_args+=("--" "$glob")
   done
 
-  changed_files_list=$(git -C "$repo" diff --name-only "$last_sha" HEAD -- "${glob_args[@]}" 2>/dev/null || true)
+  changed_files_list=$(git -C "$repo" diff --name-only "$last_sha" "$diff_ref" -- "${glob_args[@]}" 2>/dev/null || true)
 
   if [ -z "$changed_files_list" ]; then
     # HEAD moved but no source changes — only non-source files changed.
     # Still check decay age before declaring fresh.
     _check_dirty "$repo"
-    if _check_decay "$repo" "$meta_path"; then
+    if _check_decay "$repo" "$meta_path" "$diff_ref"; then
       PRESCAN_STATUS="fresh"
       PRESCAN_REASON="no_source_changes"
       CHANGED_FILES=""
@@ -359,11 +397,11 @@ _evaluate() {
   # ── Check 7: Stale (source changes detected) ─────────────────────────────
   CHANGED_FILES=$(echo "$changed_files_list" | tr '\n' ' ')
   local churn_pct
-  churn_pct=$(_calc_churn_pct "$repo" "$last_sha")
+  churn_pct=$(_calc_churn_pct "$repo" "$last_sha" "$diff_ref")
   STALENESS_SCORE="$churn_pct"
 
   # ── Check 8: Decay threshold ─────────────────────────────────────────────
-  if _check_decay "$repo" "$meta_path"; then
+  if _check_decay "$repo" "$meta_path" "$diff_ref"; then
     # Not decayed — plain stale
     PRESCAN_STATUS="stale"
     PRESCAN_REASON="source_changed"
@@ -409,6 +447,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   REPO=""
   FORCE="false"
   REPOS_ROOT="${REPOS_ROOT:-}"
+  BRANCH=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -418,6 +457,10 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
       ;;
     --repos-root)
       REPOS_ROOT="${2:-}"
+      shift 2
+      ;;
+    --branch)
+      BRANCH="${2:-}"
       shift 2
       ;;
     --help | -h)
@@ -458,7 +501,7 @@ if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   # _evaluate returns non-zero for stale/decayed/missing — expected behaviour.
   # Toggle -e off to capture the exit code, then re-enable.
   set +e
-  _evaluate "$REPO" "$REPOS_ROOT" "$FORCE"
+  _evaluate "$REPO" "$REPOS_ROOT" "$FORCE" "$BRANCH"
   rc=$?
   set -e
   _emit
