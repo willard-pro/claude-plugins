@@ -549,15 +549,30 @@ This PR integrates all completed child tickets from the \`$branch\` epic branch 
 EOF
   )
 
-  if ! gh pr create --repo "$repo_slug" \
+  local _pr_url
+  if ! _pr_url=$(gh pr create --repo "$repo_slug" \
     --head "$branch" --base "$base" \
-    --title "$pr_title" --body "$pr_body" >/dev/null 2>&1; then
+    --title "$pr_title" --body "$pr_body" 2>/dev/null); then
     echo "epic-branch: failed to open integration PR for epic $epic_id" >&2
     return 1
   fi
 
   EPIC_BRANCH_PR_STATE="open"
   echo "epic-branch: opened integration PR from '$branch' to '$base' for epic $epic_id"
+
+  # Commercial Evidence MVP (Branch B): pr-created capture for epic
+  # integration PRs, only when the caller has a pipeline log open — epic
+  # branch sync can run outside any single ticket's pipeline run.
+  if [ -n "${LOG_FILE:-}" ] && [ -n "$_pr_url" ]; then
+    local _pr_num _pr_created_json
+    _pr_num=$(echo "$_pr_url" | grep -oE '[0-9]+$')
+    _pr_created_json=$(jq -nc --argjson pr "${_pr_num:-null}" --arg url "$_pr_url" --arg repo "$repo_slug" \
+      '{pr: $pr, url: $url, repo: $repo, epic: true}' 2>/dev/null) || true
+    if [ -n "$_pr_created_json" ]; then
+      echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|pr-created|info|${_pr_created_json}" >>"$LOG_FILE"
+    fi
+  fi
+
   return 0
 }
 

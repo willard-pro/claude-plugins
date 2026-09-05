@@ -480,7 +480,7 @@ META
 
   # Write a minimal agent transcript with usage data
   cat >"$transcript" <<'JSONL'
-{"type": "assistant", "message": {"usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 10}}}
+{"type": "assistant", "message": {"usage": {"input_tokens": 100, "output_tokens": 50, "cache_read_input_tokens": 10, "cache_creation_input_tokens": 4}}}
 JSONL
 
   # Create start timestamp file
@@ -493,10 +493,13 @@ JSONL
     echo "$hook_json" | bash "$tracker" 2>/dev/null || true
   fi
 
-  # Verify the log entry has correct phase
+  # Verify the log entry has correct phase (Commercial Evidence MVP, Branch
+  # B: both the existing META|tokens line and the new, separate
+  # META|cache-tokens line — the cache read/create split — must be present).
   local result=0
   if [ -f "$log_file" ]; then
     grep -q '|META|tokens|info|APPRAISE:' "$log_file" || result=1
+    grep -q '|META|cache-tokens|info|APPRAISE:10/4' "$log_file" || result=1
   else
     result=1
   fi
