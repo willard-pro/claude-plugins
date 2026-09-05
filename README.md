@@ -12,7 +12,7 @@ Four installable plugins. Install only what you need — they work standalone an
 
 | Plugin | Version | What it does |
 |--------|---------|--------------|
-| [`ticket-auto-pipeline`](ticket-auto-pipeline/README.md) | 0.41.0 | **The core.** Takes a Linear ticket and appraises, implements, verifies, and merges it with zero user input. 20+ slash commands, state-machine flow control, deterministic safety gates. |
+| [`ticket-auto-pipeline`](ticket-auto-pipeline/README.md) | 0.42.0 | **The core.** Takes a Linear ticket and appraises, implements, verifies, and merges it with zero user input. 20+ slash commands, state-machine flow control, deterministic safety gates. |
 | [`ticket-planner`](ticket-planner/README.md) | 0.8.25 | **Upstream of the core.** Turns a one-sentence business idea into dependency-ordered, ready-to-execute tickets across 9 planning phases. Supports grill-me validated intent files as optional pre-flight gate. |
 | [`fleet-controller`](fleet-controller/README.md) | 0.22.1 | **Above the core.** Dispatches planned tickets, monitors every running pipeline via 14 detection engines, kills and restarts stuck runs, feeds results back to the planner. Bash-only. |
 | [`knowledge-curator`](knowledge-curator/README.md) | 0.2.0 | **Beside the core.** Durable cross-project knowledge tracking — captures ideas, decisions, and lessons, then resurfaces them when relevant. |
