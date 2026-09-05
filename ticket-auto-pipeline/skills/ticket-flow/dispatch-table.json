@@ -211,7 +211,8 @@
           "step": "phase-inspector-implement",
           "skill": "/guidance-extractor",
           "blocking": false,
-          "description": "RLVR Phase 1 advisory inspection. Spawned only when assemble_inspector_context yields INSPECTOR_INSTRUCTIONS. Captured with ATTEMPT=inspector so it appends rather than overwriting the implement agent's own capture."
+          "description": "RLVR Phase 1 advisory inspection. Spawned only when assemble_inspector_context yields INSPECTOR_INSTRUCTIONS. Captured with ATTEMPT=inspector so it appends rather than overwriting the implement agent's own capture.",
+          "agent": "ticket-auto-pipeline:guidance-extractor-agent"
         }
       ],
       "description": "Implement. The one phase that overrides the generic post-spawn ordering: the completeness gate must see the agent's return before the router commits the phase as done."
@@ -291,7 +292,8 @@
           "step": "phase-inspector-verify",
           "skill": "/guidance-extractor",
           "blocking": false,
-          "description": "Runs before the retry/advance decision but does not affect it."
+          "description": "Runs before the retry/advance decision but does not affect it.",
+          "agent": "ticket-auto-pipeline:guidance-extractor-agent"
         }
       ],
       "description": "Verify with router-managed retry. On PASS the pipeline advances to STEP_4_6."
@@ -355,7 +357,8 @@
           "step": "phase-inspector-pr-review",
           "skill": "/guidance-extractor",
           "blocking": false,
-          "description": "Advisory inspection; does not affect the verdict routing."
+          "description": "Advisory inspection; does not affect the verdict routing.",
+          "agent": "ticket-auto-pipeline:guidance-extractor-agent"
         },
         {
           "kind": "auto_merge",

@@ -152,6 +152,8 @@ For a first-time scan or decay-prompted re-dive, spawn multiple agents in parall
 
 **You (the orchestrating session) MUST NOT write `overview.md`, `processes.md`, `security-surfaces.md`, `backend.md`, `frontend.md`, `services/*.md`, or `INDEX.md` yourself with a direct `Write`/`Edit` call.** Each of those files is produced by a spawned `Agent`, never by you directly. If you find yourself about to `Write` one of them without having spawned its persona agent first in this run, stop — spawn the agent instead. This is a hard rule, not a suggestion: skipping the fan-out defeats the reason the docs exist (persona-isolated context) and this has silently happened before.
 
+**Every `Agent` spawn in this skill — wave 1, wave 2, and the Path B targeted re-scan below — MUST pass `subagent_type: "ticket-auto-pipeline:ticket-prescan-agent"`.** This skill does not use the router's `spawn_agent_pre`/`AGENT_TYPE=` pattern (prescan runs outside the `STEP_1..STEP_6` dispatch loop, with no phase bracket), so the agent type has to be passed directly on the `Agent` tool call itself. `ticket-prescan-agent`'s tool allowlist (no `Edit`, no Linear/GitHub mutation tools) is what actually enforces "MUST NOT modify source, create branches, or commit" below — a bare `general-purpose` spawn has no such restriction.
+
 1. **Resolve persona set** — required before any agent spawn, and log it so the run is auditable:
    ```bash
    eval $(bash "$HOME/.claude/skills/lib/persona-select.sh" \

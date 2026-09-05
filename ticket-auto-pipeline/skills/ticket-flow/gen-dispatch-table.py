@@ -62,13 +62,22 @@ def _step_agents(step):
     for a spawn with no dedicated subagent type yet (falls back to
     `general-purpose` at dispatch time — see SKILL.md's Agent spawn
     template).
+
+    Separately, and not exclusive with either of those, a step's
+    `pre_dispatch`/`post_dispatch` arrays may carry `"kind": "inspector"`
+    entries (the RLVR phase-inspector spawn, shared across IMPLEMENT,
+    VERIFY, and PR-REVIEW) — these are additional agent spawns on top of
+    the step's own phase agent, not alternatives to it.
     """
     spawn = step.get("spawn")
     if spawn and spawn.get("skill"):
         yield spawn["skill"], spawn.get("agent")
-        return
-    for entry in step.get("sequence") or []:
-        if entry.get("skill"):
+    else:
+        for entry in step.get("sequence") or []:
+            if entry.get("skill"):
+                yield entry["skill"], entry.get("agent")
+    for entry in (step.get("pre_dispatch") or []) + (step.get("post_dispatch") or []):
+        if entry.get("kind") == "inspector" and entry.get("skill"):
             yield entry["skill"], entry.get("agent")
 
 
@@ -90,9 +99,21 @@ def render(steps):
     lines.append("")
     lines.append("| Skill | subagent_type |")
     lines.append("|-------|---------------|")
+    seen = {}
     for step in steps:
         for skill, agent in _step_agents(step):
-            lines.append("| `{}` | `{}` |".format(skill, agent or "general-purpose"))
+            resolved = agent or "general-purpose"
+            if skill in seen:
+                if seen[skill] != resolved:
+                    die(
+                        f"skill '{skill}' maps to conflicting agents "
+                        f"'{seen[skill]}' and '{resolved}' across dispatch-table.json "
+                        "steps — a shared skill (e.g. /guidance-extractor) must use "
+                        "the same subagent_type everywhere it is dispatched"
+                    )
+                continue
+            seen[skill] = resolved
+            lines.append("| `{}` | `{}` |".format(skill, resolved))
     lines.append(END_MARKER)
     return "\n".join(lines) + "\n"
 

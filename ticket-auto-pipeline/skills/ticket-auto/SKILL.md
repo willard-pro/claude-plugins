@@ -677,6 +677,7 @@ After state detection, enter the stateless dispatch loop. Re-run `detect-resume.
 | `/ticket-appraise-exec` | `ticket-auto-pipeline:ticket-appraise-agent` |
 | `/ticket-gate-reconcile` | `ticket-auto-pipeline:ticket-gate-reconcile-agent` |
 | `/ticket-implement` | `ticket-auto-pipeline:ticket-implement-agent` |
+| `/guidance-extractor` | `ticket-auto-pipeline:guidance-extractor-agent` |
 | `/ticket-verify` | `ticket-auto-pipeline:ticket-verify-agent` |
 | `/ticket-pr-review` | `ticket-auto-pipeline:ticket-pr-review-agent` |
 | `/ticket-document` | `ticket-auto-pipeline:ticket-maintenance-agent` |
@@ -894,6 +895,7 @@ fi
 
 ```
 STEP=phase-inspector-implement PHASE=IMPLEMENT SKILL=/guidance-extractor
+AGENT_TYPE=ticket-auto-pipeline:guidance-extractor-agent
 EXTRA_FLAGS="--from-auto --mode extract"
 DESCRIPTION="Phase inspector for IMPLEMENT"
 INSTRUCTIONS=<_pi_instructions contents>
@@ -1021,6 +1023,7 @@ fi
 
 ```
 STEP=phase-inspector-verify PHASE=VERIFY SKILL=/guidance-extractor
+AGENT_TYPE=ticket-auto-pipeline:guidance-extractor-agent
 EXTRA_FLAGS="--from-auto --mode extract"
 DESCRIPTION="Phase inspector for VERIFY"
 INSTRUCTIONS=<_pi_instructions contents>
@@ -1113,6 +1116,7 @@ fi
 
 ```
 STEP=phase-inspector-pr-review PHASE=PR-REVIEW SKILL=/guidance-extractor
+AGENT_TYPE=ticket-auto-pipeline:guidance-extractor-agent
 EXTRA_FLAGS="--from-auto --mode extract"
 DESCRIPTION="Phase inspector for PR-REVIEW"
 INSTRUCTIONS=<_pi_instructions contents>
