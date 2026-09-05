@@ -79,6 +79,61 @@ test_windows_line_endings() {
   [ "$result" = "simple" ]
 }
 
+test_critique_single_section_score() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '## Readiness Critique\n\n**Status:** CLEAR\n**Score:** 90\n' >"$tmpdir/notes.md"
+  local result
+  result=$(bash -c "source $LIB_DIR/notes-parse.sh; get_critique_score '$tmpdir'" 2>/dev/null)
+  rm -rf "$tmpdir"
+  [ "$result" = "90" ]
+}
+
+test_critique_single_section_status() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '## Readiness Critique\n\n**Status:** CLEAR\n**Score:** 90\n' >"$tmpdir/notes.md"
+  local result
+  result=$(bash -c "source $LIB_DIR/notes-parse.sh; get_critique_status '$tmpdir'" 2>/dev/null)
+  rm -rf "$tmpdir"
+  [ "$result" = "CLEAR" ]
+}
+
+# Reproduces #292: a re-run appends a second "## Readiness Critique (re-run
+# <date>)" heading rather than replacing the first. Both headings contain
+# "## Readiness Critique", so a naive sed range anchored on the first match
+# would return the stale BLOCKED/20 values instead of the superseding
+# re-run's CLEAR/80.
+test_critique_rerun_score_takes_latest() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '## Readiness Critique\n\n**Status:** BLOCKED\n**Score:** 20\n\n## Readiness Critique (re-run 2026-09-03)\n\n**Status:** CLEAR\n**Score:** 80\n' >"$tmpdir/notes.md"
+  local result
+  result=$(bash -c "source $LIB_DIR/notes-parse.sh; get_critique_score '$tmpdir'" 2>/dev/null)
+  rm -rf "$tmpdir"
+  [ "$result" = "80" ]
+}
+
+test_critique_rerun_status_takes_latest() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '## Readiness Critique\n\n**Status:** BLOCKED\n**Score:** 20\n\n## Readiness Critique (re-run 2026-09-03)\n\n**Status:** CLEAR\n**Score:** 80\n' >"$tmpdir/notes.md"
+  local result
+  result=$(bash -c "source $LIB_DIR/notes-parse.sh; get_critique_status '$tmpdir'" 2>/dev/null)
+  rm -rf "$tmpdir"
+  [ "$result" = "CLEAR" ]
+}
+
+test_critique_rerun_stops_at_next_heading() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  printf '## Readiness Critique\n\n**Status:** BLOCKED\n**Score:** 20\n\n## Readiness Critique (re-run 2026-09-03)\n\n**Status:** CLEAR\n**Score:** 80\n\n## Some Later Section\n\n**Status:** IGNORED\n**Score:** 5\n' >"$tmpdir/notes.md"
+  local result
+  result=$(bash -c "source $LIB_DIR/notes-parse.sh; get_critique_score '$tmpdir'" 2>/dev/null)
+  rm -rf "$tmpdir"
+  [ "$result" = "80" ]
+}
+
 # ── dispatch ──────────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -88,7 +143,12 @@ for fn in \
   test_extracts_complex \
   test_missing_notes_file \
   test_missing_score_section \
-  test_windows_line_endings; do
+  test_windows_line_endings \
+  test_critique_single_section_score \
+  test_critique_single_section_status \
+  test_critique_rerun_score_takes_latest \
+  test_critique_rerun_status_takes_latest \
+  test_critique_rerun_stops_at_next_heading; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

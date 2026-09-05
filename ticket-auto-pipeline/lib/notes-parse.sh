@@ -37,6 +37,9 @@ get_complexity() {
 
 # get_critique_score <ticket-dir>
 # Reads the ## Readiness Critique section's **Score:** value from notes.md.
+# A re-run appends a second "## Readiness Critique (re-run <date>)" heading
+# rather than replacing the first, so this takes the LAST matching heading
+# (the superseding re-run), not the first.
 # Emits integer (0-100) or empty string if absent.
 # Exit codes: 0 = found, 1 = file unreadable, 2 = section not found
 get_critique_score() {
@@ -47,8 +50,16 @@ get_critique_score() {
     error_return 12 "notes-parse: file not found"
   fi
 
+  local start_line
+  start_line=$(grep -n '^## Readiness Critique' "$notes" 2>/dev/null | tail -1 | cut -d: -f1)
+
+  if [ -z "$start_line" ]; then
+    return 2
+  fi
+
   local score
-  score=$(sed -n '/## Readiness Critique/,/^## /p' "$notes" 2>/dev/null |
+  score=$(tail -n "+$start_line" "$notes" 2>/dev/null |
+    sed -n '1,/^## /p' |
     grep '^\*\*Score:' |
     head -1 |
     sed 's/.*\*\*Score:\*\* *//' |
@@ -65,6 +76,9 @@ get_critique_score() {
 
 # get_critique_status <ticket-dir>
 # Reads the ## Readiness Critique section's **Status:** value from notes.md.
+# A re-run appends a second "## Readiness Critique (re-run <date>)" heading
+# rather than replacing the first, so this takes the LAST matching heading
+# (the superseding re-run), not the first.
 # Emits BLOCKED, WARNINGS, CLEAR, or empty string if absent.
 # Exit codes: 0 = found, 1 = file unreadable, 2 = section not found
 get_critique_status() {
@@ -75,8 +89,16 @@ get_critique_status() {
     error_return 12 "notes-parse: file not found"
   fi
 
+  local start_line
+  start_line=$(grep -n '^## Readiness Critique' "$notes" 2>/dev/null | tail -1 | cut -d: -f1)
+
+  if [ -z "$start_line" ]; then
+    return 2
+  fi
+
   local status
-  status=$(sed -n '/## Readiness Critique/,/^## /p' "$notes" 2>/dev/null |
+  status=$(tail -n "+$start_line" "$notes" 2>/dev/null |
+    sed -n '1,/^## /p' |
     grep '^\*\*Status:' |
     head -1 |
     sed 's/.*\*\*Status:\*\* *//' |
