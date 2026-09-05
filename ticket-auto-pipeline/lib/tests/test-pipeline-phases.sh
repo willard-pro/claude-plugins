@@ -627,6 +627,52 @@ test_router_does_not_spawn_a_dashboard_pane() {
   }
 }
 
+# ── Issue #293 — approve-gate open-questions messaging ────────────────────────
+
+test_appraise_exec_comment_warns_on_needs_human_questions() {
+  local skill_md="$SKILLS_DIR/ticket-appraise-exec/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  local block
+  block=$(sed -n '/^## Step 5 — Post a Linear comment/,/^## Step 6/p' "$skill_md")
+  echo "$block" | grep -q '\[needs-human\]' || {
+    echo "Step 5 comment template does not mention [needs-human] gating"
+    return 1
+  }
+  echo "$block" | grep -qi "before adding the \`approved\` label" || {
+    echo "Step 5 comment template does not warn to answer before approving"
+    return 1
+  }
+  echo "$block" | grep -qi 'gate-reconcile' || {
+    echo "Step 5 comment template does not mention the extra gate-reconcile hold cycle"
+    return 1
+  }
+  # Must be explicitly conditioned on the tag being present — a blanket line
+  # would fire even on tickets with no open questions at all.
+  echo "$block" | grep -qi 'omit the warning' || {
+    echo "Step 5 does not gate the warning line on [needs-human] presence"
+    return 1
+  }
+}
+
+test_router_gate_held_message_mentions_open_questions() {
+  local skill_md="$SKILLS_DIR/ticket-auto/SKILL.md"
+  [ -f "$skill_md" ] || return 1
+  local block
+  block=$(sed -n '/### STEP_2_5 — Gate Check/,/^### STEP_3/p' "$skill_md")
+  echo "$block" | grep -qi 'Open Questions' || {
+    echo "STEP_2_5 gate-held message does not mention Open Questions"
+    return 1
+  }
+  echo "$block" | grep -qi 'approved' || {
+    echo "STEP_2_5 gate-held message does not mention the approved label"
+    return 1
+  }
+  echo "$block" | grep -qi 'gate-reconcile\|hold' || {
+    echo "STEP_2_5 gate-held message does not warn about a re-hold on next resume"
+    return 1
+  }
+}
+
 # ── dispatcher ─────────────────────────────────────────────────────────────────
 
 filter="${1:-}"

@@ -723,7 +723,7 @@ if [ $_gate_rc -eq 0 ]; then
   hb-wrap.sh gate "phase-transition" "ok" "GATE → IMPLEMENT"
 elif [ $_gate_rc -eq 1 ]; then
   # Held — fleet controller will detect, stop here
-  echo "Gate held for {TICKET_ID}. Add 'approved' label to proceed."
+  echo "Gate held for {TICKET_ID}. Check the appraisal comment in Linear for any Open Questions and answer them in a comment first — then add the 'approved' label. Approving before answering will just trigger another gate-reconcile hold on next resume."
   echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-held|info|held" >> {LOG_FILE}
   bash ~/.claude/skills/lib/pipeline-finalize.sh "{TICKET_ID}" 0 "{LOG_FILE}" || true
   exit 0
