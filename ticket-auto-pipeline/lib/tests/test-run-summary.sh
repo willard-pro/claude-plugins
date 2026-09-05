@@ -71,6 +71,72 @@ EOF
   echo "$window" | grep -q 'schema'
 }
 
+# ── versions passthrough ─────────────────────────────────────────────────────
+
+# run-summary.sh copies the whole META|version object into the run record's
+# `versions` field rather than picking fields out of it. That is the reason the
+# skill fingerprints reach runs.jsonl with no change to this file, so it is
+# worth an explicit assertion: if someone ever narrows the copy to a field list,
+# this fails instead of the fingerprints silently disappearing downstream.
+test_json_versions_carries_skill_fingerprints_verbatim() {
+  _setup
+  local log="$_ws/CRE-20-pipeline.log"
+  cat >"$log" <<'EOF'
+2026-09-01T00:00:00Z|META|schema|info|1
+2026-09-01T00:00:01Z|META|run-id|info|{"run_id":"CRE-20-a","gen":null,"trigger":"manual","pid":1}
+2026-09-01T00:00:02Z|META|version|info|{"ticket_auto":"0.42.0","fleet":null,"cc":"1.0.0","model_default":null,"skills":{"ticket-implement":{"sha256":"aaa111","manifest_n":6},"ticket-verify":{"sha256":"unresolved","manifest_n":8,"missing":["lib:skill-preamble-auto.md"]}},"skills_unresolved":1}
+2026-09-01T00:00:03Z|META|outcome|info|completed: STEP_6
+EOF
+  local json log_skills rec_skills
+  json=$(run_summary_json CRE-20 "$log" 0)
+
+  log_skills=$(grep '|META|version|info|' "$log" | cut -d'|' -f5- | jq -cS '.skills')
+  rec_skills=$(echo "$json" | jq -cS '.versions.skills')
+  _teardown
+
+  [ "$log_skills" = "$rec_skills" ] || {
+    echo "versions.skills does not match the log line's skills object"
+    echo "  log:    $log_skills"
+    echo "  record: $rec_skills"
+    return 1
+  }
+  [ "$(echo "$json" | jq -r '.versions.skills_unresolved')" = "1" ] || {
+    echo "skills_unresolved did not survive the copy"
+    return 1
+  }
+  # The `missing` array is part of the object and must not be projected away.
+  [ "$(echo "$json" | jq -r '.versions.skills["ticket-verify"].missing[0]')" = "lib:skill-preamble-auto.md" ]
+}
+
+# Two runs whose ticket-implement fingerprint differs must be separable by a
+# plain jq group-by — the whole point of carrying the field.
+test_json_versions_groupable_by_skill_revision() {
+  _setup
+  local log_a="$_ws/CRE-21-pipeline.log" log_b="$_ws/CRE-22-pipeline.log" runs="$_ws/runs.jsonl" n
+  cat >"$log_a" <<'EOF'
+2026-09-01T00:00:01Z|META|run-id|info|{"run_id":"CRE-21-a","gen":null,"trigger":"manual","pid":1}
+2026-09-01T00:00:02Z|META|version|info|{"ticket_auto":"0.42.0","skills":{"ticket-implement":{"sha256":"aaa111","manifest_n":6}},"skills_unresolved":0}
+2026-09-01T00:00:03Z|META|outcome|info|completed: STEP_6
+EOF
+  cat >"$log_b" <<'EOF'
+2026-09-01T01:00:01Z|META|run-id|info|{"run_id":"CRE-22-a","gen":null,"trigger":"manual","pid":2}
+2026-09-01T01:00:02Z|META|version|info|{"ticket_auto":"0.42.0","skills":{"ticket-implement":{"sha256":"bbb222","manifest_n":6}},"skills_unresolved":0}
+2026-09-01T01:00:03Z|META|outcome|info|completed: STEP_6
+EOF
+  runs_append "$runs" "$(run_summary_json CRE-21 "$log_a" 0)"
+  runs_append "$runs" "$(run_summary_json CRE-22 "$log_b" 0)"
+
+  n=$(jq -s '[.[] | select(.kind == "run")]
+             | group_by(.versions.skills["ticket-implement"].sha256)
+             | length' "$runs")
+  _teardown
+
+  [ "$n" = "2" ] || {
+    echo "expected 2 fingerprint cohorts, got $n"
+    return 1
+  }
+}
+
 # ── run_summary_json: window isolation of counters ──────────────────────────
 
 test_json_verify_attempts_counts_only_later_run() {
@@ -223,6 +289,8 @@ for fn in \
   test_json_token_split_summed_across_phases \
   test_json_empty_window_is_valid_json_with_zero_counters \
   test_json_detect_resume_not_sourced \
+  test_json_versions_carries_skill_fingerprints_verbatim \
+  test_json_versions_groupable_by_skill_revision \
   test_runs_append_concurrent_writers_all_valid; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"

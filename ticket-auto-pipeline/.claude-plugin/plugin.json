@@ -1,6 +1,6 @@
 {
   "name": "ticket-auto-pipeline",
-  "version": "0.41.0",
+  "version": "0.42.0",
   "description": "Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. Includes 20+ slash commands, state-machine-driven flow control, safety gates, and retrospective analysis. Supports shared epic branches with per-ticket git worktree isolation.",
   "author": {
     "name": "John Willard"
@@ -29,6 +29,12 @@
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/tmp-sweep.sh",
             "timeout": 5,
             "statusMessage": "Sweeping stale ticket-auto scratch files from /tmp..."
+          },
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/skill-fingerprint.sh",
+            "timeout": 5,
+            "statusMessage": "Fingerprinting ticket-auto skill prompt material..."
           }
         ]
       }

@@ -30,6 +30,15 @@ if ! declare -f _plog >/dev/null 2>&1; then
   [ -f "$_RI_LIB_DIR/heartbeat.sh" ] && source "$_RI_LIB_DIR/heartbeat.sh"
 fi
 
+# skill-version.sh provides skill_fingerprints_all — the per-skill prompt
+# fingerprints written by hooks/skill-fingerprint.sh at session start. Same
+# declare -f guard as heartbeat.sh above. Both of its functions are pure,
+# fail-open reads, so a missing or malformed artifact costs one JSON field
+# rather than the run's identity stamp.
+if ! declare -f skill_fingerprints_all >/dev/null 2>&1; then
+  [ -f "$_RI_LIB_DIR/skill-version.sh" ] && source "$_RI_LIB_DIR/skill-version.sh"
+fi
+
 # ── Open-run guard ────────────────────────────────────────────────────────────
 
 # run_identity_current LOG_FILE
@@ -120,17 +129,42 @@ run_identity_stamp() {
   _ticket_auto="$(_run_identity_ticket_auto_version)" || true
   _cc="$(_run_identity_cc_version)" || true
 
+  # The prompt fingerprints ride on this existing line rather than a line of
+  # their own: the fingerprint set is session-scoped, so a per-phase repeat
+  # would carry no information a per-run stamp does not. run-summary.sh already
+  # copies this whole object into the runs.jsonl `run` record, so the field
+  # reaches runs.jsonl with no change there.
+  #
+  # Both values are validated before they reach --argjson: invalid JSON there
+  # would fail the whole jq and cost the line itself, which is exactly the
+  # degradation this field is not allowed to cause.
+  local _skills="{}" _skills_unresolved=0
+  if declare -f skill_fingerprints_all >/dev/null 2>&1; then
+    _skills="$(skill_fingerprints_all 2>/dev/null)" || _skills="{}"
+  fi
+  [ -n "$_skills" ] && echo "$_skills" | jq -e 'type == "object"' >/dev/null 2>&1 || _skills="{}"
+
+  _skills_unresolved=$(echo "$_skills" |
+    jq '[to_entries[] | select(.value.sha256? == "unresolved")] | length' 2>/dev/null) || _skills_unresolved=0
+  case "$_skills_unresolved" in
+  '' | *[!0-9]*) _skills_unresolved=0 ;;
+  esac
+
   local version_json
   version_json=$(jq -nc \
     --arg ticket_auto "${_ticket_auto:-}" \
     --arg fleet "${FLEET_VERSION:-}" \
     --arg cc "${_cc:-}" \
     --arg model_default "${ANTHROPIC_MODEL:-}" \
+    --argjson skills "$_skills" \
+    --argjson skills_unresolved "$_skills_unresolved" \
     '{
       ticket_auto: (if $ticket_auto == "" then null else $ticket_auto end),
       fleet: (if $fleet == "" then null else $fleet end),
       cc: (if $cc == "" then null else $cc end),
-      model_default: (if $model_default == "" then null else $model_default end)
+      model_default: (if $model_default == "" then null else $model_default end),
+      skills: $skills,
+      skills_unresolved: $skills_unresolved
     }' 2>/dev/null) || return 0
   _plog "$log_file" "META" "version" "info" "$version_json"
 

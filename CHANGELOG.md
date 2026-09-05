@@ -17,6 +17,59 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## 0.42.0 (2026-09-05)
+
+**Skill prompt fingerprints.** Every pipeline phase was already attributable to a
+ticket, a run, a phase, a model and a plugin version — but not to the prompt
+material that produced it. A plugin version is far coarser than a skill edit:
+dozens of `SKILL.md` revisions ship under one version, so "did that edit to
+`ticket-implement` help or hurt?" was unanswerable and every prompt change landed
+on judgement rather than evidence.
+
+- **`prompt_manifests` in `dispatch-table.json`** — a new top-level key declaring,
+  per spawnable skill, the ordered files whose bytes reach the model on the
+  `--from-auto` path: its own `SKILL.md`, the `agents/*.md` named by its
+  `spawn.agent`, `lib:skill-preamble-auto.md`, `home:pipeline-log-format.md` for
+  logging skills, `plugin:docs/phase-result-schema.md` for the three phase-result
+  emitters, and the `SKILL.md` of every sub-skill it genuinely invokes. Membership
+  was verified per skill rather than grepped: `ticket-appraise-exec`'s "Run
+  `/ticket-implement`" and `ticket-appraise`'s "`/ticket-appraise-exec`" both sit
+  inside user-facing handoff blocks and are prose, so neither is an entry. The
+  generator reads only `data["steps"]`, so `make check-generated` is unaffected.
+- **`hooks/skill-fingerprint.sh`** — a third `SessionStart` hook, ordered after the
+  lib-sync hook, writing `~/.claude/skills/lib/skill-fingerprints.json`. It is a
+  hook because `CLAUDE_PLUGIN_ROOT` is unset in Bash-tool context, so no other
+  caller can resolve which plugin version's `SKILL.md` is live. `lib:`/`home:`
+  labels resolve against the destination the agent reads by absolute path, not the
+  plugin cache — hashing the source would name material that did not run. The hash
+  covers path labels (so a rename or reorder moves it) and every dispatch-table
+  spawn block naming the skill (`skill`, `extra_flags` and `instructions` are
+  concatenated into `AGENT_PROMPT`), across all four spawn-shaped block types.
+  ~0.2s for the current 12-skill table.
+- **`lib/skill-version.sh`** — `skill_version_lookup` and `skill_fingerprints_all`,
+  pure fail-open reads. Synced by the existing `lib/*.sh` hook; no manifest change.
+- **`skills` / `skills_unresolved` on `META|version`** — one new field on one
+  existing line. No `META|skill-version` line, no per-phase emission, and
+  `spawn-helper.sh` untouched. `run-summary.sh` already copies the whole object, so
+  the fingerprints reach `runs.jsonl` with no change there — now asserted by test
+  rather than assumed. Grouping runs by skill revision is a `jq` group-by.
+- **Fail-open is absolute.** An unreadable manifest entry yields the literal
+  `"unresolved"` plus the label in `missing`, never a hash over the readable subset
+  — two different programs must not collide under one id. The hook exits 0 on every
+  path; a missing artifact degrades the field to `{}` / `0`, never the line.
+- **Gaps are visible, not silent.** Any dispatch-table spawn skill without a
+  manifest is reported in `unmanifested` rather than skipped.
+- Attribution limits are documented alongside the fields in `pipeline-log-format.md`:
+  cross-plugin skills are not fingerprinted, the fingerprint is session-scoped,
+  router and fleetd workers can skew, executed-but-not-read files are attributed by
+  plugin version, and cohorts are observational — "associated with", never "caused by".
+
+Schema version stays **1** — an additive field inside an existing JSON object, so
+every existing log stays a valid prefix and every existing consumer keeps parsing.
+
+31 new tests: 24 on fingerprint generation and lookup, 5 on `META|version`
+emission, 2 on the `runs.jsonl` passthrough.
+
 ## fleet-controller 0.22.1 (2026-09-05)
 
 Branch C of the Commercial Evidence MVP (`next.md` Step 1), the last of the

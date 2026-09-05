@@ -18,6 +18,13 @@ LIB_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 PASS=0
 FAIL=0
 
+# run-identity.sh now sources skill-version.sh, which reads a real artifact
+# under $HOME when this is unset. Point the whole suite at a path that cannot
+# exist so every pre-existing assertion stays independent of whether the dev
+# box happens to have run the SessionStart fingerprint hook; the fingerprint
+# tests below override it per-test with a fixture they control.
+export SKILL_FINGERPRINTS_FILE="${SKILL_FINGERPRINTS_FILE:-/nonexistent/skill-fingerprints.json}"
+
 _run() {
   local name="$1"
   shift
@@ -28,6 +35,13 @@ _run() {
     echo "FAIL: $name"
     ((FAIL++)) || true
   fi
+}
+
+# Write a fingerprint artifact fixture and echo its path.
+_fp_fixture() {
+  local path="$1" body="$2"
+  printf '%s' "$body" >"$path"
+  printf '%s' "$path"
 }
 
 # Sandbox: a copy of lib/, so a stubbed linear-api.sh is resolved by
@@ -199,6 +213,97 @@ test_version_carries_ticket_auto_plugin_version() {
   return $ok
 }
 
+# ── skill fingerprints on META|version ─────────────────────────────────────────
+
+test_version_carries_skill_fingerprints() {
+  _sandbox_new
+  local log="$_SANDBOX/logs/T.log" fp json
+  : >"$log"
+  fp=$(_fp_fixture "$_SANDBOX/fp.json" '{"schema":1,"skills":{"ticket-implement":{"sha256":"aaa111","manifest_n":6},"ticket-verify":{"sha256":"bbb222","manifest_n":8}},"unmanifested":[]}')
+
+  json=$(SKILL_FINGERPRINTS_FILE="$fp" \
+    bash -c "source '$_SANDBOX/lib/run-identity.sh'; run_identity_stamp T-20 '$log' >/dev/null; grep '|META|version|info|' '$log' | cut -d'|' -f5-")
+
+  local ok
+  [ "$(echo "$json" | jq -r '.skills | length')" = "2" ] &&
+    [ "$(echo "$json" | jq -r '.skills["ticket-implement"].sha256')" = "aaa111" ] &&
+    [ "$(echo "$json" | jq -r '.skills["ticket-verify"].manifest_n')" = "8" ] &&
+    [ "$(echo "$json" | jq -r '.skills_unresolved')" = "0" ]
+  ok=$?
+  _sandbox_rm
+  return $ok
+}
+
+test_version_degrades_without_fingerprint_artifact() {
+  _sandbox_new
+  local log="$_SANDBOX/logs/T.log" json
+  : >"$log"
+
+  # The artifact's absence must cost the field, never the line: ticket_auto and
+  # the rest have to resolve exactly as they did before this field existed.
+  json=$(SKILL_FINGERPRINTS_FILE="$_SANDBOX/nope.json" \
+    bash -c "source '$_SANDBOX/lib/run-identity.sh'; run_identity_stamp T-21 '$log' >/dev/null; grep '|META|version|info|' '$log' | cut -d'|' -f5-")
+
+  local ok
+  [ -n "$json" ] &&
+    [ "$(echo "$json" | jq -c '.skills')" = "{}" ] &&
+    [ "$(echo "$json" | jq -r '.skills_unresolved')" = "0" ] &&
+    [ "$(echo "$json" | jq -e 'has("ticket_auto") and has("fleet") and has("cc") and has("model_default")' >/dev/null && echo yes)" = "yes" ]
+  ok=$?
+  _sandbox_rm
+  return $ok
+}
+
+test_version_degrades_on_malformed_fingerprint_artifact() {
+  _sandbox_new
+  local log="$_SANDBOX/logs/T.log" fp json
+  : >"$log"
+  fp=$(_fp_fixture "$_SANDBOX/fp.json" 'this is not json {')
+
+  json=$(SKILL_FINGERPRINTS_FILE="$fp" \
+    bash -c "source '$_SANDBOX/lib/run-identity.sh'; run_identity_stamp T-22 '$log' >/dev/null; grep '|META|version|info|' '$log' | cut -d'|' -f5-")
+
+  local ok
+  [ -n "$json" ] && [ "$(echo "$json" | jq -c '.skills')" = "{}" ]
+  ok=$?
+  _sandbox_rm
+  return $ok
+}
+
+test_version_counts_unresolved_skills() {
+  _sandbox_new
+  local log="$_SANDBOX/logs/T.log" fp json
+  : >"$log"
+  fp=$(_fp_fixture "$_SANDBOX/fp.json" '{"schema":1,"skills":{"a":{"sha256":"unresolved","manifest_n":3,"missing":["plugin:x"]},"b":{"sha256":"ccc333","manifest_n":2},"c":{"sha256":"unresolved","manifest_n":1,"missing":["lib:y"]}},"unmanifested":[]}')
+
+  json=$(SKILL_FINGERPRINTS_FILE="$fp" \
+    bash -c "source '$_SANDBOX/lib/run-identity.sh'; run_identity_stamp T-23 '$log' >/dev/null; grep '|META|version|info|' '$log' | cut -d'|' -f5-")
+
+  local ok
+  [ "$(echo "$json" | jq -r '.skills_unresolved')" = "2" ] &&
+    [ "$(echo "$json" | jq -r '.skills.a.missing[0]')" = "plugin:x" ]
+  ok=$?
+  _sandbox_rm
+  return $ok
+}
+
+test_exactly_one_version_line_and_no_skill_version_line() {
+  _sandbox_new
+  local log="$_SANDBOX/logs/T.log" fp
+  : >"$log"
+  fp=$(_fp_fixture "$_SANDBOX/fp.json" '{"schema":1,"skills":{"x":{"sha256":"ddd444","manifest_n":1}},"unmanifested":[]}')
+
+  SKILL_FINGERPRINTS_FILE="$fp" \
+    bash -c "source '$_SANDBOX/lib/run-identity.sh'; run_identity_stamp T-24 '$log' --new" >/dev/null
+
+  local ok
+  [ "$(grep -c '|META|version|' "$log")" = "1" ] &&
+    ! grep -q 'META|skill-version' "$log"
+  ok=$?
+  _sandbox_rm
+  return $ok
+}
+
 # ── run_identity_current ───────────────────────────────────────────────────────
 
 test_current_is_empty_with_no_run_id_line() {
@@ -318,6 +423,11 @@ _run "gen is null without FLEET_GENERATION" test_gen_is_null_without_fleet_gener
 _run "gen carries FLEET_GENERATION when set" test_gen_carries_fleet_generation_when_set
 _run "version fields null without their sources" test_version_fields_null_without_their_sources
 _run "version carries ticket_auto plugin version" test_version_carries_ticket_auto_plugin_version
+_run "version carries skill fingerprints" test_version_carries_skill_fingerprints
+_run "version degrades without fingerprint artifact" test_version_degrades_without_fingerprint_artifact
+_run "version degrades on malformed fingerprint artifact" test_version_degrades_on_malformed_fingerprint_artifact
+_run "version counts unresolved skills" test_version_counts_unresolved_skills
+_run "exactly one version line, no skill-version line" test_exactly_one_version_line_and_no_skill_version_line
 _run "current is empty with no run-id line" test_current_is_empty_with_no_run_id_line
 _run "current returns the open run id" test_current_returns_the_open_run_id
 _run "ticket-meta no-ops without LINEAR_API_KEY" test_ticket_meta_no_ops_without_linear_api_key

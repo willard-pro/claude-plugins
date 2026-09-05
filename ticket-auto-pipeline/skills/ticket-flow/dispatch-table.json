@@ -495,5 +495,110 @@
       "log_line": "META|router-error|fail|Unknown RESUME_STEP: {RESUME_STEP}",
       "description": "Default case for an unrecognised RESUME_STEP."
     }
-  ]
+  ],
+  "prompt_manifests": {
+    "guidance-extractor": {
+      "files": [
+        "plugin:skills/guidance-extractor/SKILL.md",
+        "plugin:agents/guidance-extractor-agent.md",
+        "lib:skill-preamble-auto.md",
+        "home:pipeline-log-format.md"
+      ]
+    },
+    "ticket-appraise": {
+      "files": [
+        "plugin:skills/ticket-appraise/SKILL.md",
+        "plugin:agents/ticket-appraise-agent.md",
+        "lib:skill-preamble-auto.md",
+        "home:pipeline-log-format.md",
+        "plugin:skills/ticket-setup/SKILL.md",
+        "plugin:skills/ticket-critique/SKILL.md",
+        "plugin:skills/ticket-flow/SKILL.md"
+      ]
+    },
+    "ticket-appraise-exec": {
+      "files": [
+        "plugin:skills/ticket-appraise-exec/SKILL.md",
+        "plugin:agents/ticket-appraise-agent.md",
+        "lib:skill-preamble-auto.md",
+        "home:pipeline-log-format.md",
+        "plugin:skills/ticket-flow/SKILL.md"
+      ]
+    },
+    "ticket-document": {
+      "files": [
+        "plugin:skills/ticket-document/SKILL.md",
+        "plugin:agents/ticket-maintenance-agent.md",
+        "home:pipeline-log-format.md"
+      ]
+    },
+    "ticket-gate-reconcile": {
+      "files": [
+        "plugin:skills/ticket-gate-reconcile/SKILL.md",
+        "plugin:agents/ticket-gate-reconcile-agent.md"
+      ]
+    },
+    "ticket-implement": {
+      "files": [
+        "plugin:skills/ticket-implement/SKILL.md",
+        "plugin:agents/ticket-implement-agent.md",
+        "lib:skill-preamble-auto.md",
+        "home:pipeline-log-format.md",
+        "plugin:docs/phase-result-schema.md",
+        "plugin:skills/ticket-flow/SKILL.md"
+      ]
+    },
+    "ticket-pr-iterate": {
+      "files": [
+        "plugin:skills/ticket-pr-iterate/SKILL.md",
+        "lib:skill-preamble-auto.md",
+        "home:pipeline-log-format.md",
+        "plugin:skills/ticket-flow/SKILL.md"
+      ]
+    },
+    "ticket-pr-review": {
+      "files": [
+        "plugin:skills/ticket-pr-review/SKILL.md",
+        "plugin:agents/ticket-pr-review-agent.md",
+        "lib:skill-preamble-auto.md",
+        "home:pipeline-log-format.md",
+        "plugin:docs/phase-result-schema.md",
+        "plugin:skills/ticket-flow/SKILL.md"
+      ]
+    },
+    "ticket-reproduce": {
+      "files": [
+        "plugin:skills/ticket-reproduce/SKILL.md",
+        "plugin:agents/ticket-appraise-agent.md",
+        "lib:skill-preamble-auto.md",
+        "home:pipeline-log-format.md",
+        "plugin:skills/ticket-setup/SKILL.md",
+        "home:app-knowledge/SKILL.md"
+      ]
+    },
+    "ticket-retro": {
+      "files": [
+        "plugin:skills/ticket-retro/SKILL.md"
+      ]
+    },
+    "ticket-verify": {
+      "files": [
+        "plugin:skills/ticket-verify/SKILL.md",
+        "plugin:agents/ticket-verify-agent.md",
+        "lib:skill-preamble-auto.md",
+        "home:pipeline-log-format.md",
+        "plugin:docs/phase-result-schema.md",
+        "home:app-knowledge/SKILL.md",
+        "plugin:skills/nav-hints/SKILL.md",
+        "plugin:skills/ticket-flow/SKILL.md"
+      ]
+    },
+    "wiki-maintenance": {
+      "files": [
+        "plugin:skills/wiki-maintenance/SKILL.md",
+        "plugin:agents/ticket-maintenance-agent.md",
+        "home:pipeline-log-format.md"
+      ]
+    }
+  }
 }

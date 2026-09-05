@@ -327,6 +327,64 @@ until fleet-controller sets it), `cc` (`CLAUDE_CODE_VERSION` or `claude --versio
 source is unavailable — same precedent as `META|model`'s `unknown` fallback — so one missing
 source never blocks the write of the other three or of the line itself.
 
+#### `skills` and `skills_unresolved` — prompt fingerprints
+
+The same line also carries a fingerprint of the **prompt material each spawnable skill
+actually ran on**, because a plugin version is far coarser than a skill edit: dozens of
+`SKILL.md` revisions ship under one `ticket_auto` version, and a retro window mixes them all.
+
+```json
+{"ticket_auto":"0.42.0","fleet":null,"cc":"2.1.261 (Claude Code)","model_default":null,
+ "skills":{"ticket-implement":{"sha256":"274ea65f…","manifest_n":6},
+           "ticket-verify":{"sha256":"unresolved","manifest_n":8,
+                            "missing":["lib:skill-preamble-auto.md"]}},
+ "skills_unresolved":1}
+```
+
+- `skills` — one entry per fingerprinted skill: `sha256` over that skill's manifest (path
+  labels plus raw file bytes, in manifest order) and every dispatch-table `spawn` block naming
+  it; `manifest_n` is the declared manifest length. A `missing` array appears only when the
+  fingerprint could not be computed.
+- `skills_unresolved` — how many entries have `sha256: "unresolved"`.
+
+The manifests live in `skills/ticket-flow/dispatch-table.json`'s top-level `prompt_manifests`;
+`hooks/skill-fingerprint.sh` computes the hashes once at `SessionStart` into
+`~/.claude/skills/lib/skill-fingerprints.json`, and `lib/skill-version.sh` reads them fail-open.
+An unresolvable fingerprint is reported as the literal string `"unresolved"` rather than a hash
+over the readable subset — two genuinely different programs must never collide under one id.
+A missing artifact degrades the field to `{}` / `0`, never the line.
+
+Because `lib/run-summary.sh` copies the whole `META|version` object into the `run` record's
+`versions` field, grouping outcomes by skill revision is a query, not new instrumentation:
+
+```bash
+jq -s '[.[] | select(.kind == "run")]
+       | group_by(.versions.skills["ticket-implement"].sha256)
+       | map({sha: .[0].versions.skills["ticket-implement"].sha256, n: length})' logs/runs.jsonl
+```
+
+**Limits of this attribution — all of them load-bearing when reading the numbers:**
+
+- **Cross-plugin skills are not fingerprinted.** `ticket-implement` invokes
+  `/commit-commands:commit`, which is rooted in another plugin's `CLAUDE_PLUGIN_ROOT` and is
+  unresolvable from ours. A change there does not move the fingerprint.
+- **The fingerprint is session-scoped.** It is computed once at `SessionStart`, so a plugin
+  upgrade mid-session stamps subsequent runs with the *previous* value until the next session.
+  `generated_at` and `plugin_version` in the artifact make the skew inspectable after the fact.
+- **Router and fleetd workers are separate sessions.** Each regenerates the artifact, so a
+  staggered upgrade can briefly leave them on different values. A single run is never
+  internally inconsistent — its stamp is written once by the process that owns it.
+- **Files that execute without entering the prompt are out of scope.** `flow.sh`,
+  `linear-api.sh`, `hb-wrap.sh` and friends change behaviour without moving any fingerprint;
+  they are attributed by `ticket_auto` (the plugin version), which this line already carries.
+- **A stale `~/.claude/skills/` copy is faithfully hashed.** `lib:` and `home:` labels resolve
+  against the destination the agent actually reads by absolute path, not the plugin cache. That
+  is deliberate — hashing the source would name material that did not run — but it means a
+  fingerprint can legitimately differ from what the repo contains.
+- **Cohorts are observational, not controlled.** Task mix drifts, models change underneath, and
+  nothing is randomised. A difference between two fingerprint cohorts is *associated with* a
+  revision, never *caused by* it, and any reporting surface must carry `n` and a time window.
+
 ```bash
 echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|ticket-meta|info|{\"createdAt\":\"2026-09-01T00:00:00Z\",\"startedAt\":null,\"estimate\":3,\"priority\":2,\"type\":\"bug\",\"planned\":true,\"labels\":[\"bug\",\"planned\"]}" >> "$LOG_FILE"
 ```
