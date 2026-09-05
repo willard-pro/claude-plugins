@@ -30,9 +30,11 @@ _run() {
 
 # ── Mock environment ──────────────────────────────────────────────────────────
 
-_ws=""   # workspace dir
-_repo="" # mock git repo
-_root="" # mock REPOS_ROOT
+_ws=""             # workspace dir
+_repo=""           # mock git repo
+_root=""           # mock REPOS_ROOT
+_origin=""         # mock bare "origin" repo (branch-aware tests only)
+_default_branch="" # branch left checked out locally (branch-aware tests only)
 
 _setup() {
   _ws=$(mktemp -d)
@@ -57,9 +59,10 @@ _teardown() {
 
 # Run prescan-check and source its output into env vars
 _run_check() {
-  local repo="$1" force="${2:-false}"
+  local repo="$1" force="${2:-false}" branch="${3:-}"
   local args=("$repo" "--repos-root" "$_root")
   [ "$force" = "true" ] && args+=("--force")
+  [ -n "$branch" ] && args+=("--branch" "$branch")
 
   local _tmp_out="$_ws/prescan-out.env"
   # prescan-check.sh returns non-zero for stale/missing — expected.
@@ -461,6 +464,108 @@ test_integrity_services_no_md_files() {
   return $rc
 }
 
+# ── Branch-aware freshness tests (--branch flag) ──────────────────────────────
+# Regression coverage for the false-"fresh" bug: repos in this project's
+# local-dev convention run as ONE shared checkout, so literal HEAD is
+# whichever branch happens to be checked out when the freshness gate runs —
+# not necessarily the ticket's actual target branch (e.g. a long-lived epic
+# branch that has diverged from develop/main). Each test builds a bare
+# "origin" repo, then diverges a target branch away from whatever's left
+# checked out locally.
+
+# Builds a bare "origin" repo and pushes the current (checked-out) branch to
+# it, so --branch can later `git fetch origin <name>` against something real.
+_setup_with_origin() {
+  _setup
+  _origin="$_ws/origin.git"
+  git init -q --bare "$_origin"
+  cd "$_repo"
+  _default_branch=$(git symbolic-ref --short HEAD)
+  git remote add origin "$_origin"
+  git push -q origin "refs/heads/$_default_branch:refs/heads/$_default_branch"
+  cd /
+}
+
+# Creates a "target" branch on origin with one extra commit (touching the
+# tracked source file) beyond whatever's currently checked out locally, then
+# leaves the local checkout back on $_default_branch, UNCHANGED — i.e. the
+# checked-out branch never advances; only the target branch (visible via
+# origin/<name> after a fetch) does. Echoes the target branch's tip SHA.
+_diverge_target_branch() {
+  local branch_name="$1"
+  cd "$_repo"
+  git checkout -q -b "$branch_name" "$_default_branch"
+  echo "// target branch change $(date +%s%N)" >>"$_repo/main.ts"
+  git add main.ts
+  git commit -q -m "target branch change"
+  local sha
+  sha=$(git rev-parse HEAD)
+  git push -q origin "refs/heads/$branch_name:refs/heads/$branch_name"
+  git checkout -q "$_default_branch"
+  git branch -q -D "$branch_name"
+  cd /
+  echo "$sha"
+}
+
+test_branch_flag_absent_preserves_old_behavior() {
+  _setup_with_origin
+  local slug="test-repo" checked_out_head
+  checked_out_head=$(git -C "$_repo" rev-parse HEAD)
+  _diverge_target_branch "epic-branch" >/dev/null
+  _write_marker "$slug" "$checked_out_head"
+  _write_docs "$slug"
+  # No --branch given: old behavior is preserved — diff against whatever's
+  # checked out, which never moved. Must still report fresh (no regression).
+  _run_check "$_repo"
+  [ "$PRESCAN_STATUS" = "fresh" ] && [ "$PRESCAN_REASON" = "head_unchanged" ]
+  local rc=$?
+  _teardown
+  return $rc
+}
+
+test_branch_flag_fresh_against_target_tip() {
+  _setup_with_origin
+  local slug="test-repo" target_sha
+  target_sha=$(_diverge_target_branch "epic-branch")
+  # Marker records the TARGET branch's tip, not the checked-out branch's HEAD
+  # (which is still the original commit — behind the target branch).
+  _write_marker "$slug" "$target_sha"
+  _write_docs "$slug"
+  _run_check "$_repo" "false" "epic-branch"
+  [ "$PRESCAN_STATUS" = "fresh" ] && [ "$PRESCAN_REASON" = "head_unchanged" ]
+  local rc=$?
+  _teardown
+  return $rc
+}
+
+test_branch_flag_catches_false_fresh_regression() {
+  _setup_with_origin
+  local slug="test-repo" checked_out_head
+  checked_out_head=$(git -C "$_repo" rev-parse HEAD)
+  # Target branch (epic-branch) gets a commit the freshness marker never saw.
+  _diverge_target_branch "epic-branch" >/dev/null
+  # Marker matches the checked-out HEAD, which never advanced — this is
+  # exactly the false-fresh scenario from the bug report: last_scanned_sha
+  # equals literal HEAD, but the ticket's real target branch has moved on.
+  _write_marker "$slug" "$checked_out_head"
+  _write_docs "$slug"
+
+  # Baseline: without --branch, old (pre-fix) behavior is unaffected — fresh.
+  _run_check "$_repo"
+  if [ "$PRESCAN_STATUS" != "fresh" ]; then
+    _teardown
+    return 1
+  fi
+
+  # With --branch, the gate must NOT report fresh — the target branch has
+  # diverged and the marker's SHA is stale relative to its actual tip.
+  _run_check "$_repo" "false" "epic-branch"
+  [ "$PRESCAN_STATUS" != "fresh" ]
+  local rc=$?
+  _teardown
+  return $rc
+}
+
 # ── Runner ─────────────────────────────────────────────────────────────────────
 
 echo "=== prescan-check.sh unit tests ==="
@@ -488,6 +593,9 @@ _run "incremental count (3) below threshold → still fresh" test_incremental_co
 _run "HEAD unchanged + old full_dive → decay_age" test_head_unchanged_decay_age
 _run "integrity fail (no services/ dir) → stale" test_integrity_services_empty
 _run "integrity fail (services/ no .md files) → stale" test_integrity_services_no_md_files
+_run "--branch absent → old behavior preserved (fresh vs checked-out)" test_branch_flag_absent_preserves_old_behavior
+_run "--branch present → fresh evaluated against target branch tip" test_branch_flag_fresh_against_target_tip
+_run "--branch present → catches false-fresh regression on diverged target" test_branch_flag_catches_false_fresh_regression
 
 echo ""
 echo "=== $PASS passed, $FAIL failed ==="
