@@ -249,6 +249,7 @@ All settings live in `lib/fleet-config.sh` using `${VAR:-default}` — override 
 | `FLEET_MAX_CONCURRENT` | 3 | Concurrent pipeline cap for dispatch |
 | `FLEET_KILL_GRACE_SECS` | 10 | Cooperative-shutdown wait before SIGTERM |
 | `FLEET_KILL_VERIFY` | true | `false` = stop-file-only kill (legacy compat) |
+| `FLEET_MERGE_POLL_CYCLES` | 10 | `run_observe` cycles between periodic merge-poll sweeps (`lib/merge-poll.sh`) — the async complement to the pipeline's one-shot post-outcome sweep |
 
 **State and fencing**
 

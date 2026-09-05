@@ -3225,5 +3225,286 @@ def _get_severity(result, tid):
     return 0
 
 
+# ── Commercial Evidence MVP Branch C: fleet-cost-events ──────────────────
+
+
+class CostEventTest(unittest.TestCase):
+    """Reap/fleet-kill cost extraction and runs.jsonl `cost` event emission."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+        self._append_queue_entry('TST-C1', 'test-cost', generation=1)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _append_queue_entry(self, tid, reason, generation=1):
+        queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+        entry = {
+            'tid': tid,
+            'reason': reason,
+            'generation': generation,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+        with open(queue_file, 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+
+    def _runs_events(self):
+        runs_file = self.workspace / 'runs.jsonl'
+        if not runs_file.is_file():
+            return []
+        return [json.loads(line) for line in runs_file.read_text().splitlines()
+                if line.strip()]
+
+    def test_reap_writes_cost_usd_and_one_cost_event(self):
+        from fleetd.supervisor import Supervisor
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True, max_concurrent=1, cycle_interval=1,
+        )
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1)
+            sup._consume_queue(cmd_override=cmd)
+            self.assertIsNotNone(sup._children.get('TST-C1'))
+
+            # The harness envelope the worker "produced" before it exits.
+            gen_file = self.workspace / 'TST-C1-gen1.json'
+            gen_file.write_text(json.dumps({'total_cost_usd': 0.4321}))
+
+            time.sleep(2)
+            sup._reap_children()
+
+            exit_entry = json.loads(
+                (self.workspace / 'TST-C1-gen1-exit.json').read_text())
+            self.assertEqual(exit_entry['cost_usd'], 0.4321)
+
+            cost_events = [e for e in self._runs_events() if e.get('kind') == 'cost']
+            self.assertEqual(len(cost_events), 1)
+            self.assertEqual(cost_events[0]['tid'], 'TST-C1')
+            self.assertEqual(cost_events[0]['gen'], 1)
+            self.assertEqual(cost_events[0]['usd'], 0.4321)
+            # No META|run-id line exists for this synthetic ticket, so the
+            # event's run_id is an honest null, not a guess.
+            self.assertIsNone(cost_events[0]['run_id'])
+        finally:
+            sup.release_lock()
+
+    def test_no_envelope_means_no_cost_event(self):
+        from fleetd.supervisor import Supervisor
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True, max_concurrent=1, cycle_interval=1,
+        )
+        sup.acquire_lock()
+        try:
+            cmd = _make_worker_cmd(sleep_secs=1)
+            sup._consume_queue(cmd_override=cmd)
+            time.sleep(2)
+            sup._reap_children()
+
+            exit_entry = json.loads(
+                (self.workspace / 'TST-C1-gen1-exit.json').read_text())
+            self.assertIsNone(exit_entry['cost_usd'])
+            self.assertEqual(
+                [e for e in self._runs_events() if e.get('kind') == 'cost'], [])
+        finally:
+            sup.release_lock()
+
+    def test_fleet_kill_writes_a_cost_event(self):
+        from fleetd.supervisor import Supervisor
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True, max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            cmd = _make_ignoring_worker(sleep_secs=30)
+            sup._consume_queue(cmd_override=cmd)
+            child = sup._children.get('TST-C1')
+            self.assertIsNotNone(child)
+
+            gen_file = self.workspace / 'TST-C1-gen1.json'
+            gen_file.write_text(json.dumps({'total_cost_usd': 1.5}))
+
+            result = sup.kill_worker('TST-C1', grace_secs=1)
+            self.assertTrue(result.success, f"kill should succeed: {result.error}")
+
+            exit_entry = json.loads(
+                (self.workspace / 'TST-C1-gen1-exit.json').read_text())
+            self.assertEqual(exit_entry['cost_usd'], 1.5)
+            self.assertTrue(exit_entry['killed_by_fleet'])
+
+            cost_events = [e for e in self._runs_events() if e.get('kind') == 'cost']
+            self.assertEqual(len(cost_events), 1)
+            self.assertEqual(cost_events[0]['usd'], 1.5)
+        finally:
+            sup.release_lock()
+
+
+class WorkerSpawnEnvironmentTest(unittest.TestCase):
+    """worker-stdio-capture: FLEET_GENERATION / FLEET_VERSION reach the worker."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def test_worker_environment_carries_generation_and_version(self):
+        from fleetd.supervisor import spawn_worker
+
+        out = self.workspace / 'TST-ENVC-gen3.json'
+        pid, _ = spawn_worker(
+            tid='TST-ENVC', generation=3, state_dir=str(self.workspace),
+            cmd_override=[
+                sys.executable, '-c',
+                'import os; print(os.environ.get("FLEET_GENERATION"), '
+                'os.environ.get("FLEET_VERSION"))'],
+        )
+        os.waitpid(pid, 0)
+        deadline = time.time() + 5
+        while time.time() < deadline and not (
+                out.is_file() and out.stat().st_size > 0):
+            time.sleep(0.05)
+        printed = out.read_text()
+        self.assertIn('3', printed.split()[0])
+
+    def test_a_missing_plugin_json_degrades_to_empty_string(self):
+        from fleetd import supervisor as sup_mod
+        from unittest import mock
+
+        with mock.patch.object(sup_mod, '_FLEET_PLUGIN_VERSION', None), \
+             mock.patch.object(Path, 'read_text', side_effect=OSError('nope')):
+            self.assertEqual(sup_mod._fleet_plugin_version(), '')
+
+
+# ── Commercial Evidence MVP Branch C: fleet-merge-poll-cadence ───────────
+
+
+class MergePollSweepTest(unittest.TestCase):
+    """`_merge_poll_sweep` shells out to merge-poll.sh, fail-soft throughout."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _make_supervisor(self):
+        from fleetd.supervisor import Supervisor
+        return Supervisor(
+            state_dir=str(self.workspace), pidfile=str(self.workspace / 't.pid'))
+
+    def test_missing_script_is_a_noop(self):
+        from unittest import mock
+
+        sup = self._make_supervisor()
+        with mock.patch('fleetd.phase_dispatch.ticket_auto_lib_dir',
+                        return_value=self.workspace / 'no-such-lib'), \
+             mock.patch('subprocess.run') as run:
+            sup._merge_poll_sweep()
+            run.assert_not_called()
+
+    def test_invokes_the_script_with_an_outer_timeout(self):
+        from unittest import mock
+
+        lib_dir = self.workspace / 'lib'
+        lib_dir.mkdir()
+        (lib_dir / 'merge-poll.sh').write_text('#!/usr/bin/env bash\n')
+
+        sup = self._make_supervisor()
+        with mock.patch('fleetd.phase_dispatch.ticket_auto_lib_dir',
+                        return_value=lib_dir), \
+             mock.patch('subprocess.run') as run:
+            sup._merge_poll_sweep()
+            run.assert_called_once()
+            _, kwargs = run.call_args
+            self.assertEqual(kwargs.get('timeout'), 60)
+
+    def test_a_hanging_gh_call_does_not_propagate(self):
+        from unittest import mock
+
+        lib_dir = self.workspace / 'lib'
+        lib_dir.mkdir()
+        (lib_dir / 'merge-poll.sh').write_text('#!/usr/bin/env bash\n')
+
+        sup = self._make_supervisor()
+        with mock.patch('fleetd.phase_dispatch.ticket_auto_lib_dir',
+                        return_value=lib_dir), \
+             mock.patch('subprocess.run',
+                        side_effect=subprocess.TimeoutExpired(cmd='x', timeout=60)):
+            sup._merge_poll_sweep()  # must not raise
+
+
+class MergePollCadenceTest(unittest.TestCase):
+    """run_observe fires the sweep every FLEET_MERGE_POLL_CYCLES cycles."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+        self.pidfile = self.workspace / 'test.pid'
+        self.port = _find_free_port()
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _make_patched_supervisor(self, cycles_before_exit):
+        from fleetd.supervisor import Supervisor
+
+        sup = Supervisor(
+            state_dir=str(self.workspace), pidfile=str(self.pidfile),
+            port=self.port, cycle_interval=0.01,
+        )
+        calls = []
+        sup.scan_workers = lambda: None
+        sup.reconcile_orphaned_tickets = lambda *a, **k: None
+        sup.run_detection_cycle = lambda: None
+        sup._reap_children = lambda: None
+        sup._process_kill_requests = lambda: None
+        sup.poll_adopted_workers = lambda: None
+        sup.maybe_spawn_otel = lambda: None
+        sup._merge_poll_sweep = lambda: calls.append('sweep')
+
+        counter = {'n': 0}
+
+        def _consume_queue(*args, **kwargs):
+            counter['n'] += 1
+            if counter['n'] >= cycles_before_exit:
+                raise SystemExit(0)
+
+        sup._consume_queue = _consume_queue
+        return sup, calls
+
+    def test_sweep_fires_on_the_configured_cadence(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+
+        with mock.patch.object(sup_mod, 'FLEET_MERGE_POLL_CYCLES', 2):
+            sup, calls = self._make_patched_supervisor(cycles_before_exit=2)
+            with self.assertRaises(SystemExit):
+                sup.run_observe()
+            self.assertEqual(calls, ['sweep'])
+
+    def test_sweep_does_not_fire_off_cadence(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+
+        with mock.patch.object(sup_mod, 'FLEET_MERGE_POLL_CYCLES', 5):
+            sup, calls = self._make_patched_supervisor(cycles_before_exit=2)
+            with self.assertRaises(SystemExit):
+                sup.run_observe()
+            self.assertEqual(calls, [])
+
+
 if __name__ == '__main__':
     unittest.main()

@@ -583,6 +583,40 @@ class TestReturnCapture(unittest.TestCase):
             finally:
                 os.chdir(cwd)
 
+
+class TestWorkerCostUsd(unittest.TestCase):
+    """fleet-cost-events: cost extraction from a worker's stdout envelope."""
+
+    def test_a_valid_envelope_yields_a_float(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'CRE-9-gen1.json'
+            out.write_text(json.dumps({
+                'type': 'result', 'total_cost_usd': 0.4321,
+            }))
+            self.assertEqual(phase_dispatch.worker_cost_usd(out), 0.4321)
+
+    def test_non_json_content_yields_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'CRE-9-gen1.json'
+            out.write_text('not json at all')
+            self.assertIsNone(phase_dispatch.worker_cost_usd(out))
+
+    def test_missing_field_yields_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'CRE-9-gen1.json'
+            out.write_text(json.dumps({'type': 'result'}))
+            self.assertIsNone(phase_dispatch.worker_cost_usd(out))
+
+    def test_missing_file_yields_none(self):
+        self.assertIsNone(
+            phase_dispatch.worker_cost_usd('/nonexistent/CRE-9-gen1.json'))
+
+    def test_non_numeric_value_yields_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'CRE-9-gen1.json'
+            out.write_text(json.dumps({'total_cost_usd': 'oops'}))
+            self.assertIsNone(phase_dispatch.worker_cost_usd(out))
+
     def test_capture_is_fail_soft_when_the_helper_is_absent(self):
         with tempfile.TemporaryDirectory() as empty:
             self.assertFalse(phase_dispatch.capture_phase_return(

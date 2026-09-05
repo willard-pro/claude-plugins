@@ -757,6 +757,32 @@ def worker_return_text(stdout_path):
     return raw
 
 
+def worker_cost_usd(stdout_path):
+    """Extract `total_cost_usd` from a worker's captured stdout envelope.
+
+    Returns a float when the envelope is valid JSON with a numeric
+    `total_cost_usd` field, `None` on any anomaly (missing file, non-JSON
+    content, missing field, non-numeric value) — never raises. Cost
+    extraction must not be able to fail a reap or a fleet-kill (design.md
+    Decision 2), the two paths that guarantee tickets don't get stuck as
+    phantom-owned.
+    """
+    try:
+        raw = Path(stdout_path).read_text()
+    except OSError:
+        return None
+    try:
+        payload = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    cost = payload.get('total_cost_usd')
+    if isinstance(cost, bool) or not isinstance(cost, (int, float)):
+        return None
+    return float(cost)
+
+
 def capture_phase_return(tid, phase, text, attempt=None, lib_dir=None,
                          timeout=30):
     """Persist a phase's return to `logs/{tid}-{phase}-agent.log`.
