@@ -33,6 +33,7 @@ test-lib:
 	bash ticket-auto-pipeline/lib/tests/test-pipeline-postmortem.sh
 	bash ticket-auto-pipeline/lib/tests/test-phase-inspector.sh
 	bash ticket-auto-pipeline/lib/tests/test-inspect-verifiers.sh
+	bash ticket-auto-pipeline/lib/tests/test-skill-fingerprint.sh
 	# fleet-controller tests
 	bash fleet-controller/lib/tests/test-fleet-detect.sh
 	bash fleet-controller/lib/tests/test-fleet-detect-new.sh
