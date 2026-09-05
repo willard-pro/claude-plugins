@@ -154,6 +154,96 @@ _last_msg() {
   tail -1 "$file" | awk -F'|' '{for(i=5;i<=NF;i++) printf "%s%s", $i, (i<NF?"|":"")}'
 }
 
+# Emits the log's last line, skipping any trailing run of `META|worker-exit`
+# entries. fleetd's reap path appends `META|worker-exit|...` after a
+# worker's own generation exits (fleet-controller/CLAUDE.md "Worker exit
+# records") — an annotation of the exit, not a new pipeline state — so a
+# genuinely completed pipeline's log ends with worker-exit as its literal
+# last line once fleetd has reaped it. Any classifier that took the raw
+# last line here would misclassify an already-terminal pipeline as
+# incomplete on the very next call (e.g. a stale queue-consume check would
+# stop skipping re-spawn of a finished ticket). Arg: file
+_last_effective_line() {
+  local file="$1"
+  if [ ! -f "$file" ] || [ ! -s "$file" ]; then
+    echo ""
+    return
+  fi
+  tac "$file" | awk -F'|' '$3 != "worker-exit" {print; exit}'
+}
+
+# ── Outcome classification ──────────────────────────────────────────────────
+# Pipeline-finalize.sh's tail-check guarantee means only the log's LAST line
+# needs inspecting — a stale "held:"/"stopped:" outcome earlier in a
+# crash-resumed log must never override a later, real resolution. "Last
+# line" skips any trailing `META|worker-exit` entries for the same reason
+# _last_effective_line does — fleetd appends one of those after reap, and it
+# is an annotation of the exit, not a new pipeline state.
+
+# Emits the pipeline's effective last line (trailing worker-exit entries
+# skipped), or nothing when there is no history at all.
+# Usage: _pipeline_last_effective_line <tid> [workspace]
+_pipeline_last_effective_line() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  _pipeline_lines "$tid" "$workspace" | tac | awk -F'|' '$3 != "worker-exit" {print; exit}'
+}
+
+# Emits the pipeline's last outcome message, or nothing when the effective
+# last line is not an outcome entry (including "no history at all").
+# Usage: _pipeline_last_outcome_msg <tid> [workspace]
+_pipeline_last_outcome_msg() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local last
+  last=$(_pipeline_last_effective_line "$tid" "$workspace")
+  [ -z "$last" ] && return
+  local step
+  step=$(echo "$last" | awk -F'|' '{print $3}')
+  [ "$step" = "outcome" ] || return
+  echo "$last" | awk -F'|' '{for(i=5;i<=NF;i++) printf "%s%s", $i, (i<NF?"|":"")}'
+}
+
+# True only for a genuinely finished pipeline — completed, stopped
+# (gate-stop/exhausted/exit/fleet-kill), or dead-lettered. False for a held
+# ticket, which is waiting on a human, not the pipeline, and must stay
+# visible to the sweep. A raw `META|outcome|` grep treated "held: gate" the
+# same as "completed: STEP_6" and exempted every held ticket from all 11
+# detectors — one sat unanswered for 160h with no alert.
+# Usage: _pipeline_genuinely_terminal <tid> [workspace]
+_pipeline_genuinely_terminal() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local last_step
+  last_step=$(_pipeline_last_effective_line "$tid" "$workspace" | awk -F'|' '{print $3}')
+  [ "$last_step" = "dead-letter" ] && return 0
+  local msg
+  msg=$(_pipeline_last_outcome_msg "$tid" "$workspace")
+  [ -z "$msg" ] && return 1
+  case "$msg" in
+  "held: "*) return 1 ;;
+  *) return 0 ;;
+  esac
+}
+
+# True when the ticket's last outcome is a hold — waiting on a human, not
+# terminal, but not "active" in the ordinary sense either: the router has
+# already exited cleanly, so the 10 process-liveness detectors (stalls,
+# zombies, loops, ...) would false-positive against it within minutes (no
+# heartbeat, no open bracket — that IS what a clean hold looks like). Only
+# detect_abandoned's held-aware branch should run for these.
+# Usage: _pipeline_is_held <tid> [workspace]
+_pipeline_is_held() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+  local msg
+  msg=$(_pipeline_last_outcome_msg "$tid" "$workspace")
+  case "$msg" in
+  "held: "*) return 0 ;;
+  *) return 1 ;;
+  esac
+}
+
 # ── Detection functions ─────────────────────────────────────────────────────────
 # Each takes (tid, workspace_dir) and prints severity to stdout.
 # workspace_dir is optional — defaults to FLEET_PIPELINE_LOG_DIR, then ./logs.
@@ -556,7 +646,7 @@ detect_loops() {
   echo "$severity"
 }
 
-# 5. Abandonment detection — pipeline log exists but no outcome
+# 5. Abandonment detection — pipeline log exists but no genuine resolution
 detect_abandoned() {
   local tid="$1"
   local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
@@ -566,16 +656,31 @@ detect_abandoned() {
     return
   fi
 
-  # Check if pipeline has an outcome (completed normally)
-  if _pipeline_lines "$tid" "$workspace" | command grep -q '|META|outcome|' 2>/dev/null; then
+  # Genuinely finished (completed/stopped/dead-lettered) — nothing left to
+  # watch.
+  if _pipeline_genuinely_terminal "$tid" "$workspace"; then
     echo "0"
     return
   fi
 
   local age
   age=$(_pipeline_last_age_secs "$tid" "$workspace")
-
   local warn_secs=$((${FLEET_ABANDON_WARN_HOURS:-1} * 3600))
+
+  # A held ticket is waiting on a human, not abandoned by the pipeline — but
+  # it can still go stale if nobody ever answers. Capped at WARN: unlike a
+  # genuinely dead pipeline there is no process to kill, and restarting
+  # would only spawn a duplicate worker while the same open question sits
+  # unanswered.
+  if _pipeline_is_held "$tid" "$workspace"; then
+    if [ "$age" -ge "$warn_secs" ]; then
+      echo "1"
+    else
+      echo "0"
+    fi
+    return
+  fi
+
   local kill_secs=$((${FLEET_ABANDON_KILL_HOURS:-4} * 3600))
 
   if [ "$age" -ge "$kill_secs" ]; then
@@ -1195,8 +1300,11 @@ _fleet_scan_blocked_by() {
     tid=$(basename "$log_file" | sed 's/-pipeline.log$//')
     [ -z "$tid" ] && continue
 
-    # Skip completed pipelines
-    command grep -q '|META|outcome|' "$log_file" 2>/dev/null && continue
+    # Skip genuinely finished pipelines. A held ticket is not terminal — it
+    # is waiting on a human — so it still has its blocked-by status checked;
+    # this detector never auto-acts (WARN-only, fleet-wide finding), so
+    # there is no kill/restart risk in scanning it.
+    _pipeline_genuinely_terminal "$tid" "$workspace" && continue
 
     local sev
     sev=$(detect_blocked_by "$tid" "$workspace")
@@ -1357,8 +1465,14 @@ fleet_detect_all() {
       fi
     fi
 
-    # Skip pipelines that already have an outcome (completed)
-    if command grep -q '|META|outcome|' "$log_file" 2>/dev/null; then
+    # Skip pipelines that are genuinely finished (completed, stopped, or
+    # dead-lettered) — nothing left to watch. A held ticket is NOT
+    # genuinely terminal (it is waiting on a human, not the pipeline), so
+    # it stays in the sweep below rather than being exempted from every
+    # detector — a raw `META|outcome|` grep here previously treated
+    # "held: gate" the same as "completed:" and exempted every held ticket
+    # from all 11 detectors; one sat unanswered for 160h with no alert.
+    if _pipeline_genuinely_terminal "$tid" "$workspace"; then
       continue
     fi
 
@@ -1366,17 +1480,37 @@ fleet_detect_all() {
 
     # Run all 10 per-ticket detectors (1-8 + planner_feedback + epic-branch), collect max severity
     local s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 max_sev anomaly_types
-    s1=$(detect_phase_failures "$tid" "$workspace")
-    s2=$(detect_stalls "$tid" "$workspace")
-    s3=$(detect_zombies "$tid" "$workspace")
-    s4=$(detect_loops "$tid" "$workspace")
-    s5=$(detect_abandoned "$tid" "$workspace")
-    s6=$(detect_flow_failures "$tid" "$workspace")
-    s7=$(detect_auto_mode_blocks "$tid" "$workspace")
-    s8=$(detect_tool_errors "$tid" "$workspace")
-    s9=$(detect_planner_feedback "$tid" "$workspace")
-    s10=$(detect_epic_branch_ready "$tid" "$workspace")
-    s11=$(detect_runaway_calls "$tid" "$workspace")
+    if _pipeline_is_held "$tid" "$workspace"; then
+      # The router has already exited cleanly for a held ticket — no live
+      # process, no open bracket, no heartbeat. The other 10 detectors
+      # assume an actively running pipeline and would false-positive
+      # (stalls/zombies/loops in particular) within minutes of a clean
+      # hold. Only detect_abandoned's held-aware branch (WARN-capped, no
+      # kill/restart) is meaningful here.
+      s1=0
+      s2=0
+      s3=0
+      s4=0
+      s5=$(detect_abandoned "$tid" "$workspace")
+      s6=0
+      s7=0
+      s8=0
+      s9=0
+      s10=0
+      s11=0
+    else
+      s1=$(detect_phase_failures "$tid" "$workspace")
+      s2=$(detect_stalls "$tid" "$workspace")
+      s3=$(detect_zombies "$tid" "$workspace")
+      s4=$(detect_loops "$tid" "$workspace")
+      s5=$(detect_abandoned "$tid" "$workspace")
+      s6=$(detect_flow_failures "$tid" "$workspace")
+      s7=$(detect_auto_mode_blocks "$tid" "$workspace")
+      s8=$(detect_tool_errors "$tid" "$workspace")
+      s9=$(detect_planner_feedback "$tid" "$workspace")
+      s10=$(detect_epic_branch_ready "$tid" "$workspace")
+      s11=$(detect_runaway_calls "$tid" "$workspace")
+    fi
 
     max_sev=0
     anomaly_types=""

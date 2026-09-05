@@ -1574,8 +1574,12 @@ def _cmd_already_sets_permission_mode(cmd_str):
     return any(marker in cmd_str for marker in _PERMISSION_FLAG_MARKERS)
 
 
+def _cmd_already_sets_agent(cmd_str):
+    return '--agent' in cmd_str
+
+
 def _build_worker_cmd(tid, claude_bin=None, claude_cmd=None, session_id=None,
-                      prompt=None):
+                      prompt=None, agent=None):
     """Build the argument list for spawning a worker.
 
     `prompt` replaces the default whole-ticket `/ticket-auto` invocation with
@@ -1584,6 +1588,16 @@ def _build_worker_cmd(tid, claude_bin=None, claude_cmd=None, session_id=None,
     handling are identical, because a phase worker is the same kind of
     headless session as a ticket worker — it simply runs one step of the
     pipeline instead of all of them.
+
+    `agent` is the dispatch table's per-step `spawn.agent` (a plugin-scoped
+    subagent type, e.g. `ticket-auto-pipeline:ticket-implement-agent`),
+    passed through as `--agent` so the phase worker's tool allowlist and
+    system prompt (`ticket-auto-pipeline/agents/*.md`) actually bind — the
+    mirror of the manual router passing `AGENT_TYPE` to the `Agent` tool's
+    `subagent_type`. None for a whole-ticket worker (the router needs every
+    tool to dispatch its own phases) and for any step with no dedicated
+    agent type yet. Skipped when `claude_cmd`/CLAUDE_CMD already specifies
+    `--agent` — same override precedence as permission mode.
 
     `claude_cmd` (or the CLAUDE_CMD env var) is a shell-style command line —
     e.g. "claude-deepseek 2 --bypass" — that replaces the bare binary name
@@ -1607,6 +1621,8 @@ def _build_worker_cmd(tid, claude_bin=None, claude_cmd=None, session_id=None,
             '--output-format', 'json']
     if session_id:
         args += ['--session-id', session_id]
+    if agent and not _cmd_already_sets_agent(cmd_str):
+        args += ['--agent', agent]
     if not _cmd_already_sets_permission_mode(cmd_str):
         args += ['--permission-mode', FLEET_WORKER_PERMISSION_MODE]
         if FLEET_WORKER_DISALLOWED_TOOLS:
@@ -1639,7 +1655,8 @@ class SpawnError(Exception):
 
 def spawn_worker(tid, generation, state_dir, reason='dispatched',
                  cmd_override=None, claude_bin=None, claude_cmd=None,
-                 prompt=None, phase='', extra_env=None, session_id=None):
+                 prompt=None, phase='', extra_env=None, session_id=None,
+                 agent=None):
     """Fork and exec a worker for `tid`. Returns the child PID.
 
     The child is placed in its own process group so that kill escalation
@@ -1661,6 +1678,10 @@ def spawn_worker(tid, generation, state_dir, reason='dispatched',
     run-registry files so a ticket's successive phases do not overwrite each
     other's records; `extra_env` carries what `spawn_agent_pre` would have
     exported in the agent prompt — see `phase_dispatch.build_phase_spawn`.
+
+    agent: forwarded to `_build_worker_cmd` as `--agent` — see its docstring.
+    None for a whole-ticket worker; a phase worker's dispatch-table
+    `spawn.agent` otherwise.
     """
     # Generated here unless the caller already has one. A phase spawn does:
     # it must write the session id into spawn-meta *before* the fork, so no
@@ -1668,7 +1689,7 @@ def spawn_worker(tid, generation, state_dir, reason='dispatched',
     session_id = session_id or str(uuid.uuid4())
     cmd = cmd_override if cmd_override is not None else _build_worker_cmd(
         tid, claude_bin=claude_bin, claude_cmd=claude_cmd,
-        session_id=session_id, prompt=prompt)
+        session_id=session_id, prompt=prompt, agent=agent)
 
     slug = f'{tid}-{phase.lower()}' if phase else tid
     stdout_path = Path(state_dir) / f'{slug}-gen{generation}.json'
@@ -1798,7 +1819,7 @@ def spawn_phase_worker(tid, step_id, generation, state_dir, log_file,
         tid, generation, state_dir, reason=reason, cmd_override=cmd_override,
         claude_bin=claude_bin, claude_cmd=claude_cmd,
         prompt=spawn.prompt, phase=spawn.phase, extra_env=spawn.env,
-        session_id=session_id,
+        session_id=session_id, agent=spawn.agent,
     )
     _store_record_spawn(state_dir, tid, pid, generation, reason, session_id,
                         phase=spawn.phase)
@@ -1978,11 +1999,16 @@ def _log_reached_terminal(state_dir, tid):
 
     Terminal iff (mirrors fleet_ticket_terminal_state branch order —
     the bash classifier is the authority):
-      - the last line's step is `outcome`: `held: gate`, `stopped:
-        gate-stop` and `stopped: fleet-kill` are NOT terminal; any other
-        outcome message IS terminal, or
+      - the last line's step is `outcome`: any `held: <kind>` message,
+        `stopped: gate-stop` and `stopped: fleet-kill` are NOT terminal;
+        any other outcome message IS terminal, or
       - the last line's step is `dead-letter` (terminal).
     A missing/empty log is NOT terminal, same as the bash classifier.
+
+    The held check matches the `held: ` prefix, not the exact string
+    `held: gate` — today the only hold kind pipeline-finalize.sh writes,
+    but an exact match would silently misclassify any future hold kind
+    (e.g. an external-wait hold) as terminal via the fallthrough below.
 
     NO gate-stop-derived verdict is terminal any more. Bash classifies all
     three of its gate-stop routes as `gate-stopped` — a distinct value from
@@ -2010,12 +2036,29 @@ def _log_reached_terminal(state_dir, tid):
     if not lines:
         return False
 
+    # Skip any trailing run of `META|worker-exit` entries — fleetd appends
+    # one after a worker's own generation exits (fleet-controller/CLAUDE.md
+    # "Worker exit records"), an annotation of the exit rather than a new
+    # pipeline state. Without this, a genuinely completed pipeline reads as
+    # `incomplete` the moment fleetd reaps it, because the raw last line is
+    # no longer the outcome/dead-letter line (mirrors bash's
+    # _last_effective_line).
+    idx = len(lines) - 1
+    while idx >= 0:
+        fields = lines[idx].split('|')
+        if len(fields) >= 3 and fields[2] == 'worker-exit':
+            idx -= 1
+            continue
+        break
+    if idx < 0:
+        return False
+
     # Pipeline log schema is ISO|PHASE|STEP|STATUS|MSG — split() is
     # 0-indexed, so STEP is field 2 and STATUS is field 3. The outcome arm
     # must run before the gate-stop-anywhere grep: bash classifies a
     # gate-held outcome as gate-held even when a gate-stop line exists
     # earlier in the log.
-    last = lines[-1].split('|')
+    last = lines[idx].split('|')
     if len(last) >= 3 and last[2] == 'outcome':
         msg = '|'.join(last[4:]) if len(last) > 4 else ''
         if 'stopped: fleet-kill' in msg:
@@ -2029,8 +2072,9 @@ def _log_reached_terminal(state_dir, tid):
             # a scoped campaign resume is entitled to retry it, so this
             # entry must not be dropped as stale. See the docstring.
             return False
-        if 'held: gate' in msg:
-            # Waiting on the human, not terminal.
+        if msg.startswith('held: '):
+            # Waiting on the human, not terminal — any hold kind, not just
+            # "gate" (see docstring).
             return False
         return True
 

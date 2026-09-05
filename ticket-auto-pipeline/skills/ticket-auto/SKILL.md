@@ -381,27 +381,28 @@ If you use `Skill` instead of `Agent`, every phase's full context (code reads, f
 
 Every agent spawn follows this 3-step pattern:
 
-1. **Pre-spawn** — `spawn_agent_pre` prints the `AGENT_PROMPT` line. Capture it:
+1. **Pre-spawn** — `spawn_agent_pre` prints the `AGENT_PROMPT` and `AGENT_TYPE` lines. Look up `AGENT_TYPE` for the skill you are dispatching in the "Agent types" table above, and pass it explicitly — `spawn_agent_pre` cannot infer it from `SKILL` alone (the same skill can be dispatched at more than one step). Capture the output:
    ```bash
    source ~/.claude/skills/lib/spawn-helper.sh
    _prompt=$(spawn_agent_pre \
      PHASE=<phase> STEP=<step> TICKET_ID={TICKET-ID} \
      LOG_FILE={LOG_FILE} HB_LOG_FILE={HB_LOG_FILE} CLAUDE_LOG_FILE=$CLAUDE_LOG_FILE \
      SKILL=/ticket-<skill> FLAGS="--from-auto" \
+     AGENT_TYPE="<subagent_type from the Agent types table>" \
      FROM_STEP={<FROM>} \
      DESCRIPTION="<what the agent does>" \
      INSTRUCTIONS="<additional skill-specific instructions>")
    ```
-   `spawn_agent_pre` outputs a line starting with `AGENT_PROMPT=`. Everything after `AGENT_PROMPT=` is the exact prompt the agent needs.
+   `spawn_agent_pre` outputs two lines: `AGENT_PROMPT=` (everything after it is the exact prompt the agent needs) and `AGENT_TYPE=` (the exact `subagent_type` value to use in the next step — `general-purpose` if you omitted `AGENT_TYPE=`, never guess a different fallback).
 
-2. **Spawn** — invoke the `Agent` tool with the prompt from `$_prompt`. Extract the text after `AGENT_PROMPT=` and pass it as the `prompt` parameter:
+2. **Spawn** — invoke the `Agent` tool with the prompt from `$_prompt`. Extract the text after `AGENT_PROMPT=` and pass it as the `prompt` parameter; extract the text after `AGENT_TYPE=` and pass it as `subagent_type`:
    ```
    Agent tool call:
      description: "<phase> agent for {TICKET-ID}"
      prompt: <content after AGENT_PROMPT= from step 1>
-     subagent_type: "general-purpose"
+     subagent_type: <content after AGENT_TYPE= from step 1>
    ```
-   **NEVER use `Skill` tool here.** `Skill` runs inline and defeats isolation. Always `Agent` with `subagent_type: "general-purpose"`.
+   **NEVER use `Skill` tool here.** `Skill` runs inline and defeats isolation. Always `Agent`, and always the `subagent_type` `spawn_agent_pre` printed — never hardcode `general-purpose`: a phase's tool allowlist and system prompt (`ticket-auto-pipeline/agents/*.md`) only apply when the matching named agent type is used.
 
 3. **Post-spawn** — `spawn_capture` persists agent output to `-{phase}-agent.log`, then `spawn_agent_post` writes done/fail log entries, stops pinger, and writes heartbeat transitions.
 
@@ -666,6 +667,23 @@ After state detection, enter the stateless dispatch loop. Re-run `detect-resume.
 | `STEP_6` | Retro check + optional `ticket-retro` + outcome write | Bash + Agent |
 | `done` | Exit 0 | — |
 | `*` (unknown) | Log error, exit 1 | — |
+
+**Agent types** — the `subagent_type` each phase's `Agent` tool spawn MUST use (see "Agent spawn template" below). A skill with no dedicated agent type falls back to `general-purpose`.
+
+| Skill | subagent_type |
+|-------|---------------|
+| `/ticket-appraise` | `ticket-auto-pipeline:ticket-appraise-agent` |
+| `/ticket-reproduce` | `ticket-auto-pipeline:ticket-appraise-agent` |
+| `/ticket-appraise-exec` | `ticket-auto-pipeline:ticket-appraise-agent` |
+| `/ticket-gate-reconcile` | `ticket-auto-pipeline:ticket-gate-reconcile-agent` |
+| `/ticket-implement` | `ticket-auto-pipeline:ticket-implement-agent` |
+| `/guidance-extractor` | `ticket-auto-pipeline:guidance-extractor-agent` |
+| `/ticket-verify` | `ticket-auto-pipeline:ticket-verify-agent` |
+| `/ticket-pr-review` | `ticket-auto-pipeline:ticket-pr-review-agent` |
+| `/ticket-document` | `ticket-auto-pipeline:ticket-maintenance-agent` |
+| `/wiki-maintenance` | `ticket-auto-pipeline:ticket-maintenance-agent` |
+| `/ticket-pr-iterate` | `general-purpose` |
+| `/ticket-retro` | `general-purpose` |
 <!-- GENERATED:dispatch-table END -->
 
 ### STEP_1 — Appraise
@@ -877,6 +895,7 @@ fi
 
 ```
 STEP=phase-inspector-implement PHASE=IMPLEMENT SKILL=/guidance-extractor
+AGENT_TYPE=ticket-auto-pipeline:guidance-extractor-agent
 EXTRA_FLAGS="--from-auto --mode extract"
 DESCRIPTION="Phase inspector for IMPLEMENT"
 INSTRUCTIONS=<_pi_instructions contents>
@@ -1004,6 +1023,7 @@ fi
 
 ```
 STEP=phase-inspector-verify PHASE=VERIFY SKILL=/guidance-extractor
+AGENT_TYPE=ticket-auto-pipeline:guidance-extractor-agent
 EXTRA_FLAGS="--from-auto --mode extract"
 DESCRIPTION="Phase inspector for VERIFY"
 INSTRUCTIONS=<_pi_instructions contents>
@@ -1096,6 +1116,7 @@ fi
 
 ```
 STEP=phase-inspector-pr-review PHASE=PR-REVIEW SKILL=/guidance-extractor
+AGENT_TYPE=ticket-auto-pipeline:guidance-extractor-agent
 EXTRA_FLAGS="--from-auto --mode extract"
 DESCRIPTION="Phase inspector for PR-REVIEW"
 INSTRUCTIONS=<_pi_instructions contents>

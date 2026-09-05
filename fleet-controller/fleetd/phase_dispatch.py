@@ -843,7 +843,7 @@ DEFAULT_PHASE_FLAGS = '--from-auto'
 
 PhaseSpawn = namedtuple(
     'PhaseSpawn',
-    'step_id step phase skill prompt env attempt loop_bearing next_phase',
+    'step_id step phase skill prompt env attempt loop_bearing next_phase agent',
 )
 PhaseSpawn.__doc__ = """Everything needed to fork one phase worker.
 
@@ -852,6 +852,11 @@ prompt — the `-p` argument: a slash-command line plus the table's per-phase
          AGENT_PROMPT so the automated and manual paths give an agent the
          same words.
 env    — variables to merge into the worker's process environment.
+agent  — the plugin-scoped subagent type (`spawn.agent` in the dispatch
+         table, e.g. `ticket-auto-pipeline:ticket-implement-agent`) to pass
+         as `claude`'s `--agent` flag, or None when the step has no
+         dedicated agent type yet (the worker runs unrestricted, same as
+         today). Mirrors the manual router's AGENT_TYPE (spawn_agent_pre).
 """
 
 
@@ -945,6 +950,7 @@ def build_phase_spawn(table, step_id, tid, log_file, hb_log_file='',
         attempt=attempt,
         loop_bearing=bool(spawn.get('loop_bearing')),
         next_phase=(spawn.get('next_phase') or phase),
+        agent=spawn.get('agent') or None,
     )
 
 

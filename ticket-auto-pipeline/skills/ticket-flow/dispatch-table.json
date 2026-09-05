@@ -31,7 +31,8 @@
         "extra_flags": null,
         "next_phase": "APPRAISE",
         "description": "Investigate the ticket and produce complexity score",
-        "instructions": "Follow the skill exactly."
+        "instructions": "Follow the skill exactly.",
+        "agent": "ticket-auto-pipeline:ticket-appraise-agent"
       },
       "pre_dispatch": [
         {
@@ -63,7 +64,8 @@
         "extra_flags": null,
         "next_phase": "REPRODUCE",
         "description": "Reproduce the bug and capture evidence",
-        "instructions": "Follow the skill exactly."
+        "instructions": "Follow the skill exactly.",
+        "agent": "ticket-auto-pipeline:ticket-appraise-agent"
       },
       "pre_dispatch": [],
       "post_dispatch": [],
@@ -84,7 +86,8 @@
         "extra_flags": null,
         "next_phase": "EXEC",
         "description": "Create implementation artifacts (simple-fix.md or OpenSpec change)",
-        "instructions": "Follow the skill exactly."
+        "instructions": "Follow the skill exactly.",
+        "agent": "ticket-auto-pipeline:ticket-appraise-agent"
       },
       "pre_dispatch": [],
       "post_dispatch": [],
@@ -151,7 +154,8 @@
         "extra_flags": null,
         "next_phase": "GATE",
         "description": "Reconcile comments after gate hold and re-approval",
-        "instructions": "Follow the skill exactly. Load context from env.sh, pipeline log, and artifact files."
+        "instructions": "Follow the skill exactly. Load context from env.sh, pipeline log, and artifact files.",
+        "agent": "ticket-auto-pipeline:ticket-gate-reconcile-agent"
       },
       "pre_dispatch": [],
       "post_dispatch": [],
@@ -172,7 +176,8 @@
         "extra_flags": "--from-auto --mode extract",
         "next_phase": "IMPLEMENT",
         "description": "Implement the changes described in the artifact",
-        "instructions": "Use Serena for all code navigation. For openspec tickets: first read tasks.md in full, then proceed task by task. Pre-warm by reading all task descriptions before starting implementation."
+        "instructions": "Use Serena for all code navigation. For openspec tickets: first read tasks.md in full, then proceed task by task. Pre-warm by reading all task descriptions before starting implementation.",
+        "agent": "ticket-auto-pipeline:ticket-implement-agent"
       },
       "pre_dispatch": [],
       "post_dispatch": [
@@ -206,7 +211,8 @@
           "step": "phase-inspector-implement",
           "skill": "/guidance-extractor",
           "blocking": false,
-          "description": "RLVR Phase 1 advisory inspection. Spawned only when assemble_inspector_context yields INSPECTOR_INSTRUCTIONS. Captured with ATTEMPT=inspector so it appends rather than overwriting the implement agent's own capture."
+          "description": "RLVR Phase 1 advisory inspection. Spawned only when assemble_inspector_context yields INSPECTOR_INSTRUCTIONS. Captured with ATTEMPT=inspector so it appends rather than overwriting the implement agent's own capture.",
+          "agent": "ticket-auto-pipeline:guidance-extractor-agent"
         }
       ],
       "description": "Implement. The one phase that overrides the generic post-spawn ordering: the completeness gate must see the agent's return before the router commits the phase as done."
@@ -249,7 +255,8 @@
         "verdict_tokens": [
           "PASS",
           "FAIL"
-        ]
+        ],
+        "agent": "ticket-auto-pipeline:ticket-verify-agent"
       },
       "pre_dispatch": [
         {
@@ -285,7 +292,8 @@
           "step": "phase-inspector-verify",
           "skill": "/guidance-extractor",
           "blocking": false,
-          "description": "Runs before the retry/advance decision but does not affect it."
+          "description": "Runs before the retry/advance decision but does not affect it.",
+          "agent": "ticket-auto-pipeline:guidance-extractor-agent"
         }
       ],
       "description": "Verify with router-managed retry. On PASS the pipeline advances to STEP_4_6."
@@ -328,7 +336,8 @@
           "WARN": "if ITERATION < 3, reapprove-gate then run the loop body; else gate-stop",
           "BLOCK": "gate-stop",
           "unparseable": "PR_REVIEW_VERDICT_UNPARSEABLE"
-        }
+        },
+        "agent": "ticket-auto-pipeline:ticket-pr-review-agent"
       },
       "sub_steps": [
         {
@@ -348,7 +357,8 @@
           "step": "phase-inspector-pr-review",
           "skill": "/guidance-extractor",
           "blocking": false,
-          "description": "Advisory inspection; does not affect the verdict routing."
+          "description": "Advisory inspection; does not affect the verdict routing.",
+          "agent": "ticket-auto-pipeline:guidance-extractor-agent"
         },
         {
           "kind": "auto_merge",
@@ -379,7 +389,8 @@
           "skill": "/ticket-document",
           "next_phase": "MAINTENANCE",
           "description": "Generate ai-context.md documentation",
-          "instructions": "Follow the skill exactly."
+          "instructions": "Follow the skill exactly.",
+          "agent": "ticket-auto-pipeline:ticket-maintenance-agent"
         },
         {
           "step": "wiki-maintenance",
@@ -387,7 +398,8 @@
           "skill": "/wiki-maintenance",
           "next_phase": "MAINTENANCE",
           "description": "Process wiki errata and update documentation",
-          "instructions": "Follow the skill exactly."
+          "instructions": "Follow the skill exactly.",
+          "agent": "ticket-auto-pipeline:ticket-maintenance-agent"
         }
       ],
       "pre_dispatch": [],
@@ -419,7 +431,8 @@
         "description": "Reconcile PR comments from human reviewers",
         "instructions": "Check for new human comments on the open PR. Apply amend/push-back/clean logic.",
         "loop_bearing": true,
-        "terminal_msg_expr": "cycle#$((PR_FEEDBACK_CYCLE + 1)) reconciled"
+        "terminal_msg_expr": "cycle#$((PR_FEEDBACK_CYCLE + 1)) reconciled",
+        "agent": null
       },
       "pre_dispatch": [],
       "post_dispatch": [],
@@ -443,7 +456,8 @@
         "step": "retro",
         "phase": "MAINTENANCE",
         "skill": "/ticket-retro",
-        "conditional_on": "NEEDS_RETRO"
+        "conditional_on": "NEEDS_RETRO",
+        "agent": null
       },
       "post_dispatch": [
         {

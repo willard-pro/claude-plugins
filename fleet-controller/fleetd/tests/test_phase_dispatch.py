@@ -606,6 +606,15 @@ class TestPhaseSpawnConstruction(unittest.TestCase):
         self.assertEqual(spawn.phase, 'APPRAISE')
         self.assertEqual(spawn.step, 'appraise')
 
+    def test_agent_is_carried_from_the_table(self):
+        spawn = build_phase_spawn(self.table, 'STEP_1', 'CRE-9', '/w/log')
+        self.assertEqual(spawn.agent,
+                          'ticket-auto-pipeline:ticket-appraise-agent')
+
+    def test_agent_is_none_for_a_step_with_no_dedicated_type(self):
+        spawn = build_phase_spawn(self.table, 'STEP_5_5', 'CRE-9', '/w/log')
+        self.assertIsNone(spawn.agent)
+
     def test_extra_flags_from_the_table_are_used_verbatim(self):
         spawn = build_phase_spawn(self.table, 'STEP_4', 'CRE-9', '/w/log')
         self.assertIn('--from-auto --mode extract', spawn.prompt)

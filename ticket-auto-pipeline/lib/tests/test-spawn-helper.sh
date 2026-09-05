@@ -275,6 +275,21 @@ test_pre_prints_agent_prompt_line() {
   echo "$output" | grep -q '^AGENT_PROMPT='
 }
 
+test_pre_prints_agent_type_line_default() {
+  source "$LIB_DIR/spawn-helper.sh"
+  local output
+  output=$(spawn_agent_pre PHASE=TEST STEP=test TICKET_ID=TEST-42 SKILL=/ticket-test 2>/dev/null)
+  echo "$output" | grep -q '^AGENT_TYPE=general-purpose$'
+}
+
+test_pre_prints_agent_type_line_explicit() {
+  source "$LIB_DIR/spawn-helper.sh"
+  local output
+  output=$(spawn_agent_pre PHASE=TEST STEP=test TICKET_ID=TEST-42 SKILL=/ticket-appraise \
+    AGENT_TYPE="ticket-auto-pipeline:ticket-appraise-agent" 2>/dev/null)
+  echo "$output" | grep -q '^AGENT_TYPE=ticket-auto-pipeline:ticket-appraise-agent$'
+}
+
 test_pre_prompt_includes_skill_and_ticket() {
   source "$LIB_DIR/spawn-helper.sh"
   local output
@@ -2061,6 +2076,8 @@ for fn in \
   test_pre_rejects_missing_phase \
   test_pre_rejects_missing_ticket_id \
   test_pre_prints_agent_prompt_line \
+  test_pre_prints_agent_type_line_default \
+  test_pre_prints_agent_type_line_explicit \
   test_pre_prompt_includes_skill_and_ticket \
   test_pre_appends_from_step_to_flags \
   test_pre_writes_metadata_file \

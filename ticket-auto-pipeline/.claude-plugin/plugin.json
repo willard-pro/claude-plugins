@@ -1,6 +1,6 @@
 {
   "name": "ticket-auto-pipeline",
-  "version": "0.38.7",
+  "version": "0.39.0",
   "description": "Fully autonomous Linear ticket pipeline — appraise, implement, verify, and merge with zero user input. Includes 20+ slash commands, state-machine-driven flow control, safety gates, and retrospective analysis. Supports shared epic branches with per-ticket git worktree isolation.",
   "author": {
     "name": "John Willard"
@@ -14,124 +14,6 @@
     "automation",
     "project-management"
   ],
-  "agentTypes": {
-    "ticket-appraise-agent": {
-      "description": "Read-only investigation agent for the APPRAISE and EXEC pipeline phases. Analyzes tickets, traces code, scores complexity, and creates artifacts.",
-      "tools": [
-        "Bash",
-        "Read",
-        "Grep",
-        "Glob",
-        "Write",
-        "mcp__gitnexus__impact"
-      ],
-      "destructive": false,
-      "systemPrompt": "You are a ticket appraisal agent in the ticket-auto-pipeline. Your scope is investigation and artifact creation only. You may read any file and search the codebase, but you MUST NOT modify source code, create branches, or commit. Write only to the ticket workspace directory (notes.md, simple-fix.md, OpenSpec artifacts). Failures go to the pipeline log — never attempt Linear API mutations directly."
-    },
-    "ticket-implement-agent": {
-      "description": "Code implementation agent for the IMPLEMENT pipeline phase. Makes code changes, writes tests, commits, and pushes branches.",
-      "tools": [
-        "Bash",
-        "Read",
-        "Write",
-        "Edit",
-        "Grep",
-        "Glob",
-        "mcp__gitnexus__impact",
-        "mcp__gitnexus__detect_changes"
-      ],
-      "destructive": true,
-      "systemPrompt": "You are a ticket implementation agent in the ticket-auto-pipeline. Your scope is code changes within the ticket workspace directory. You may read, write, and edit files, run tests, commit, and push branches. You MUST NOT merge PRs or modify Linear issue state directly. All Linear mutations go through flow.sh. Restrict file modifications to the repositories referenced in the ticket workspace."
-    },
-    "ticket-verify-agent": {
-      "description": "Browser testing agent for the VERIFY pipeline phase. Runs Playwright user-acceptance tests against localhost.",
-      "tools": [
-        "Bash",
-        "Read",
-        "mcp__plugin_playwright_playwright__browser_navigate",
-        "mcp__plugin_playwright_playwright__browser_snapshot",
-        "mcp__plugin_playwright_playwright__browser_click",
-        "mcp__plugin_playwright_playwright__browser_take_screenshot",
-        "mcp__plugin_playwright_playwright__browser_evaluate",
-        "mcp__plugin_playwright_playwright__browser_type",
-        "mcp__plugin_playwright_playwright__browser_wait_for",
-        "mcp__plugin_playwright_playwright__browser_console_messages"
-      ],
-      "destructive": true,
-      "systemPrompt": "You are a ticket verification agent in the ticket-auto-pipeline. Your scope is browser-based UAT testing via Playwright. You may navigate, interact with pages, and capture screenshots. You MUST NOT modify code or Linear issue state. Report verification results (PASS/FAIL) to the pipeline log."
-    },
-    "ticket-pr-review-agent": {
-      "description": "PR review and merge agent for the PR-REVIEW pipeline phase. Reviews pull request diffs, posts findings, and merges passing PRs.",
-      "tools": [
-        "Bash",
-        "Read",
-        "Grep",
-        "mcp__plugin_github_github__pull_request_read",
-        "mcp__plugin_github_github__add_comment_to_pending_review",
-        "mcp__plugin_github_github__pull_request_review_write",
-        "mcp__plugin_github_github__merge_pull_request",
-        "mcp__plugin_github_github__get_commit",
-        "mcp__plugin_github_github__search_code",
-        "mcp__gitnexus__detect_changes"
-      ],
-      "destructive": true,
-      "systemPrompt": "You are a PR review agent in the ticket-auto-pipeline. Your scope is reviewing pull request diffs against ticket requirements. You may read PRs, post review comments, and merge PRs. You MUST NOT directly modify code files. Only merge when all requirements are addressed and pipeline safety gates have passed. Failures go to the pipeline log."
-    },
-    "ticket-maintenance-agent": {
-      "description": "Documentation and wiki maintenance agent for the MAINTENANCE pipeline phase. Generates ai-context.md and processes wiki errata.",
-      "tools": [
-        "Bash",
-        "Read",
-        "Write",
-        "Grep",
-        "Glob"
-      ],
-      "destructive": true,
-      "systemPrompt": "You are a maintenance agent in the ticket-auto-pipeline. Your scope is documentation generation and wiki errata processing. You may read and write files, but MUST NOT modify source code, create branches, or make commits. Documentation changes are scoped to the wiki root directory and the ticket workspace. Failures are non-blocking — log warnings to the pipeline log and continue."
-    },
-    "ticket-gate-reconcile-agent": {
-      "description": "Post-gate-hold comment reconciliation agent. Spawned when a held ticket is re-approved. Fetches Linear comments, evaluates open questions, incorporates user feedback into the plan artifact, and either passes clean or re-holds with an amendment cycle.",
-      "tools": [
-        "Bash",
-        "Read",
-        "Write",
-        "Grep",
-        "Glob",
-        "Edit"
-      ],
-      "destructive": true,
-      "systemPrompt": "You are a gate reconciliation agent in the ticket-auto-pipeline. Your scope is post-gate-hold comment reconciliation. When a held ticket is re-approved, you fetch Linear comments, identify unprocessed user feedback, evaluate open questions from notes.md, and either pass clean or apply amendments. You may read and modify plan artifacts (simple-fix.md, OpenSpec tasks.md) and notes.md. You may call flow.sh re-claim for holds. All Linear mutations go through flow.sh."
-    },
-    "ticket-prescan-agent": {
-      "description": "Repository prescan agent for building durable agent-knowledge docs. Spawned per-persona during first-time fan-out or targeted re-scan. Writes only its assigned doc file under REPOS_ROOT/.ticket-auto/<repo-slug>/docs/.",
-      "tools": [
-        "Bash",
-        "Read",
-        "Write",
-        "Grep",
-        "Glob",
-        "mcp__gitnexus__list_repos",
-        "mcp__gitnexus__context",
-        "mcp__gitnexus__query",
-        "mcp__gitnexus__detect_changes",
-        "mcp__gitnexus__route_map",
-        "mcp__gitnexus__tool_map",
-        "mcp__gitnexus__smart_search",
-        "mcp__gitnexus__smart_outline",
-        "mcp__gitnexus__smart_unfold"
-      ],
-      "destructive": false,
-      "systemPrompt": "You are a prescan agent in the ticket-auto-pipeline. Your scope is repository analysis and documentation generation. You write ONLY to your assigned output file under REPOS_ROOT/.ticket-auto/<repo-slug>/docs/. You MUST NOT modify source code, create branches, or make commits. Your output is a single markdown file providing agent-knowledge context for future pipeline runs. Failures are non-blocking — report issues and exit gracefully."
-    },
-    "guidance-extractor-agent": {
-      "description": "Phase inspector agent for the Phase Inspector (Phase 1) and Guidance Store (Phase 2) RLVR pipeline stages. Reads pre-parsed verifier-result entries for a completed phase, inspects for known defect patterns (flaky tests, missing requirements, trivial passes, verdict disagreement, incomplete implementation), and writes structured META|phase-inspector PASS/WARN/FAIL verdicts to the pipeline log.",
-      "tools": [
-        "Bash"
-      ],
-      "destructive": false,
-      "systemPrompt": "You are a guidance extractor agent in the ticket-auto-pipeline. Your scope is read-only inspection of verifier-result entries for a single pipeline phase. You receive pre-parsed verifier results in the prompt context — do not read files or call APIs. Check for five known defect patterns (flaky_tests, missing_requirement, trivial_pass, verdict_disagreement, incomplete_implementation) and write exactly one META|phase-inspector line to the pipeline log with a PASS/WARN/FAIL verdict. All patterns are WARN severity in Phase 1 — the inspector is advisory only, never gating the pipeline. Failures are non-blocking — write a WARN skip entry and exit gracefully."
-    }
-  },
   "hooks": {
     "SessionStart": [
       {

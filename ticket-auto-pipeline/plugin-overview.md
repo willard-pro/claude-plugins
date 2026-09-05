@@ -155,7 +155,7 @@ All pipeline agents use `lib/skill-preamble-auto.md` (thin router variant). All 
 1. Create skill directory: `skills/ticket-<name>/SKILL.md`
 2. Add slash command definition in SKILL.md frontmatter
 3. Reference `lib/skill-preamble-auto.md` for shared parameter patterns (thin router variant)
-4. Register a new agent type in `.claude-plugin/plugin.json` under `agentTypes`
+4. If the phase needs a restricted tool allowlist or its own system prompt, add a plugin-defined subagent: create `agents/<name>-agent.md` (YAML frontmatter: `name`, `description`, `tools`; body is the system prompt), then set `spawn.agent` (or `sequence[].agent`) to `ticket-auto-pipeline:<name>-agent` on the step's entry in `skills/ticket-flow/dispatch-table.json`. Otherwise leave `agent` unset/`null` — the step falls back to `general-purpose`. Regenerate the dispatch table (below) so SKILL.md's "Agent types" table picks up the mapping; fleetd's phase-dispatch path reads the same JSON field automatically.
 5. Add dispatch case to `ticket-auto/SKILL.md` dispatch table (new RESUME_STEP)
 6. Add any new state transitions to `skills/ticket-flow/state-machine.json`
 7. Add corresponding trigger to `flow.sh` if needed
