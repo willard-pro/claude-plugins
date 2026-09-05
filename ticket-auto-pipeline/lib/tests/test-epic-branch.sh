@@ -625,8 +625,14 @@ test_pr_opens_when_ready() {
   ensure_epic_branch "CRE-100" "$FIXTURE_REPO" 2>&1 || return 1
   _commit_on_epic_branch "$FIXTURE_REPO" || return 1
 
-  # Override gh as a function (more reliable than PATH-based mock)
-  GH_PR_CREATE_CALLED=false
+  # Override gh as a function (more reliable than PATH-based mock). The call
+  # marker is a file, not a variable: epic_branch_open_pr now captures gh's
+  # stdout via command substitution (`_pr_url=$(gh pr create ...)`) to build
+  # the pr-created evidence record, which runs the mock inside a subshell —
+  # a plain variable assignment there would not survive back to this scope.
+  GH_PR_CREATE_MARKER=$(mktemp)
+  rm -f "$GH_PR_CREATE_MARKER"
+  export GH_PR_CREATE_MARKER
   gh() {
     case "$1" in
     pr)
@@ -634,7 +640,7 @@ test_pr_opens_when_ready() {
       # gh pr list --jq '.[0].number // empty' outputs empty string when no PRs
       list) echo "" ;;
       create)
-        GH_PR_CREATE_CALLED=true
+        touch "$GH_PR_CREATE_MARKER"
         echo "https://github.com/test/repo/pull/99"
         ;;
       esac
@@ -653,10 +659,11 @@ test_pr_opens_when_ready() {
   }
 
   # gh pr create should have been called
-  if [ "$GH_PR_CREATE_CALLED" != "true" ]; then
+  if [ ! -f "$GH_PR_CREATE_MARKER" ]; then
     echo "  gh pr create was not called" >&2
     return 1
   fi
+  rm -f "$GH_PR_CREATE_MARKER"
 
   return 0
 }
@@ -792,14 +799,19 @@ test_pr_proceeds_when_epic_branch_has_commits() {
   _commit_on_epic_branch "$FIXTURE_REPO" || return 1
   git -C "$FIXTURE_REPO" remote set-url origin "git@github.com:test-org/test-repo.git"
 
-  GH_PR_CREATE_CALLED=false
+  # File-based call marker — see test_pr_opens_when_ready for why a plain
+  # variable set inside gh() does not survive the command substitution
+  # subshell that captures the PR URL.
+  GH_PR_CREATE_MARKER=$(mktemp)
+  rm -f "$GH_PR_CREATE_MARKER"
+  export GH_PR_CREATE_MARKER
   gh() {
     case "$1" in
     pr)
       case "$2" in
       list) echo "" ;;
       create)
-        GH_PR_CREATE_CALLED=true
+        touch "$GH_PR_CREATE_MARKER"
         echo "https://github.com/test/repo/pull/99"
         ;;
       esac
@@ -810,10 +822,11 @@ test_pr_proceeds_when_epic_branch_has_commits() {
 
   FLEET_EPIC_AUTO_PR=true epic_branch_open_pr "CRE-100" "$FIXTURE_REPO" 2>&1 || return 1
 
-  [ "$GH_PR_CREATE_CALLED" = "true" ] || {
+  [ -f "$GH_PR_CREATE_MARKER" ] || {
     echo "  PR not opened despite commits on the epic branch" >&2
     return 1
   }
+  rm -f "$GH_PR_CREATE_MARKER"
   return 0
 }
 _run "PR proceeds when epic branch has commits beyond base" test_pr_proceeds_when_epic_branch_has_commits

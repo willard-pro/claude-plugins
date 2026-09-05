@@ -745,8 +745,9 @@ Verification passed on localhost — the implementation is confirmed working. No
    existing_pr=$(cd "$WORKTREE_PATH" && gh pr list --head {branch-name} --json url --jq '.[0].url' 2>/dev/null)
    if [ -n "$existing_pr" ]; then
      echo "PR already exists: $existing_pr"
+     _pr_url="$existing_pr"
    else
-     cd "$WORKTREE_PATH" && gh pr create --base "${BASE_BRANCH:-develop}" --head {branch-name} \
+     _pr_url=$(cd "$WORKTREE_PATH" && gh pr create --base "${BASE_BRANCH:-develop}" --head {branch-name} \
        --title "{type}({TICKET-ID}): {description}" \
        --body "$(cat <<'EOF'
    ## Summary
@@ -755,7 +756,16 @@ Verification passed on localhost — the implementation is confirmed working. No
    ## Test plan
    - [x] ticket-verify --env local PASS ({N}/{N} criteria)
    EOF
-     )"
+     )")
+   fi
+   # Capture pr-created evidence (Commercial Evidence MVP, Branch B) — covers
+   # both the new-PR and existing-PR paths above, once per PR.
+   if [ -n "$_pr_url" ] && [ -n "{LOG_FILE}" ]; then
+     _pr_num=$(echo "$_pr_url" | grep -oE '[0-9]+$')
+     _pr_repo=$(echo "$_pr_url" | sed -E 's#https://github\.com/([^/]+/[^/]+)/pull/[0-9]+.*#\1#')
+     _pr_created_json=$(jq -nc --argjson pr "${_pr_num:-null}" --arg url "$_pr_url" --arg repo "$_pr_repo" \
+       '{pr: $pr, url: $url, repo: (if $repo == "" then null else $repo end)}')
+     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|pr-created|info|${_pr_created_json}" >> {LOG_FILE}
    fi
    ```
 3. Capture the PR URL(s).

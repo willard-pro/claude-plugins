@@ -135,6 +135,14 @@ _gate_entry() {
   autonomy=$(_get_autonomy)
   artifact_type=$(_get_artifact_type)
 
+  # Commercial Evidence MVP (Branch B): single canonical writer for
+  # META|complexity, guarded to fire once per ticket — present on both the
+  # standard route (this function) and the planned-ticket fast-path, which
+  # also flows through _gate_entry.
+  if ! grep -q '|META|complexity|info|' "$LOG_FILE" 2>/dev/null; then
+    _plog "$LOG_FILE" "META" "complexity" "info" "$complexity"
+  fi
+
   # Check 1: Artifact file existence (accepts files and openspec directories)
   if [ -n "$artifact_path" ] && [ ! -f "$artifact_path" ] && [ ! -d "$artifact_path" ]; then
     _plog "$LOG_FILE" "META" "gate-stop" "fail" "EXEC_NO_ARTIFACT"

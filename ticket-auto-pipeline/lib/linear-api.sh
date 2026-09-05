@@ -282,6 +282,31 @@ get_comments() {
   echo "$resp" | jq '.data.issue.comments.nodes'
 }
 
+# Fetch an issue's history (Commercial Evidence MVP, Branch B — human
+# approval attribution). Returns JSON array on stdout. `first: 100` is a
+# known limit — sufficient for the recent-history approval-detection window
+# this is used for, not exhaustive for a long-lived ticket (see design.md
+# Risks). botActor identifies a workflow/automation change, distinct from
+# a real human actor.
+get_issue_history() {
+  local issue_id="$1"
+  local query
+  query=$(jq -n --arg id "$issue_id" '{
+    query: "query($id: String!) { issue(id: $id) { history(first: 100) { nodes { id createdAt actor { id name } botActor { id name } addedLabels { name } removedLabels { name } } } } }",
+    variables: {id: $id}
+  }')
+  local resp
+  resp=$(linear_graphql "$query")
+  # Type guard: verify .data.issue.history.nodes exists as array
+  if ! _jq_guard "$resp" ".data.issue.history.nodes" "array"; then
+    # Graceful: may be empty (no history), or the field may not exist on this
+    # Linear plan/API version — return empty array either way.
+    echo "[]"
+    return 0
+  fi
+  echo "$resp" | jq '.data.issue.history.nodes'
+}
+
 # Normalize comments JSON from bash get_comments or MCP fallback to a flat array.
 # Reads JSON from stdin, outputs normalized array to stdout.
 # Handles: raw array, .data.issue.comments.nodes, .data.issue.comments,

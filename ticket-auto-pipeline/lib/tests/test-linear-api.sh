@@ -478,6 +478,59 @@ test_get_issue_success() {
   echo "$result" | jq -e '.id == "i1"' >/dev/null
 }
 
+# Branch A regression guard: get_issue's query string must request estimate.
+test_get_issue_query_contains_estimate() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo \"\$1\" > '$tmpfile'; echo '{\"data\":{\"issue\":{\"id\":\"i1\"}}}'; }
+    get_issue 'i1'
+  " >/dev/null 2>&1
+  local result
+  jq -e '.query | contains("estimate")' "$tmpfile" >/dev/null 2>&1
+  result=$?
+  rm -f "$tmpfile"
+  return $result
+}
+
+# ── get_issue_history tests (Branch B, Commercial Evidence MVP) ─────────────
+
+test_get_issue_history_returns_array() {
+  local result
+  result=$(bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo '{\"data\":{\"issue\":{\"history\":{\"nodes\":[{\"id\":\"h1\",\"createdAt\":\"2026-09-01T00:00:00Z\",\"actor\":{\"id\":\"u1\",\"name\":\"Jane\"},\"botActor\":null,\"addedLabels\":[{\"name\":\"approved\"}]}]}}}}'; }
+    get_issue_history 'i1'
+  " 2>/dev/null) || true
+  echo "$result" | jq -e 'type == "array" and .[0].id == "h1" and .[0].actor.name == "Jane"' >/dev/null
+}
+
+test_get_issue_history_missing_field_returns_empty_array() {
+  local result
+  result=$(bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo '{\"data\":{\"issue\":{}}}'; }
+    get_issue_history 'i1'
+  " 2>/dev/null) || true
+  echo "$result" | jq -e 'type == "array" and length == 0' >/dev/null
+}
+
+test_get_issue_history_query_shape() {
+  local tmpfile
+  tmpfile=$(mktemp)
+  bash -c "
+    source $LIB_DIR/linear-api.sh
+    linear_graphql() { echo \"\$1\" > '$tmpfile'; echo '{\"data\":{\"issue\":{\"history\":{\"nodes\":[]}}}}'; }
+    get_issue_history 'i1'
+  " >/dev/null 2>&1
+  local result
+  jq -e '.query | contains("history") and contains("botActor") and contains("addedLabels")' "$tmpfile" >/dev/null 2>&1
+  result=$?
+  rm -f "$tmpfile"
+  return $result
+}
+
 test_graphql_error_in_body_exits_2() {
   local exit_code=0
   LINEAR_API_KEY=test bash -c "
@@ -699,6 +752,10 @@ for fn in \
   test_check_api_key_exits_4_when_dotenv_has_no_linear_key \
   test_check_api_key_skips_dotenv_when_key_already_set \
   test_get_issue_success \
+  test_get_issue_query_contains_estimate \
+  test_get_issue_history_returns_array \
+  test_get_issue_history_missing_field_returns_empty_array \
+  test_get_issue_history_query_shape \
   test_graphql_error_in_body_exits_2 \
   test_retry_three_503s_exits_2 \
   test_retry_503_then_200_succeeds \

@@ -341,6 +341,96 @@ All three are additive — schema version stays **1**. A log predating this chan
 `META|run-id` line; `pipeline-postmortem.sh`'s run_id derivation falls back to its prior
 "ticket ID + log's first line ISO" behavior in that case.
 
+### pr-created, cache-tokens, complexity (Branch B, Commercial Evidence MVP)
+
+Three additive META lines feed `lib/run-summary.sh`'s `run` event (see
+"runs.jsonl" below).
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|pr-created|info|{\"pr\":42,\"url\":\"https://github.com/acme/repo/pull/42\",\"repo\":\"acme/repo\"}" >> "$LOG_FILE"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|cache-tokens|info|VERIFY:8/2" >> "$LOG_FILE"
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|complexity|info|simple" >> "$LOG_FILE"
+```
+
+`pr-created` is written once per PR by `skills/ticket-verify/SKILL.md` (both
+the new-PR and existing-PR code paths converge on one capture site) and by
+`lib/epic-branch.sh` for epic integration PRs (`"epic":true`, only when
+`$LOG_FILE` is set). Fields: `pr` (integer), `url` (string), `repo`
+(`OWNER/REPO` or `null` if unparseable). It is preferred over the older
+`PR-REVIEW|checkout-pr|done|<N>` line (number only, no URL/repo) wherever
+both exist in a run's window.
+
+`cache-tokens` is written by `hooks/token-tracker.sh` alongside (never
+instead of) the existing `META|tokens` line, as `${PHASE}:${CACHE_READ}/${CACHE_CREATE}`.
+It is a separate grammar rather than a fourth `META|tokens` field because
+four existing consumers (`supervisor.py`, `otel.py`, `dashboard.py`, dexter's
+`logparse.py`) parse `META|tokens`'s payload by splitting every slash field —
+adding one would silently corrupt all four.
+
+`complexity` is written once per ticket by `lib/gate-check.sh`'s `_gate_entry`
+(guarded by a grep for its own prior output, same pattern as
+`META|ticket-meta`), present on both the standard gate route and the
+planned-ticket fast-path — both flow through `_gate_entry`, so one guarded
+write site covers both.
+
+All three are additive — schema version stays **1**.
+
+### runs.jsonl — post-outcome evidence channel (Branch B, Commercial Evidence MVP)
+
+`META|outcome` stays the pipeline log's contractual last line (both terminal
+classifiers — `supervisor.py`'s `_log_reached_terminal` and
+`fleet-reconcile.sh`'s `fleet_ticket_terminal_state` — read only the log's
+last line). Every fact that only becomes knowable **after** outcome — merge
+truth, human approval, cost (Branch C) — is recorded instead in
+`logs/runs.jsonl`, an append-only, `flock`-guarded file living beside the
+pipeline logs. Nothing in this capability ever appends to the pipeline log
+past `META|outcome`.
+
+Four event kinds, one writer each, folded by consumers on `tid`/`run_id`:
+
+```bash
+# run — lib/run-summary.sh's run_summary_json, appended once per run by
+# lib/pipeline-finalize.sh's post-outcome sequence (idempotent: guarded on
+# an existing run event for this run_id).
+{"kind":"run","tid":"CRE-40","run_id":"CRE-40-2026-09-05T18:00:00Z-4821","gen":null,"trigger":"manual","versions":{"ticket_auto":"0.41.0","fleet":null,"cc":"2.1.261","model_default":null},"models":["claude-sonnet-4"],"complexity":"simple","type":"bug","planned":false,"estimate":null,"autonomy":"auto","ticket_created_at":"2026-09-01T00:00:00Z","started_at":"2026-09-05T18:00:00Z","ended_at":"2026-09-05T18:10:00Z","outcome":"completed: STEP_6","exit_code":0,"gate_held_at":null,"resumed_after_hold_ms":null,"verify_attempts":1,"review_iterations":0,"fix_rounds":0,"reconcile_cycles":0,"gate_stops":[],"pr":{"pr":42,"url":"https://github.com/acme/repo/pull/42","repo":"acme/repo"},"merge_decision":"merged","tokens":{"in":1000,"out":500,"cache":100,"cache_read":80,"cache_write":20},"phase_elapsed_ms":{"VERIFY":5000},"observed_at":"2026-09-05T18:10:01Z"}
+
+# merge — lib/merge-poll.sh, the single merge-truth implementation. One or
+# more per PR as state changes (open → merged/closed/stale/unknown-repo).
+{"kind":"merge","tid":"CRE-40","pr":42,"repo":"acme/repo","state":"merged","merged_at":"2026-09-05T18:20:00Z","merge_sha":"abc123","observed_at":"2026-09-05T18:20:05Z"}
+
+# human — lib/pipeline-finalize.sh, once per run when LINEAR_API_KEY is set.
+# approved_by/approved_at come from Linear's own IssueHistory, not inferred
+# from pipeline-resume timing.
+{"kind":"human","tid":"CRE-40","run_id":"CRE-40-2026-09-05T18:00:00Z-4821","approved_by":"Jane","approved_at":"2026-09-05T17:55:00Z","human_actions":2,"comment_words":37,"observed_at":"2026-09-05T18:10:01Z"}
+
+# cost — Branch C (fleet-controller), not written by this branch.
+```
+
+`run_summary_window LOG_FILE` (the lines from the last `META|run-id` to EOF)
+scopes per-run counters (`verify_attempts`, `review_iterations`, `fix_rounds`,
+`reconcile_cycles`) to the current run — a held-then-resumed ticket has two
+runs in one log, and a naive whole-log grep would double-count the held run's
+attempts into the resumed run's. Counters use `detect-resume.sh`'s exact grep
+patterns, copied rather than sourced (that script has zombie-synthesis side
+effects wrong to trigger from a post-outcome summarizer).
+
+`pipeline-finalize.sh`'s post-outcome sequence runs strictly after
+`META|outcome` is on disk: (1) append the `run` event, guarded so a retried
+finalize call never duplicates it; (2) if `run.pr` is present, a one-shot
+`merge_poll_sweep` under `timeout 20`; (3) if `LINEAR_API_KEY` is set, append
+a `human` event. Every step is wrapped `|| true` and never alters the
+caller's exit code or touches the pipeline log.
+
+`merge-poll.sh`'s candidate selection re-polls no more than once per
+`MERGE_POLL_MIN_INTERVAL_SECS` (default 600) and marks a PR `state:"stale"`
+once its run is older than `MERGE_POLL_MAX_AGE_DAYS` (default 14) with no
+terminal state yet — converting "we stopped checking" into an honest event
+instead of silence. A `pr` with no resolvable `repo` gets `state:"unknown-repo"`
+exactly once, never retried.
+
+No schema change: `runs.jsonl` is created on first append, is independent of
+the pipeline log's own schema version, and this section is purely additive.
+
 ### Phase-inspector entries (Phase 1 RLVR)
 
 Written by the `guidance-extractor-agent` after each pipeline phase completes (post-IMPLEMENT, post-VERIFY, post-PR-REVIEW). Provides per-phase inspection verdicts by reading `META|verifier-result` entries and checking for known defect patterns. The inspector is advisory only — it never gates the pipeline.
@@ -530,6 +620,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|<CODE>" >> "$LOG_FILE"
 3. **Token META accuracy**: `META|tokens` lines carry the correct PHASE label matching the agent that consumed those tokens. The phase is resolved from the spawn-meta file (`/tmp/ticket-auto-{ID}-spawn-meta.txt`), not the volatile ctx file.
 4. **Retro-trigger before outcome**: `META|retro-trigger` SHALL appear before `META|outcome`, not after. Retro-trigger entries are idempotent — at most one per pipeline run.
 5. **MAINTENANCE before outcome**: On success and no-op paths, all `MAINTENANCE|*` entries SHALL appear before `META|outcome`.
+6. **Nothing follows outcome** (Branch B, Commercial Evidence MVP): no component SHALL append to the pipeline log after `META|outcome` has been written. Every post-outcome fact (merge truth, human approval, cost) goes to `logs/runs.jsonl` instead — see "runs.jsonl — post-outcome evidence channel" above. The sanctioned fleet-kill postmortem exception (rule 1's note above) predates this rule and is unaffected: it concerns `META|postmortem` timing relative to outcome, not a new pipeline-log append.
 
 ## Rules
 

@@ -1498,6 +1498,70 @@ test_cross_val_build_only_nav_gap_not_held() {
   }
 }
 
+# ── Commercial Evidence MVP (Branch B): META|complexity single-writer ──────────
+
+# META|complexity is written exactly once per ticket, on the standard route.
+test_complexity_line_written_once() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+
+  _gate_entry >/dev/null 2>&1 || true
+
+  local count value
+  count=$(grep -c '|META|complexity|info|' "$LOG_FILE" 2>/dev/null || echo 0)
+  value=$(grep '|META|complexity|info|' "$LOG_FILE" 2>/dev/null | tail -1 | cut -d'|' -f5-)
+
+  _teardown
+  [ "$count" -eq 1 ] || {
+    echo "expected exactly 1 META|complexity line, got $count"
+    return 1
+  }
+  [ "$value" = "simple" ] || {
+    echo "expected complexity value 'simple', got '$value'"
+    return 1
+  }
+}
+
+# A second gate-check invocation for the same ticket (e.g. reapprove mode
+# re-entering _gate_entry) must not duplicate the line.
+test_complexity_line_not_duplicated_on_second_entry() {
+  _setup
+  _scaffold_exec_done "simple" "manual" "simple-fix" "${_ws}/simple-fix.md"
+
+  _gate_entry >/dev/null 2>&1 || true
+  _gate_entry >/dev/null 2>&1 || true
+
+  local count
+  count=$(grep -c '|META|complexity|info|' "$LOG_FILE" 2>/dev/null || echo 0)
+
+  _teardown
+  [ "$count" -eq 1 ] || {
+    echo "expected exactly 1 META|complexity line after two _gate_entry calls, got $count"
+    return 1
+  }
+}
+
+# The fast-path (planned tickets skipping full investigation) flows through
+# the same _gate_entry function — there is no separate code path — so the
+# complexity line is written there too. A planned-labeled issue exercises
+# Check 2.7 without changing the assertion under test.
+test_complexity_line_written_on_planned_fast_path() {
+  _setup
+  _scaffold_exec_done "simple" "auto" "simple-fix" "${_ws}/simple-fix.md"
+  _fake_issue='{"description":"## Planner Context\n**Confidence:** 0.9\n","labels":{"nodes":[{"name":"planned"},{"name":"feature"}]}}'
+
+  _gate_entry >/dev/null 2>&1 || true
+
+  local count
+  count=$(grep -c '|META|complexity|info|' "$LOG_FILE" 2>/dev/null || echo 0)
+
+  _teardown
+  [ "$count" -eq 1 ] || {
+    echo "expected exactly 1 META|complexity line on planned fast-path, got $count"
+    return 1
+  }
+}
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Dispatcher
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1547,7 +1611,10 @@ for fn in \
   test_entry_one_missing_prereq_no_abort \
   test_entry_complex_manual_approved_ready_passes \
   test_entry_complex_manual_not_approved_still_held \
-  test_cross_val_build_only_nav_gap_not_held; do
+  test_cross_val_build_only_nav_gap_not_held \
+  test_complexity_line_written_once \
+  test_complexity_line_not_duplicated_on_second_entry \
+  test_complexity_line_written_on_planned_fast_path; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

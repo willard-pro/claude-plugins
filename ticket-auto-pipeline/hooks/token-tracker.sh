@@ -117,7 +117,7 @@ if [ "${#_start_files[@]}" -gt 0 ]; then
 fi
 
 if [ -n "$TRANSCRIPT" ] && [ -f "$TRANSCRIPT" ]; then
-  TOKENS=$(python3 -c '
+  TOKEN_LINE=$(python3 -c '
 import json, sys
 input_t = output_t = cache_read = cache_create = 0
 with open(sys.argv[1]) as f:
@@ -132,9 +132,12 @@ with open(sys.argv[1]) as f:
             output_t += u.get("output_tokens", 0)
             cache_read += u.get("cache_read_input_tokens", 0)
             cache_create += u.get("cache_creation_input_tokens", 0)
-print(f"{input_t}/{output_t}/{cache_read + cache_create}")
+print(f"{input_t}/{output_t}/{cache_read + cache_create}/{cache_read}/{cache_create}")
 ' "$TRANSCRIPT" 2>/dev/null)
-  if [ -n "$TOKENS" ]; then
+  if [ -n "$TOKEN_LINE" ]; then
+    TOKENS=$(echo "$TOKEN_LINE" | cut -d/ -f1-3)
+    CACHE_READ=$(echo "$TOKEN_LINE" | cut -d/ -f4)
+    CACHE_CREATE=$(echo "$TOKEN_LINE" | cut -d/ -f5)
     ELAPSED=""
     if [ -f "$START_FILE" ]; then
       START_NS=$(cat "$START_FILE")
@@ -143,6 +146,7 @@ print(f"{input_t}/{output_t}/{cache_read + cache_create}")
       rm -f "$START_FILE"
     fi
     echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|tokens|info|${PHASE}:${TOKENS}${ELAPSED}" >>"$LOG_FILE"
+    echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|cache-tokens|info|${PHASE}:${CACHE_READ}/${CACHE_CREATE}" >>"$LOG_FILE"
     echo "tokens logged: ${PHASE} ${TOKENS}" >&2
   fi
 fi

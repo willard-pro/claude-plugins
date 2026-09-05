@@ -17,6 +17,52 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-auto-pipeline 0.41.0 (2026-09-05)
+
+Branch B of the Commercial Evidence MVP (`next.md` Step 1), sequenced after
+Branch A (0.40.0): two of the three facts a buyer needs to trust the
+pipeline were still unrecorded — **whether a PR actually merged** (the
+router fires `gh pr merge --auto` and never learns the result) and **who
+approved the ticket and when** (only visible as pipeline-resume timing, not
+Linear's own record of the human action). `META|outcome` stays the pipeline
+log's contractual last line; every post-outcome fact now goes to a new
+`logs/runs.jsonl` instead. Branch C (fleet-controller cost/env events,
+writing into the same file) follows this one.
+
+- New `logs/runs.jsonl` — an append-only, `flock`-guarded evidence log with
+  four event kinds (`run`, `merge`, `cost`, `human`), one writer each, folded
+  by consumers on `tid`/`run_id`. A write failure never changes the calling
+  script's exit code.
+- New `lib/run-summary.sh` — builds the `run` event from a single run's
+  window (last `META|run-id` line to EOF, so a held-then-resumed ticket's
+  counters don't bleed across the hold boundary). Per-run counters
+  (`verify_attempts`, `review_iterations`, `fix_rounds`, `reconcile_cycles`)
+  use `detect-resume.sh`'s exact grep patterns, copied rather than sourced —
+  that script's zombie-synthesis side effects must never fire from a
+  post-outcome summarizer.
+- New `lib/merge-poll.sh` — the single merge-truth implementation, both
+  sourceable (`pipeline-finalize.sh`'s one-shot sweep) and a CLI (for
+  fleet-controller's future periodic sweep). 10-minute re-poll floor,
+  14-day staleness cutoff (`state:"stale"` instead of polling forever),
+  `state:"unknown-repo"` exactly once for a PR with no resolvable repo.
+- `lib/linear-api.sh` gains `get_issue_history` (Linear `IssueHistory`,
+  `first: 100`) to attribute human approval to a real actor — the latest
+  history node adding an `approved`-shaped label where the actor is human
+  (`botActor == null`, not the pipeline's own account).
+- `lib/pipeline-finalize.sh`'s post-outcome sequence (after `META|outcome`
+  is already on disk, every step `|| true`): append the `run` event
+  (idempotency-guarded on `run_id`), one-shot merge-poll sweep when a PR is
+  present, `human` event when `LINEAR_API_KEY` is set.
+- Three new pipeline log lines: `META|pr-created` (the `gh pr create`/`gh pr
+  list` URL, not captured before — `skills/ticket-verify/SKILL.md` and
+  `lib/epic-branch.sh`), `META|cache-tokens` (cache read/write split as its
+  own line — additive, since four existing `META|tokens` consumers parse
+  that line by splitting every slash field), and a guarded `META|complexity`
+  in `gate-check.sh` (single canonical writer, present on the fast-path
+  too).
+- No schema change, no new services — `runs.jsonl` composes with the
+  existing pipeline log without touching its schema version.
+
 ## ticket-auto-pipeline 0.40.0 (2026-09-05)
 
 Branch A of the Commercial Evidence MVP (`next.md` Step 1): the pipeline log

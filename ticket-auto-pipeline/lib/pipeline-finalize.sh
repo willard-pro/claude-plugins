@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # pipeline-finalize.sh — deterministic exit finalizer for ticket-auto router.
 # RLVR Phase 3: runs postmortem analysis, writes META|outcome, and exits.
+# Commercial Evidence MVP (Branch B): also appends the post-outcome
+# runs.jsonl sequence — run event, merge-poll sweep, human event — all
+# strictly AFTER META|outcome is on disk, never modifying the pipeline log.
 #
 # Called at every router exit point (gate-stop, gate-held, exhaustion,
 # STEP_6 completion, router-error) to ensure postmortem coverage and
@@ -13,6 +16,8 @@
 # -u intentionally omitted: Claude Code shell snapshots inject ZSH_VERSION.
 set -eo pipefail
 
+_PF_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 TICKET_ID="${1:-}"
 EXIT_CODE="${2:-0}"
 LOG_FILE="${3:-}"
@@ -22,6 +27,76 @@ if [ -z "$TICKET_ID" ] || [ -z "$LOG_FILE" ]; then
   echo "[pipeline-finalize] WARN: missing required args" >&2
   exit "${EXIT_CODE}"
 fi
+
+# ── Post-outcome evidence sequence (Branch B, Commercial Evidence MVP) ──────
+# Runs AFTER META|outcome is already on disk (guaranteed by every call site
+# below). Every step is wrapped `|| true` and never touches EXIT_CODE or the
+# pipeline log — all facts land in runs.jsonl instead.
+_pf_post_outcome() {
+  local tid="$1" exit_code="$2" log_file="$3"
+
+  [ -f "$_PF_LIB_DIR/run-summary.sh" ] || return 0
+  source "$_PF_LIB_DIR/run-summary.sh" 2>/dev/null || return 0
+
+  local runs_file
+  runs_file="$(dirname "$log_file")/runs.jsonl"
+
+  # Idempotency guard: skip the whole sequence if a run event for this
+  # run_id already exists (F: idempotent re-run of finalize itself).
+  local run_id
+  run_id=$(run_summary_window "$log_file" 2>/dev/null | grep '|META|run-id|info|' | tail -1 |
+    awk -F'|' '{s=$5; for(i=6;i<=NF;i++) s=s"|"$i; print s}' | jq -r '.run_id // empty' 2>/dev/null) || true
+
+  if [ -n "$run_id" ] && [ -f "$runs_file" ] &&
+    jq -e --arg rid "$run_id" 'select(.kind == "run" and .run_id == $rid)' "$runs_file" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local run_json
+  run_json=$(run_summary_json "$tid" "$log_file" "$exit_code" 2>/dev/null) || run_json=""
+  [ -n "$run_json" ] && runs_append "$runs_file" "$run_json"
+
+  # One-shot merge-poll sweep, only when this run produced a PR. Via the CLI
+  # entrypoint (not a sourced function call) so `timeout` can actually bound
+  # it — timeout cannot exec a bash function directly (same constraint
+  # documented in run-identity.sh's run_identity_ticket_meta).
+  local has_pr
+  has_pr=$(echo "$run_json" | jq -r '(.pr // null) != null' 2>/dev/null) || has_pr="false"
+  if [ "$has_pr" = "true" ] && [ -f "$_PF_LIB_DIR/merge-poll.sh" ] && command -v gh >/dev/null 2>&1; then
+    timeout 20 bash "$_PF_LIB_DIR/merge-poll.sh" --tid "$tid" "$runs_file" 2>/dev/null || true
+  fi
+
+  # Human event, only when a Linear key is available.
+  if [ -n "${LINEAR_API_KEY:-}" ] && [ -f "$_PF_LIB_DIR/linear-api.sh" ]; then
+    local history_json comments_json me_json my_id human_json
+    history_json=$(timeout 20 bash -c "source '$_PF_LIB_DIR/linear-api.sh'; get_issue_history '$tid'" 2>/dev/null) || history_json=""
+    comments_json=$(timeout 20 bash -c "source '$_PF_LIB_DIR/linear-api.sh'; get_comments '$tid'" 2>/dev/null) || comments_json=""
+    me_json=$(timeout 20 bash -c "source '$_PF_LIB_DIR/linear-api.sh'; get_me" 2>/dev/null) || me_json=""
+    echo "$history_json" | jq -e . >/dev/null 2>&1 || history_json="[]"
+    echo "$comments_json" | jq -e . >/dev/null 2>&1 || comments_json="[]"
+    my_id=$(echo "$me_json" | jq -r '.id // empty' 2>/dev/null) || true
+
+    human_json=$(jq -nc \
+      --argjson history "$history_json" --argjson comments "$comments_json" \
+      --arg my_id "${my_id:-}" --arg tid "$tid" --arg run_id "${run_id:-}" '
+      def is_approval_label: (.addedLabels // []) | map(.name // "" | ascii_downcase) | any(contains("approved"));
+      def is_human: (.botActor == null) and ((.actor.id // "") != $my_id);
+      ($history | map(select(is_approval_label and is_human)) | sort_by(.createdAt) | last) as $approval |
+      ($history | map(select(is_human))) as $human_actions |
+      ($comments | map(select((.user.id // "") != $my_id)) | map(.body // "" | split(" ") | length) | add // 0) as $comment_words |
+      {
+        kind: "human", tid: $tid, run_id: (if $run_id == "" then null else $run_id end),
+        approved_by: ($approval.actor.name // null),
+        approved_at: ($approval.createdAt // null),
+        human_actions: ($human_actions | length),
+        comment_words: $comment_words,
+        observed_at: (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
+      }' 2>/dev/null) || human_json=""
+    [ -n "$human_json" ] && runs_append "$runs_file" "$human_json"
+  fi
+
+  return 0
+}
 
 # ── Post-mortem analysis ────────────────────────────────────────────────────
 
@@ -75,12 +150,16 @@ fi
 
 # Tail-check guard: skip only if the LAST line is an outcome entry (F10 fix).
 # A grep anywhere in the log means nothing — crash-resume leaves stale outcomes
-# mid-log. Only a tail-match indicates this run already wrote outcome.
+# mid-log. Only a tail-match indicates this run already wrote outcome. Either
+# way, the post-outcome sequence below still runs — it is guarded on its own
+# run_id idempotency key, independent of this outcome-write guard, so a
+# retried finalize call reaches it even when the outcome line was written by
+# an earlier call.
 _last_line=$(tail -1 "$LOG_FILE" 2>/dev/null || true)
-if echo "$_last_line" | grep -q '|META|outcome|info|'; then
-  exit "${EXIT_CODE}"
+if ! echo "$_last_line" | grep -q '|META|outcome|info|'; then
+  echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|outcome|info|${_outcome_summary}" >>"$LOG_FILE"
 fi
 
-echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|outcome|info|${_outcome_summary}" >>"$LOG_FILE"
+_pf_post_outcome "$TICKET_ID" "$EXIT_CODE" "$LOG_FILE" || true
 
 exit "${EXIT_CODE}"
