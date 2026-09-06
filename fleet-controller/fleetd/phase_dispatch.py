@@ -730,16 +730,25 @@ def phase_liveness_heartbeat(tid, phase, hb_log_file, pid, start_ticks=None,
 def worker_return_text(stdout_path):
     """Extract a phase worker's final message from its captured stdout.
 
-    fleetd spawns workers with `--output-format json`, so the captured stdout
-    is a JSON envelope, not the prose the router's `spawn_capture` receives
-    from an Agent return. The `result` field is the equivalent text; handing
-    the envelope to `phase-result-parse.sh` verbatim would work by accident
-    (the marker block survives JSON string escaping unevenly) and fail
-    silently when it did not.
+    fleetd spawns workers with `--output-format json` by default, so the
+    captured stdout is a single JSON envelope, not the prose the router's
+    `spawn_capture` receives from an Agent return. The `result` field is the
+    equivalent text; handing the envelope to `phase-result-parse.sh` verbatim
+    would work by accident (the marker block survives JSON string escaping
+    unevenly) and fail silently when it did not.
 
-    Falls back to the raw text when the envelope will not parse — a truncated
-    or non-JSON capture still carries a readable tail, and a phase-result
-    block that does survive there is better than none.
+    Under `FLEET_OBSERVER_ENABLE=true` (Agent Observer), phase-level workers
+    instead spawn with `--output-format stream-json`, writing one JSON object
+    per line to the same file (`.ndjson` extension — see `_build_worker_cmd`).
+    A whole-file `json.loads()` fails on that shape, so this falls through to
+    `_worker_return_text_ndjson`, which mirrors `lib/phase-result-parse.sh`'s
+    `_pr_unwrap`: scan every line to EOF and take the *last* `type: "result"`
+    frame's `.result` field — never the first, since a `hook_response` line
+    can follow the terminal `result` frame (design.md E5).
+
+    Falls back to the raw text when neither shape yields a result — a
+    truncated or non-JSON capture still carries a readable tail, and a
+    phase-result block that does survive there is better than none.
     """
     try:
         raw = Path(stdout_path).read_text()
@@ -751,10 +760,34 @@ def worker_return_text(stdout_path):
     try:
         payload = json.loads(stripped)
     except (ValueError, TypeError):
-        return raw
+        return _worker_return_text_ndjson(raw) or raw
     if isinstance(payload, dict):
         return str(payload.get('result') or raw)
     return raw
+
+
+def _worker_return_text_ndjson(raw):
+    """The last `type: "result"` line's `.result` field in NDJSON `raw`.
+
+    Returns None when no such line parses, so the caller can fall back to
+    the raw text (matching `_pr_unwrap`'s final `cat -- "$file"`). Unparseable
+    lines are skipped rather than raising — a stream-json capture routinely
+    interleaves noise (hook lines, a mid-write partial line) that must not
+    abort extraction of the one line that matters.
+    """
+    last = None
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(obj, dict) and obj.get('type') == 'result' \
+                and isinstance(obj.get('result'), str):
+            last = obj['result']
+    return last
 
 
 def worker_cost_usd(stdout_path):

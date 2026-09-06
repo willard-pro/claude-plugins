@@ -584,6 +584,69 @@ class TestReturnCapture(unittest.TestCase):
                 os.chdir(cwd)
 
 
+FIXTURES_DIR = Path(__file__).resolve().parent / 'fixtures'
+
+
+class TestNdjsonReturnCapture(unittest.TestCase):
+    """Inc 0 (agent-observer): `worker_return_text` on stream-json NDJSON.
+
+    Fixtures are real `claude -p --output-format stream-json --verbose`
+    captures (see `fixtures/README.md`) — not hand-written — so a change to
+    the CLI's actual frame shape would show up here rather than only in a
+    synthetic fixture that quietly drifted from reality.
+    """
+
+    def test_ndjson_fixture_extracts_the_same_result_as_single_object_json(self):
+        ndjson_path = FIXTURES_DIR / 'stream-json-bash-exit3.ndjson'
+        ndjson_result = phase_dispatch.worker_return_text(ndjson_path)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            single = Path(tmp) / 'equivalent.json'
+            single.write_text(json.dumps({'type': 'result', 'result': 'DONE'}))
+            single_result = phase_dispatch.worker_return_text(single)
+
+        self.assertEqual(ndjson_result, 'DONE')
+        self.assertEqual(ndjson_result, single_result)
+
+    def test_a_trailing_non_result_line_after_result_does_not_break_extraction(self):
+        # This fixture's `result` frame is followed by a `hook_response`-class
+        # line (design.md E5) — `result` is not always the last line.
+        ndjson_path = FIXTURES_DIR / 'stream-json-bash-ok-with-hook-events.ndjson'
+        self.assertEqual(
+            phase_dispatch.worker_return_text(ndjson_path), 'DONE')
+
+    def test_last_result_line_wins_when_multiple_are_present(self):
+        raw = '\n'.join([
+            json.dumps({'type': 'result', 'result': 'FIRST'}),
+            json.dumps({'type': 'system'}),
+            json.dumps({'type': 'result', 'result': 'LAST'}),
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'CRE-9-verify-gen1.ndjson'
+            out.write_text(raw)
+            self.assertEqual(phase_dispatch.worker_return_text(out), 'LAST')
+
+    def test_unparseable_line_is_skipped_not_fatal(self):
+        raw = '\n'.join([
+            'not json at all',
+            json.dumps({'type': 'result', 'result': 'DONE'}),
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'CRE-9-verify-gen1.ndjson'
+            out.write_text(raw)
+            self.assertEqual(phase_dispatch.worker_return_text(out), 'DONE')
+
+    def test_no_result_line_falls_back_to_raw_text(self):
+        raw = '\n'.join([
+            json.dumps({'type': 'assistant', 'result': None}),
+            json.dumps({'type': 'system'}),
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'CRE-9-verify-gen1.ndjson'
+            out.write_text(raw)
+            self.assertEqual(phase_dispatch.worker_return_text(out), raw)
+
+
 class TestWorkerCostUsd(unittest.TestCase):
     """fleet-cost-events: cost extraction from a worker's stdout envelope."""
 
