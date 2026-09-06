@@ -17,6 +17,48 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## 0.44.0 (2026-09-06)
+
+`rlvr-verdict-recompute` (`next.md` Step 4). `rlvr-phase-result-contract`
+(PR #279) made a phase agent's own verdict machine-readable — a claim. Nothing
+in the pipeline compared that claim against observable state; the four
+existing bash guards check whether artifacts *exist*, not whether a verdict is
+*true*. This ships the recompute half, split out of the original proposal
+because it is RLVR measurement on its own timeline and depends only on the
+parser existing, never the reverse.
+
+- **New `lib/verdict-recompute.sh`** (ticket-auto-pipeline). VERIFY only.
+  Reuses `phase-result-parse.sh`'s own `parse_phase_result` (sourced, run a
+  second time with no `--log-file` so nothing is double-logged) to obtain the
+  claim from the same captured-return file, and
+  `return-completeness-check.sh`'s section-scoped `_count_checklist_boxes`
+  (sourced) to count `- [x]`/`- [ ]` in `verify-session.md`'s `## Step trace`
+  section — no second checkbox parser. The verified verdict never trusts the
+  claim: the evidence file must exist and postdate the phase's own
+  `|VERIFY|verify|waiting|` bracket-open line, or `verified_met=0` with
+  `evidence_state` recording `missing`/`stale`. A fourth state,
+  `fresh-unverified-phase-start`, covers a standalone invocation with no
+  `--log-file` to check the bracket against — the checkboxes are still
+  counted, but the freshness guarantee is not claimed.
+- **New `META|claim-delta|info|{json}` channel.** `claimed_*` (from the
+  claim), `verified_verdict`/`verified_met` (from the recompute),
+  `criteria_total`, `delta`, `direction` (`aligned`|`optimistic`|
+  `pessimistic`|`unknown` — the last when the claim itself was `UNKNOWN`),
+  `evidence`, `evidence_state`. Documented in `pipeline-log-format.md`.
+- **Router wiring, observe-only.** `skills/ticket-auto/SKILL.md` invokes
+  `verdict-recompute.sh` immediately after `phase-result-parse.sh` on the
+  VERIFY path — same insertion point, same `|| true` guard, no gate-stop,
+  nothing routes on the result. The claim is deliberately never written
+  through `write_verifier_result`: a claimed-PASS beside a verified-FAIL would
+  trip the flaky-tests/verdict-disagreement detection patterns on a channel
+  that isn't a verifier result.
+- **Deferred, on purpose.** IMPLEMENT and PR-REVIEW recompute rules; any
+  `direction`-driven routing (`gate-warn` reader, or a `CLAIM_DRIFT`
+  gate-stop) — `RLVR_OPTIMISM_HOLD_DELTA` stays unset until the real-run
+  `direction` distribution is reviewed.
+- 17/17 new tests (`test-verdict-recompute.sh`); `make lint`/`fmt-check`/
+  `check-generated`/`test` all green.
+
 ## ticket-planner 0.8.26 (2026-09-06)
 
 Fix `planner-crosscheck-citations.sh` false-flagging `CITATION_UNRESOLVED` on a
