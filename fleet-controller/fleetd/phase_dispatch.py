@@ -1751,6 +1751,38 @@ def resolve_ticket_complexity(tid, repos_root='', lib_dir=None, timeout=30):
     return (proc.stdout or '').strip()
 
 
+# ── Loop counter resolution (task 10.1.8, design.md D22) ────────────────────
+#
+# `evaluate_loop`'s `counters` dict has no store-backed table to read from —
+# design.md's own decision is that these are derived from the pipeline log,
+# the same way `detect-resume.sh` derives its own COUNTER variables, via
+# `grep -c` over field-anchored patterns. Reusing `_retro_anchored` (defined
+# below with `needs_retro`) rather than a second field-match helper keeps the
+# two log-scanning functions in this module sharing one anchoring rule.
+
+_LOOP_COUNTER_PATTERNS = {
+    'RECONCILE_CYCLE': 'GATE|reconcile|done|cycle#',
+    'VERIFY_ATTEMPTS': 'VERIFY|verify|fail|',
+    'ITERATION': 'PR-REVIEW|pr-review|done|WARN',
+    'PR_FEEDBACK_CYCLE': 'PR-REVIEW|pr-reconcile|done|cycle#',
+}
+
+
+def resolve_loop_counters(log_lines):
+    """The four loop-cap counters `evaluate_loop` reads, derived from the log.
+
+    Ports `detect-resume.sh`'s four `grep -c '^[^|]*|...'` patterns exactly —
+    RECONCILE_CYCLE, VERIFY_ATTEMPTS, ITERATION, PR_FEEDBACK_CYCLE — so a
+    Python reimplementation cannot silently diverge from the bash one. `''`
+    (no matching lines) resolves to `0`, matching `detect-resume.sh`'s own
+    `${VAR:-0}` fallback after an empty grep.
+    """
+    return {
+        name: sum(1 for line in log_lines if _retro_anchored(line, literal))
+        for name, literal in _LOOP_COUNTER_PATTERNS.items()
+    }
+
+
 # ── Step transitions (task 10.1, design.md D22) ─────────────────────────────
 #
 # Groups 1-9/11 give fleetd every primitive to run ONE phase. Nothing decided

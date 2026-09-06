@@ -74,6 +74,7 @@ from fleetd.phase_dispatch import (  # noqa: E402
     build_pr_iterate_spawn,
     resolve_ticket_type,
     resolve_ticket_complexity,
+    resolve_loop_counters,
     needs_retro,
     RetroDecision,
     RETRO_REASON_GATE_STOP,
@@ -1870,6 +1871,61 @@ class TestNeedsRetro(unittest.TestCase):
             decision.reasons,
             (RETRO_REASON_GATE_STOP, RETRO_REASON_NO_SUCCESS,
              RETRO_REASON_VERIFY_EXHAUSTED, RETRO_REASON_VERIFY_FAIL))
+
+
+class TestResolveLoopCounters(unittest.TestCase):
+    """The four loop-cap counters, derived from the log (task 10.1.8)."""
+
+    def test_empty_log_is_all_zero(self):
+        counters = resolve_loop_counters([])
+        self.assertEqual(counters, {
+            'RECONCILE_CYCLE': 0, 'VERIFY_ATTEMPTS': 0,
+            'ITERATION': 0, 'PR_FEEDBACK_CYCLE': 0,
+        })
+
+    def test_reconcile_cycle_counts_gate_reconcile_done_cycle_lines(self):
+        lines = [
+            '2026-09-06T10:00:00Z|GATE|reconcile|done|cycle#1',
+            '2026-09-06T10:05:00Z|GATE|reconcile|done|cycle#2',
+            '2026-09-06T10:06:00Z|GATE|gate|fail|held: gate',
+        ]
+        self.assertEqual(resolve_loop_counters(lines)['RECONCILE_CYCLE'], 2)
+
+    def test_verify_attempts_counts_verify_fail_lines(self):
+        lines = [
+            '2026-09-06T10:00:00Z|VERIFY|verify|fail|timeout',
+            '2026-09-06T10:01:00Z|VERIFY|verify|fail|assertion mismatch',
+            '2026-09-06T10:02:00Z|VERIFY|verify|done|PASS (2 attempts)',
+        ]
+        self.assertEqual(resolve_loop_counters(lines)['VERIFY_ATTEMPTS'], 2)
+
+    def test_iteration_counts_pr_review_done_warn_lines(self):
+        lines = [
+            '2026-09-06T10:00:00Z|PR-REVIEW|pr-review|done|WARN',
+            '2026-09-06T10:01:00Z|PR-REVIEW|pr-iterate|done|',
+            '2026-09-06T10:02:00Z|PR-REVIEW|pr-review|done|OK',
+        ]
+        self.assertEqual(resolve_loop_counters(lines)['ITERATION'], 1)
+
+    def test_pr_feedback_cycle_counts_pr_reconcile_done_cycle_lines(self):
+        lines = [
+            '2026-09-06T10:00:00Z|PR-REVIEW|pr-reconcile|done|cycle#1',
+            '2026-09-06T10:01:00Z|PR-REVIEW|pr-reconcile|done|cycle#2',
+            '2026-09-06T10:02:00Z|PR-REVIEW|pr-reconcile|done|cycle#3',
+        ]
+        self.assertEqual(resolve_loop_counters(lines)['PR_FEEDBACK_CYCLE'], 3)
+
+    def test_counters_are_independent_of_each_other(self):
+        lines = (
+            ['2026-09-06T10:00:00Z|GATE|reconcile|done|cycle#1'] * 1
+            + ['2026-09-06T10:01:00Z|VERIFY|verify|fail|x'] * 2
+            + ['2026-09-06T10:02:00Z|PR-REVIEW|pr-review|done|WARN'] * 3
+            + ['2026-09-06T10:03:00Z|PR-REVIEW|pr-reconcile|done|cycle#1'] * 4
+        )
+        self.assertEqual(resolve_loop_counters(lines), {
+            'RECONCILE_CYCLE': 1, 'VERIFY_ATTEMPTS': 2,
+            'ITERATION': 3, 'PR_FEEDBACK_CYCLE': 4,
+        })
 
 
 if __name__ == '__main__':

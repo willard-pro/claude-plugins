@@ -407,6 +407,246 @@ class PhaseDispatchHoldTest(unittest.TestCase):
         self.assertFalse(self._ticket_row('CRE-9')['held'])
 
 
+class PhaseDispatchFirstDispatchTest(unittest.TestCase):
+    """Task 10.1.8: `_dispatch_phase_locked` — the first-dispatch entry point
+    for phase-level mode. Preamble and dispatch-table calls are patched so
+    these exercise the decision logic (action routing, position/counter
+    resolution, spawn wiring) without a real ticket-preamble.sh run or a
+    real `claude -p` fork; `spawn_phase` itself already has end-to-end
+    coverage in `SpawnAndReapTest`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _supervisor(self):
+        from fleetd.supervisor import Supervisor
+        return Supervisor(
+            state_dir=str(self.state_dir),
+            pidfile=str(self.state_dir / 'test.pid'),
+        )
+
+    def _preamble_result(self, action, fields=None, gate_stop_code=''):
+        from fleetd import preamble as preamble_mod
+        code = {
+            preamble_mod.ACTION_PROCEED: preamble_mod.PREAMBLE_OK,
+            preamble_mod.ACTION_RETRY_LATER: preamble_mod.PREAMBLE_USAGE,
+            preamble_mod.ACTION_GATE_STOP:
+                preamble_mod.PREAMBLE_BRANCH_DIRECTIVE_INVALID,
+        }[action]
+        return preamble_mod.PreambleResult(
+            action == preamble_mod.ACTION_PROCEED, action, code,
+            gate_stop_code, fields or {}, '')
+
+    def test_proceed_spawns_the_resolved_position_with_derived_counters(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+        from fleetd import preamble as preamble_mod
+
+        log_file = self.state_dir / 'CRE-20-pipeline.log'
+        log_file.write_text(
+            '2026-09-06T10:00:00Z|VERIFY|verify|fail|timeout\n'
+            '2026-09-06T10:01:00Z|VERIFY|verify|fail|timeout\n'
+        )
+        sup_mod._store_record_position(str(self.state_dir), 'CRE-20', 'STEP_4_5')
+
+        result = self._preamble_result(
+            preamble_mod.ACTION_PROCEED,
+            fields={'LOG_FILE': str(log_file), 'HB_LOG_FILE': 'hb.log',
+                   'ENV_FILE': 'env.sh'})
+        sup = self._supervisor()
+        with mock.patch.object(sup_mod._preamble_mod, 'run_preamble',
+                               return_value=result), \
+             mock.patch.object(sup, 'spawn_phase') as spawn_phase:
+            consumed = sup._dispatch_phase_locked('CRE-20', 'dispatched')
+
+        self.assertTrue(consumed)
+        spawn_phase.assert_called_once()
+        args, kwargs = spawn_phase.call_args
+        self.assertEqual(args[0], 'CRE-20')
+        self.assertEqual(args[1], 'STEP_4_5')
+        self.assertEqual(args[2], str(log_file))
+        self.assertEqual(kwargs['hb_log_file'], 'hb.log')
+        self.assertEqual(kwargs['env_file'], 'env.sh')
+        self.assertEqual(kwargs['counters']['VERIFY_ATTEMPTS'], 2)
+        self.assertEqual(kwargs['reason'], 'dispatched')
+
+    def test_retry_later_defers_without_spawning(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+        from fleetd import preamble as preamble_mod
+
+        result = self._preamble_result(preamble_mod.ACTION_RETRY_LATER)
+        sup = self._supervisor()
+        with mock.patch.object(sup_mod._preamble_mod, 'run_preamble',
+                               return_value=result), \
+             mock.patch.object(sup, 'spawn_phase') as spawn_phase:
+            consumed = sup._dispatch_phase_locked('CRE-21', 'dispatched')
+
+        self.assertFalse(consumed)
+        spawn_phase.assert_not_called()
+
+    def test_a_preamble_error_defers_without_spawning(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+
+        sup = self._supervisor()
+        with mock.patch.object(
+                sup_mod._preamble_mod, 'run_preamble',
+                side_effect=sup_mod._preamble_mod.PreambleError('boom')), \
+             mock.patch.object(sup, 'spawn_phase') as spawn_phase:
+            consumed = sup._dispatch_phase_locked('CRE-22', 'dispatched')
+
+        self.assertFalse(consumed)
+        spawn_phase.assert_not_called()
+
+    def test_gate_stop_finalizes_without_writing_a_second_log_line(self):
+        # ticket-preamble.sh already wrote the gate-stop line itself
+        # (preamble.py's own docstring) — finalize_terminal must not be
+        # asked to duplicate it.
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+        from fleetd import preamble as preamble_mod
+
+        result = self._preamble_result(
+            preamble_mod.ACTION_GATE_STOP,
+            gate_stop_code='BRANCH_DIRECTIVE_INVALID')
+        sup = self._supervisor()
+        with mock.patch.object(sup_mod._preamble_mod, 'run_preamble',
+                               return_value=result), \
+             mock.patch.object(sup_mod._orchestration_mod, 'finalize_terminal') \
+                as finalize_terminal, \
+             mock.patch.object(sup, 'spawn_phase') as spawn_phase:
+            consumed = sup._dispatch_phase_locked('CRE-23', 'dispatched')
+
+        self.assertTrue(consumed)
+        spawn_phase.assert_not_called()
+        finalize_terminal.assert_called_once()
+        call_args = finalize_terminal.call_args[0]
+        self.assertEqual(call_args[1], 'CRE-23')
+        self.assertEqual(call_args[2], 1)
+        self.assertEqual(call_args[3], '')
+        self.assertEqual(
+            call_args[4], str(self.state_dir / 'CRE-23-pipeline.log'))
+
+    def test_an_unavailable_store_defers_without_spawning(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+        from fleetd import preamble as preamble_mod
+
+        result = self._preamble_result(
+            preamble_mod.ACTION_PROCEED,
+            fields={'LOG_FILE': str(self.state_dir / 'CRE-24-pipeline.log')})
+        sup = self._supervisor()
+        with mock.patch.object(sup_mod._preamble_mod, 'run_preamble',
+                               return_value=result), \
+             mock.patch.object(sup_mod, '_store_resolve_dispatch_position',
+                               return_value=None), \
+             mock.patch.object(sup, 'spawn_phase') as spawn_phase:
+            consumed = sup._dispatch_phase_locked('CRE-24', 'dispatched')
+
+        self.assertFalse(consumed)
+        spawn_phase.assert_not_called()
+
+    def test_reason_prefix_derives_from_planned(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+        from fleetd import preamble as preamble_mod
+
+        sup_mod._store_record_position(str(self.state_dir), 'CRE-25', 'STEP_1')
+        result = self._preamble_result(
+            preamble_mod.ACTION_PROCEED,
+            fields={'LOG_FILE': str(self.state_dir / 'CRE-25-pipeline.log')})
+        sup = self._supervisor()
+        with mock.patch.object(sup_mod._preamble_mod, 'run_preamble',
+                               return_value=result) as run_preamble, \
+             mock.patch.object(sup, 'spawn_phase'):
+            sup._dispatch_phase_locked('CRE-25', 'planned-dispatch from INIT-1')
+
+        self.assertTrue(run_preamble.call_args.kwargs['from_planned'])
+
+    def _append_queue_entry(self, tid, reason='dispatched'):
+        queue_file = self.state_dir / 'fleet-default-spawn-queue.jsonl'
+        entry = {
+            'tid': tid, 'reason': reason, 'generation': 1,
+            'timestamp': datetime.now(timezone.utc).isoformat(),
+        }
+        with open(queue_file, 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+
+    def test_consume_queue_routes_through_phase_dispatch_when_flag_is_set(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+
+        self._append_queue_entry('CRE-26')
+        sup = sup_mod.Supervisor(
+            state_dir=str(self.state_dir),
+            pidfile=str(self.state_dir / 'test.pid'),
+            spawn_enabled=True, max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            with mock.patch.object(sup_mod, 'FLEET_PHASE_DISPATCH_ENABLE', True), \
+                 mock.patch.object(sup, '_dispatch_phase_locked',
+                                   return_value=True) as dispatch_phase, \
+                 mock.patch.object(sup_mod, 'spawn_worker') as spawn_worker:
+                consumed = sup._consume_queue()
+        finally:
+            sup.release_lock()
+
+        self.assertEqual(consumed, {'CRE-26'})
+        dispatch_phase.assert_called_once_with('CRE-26', 'dispatched')
+        spawn_worker.assert_not_called()
+
+    def test_consume_queue_leaves_the_entry_when_phase_dispatch_defers(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+
+        self._append_queue_entry('CRE-27')
+        sup = sup_mod.Supervisor(
+            state_dir=str(self.state_dir),
+            pidfile=str(self.state_dir / 'test.pid'),
+            spawn_enabled=True, max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            with mock.patch.object(sup_mod, 'FLEET_PHASE_DISPATCH_ENABLE', True), \
+                 mock.patch.object(sup, '_dispatch_phase_locked',
+                                   return_value=False):
+                consumed = sup._consume_queue()
+        finally:
+            sup.release_lock()
+
+        self.assertEqual(consumed, set())
+        entries = sup_mod._read_queue_entries(self.state_dir)
+        self.assertEqual([e['tid'] for e in entries], ['CRE-27'])
+
+    def test_flag_unset_is_a_true_no_op_ticket_level_path_untouched(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+
+        self._append_queue_entry('CRE-28')
+        sup = sup_mod.Supervisor(
+            state_dir=str(self.state_dir),
+            pidfile=str(self.state_dir / 'test.pid'),
+            spawn_enabled=True, max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            self.assertFalse(sup_mod.FLEET_PHASE_DISPATCH_ENABLE)
+            with mock.patch.object(sup, '_dispatch_phase_locked') as dispatch_phase:
+                consumed = sup._consume_queue(
+                    cmd_override=[sys.executable, '-c', 'pass'])
+        finally:
+            sup.release_lock()
+
+        self.assertEqual(consumed, {'CRE-28'})
+        dispatch_phase.assert_not_called()
+
+
 class RegistryObservationTest(unittest.TestCase):
     """Task 4.4: observe-only mode reads existing registry entries."""
 

@@ -66,6 +66,24 @@ try:
 except ImportError:  # pragma: no cover - gate hold unavailable
     _gate_hold_mod = None
 
+# Between-phase step orchestration (task 10.1.5/10.1.7/10.1.8). Imported
+# defensively like the store above: without it a phase-dispatch terminal
+# simply cannot finalize this cycle — the ticket stays queued/undispatched
+# rather than taking the supervisor down.
+try:
+    from fleetd import orchestration as _orchestration_mod
+except ImportError:  # pragma: no cover - orchestration unavailable
+    _orchestration_mod = None
+
+# Once-per-ticket preamble (task 10.1.8). Imported defensively like the
+# store above: without it phase-dispatch's first-dispatch path cannot
+# establish a ticket's operating environment, so it defers rather than
+# crashing the daemon.
+try:
+    from fleetd import preamble as _preamble_mod
+except ImportError:  # pragma: no cover - preamble unavailable
+    _preamble_mod = None
+
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
@@ -1088,6 +1106,26 @@ def _store_record_position(state_dir, tid, step_id, source='dispatch'):
 def _store_get_position(state_dir, tid):
     return _store_do(state_dir, lambda st: st.get_position(tid),
                      'get position')
+
+
+def _store_resolve_dispatch_position(state_dir, tid, project_dir=None,
+                                     timeout=60):
+    """The step_id fleetd should dispatch next for `tid` (task 10.1.8).
+
+    Bridges `phase_dispatch.resolve_dispatch_position`'s need for a live
+    `store` object — it reads the recorded position and, on first adoption,
+    writes it back itself — to the short-lived-connection discipline every
+    other store access in this module follows. Returns None when the store
+    is unavailable: phase-dispatch position tracking has no meaning without
+    it, so the caller defers the ticket rather than guessing a position.
+    """
+    if _phase_mod is None:
+        return None
+    return _store_do(
+        state_dir,
+        lambda st: _phase_mod.resolve_dispatch_position(
+            st, tid, project_dir=project_dir, timeout=timeout),
+        'resolve dispatch position')
 
 
 def _store_ticket_is_held(state_dir, tid):
@@ -3487,11 +3525,22 @@ class Supervisor:
                 )
                 continue
 
+            reason = entry.get('reason', 'dispatched')
+
+            # Phase-level dispatch (task 10.1.8, design.md D22): this
+            # instance's opt-in, resolved once per fleetd process. Handles
+            # only a queued ticket's *first* dispatch — every later step
+            # transition is decided from a reaped child's exit
+            # (_reap_children_locked, task 10.1.9), never from the queue.
+            if FLEET_PHASE_DISPATCH_ENABLE:
+                if self._dispatch_phase_locked(tid, reason):
+                    consumed.add(tid)
+                continue
+
             # The supervisor assigns generations, not the queue entry.
             # This ensures a restarted worker always gets a generation
             # higher than any fenced predecessor.
             generation = self._resolve_generation(tid)
-            reason = entry.get('reason', 'dispatched')
 
             try:
                 pid, session_id = spawn_worker(
@@ -3536,6 +3585,107 @@ class Supervisor:
         return consumed
 
     # ── phase dispatch (task 4.17) ─────────────────────────────────────────
+
+    def _dispatch_phase_locked(self, tid, reason):
+        """First-dispatch entry point for a queued ticket, phase-level mode
+        (task 10.1.8, design.md D22).
+
+        Establishes the ticket's operating environment (`preamble.run_preamble`
+        — the phase-dispatch equivalent of SKILL.md's Steps 0.1-0.6), resolves
+        where it should dispatch (`resolve_dispatch_position`), derives the
+        loop-cap counters `evaluate_loop` will read (`resolve_loop_counters`)
+        and spawns the first phase. Deliberately narrow: every later step
+        transition — advance, hold, finalize — is decided from a reaped
+        child's exit result (`_reap_children_locked`, task 10.1.9), so a
+        ticket already under fleetd's own phase-dispatch never comes back
+        through this method; no `--from-step`/`attempt` retry semantics are
+        needed here, only there.
+
+        Returns True when the queue entry should be consumed — dispatched or
+        terminally finalized — False to leave it in place for the next cycle
+        (a transient preamble failure or an unavailable store/table).
+        """
+        if _preamble_mod is None or _phase_mod is None or _orchestration_mod is None:
+            print(
+                f"fleetd[{os.getpid()}]: deferring {tid} — phase-dispatch "
+                f"modules unavailable"
+            )
+            return False
+
+        from_planned = reason.startswith('planned-dispatch')
+        try:
+            result = _preamble_mod.run_preamble(tid, from_planned=from_planned)
+        except _preamble_mod.PreambleError as exc:
+            print(f"fleetd[{os.getpid()}]: preamble failed for {tid}: {exc}",
+                  file=sys.stderr)
+            return False
+
+        if result.action == _preamble_mod.ACTION_RETRY_LATER:
+            print(
+                f"fleetd[{os.getpid()}]: deferring {tid} — preamble not "
+                f"ready ({result.detail})"
+            )
+            return False
+
+        try:
+            table = _phase_mod.DispatchTable.load()
+        except _phase_mod.DispatchTableError as exc:
+            print(
+                f"fleetd[{os.getpid()}]: dispatch table unavailable, "
+                f"deferring {tid}: {exc}", file=sys.stderr,
+            )
+            return False
+
+        if result.action == _preamble_mod.ACTION_GATE_STOP:
+            # The gate-stop line is already in the log — ticket-preamble.sh
+            # wrote it itself (preamble.py's own docstring) — so no second
+            # copy is passed here; only the finalize path (pipeline-
+            # finalize.sh, no worktree release) still needs to run, matching
+            # SKILL.md's "every exit path calls pipeline-finalize.sh" rule.
+            log_file = (result.fields.get('LOG_FILE')
+                       or str(self._state_dir / f'{tid}-pipeline.log'))
+            _orchestration_mod.finalize_terminal(table, tid, 1, '', log_file)
+            print(
+                f"fleetd[{os.getpid()}]: {tid} gate-stopped in preamble "
+                f"({result.gate_stop_code})"
+            )
+            return True
+
+        fields = result.fields
+        log_file = fields.get('LOG_FILE', '')
+        hb_log_file = fields.get('HB_LOG_FILE', '')
+        env_file = fields.get('ENV_FILE', '')
+
+        position = _store_resolve_dispatch_position(str(self._state_dir), tid)
+        if position is None:
+            print(
+                f"fleetd[{os.getpid()}]: deferring {tid} — dispatch position "
+                f"unavailable (store)"
+            )
+            return False
+        step_id, source, _adopted_fields = position
+
+        try:
+            log_lines = Path(log_file).read_text().splitlines() if log_file else []
+        except OSError:
+            log_lines = []
+        counters = _phase_mod.resolve_loop_counters(log_lines)
+
+        try:
+            self.spawn_phase(
+                tid, step_id, log_file, table=table, hb_log_file=hb_log_file,
+                env_file=env_file, counters=counters, reason=reason,
+            )
+        except (OSError, SpawnError, _phase_mod.PhaseSpawnError) as exc:
+            print(f"fleetd[{os.getpid()}]: failed to phase-spawn {tid}: {exc}",
+                  file=sys.stderr)
+            return False
+
+        print(
+            f"fleetd[{os.getpid()}]: phase-dispatched {tid} at {step_id} "
+            f"(source={source})"
+        )
+        return True
 
     def spawn_phase(self, tid, step_id, log_file, table=None, **kwargs):
         """Spawn one phase worker and register it as a killable child.
