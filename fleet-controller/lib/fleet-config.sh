@@ -103,8 +103,13 @@ FLEET_OBSERVER_GRACE_SECS="${FLEET_OBSERVER_GRACE_SECS:-30}"
 # result embedding a whole file could be orders of magnitude larger than probed.
 FLEET_OBSERVER_MAX_FIELD="${FLEET_OBSERVER_MAX_FIELD:-512}"
 
-# Generations of {tid}-{phase}-events.jsonl / -findings.jsonl kept per ticket;
-# older ones are swept alongside the existing gen-file retention sweep (D8).
+# Generations of the phase-slugged {tid}-{phase}-gen{N}.json/.ndjson/.stderr
+# worker-stdio files kept per ticket, swept the same way FLEET_WORKER_LOG_RETENTION
+# already sweeps the ticket-level files — a separate knob because a .ndjson
+# capture can be far larger than the .json it replaces (design.md D8), so an
+# operator may want it aged out faster. {tid}-{phase}-events.jsonl and
+# -findings.jsonl are NOT generation-scoped (one file accumulates across a
+# phase's generations) and are unaffected by this var.
 FLEET_OBSERVER_LOG_RETENTION="${FLEET_OBSERVER_LOG_RETENTION:-3}"
 
 # ── Dispatch ─────────────────────────────────────────────────────────────────────

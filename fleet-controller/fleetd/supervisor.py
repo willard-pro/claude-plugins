@@ -41,6 +41,14 @@ try:
 except ImportError:  # pragma: no cover - exporter unavailable
     _otel_mod = None
 
+# The Agent Observer sidecar module. observer.py is pure stdlib, always —
+# unlike otel.py there is no lazy third-party import to defer, so this only
+# fails when the file itself is missing.
+try:
+    from fleetd import observer as _observer_mod
+except ImportError:  # pragma: no cover - observer unavailable
+    _observer_mod = None
+
 # Phase-level dispatch. Unlike the two above, a missing phase_dispatch is not
 # survivable for a phase spawn — there is no degraded mode in which fleetd
 # dispatches a phase without knowing the dispatch table — so the failure is
@@ -1128,6 +1136,43 @@ def _otel_cmd(log_dir):
     return [sys.executable, str(script), '--log-dir', str(log_dir)]
 
 
+#: Same shape as _OTEL_RESPAWN_BACKOFF — a sidecar that cannot start at all
+#: (bad log dir, permissions) must not spin either.
+_OBSERVER_RESPAWN_BACKOFF = (5, 30, 120, 600)
+
+
+def observer_service_id():
+    """Fixed run-registry identifier. Not a ticket id, and the reap path
+    branches on it so an observer exit is never mistaken for a ticket dying."""
+    return _observer_mod.SERVICE_ID if _observer_mod is not None else 'agent-observer'
+
+
+def observer_enabled_for_sidecar():
+    """True only when the operator opted in AND the module is importable.
+
+    Named distinctly from the module-level `FLEET_OBSERVER_ENABLE` constant
+    (which gates the phase-spawn `--output-format` switch, read once at
+    import time) — this re-reads the env var on every call, the same
+    always-current pattern `otel_enabled()` uses, so toggling the flag at
+    runtime is reflected without a fleetd restart for the sidecar's own
+    spawn/stop decisions.
+    """
+    if _observer_mod is None:
+        return False
+    try:
+        return _observer_mod.observer_enabled()
+    except Exception:
+        return False
+
+
+def _observer_cmd(log_dir):
+    """argv for the observer child. Same rationale as `_otel_cmd`: a plain
+    script by absolute path, never `-m fleetd.observer`, so it execs
+    correctly regardless of fleetd's own working directory or sys.path."""
+    script = Path(__file__).resolve().parent / 'observer.py'
+    return [sys.executable, str(script), '--log-dir', str(log_dir)]
+
+
 def _write_fence_files(tid, generation, state_dir):
     """Write a generation fence marker so the next spawn uses a higher generation.
 
@@ -1153,6 +1198,11 @@ def _write_fence_files(tid, generation, state_dir):
 # ── Worker exit persistence (worker-reap-recovery) ─────────────────────────
 
 FLEET_WORKER_LOG_RETENTION = _env_int('FLEET_WORKER_LOG_RETENTION', 3)
+
+# Agent Observer (design.md D8): a separate retention count for the
+# phase-slugged {tid}-{phase}-gen{N}.json/.ndjson/.stderr files, since a
+# .ndjson capture can be far larger than the .json it replaces.
+FLEET_OBSERVER_LOG_RETENTION = _env_int('FLEET_OBSERVER_LOG_RETENTION', 3)
 
 
 def _append_pipeline_log_line(state_dir, tid, phase, step, status, msg):
@@ -1377,22 +1427,51 @@ def _notify_worker_event(fleet_lib_dir, state_dir, tid, event_type, detail=''):
 
 
 def _sweep_stale_generation_files(state_dir, tid, current_generation,
-                                  retention=None):
+                                  retention=None, phase='',
+                                  phase_retention=None):
     """Delete gen/.stderr/-exit.json files older than the retention window.
 
     Per-generation worker output is otherwise unbounded — Increment A ships
     the sweep alongside capture rather than deferring it (tasks.md 3.12).
     Keeps the most recent `retention` generations (default
     FLEET_WORKER_LOG_RETENTION); best-effort, never raises.
+
+    `phase` (agent-observer design.md D8): a pre-existing leak — this only
+    ever matched `{tid}-gen{N}{suffix}`, never the phase-slugged
+    `{tid}-{phase}-gen{N}.json`/`.ndjson`/`.stderr` a phase-level spawn_worker
+    call writes (`spawn_worker`'s `slug`) — is fixed in the same increment
+    that introduces `.ndjson` (Inc 2), not carried forward as new debt, since
+    a `.ndjson` capture can be far larger than the `.json` it replaces.
+    `phase_retention` defaults to `FLEET_OBSERVER_LOG_RETENTION` — a
+    separate knob from the ticket-level `retention`, since an operator may
+    want the larger phase-level captures aged out faster. The exit-record
+    file has no phase-slugged form (`_write_exit_record` takes no `phase`
+    argument), so only `.json`/`.ndjson`/`.stderr` are swept here, never
+    `-exit.json`.
     """
     keep = retention if retention is not None else FLEET_WORKER_LOG_RETENTION
     cutoff = current_generation - keep
-    if cutoff < 1:
-        return
     state = Path(state_dir)
-    for suffix in ('.json', '.stderr', '-exit.json'):
-        for gen in range(1, cutoff + 1):
-            stale = state / f'{tid}-gen{gen}{suffix}'
+    if cutoff >= 1:
+        for suffix in ('.json', '.stderr', '-exit.json'):
+            for gen in range(1, cutoff + 1):
+                stale = state / f'{tid}-gen{gen}{suffix}'
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+
+    if not phase:
+        return
+    p_keep = (phase_retention if phase_retention is not None
+             else FLEET_OBSERVER_LOG_RETENTION)
+    p_cutoff = current_generation - p_keep
+    if p_cutoff < 1:
+        return
+    slug = f'{tid}-{phase.lower()}'
+    for suffix in ('.json', '.ndjson', '.stderr'):
+        for gen in range(1, p_cutoff + 1):
+            stale = state / f'{slug}-gen{gen}{suffix}'
             try:
                 stale.unlink()
             except OSError:
@@ -2425,6 +2504,12 @@ class Supervisor:
         self._otel_pid = None
         self._otel_failures = 0
         self._otel_next_attempt = 0.0
+        # Agent Observer sidecar (agent-observer D1). Same shape as the OTel
+        # exporter above — one supervised child under a fixed identifier,
+        # never a ticket, respawned with the same bounded backoff on crash.
+        self._observer_pid = None
+        self._observer_failures = 0
+        self._observer_next_attempt = 0.0
         # Hold reconciliation's own cadence (design.md D5): `None` means
         # "never run", so the first cycle always probes any held ticket
         # rather than waiting a full interval after a restart.
@@ -3124,6 +3209,13 @@ class Supervisor:
             if pid == self._otel_pid:
                 self._handle_otel_exit(pid, exit_code, exit_type)
                 continue
+            # Same reasoning as the OTel branch above: the observer is a
+            # supervised child, not a ticket worker, and must never touch
+            # the ticket reap path (no exit record, no circuit breaker, no
+            # pipeline-log line, no reconciliation) — design.md Goals.
+            if pid == self._observer_pid:
+                self._handle_observer_exit(pid, exit_code, exit_type)
+                continue
             # Find the child entry by PID and remove it.
             for tid, entry in list(self._children._workers.items()):
                 if entry['pid'] == pid:
@@ -3170,7 +3262,7 @@ class Supervisor:
                         f'code={exit_code} type={exit_type} gen={generation} '
                         f'killed_by_fleet=false'
                     )
-                    _sweep_stale_generation_files(str(self._state_dir), tid, generation)
+                    _sweep_stale_generation_files(str(self._state_dir), tid, generation, phase=phase)
 
                     self._children.remove(tid)
                     print(
@@ -3540,7 +3632,7 @@ class Supervisor:
             state_dir, tid, 'META', 'worker-exit', 'fail',
             f'code=none type={method} gen={generation} killed_by_fleet=true'
         )
-        _sweep_stale_generation_files(state_dir, tid, generation)
+        _sweep_stale_generation_files(state_dir, tid, generation, phase=phase)
 
     def _merge_poll_sweep(self):
         """Periodic merge-truth sweep — the async complement to the
@@ -3697,6 +3789,87 @@ class Supervisor:
         except Exception as exc:
             print(f"fleetd[{os.getpid()}]: otel exporter stop failed: {exc}",
                   file=sys.stderr)
+
+    # ── Agent Observer supervision (agent-observer Inc 2, D1) ───────────────
+    # Copies the OTel exporter's spawn/backoff/reap/stop wiring exactly —
+    # design.md D1 calls this "architecturally the same object", not a new
+    # supervision pattern.
+
+    def _observer_log_dir(self):
+        return os.environ.get('FLEET_PIPELINE_LOG_DIR') or str(self._state_dir)
+
+    def maybe_spawn_observer(self, now=None):
+        """Start the sidecar if enabled, not running, and past its backoff.
+
+        Called on startup and on every cycle, so a crashed observer comes
+        back without fleetd restarting. Returns the pid, or None.
+        """
+        if not observer_enabled_for_sidecar() or self._observer_pid is not None:
+            return None
+        now = time.time() if now is None else now
+        if now < self._observer_next_attempt:
+            return None
+
+        sid = observer_service_id()
+        try:
+            pid, session_id = spawn_worker(
+                sid, 0, str(self._state_dir), reason='agent-observer',
+                cmd_override=_observer_cmd(self._observer_log_dir()),
+            )
+        except Exception as exc:
+            # Never fatal: the observer failing to start must not stop
+            # fleetd supervising tickets — design.md Goals.
+            print(f"fleetd[{os.getpid()}]: agent observer spawn failed: {exc}",
+                  file=sys.stderr)
+            self._observer_failures += 1
+            self._observer_next_attempt = now + self._observer_backoff()
+            return None
+
+        self._observer_pid = pid
+        self._children.add(sid, pid, generation=0, reason='agent-observer',
+                           session_id=session_id)
+        print(f"fleetd[{os.getpid()}]: agent observer started (pid {pid}) "
+              f"watching {self._observer_log_dir()}")
+        return pid
+
+    def _observer_backoff(self):
+        idx = min(self._observer_failures, len(_OBSERVER_RESPAWN_BACKOFF)) - 1
+        return _OBSERVER_RESPAWN_BACKOFF[max(idx, 0)]
+
+    def _handle_observer_exit(self, pid, exit_code, exit_type):
+        """Record an observer exit and schedule a respawn.
+
+        Deliberately not the ticket path: no exit record, no circuit
+        breaker, no pipeline-log line, no reconciliation. The observer has
+        no ticket state to reconcile and no pipeline log of its own.
+        """
+        sid = observer_service_id()
+        self._children.remove(sid)
+        self._observer_pid = None
+        clean = (exit_type == 'exit' and exit_code == 0)
+        if clean:
+            self._observer_failures = 0
+        else:
+            self._observer_failures += 1
+        self._observer_next_attempt = time.time() + self._observer_backoff()
+        print(
+            f"fleetd[{os.getpid()}]: agent observer (pid {pid}) exited "
+            f"({exit_type}, code={exit_code}); "
+            f"respawn in {self._observer_backoff()}s"
+        )
+
+    def stop_observer(self, grace_secs=5):
+        """Stop the observer through the same kill escalation as any worker."""
+        if self._observer_pid is None:
+            return
+        pid, sid = self._observer_pid, observer_service_id()
+        self._observer_pid = None
+        try:
+            kill_worker(sid, pid, 0, str(self._state_dir),
+                        reason='fleetd-shutdown', grace_secs=grace_secs)
+        except Exception as exc:
+            print(f"fleetd[{os.getpid()}]: agent observer stop failed: {exc}",
+                  file=sys.stderr)
         self._children.remove(sid)
 
     def run_observe(self, cmd_override=None):
@@ -3729,6 +3902,7 @@ class Supervisor:
         # Telemetry starts after the health endpoint and before the first
         # detection cycle, so a trace exists for work this run does.
         self.maybe_spawn_otel()
+        self.maybe_spawn_observer()
 
         shutdown_event = threading.Event()
 
@@ -3774,6 +3948,7 @@ class Supervisor:
                 # 4b. Restart the exporter if it died (no-op when disabled,
                 # already running, or still inside its backoff window).
                 self.maybe_spawn_otel()
+                self.maybe_spawn_observer()
 
                 # 4. Wait for next interval or shutdown.
                 if shutdown_event.wait(timeout=self._cycle_interval):
@@ -3786,6 +3961,7 @@ class Supervisor:
             # In future groups we'll also attempt cooperative stop of all
             # workers before exiting.
             self.stop_otel()
+            self.stop_observer()
             health.shutdown()
             self._reaper.close()
             self.release_lock()
