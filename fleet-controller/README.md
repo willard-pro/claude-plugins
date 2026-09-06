@@ -1,6 +1,6 @@
 # fleet-controller
 
-Parent orchestrator above `ticket-planner` and `ticket-auto-pipeline`. Dispatches planned tickets from initiative epics, watches every running pipeline via 14 detection engines, kills and restarts stuck runs, and feeds execution results back to the planner.
+Parent orchestrator above `ticket-planner` and `ticket-auto-pipeline`. Dispatches planned tickets from initiative epics, watches every running pipeline via 16 detection engines, kills and restarts stuck runs, and feeds execution results back to the planner.
 
 **Bash-only — zero Claude agents.** Every detection and intervention is a deterministic script. Nothing here reasons; it measures and acts on thresholds.
 
