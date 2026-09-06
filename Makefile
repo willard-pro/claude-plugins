@@ -95,6 +95,7 @@ test-lib:
 	# pipeline-integrity tests
 	bash ticket-auto-pipeline/lib/tests/test-return-completeness.sh
 	bash ticket-auto-pipeline/lib/tests/test-phase-result-parse.sh
+	bash ticket-auto-pipeline/lib/tests/test-verdict-recompute.sh
 	bash ticket-auto-pipeline/lib/tests/test-human-hold-parse.sh
 	bash ticket-auto-pipeline/lib/tests/test-corrections.sh
 	bash ticket-auto-pipeline/lib/tests/test-guidance-store.sh

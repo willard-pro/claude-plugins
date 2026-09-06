@@ -279,11 +279,25 @@ pre-this-mechanism ask-form), shaped like the incident this change targets.
 Agent returns a machine-readable claim; bash recomputes; the delta is the reward signal. On the
 critical path to workflow-driven execution and to finishing fleetd phase supervision.
 
-Order within the change: capture (§1.2–1.5) → schema → parser → emission → wiring, observe-only.
-**Then measure emission rate before writing any consumer.** Emission depends on an agent obeying a
-prompt instruction and no bash gate can observe compliance, so a consumer written against
-unmeasured emission is a guess. `runs.jsonl` is the place to measure it — add
-`phase_result_emitted` to the `run` record when this lands.
+1. **`rlvr-phase-result-contract` — merged earlier (PR #279), archived.** The
+   `=== PHASE_RESULT ===` transport, `lib/phase-result-parse.sh`, and the
+   `META|phase-result` channel for the three loop-bearing phases (IMPLEMENT,
+   VERIFY, PR-REVIEW). Observe-only; nothing routes on it. **Gap carried
+   forward, not fixed here:** `runs.jsonl`'s `run` record still has no
+   `phase_result_emitted` field, so emission rate has not actually been
+   measured yet — the consumer-gating condition this change specified is
+   still open.
+2. **`rlvr-verdict-recompute` — implemented 2026-09-06 (ticket-auto-pipeline
+   0.44.0), 15/17 tasks (2 telemetry-review tasks are gated on real-run data,
+   not done here), `make lint`/`fmt-check`/`test` all green.** New
+   `lib/verdict-recompute.sh` (VERIFY only): reuses `phase-result-parse.sh`'s
+   parser (sourced, log-free) for the claim and `return-completeness-check.sh`'s
+   section-scoped checkbox counter (sourced) for the verified side — counts
+   `- [x]`/`- [ ]` in `verify-session.md`'s `## Step trace`, gated on the file
+   postdating the phase's own bracket-open line. Emits `META|claim-delta` with
+   `direction` (`aligned`/`optimistic`/`pessimistic`/`unknown`). Wired into
+   `skills/ticket-auto/SKILL.md` immediately after `phase-result-parse.sh`,
+   same observe-only guarantees. 17/17 new tests.
 
 If the follow-up's `direction` comes back `aligned` on essentially every ticket, the routing
 increments get **dropped** — that is an intended outcome, not a failure.
@@ -308,6 +322,34 @@ phase-slug sweep leak (`fleetd/supervisor.py:1240` matches only `{tid}-gen{N}`, 
 
 Probe fixtures are ready at `fleet-controller/fleetd/tests/fixtures/stream-json-*.ndjson`
 (currently untracked).
+
+---
+
+## Step 6 — Agent Mesh MVP (PC agent ↔ server agent)
+
+**Plan:** `~/.claude/plans/i-want-you-to-zesty-quilt.md`
+
+Investigated 2026-09-06: how much of an Agent Mesh foundation (identity, capabilities,
+endpoint, status, permissions, trust) already exists, and the smallest step to get two
+Claude agents on different machines discovering, delegating, and returning structured
+results. Verdict: ~60% of the foundation exists; no new major infrastructure component
+needed — fleetd's existing loopback HTTP server, reached over an SSH tunnel with a bearer
+token, is the endpoint.
+
+**Not started.** Four-phase plan in the file above:
+- Phase 0 — prove communication (zero code: systemd fleetd + SSH tunnel + curl).
+- Phase 1 — agent identity + registration (`agent_id`, bearer token, `GET /agent` card,
+  threading HTTP server, `FLEET_AGENT_ID` stamped alongside `FLEET_GENERATION`).
+- Phase 2 — capabilities + discovery (derive from `fleet-env-check.sh` + installed
+  `agents/*.md`, cached; client-side `FLEET_MESH_PEERS`, no server-side registry).
+- Phase 3 — task delegation (`POST /tasks` with `run_prompt`/`run_ticket`; the reaper needs
+  a `reason`-keyed branch — modelled on the existing otel-exporter branch — so a mesh task
+  is never misclassified as an orphaned ticket and re-enqueued).
+- Phase 4 — evidence (assemble existing `PHASE_RESULT`/exit-record/`runs.jsonl` objects;
+  no new trust primitive).
+
+Cut from MVP: `run_phase` (phase-level dispatch isn't rolled out yet), a server-side
+`/peers` registry, mTLS/signing/RBAC, dexter Workflows integration.
 
 ---
 
