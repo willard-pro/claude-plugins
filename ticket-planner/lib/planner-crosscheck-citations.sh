@@ -284,6 +284,20 @@ _planner_crosscheck_check_citation() {
   # `resolve_path` needs. Confirmed live on VS-4 (exc-2/exc-5/exc-7).
   path_part=$(echo "$path_part" | sed -E 's/^(GET|POST|PUT|PATCH|DELETE)[[:space:]]+//')
 
+  # A bare `path:line` TargetSymbols entry with no `Name:` prefix has no
+  # separate `symbol` value to carry a "(new)" annotation — the caller left
+  # $symbol empty, so the marked-new check above (which only ever inspects
+  # $symbol) never runs. An author writing "worker/llm/cascade.py (new)" as
+  # the whole entry means the annotation for the same reason a symbol-side
+  # "(new)" does: this ticket creates the file, it isn't expected to exist
+  # yet. Recognize the same annotation on path_part itself. Confirmed live
+  # on VS-6 (worker/llm/cascade.py, worker/llm/validate.py both false-
+  # flagged CITATION_UNRESOLVED — willard-pro/claude-plugins#304).
+  if [ "$marked_new" -ne 1 ] && _planner_crosscheck_symbol_marked_new "$path_part"; then
+    marked_new=1
+    path_part=$(_planner_crosscheck_strip_symbol_annotation "$path_part")
+  fi
+
   resolved=$(_planner_crosscheck_resolve_path "$repos_root" "$path_part")
   if [ -z "$resolved" ]; then
     [ "$marked_new" -eq 1 ] && return 0

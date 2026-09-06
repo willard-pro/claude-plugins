@@ -17,6 +17,22 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## ticket-planner 0.8.26 (2026-09-06)
+
+Fix `planner-crosscheck-citations.sh` false-flagging `CITATION_UNRESOLVED` on a
+bare TargetSymbols entry that marks a new file directly on the path, with no
+`Name:` prefix (`worker/llm/cascade.py (new)`). The `(new)` bypass
+(`_planner_crosscheck_symbol_marked_new`) only ever inspected the `symbol`
+value; a no-`Name:`-prefix entry leaves `$symbol` empty, so the annotation on
+the path itself was never consulted. Found live on VS-6
+(`INIT-1788101975-8566`): both `worker/llm/cascade.py (new)` and
+`worker/llm/validate.py (new)` false-flagged, costing two wasted
+Crosscheck-fail retry cycles before the spec was reworded around the bug
+(#304). `_planner_crosscheck_check_citation` now checks `path_part` for the
+same annotation and strips it before resolving. New golden fixture
+(`citation-new-path-no-name-prefix`) confirmed to fail without the fix (2
+blocking) and pass with it.
+
 ## 0.43.0 (2026-09-06), fleet-controller 0.24.0
 
 `human-hold-protocol` (`next.md` Step 3, remainder). `human-hold-store-foundation`
