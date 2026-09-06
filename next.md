@@ -5,7 +5,7 @@ bottom. Update the checkboxes as work lands; move completed steps to the archive
 
 > Public repo — no ticket IDs, no customer data in this file.
 
-Last reviewed: 2026-09-06 (Step 5 landed; Step 6 held for real-run validation)
+Last reviewed: 2026-09-06 (Steps 1C/5/env-check-gate merged; Step 6 still held for real-run validation)
 
 ---
 
@@ -57,6 +57,19 @@ Estimated: one sitting for all three.
       once fleetd has reaped it — which would have silently defeated the stale-queue-entry skip
       at `supervisor.py:3024` and let fleetd re-spawn an already-finished ticket.
 
+- [x] **fleetd startup env-check gate + two false-positive issue-counters found live.** Not
+      from a queued plan — built and merged reactively 2026-09-06 (PR #311, fleet-controller
+      0.26.0) after being asked to verify the tickets host would come up clean. `__main__.py`'s
+      `_run_startup_env_check()` now shells out to `lib/fleet-env-check.sh` before constructing
+      the `Supervisor` and refuses to boot on any reported issue — fleetd previously had no
+      equivalent of ticket-auto-pipeline's Step-0 `validate-env` guard at all. Live-reproduced
+      against `../tickets` (real `LINEAR_API_KEY` + `gh` token exported, no `CLAUDE_CMD`) and
+      found the gate refused to start on a fully valid config: `FLEET_WORKER_PERMISSION_MODE`
+      unset — fleetd's own documented zero-config default — was being counted as an issue.
+      Fixed by reclassifying that branch `auto` (non-issue), matching the existing convention
+      for other intentional defaults. Confirmed live afterward: fleetd boots clean from
+      `../tickets`. Full fleetd suite green post-fix (745 passed / 2 skipped).
+
 ---
 
 ## Step 1 — Commercial evidence MVP (runs.jsonl)
@@ -102,12 +115,11 @@ append-only event log with four kinds: `run`, `merge`, `cost`, `human`.
       env.** Openspec: `commercial-evidence-fleet-cost-events`. `worker_cost_usd()` beside `worker_return_text`; read in reap and fleet-kill paths
       before the generation-file sweep; `cost_usd` on the exit record + `cost` event;
       `FLEET_GENERATION`/`FLEET_VERSION` in worker env (neither exists today); merge-poll sweep
-      every `FLEET_MERGE_POLL_CYCLES` (10) as a bash subprocess. Implemented 2026-09-05, `make
-      lint`/`make fmt-check`/`make test` all green, fleet-controller 0.22.1 — PR #301 open,
-      pending merge.
+      every `FLEET_MERGE_POLL_CYCLES` (10) as a bash subprocess. Merged 2026-09-05
+      (PR #301, fleet-controller 0.22.1).
 
-**Step 1 complete** (2026-09-05): all three branches implemented and tested; A and B merged to
-main, C awaiting PR #301 merge. Dexter follow-up (below) can start as soon as that lands.
+**Step 1 complete** (2026-09-05): all three branches implemented, tested, and merged to main.
+Dexter follow-up (below) can start now.
 
 Follow-up in the **dexter repo** (separate plan, not tracked here): The Bench executive view
 reading `runs.jsonl` — five tiles (autonomous merge rate, cycle time P50/P90, cost per merged
@@ -311,8 +323,8 @@ increments get **dropped** — that is an intended outcome, not a failure.
 **Openspec change:** `agent-observer` (implemented 2026-09-06, 43/43 tasks; `openspec/` is
 gitignored, exists only on local disk).
 
-**Implemented 2026-09-06 on `feat/agent-observer` (fleet-controller 0.25.0), PR #309 open,
-pending merge.** `fleetd/observer.py`, a fleet-wide sidecar modelled on `otel.py`'s own
+**Merged 2026-09-06 on `feat/agent-observer` (PR #309, fleet-controller 0.25.0).**
+`fleetd/observer.py`, a fleet-wide sidecar modelled on `otel.py`'s own
 spawn/backoff/reap/stop supervision, tails phase workers' `--output-format stream-json
 --verbose` transcripts (opt-in via `FLEET_OBSERVER_ENABLE`) and computes 8 deterministic
 findings — `CLAIM_CONTRADICTION`, `REPEATED_FAILURE`, `SCOPE_VIOLATION`, `UNEXPECTED_TOOL`,
@@ -343,6 +355,13 @@ unverified against live fleetd/Linear traffic on the tickets host. Agent Mesh's 
 phase (Phase 3) adds another consumer of the same reap path several of those changes just
 touched (`fleetd/supervisor.py`) — better to know the current batch is solid first than debug
 two layers of new behavior at once.
+
+**Partial de-risking done 2026-09-06:** verified against `../tickets` directly — Linear API
+key live (`viewer` query succeeds), `gh` CLI authenticated, and fleetd now actually boots
+clean from that workspace with a real config (see Step 0's env-check-gate entry above — this
+is what surfaced that bug). Still missing before the hold lifts: an actual ticket run through
+live fleetd on that host, which is what would exercise Steps 3/4/5's reap-path changes for
+real.
 
 **Plan:** `~/.claude/plans/i-want-you-to-zesty-quilt.md`
 
