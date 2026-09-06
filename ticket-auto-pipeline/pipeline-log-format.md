@@ -641,6 +641,51 @@ five verifier detection patterns are unaffected by this channel.
 first is what the agent said, the second is what the artifact shows. Same rule: read one,
 not both.
 
+### Claim-delta entries (rlvr-verdict-recompute)
+
+`META|phase-result` is the agent's claim. This channel is bash's independent
+check of it — never a source of truth on its own, and never routed on in this
+increment. Written by `lib/verdict-recompute.sh`, immediately after
+`phase-result-parse.sh` at the same insertion point, VERIFY only. The MSG is a
+JSON object:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|claim-delta|info|{\"phase\":\"VERIFY\",\"claimed_verdict\":\"PASS\",\"claimed_met\":3,\"claimed_total\":3,\"verified_verdict\":\"FAIL\",\"verified_met\":2,\"criteria_total\":3,\"delta\":1,\"direction\":\"optimistic\",\"evidence\":\"/path/to/verify-session.md\",\"evidence_state\":\"fresh\",\"attempt\":1}" >> "$LOG_FILE"
+```
+
+JSON fields: `phase` (`VERIFY` — the only phase implemented; IMPLEMENT and
+PR-REVIEW recompute rules are deferred), `claimed_verdict`/`claimed_met`/
+`claimed_total` (read from the phase's own `META|phase-result` claim, verbatim
+— `claimed_verdict` includes `UNKNOWN`), `verified_verdict` (`PASS`|`FAIL`,
+recomputed from `verify-session.md`'s `## Step trace` checkbox counts —
+never from the claim), `verified_met`, `criteria_total` (the verified total),
+`delta` (`claimed_met - verified_met`), `direction` (`aligned`|`optimistic`|
+`pessimistic`|`unknown` — see below), `evidence` (the evidence file's path),
+`evidence_state` (`fresh`|`fresh-unverified-phase-start`|`stale`|`missing`),
+`attempt` (integer, carried from the claim).
+
+**The verified verdict never trusts the claim.** `verify-session.md` must
+exist and have a modification time later than the phase's own
+`|VERIFY|verify|waiting|` bracket-open line, or `verified_met` is `0` and
+`evidence_state` records why: `missing` (no file at all) or `stale` (the file
+predates this attempt's bracket — left over from an earlier one).
+`fresh-unverified-phase-start` is a third, honest middle state: the file is
+present and its checkboxes are counted, but no pipeline log was available to
+prove its mtime postdates this attempt (a standalone invocation with no
+`--log-file`) — the count is used, but the freshness guarantee it normally
+carries is not.
+
+**`direction`**: `optimistic` when the claim exceeds the verified result,
+`pessimistic` when the claim falls short, `aligned` when they match, and
+`unknown` when the claim itself was `UNKNOWN` (no comparison is meaningful —
+the entry still records the verified side).
+
+**Observe-only, like `phase-result`**: nothing routes on this channel, no
+gate-stop is emitted (`RETURN_CONTRACT_MISMATCH`/`CLAIM_DRIFT` do not exist
+yet), and a recompute failure cannot halt a run. `direction`'s real-run
+distribution must be reviewed before any consumer is proposed — see
+`rlvr-verdict-recompute`'s deferred telemetry-review task.
+
 ### RETURN_INCOMPLETE coexistence
 
 `META|gate-warn|RETURN_INCOMPLETE` and `META|verifier-result` may coexist in the same log. Downstream consumers SHALL read only the verifier-result line, never both, to avoid double-counting.

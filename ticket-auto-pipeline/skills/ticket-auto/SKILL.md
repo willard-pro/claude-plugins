@@ -1012,6 +1012,17 @@ bash "$_prp_sh" --phase VERIFY \
   --return-file "./logs/{TICKET_ID}-verify-agent.log" \
   --log-file "{LOG_FILE}" >/dev/null 2>&1 || true
 
+# Verdict recompute (advisory, observe-only, RLVR) — bash independently derives
+# the verdict from verify-session.md and compares it against the claim the
+# parser just logged. Same insertion point as phase-result-parse.sh, runs
+# immediately after it. Never gates, never halts on a mismatch — see
+# lib/verdict-recompute.sh and pipeline-log-format.md's claim-delta section.
+_vrc_sh="${CLAUDE_SKILLS_LIB:-$HOME/.claude/skills/lib}/verdict-recompute.sh"
+bash "$_vrc_sh" --phase VERIFY \
+  --return-file "./logs/{TICKET_ID}-verify-agent.log" \
+  --ticket-dir "{TICKET_DIR}" \
+  --log-file "{LOG_FILE}" >/dev/null 2>&1 || true
+
 spawn_agent_post TICKET_ID={TICKET-ID} RESULT=done VERDICT=PASS MSG="<summary>" NEXT_PHASE=PR-REVIEW LOOP_BEARING=true  # on PASS
 spawn_agent_post TICKET_ID={TICKET-ID} RESULT=fail VERDICT=FAIL MSG="<summary>" LOOP_BEARING=true                         # on FAIL
 
@@ -1324,6 +1335,7 @@ exit 1
 2. **Stateless router**: All state lives in the pipeline log. The router re-reads it via `detect-resume.sh` before every dispatch decision.
 3. **3-step spawn pattern at every dispatch site**: `spawn_agent_pre` → agent spawn → `spawn_capture` (saves agent return value to `-{phase}-agent.log`) → `spawn_agent_post`. Token-tracker SubagentStop hook captures token counts only — agent output text logging requires the explicit `spawn_capture` step. The agent's return is handed to `spawn_capture` as a **file** (`RESULT_FILE=`, written with a quoted heredoc), never interpolated into a quoted `RESULT="..."` argument.
 7. **Phase results are observe-only**: `phase-result-parse.sh` runs at the three loop-bearing sites (IMPLEMENT, VERIFY, PR-REVIEW) between `spawn_capture` and `spawn_agent_post`, and only appends `META|phase-result|info|{json}` to the log. The router continues to route on its existing `RESULT=done|fail` and `VERDICT=` tokens. The parser emits no gate-stop code, and every call site is `|| true`-guarded, so a parser failure cannot halt a run. See [phase-result schema](../../docs/phase-result-schema.md).
+8. **Verdict recompute is observe-only (RLVR)**: `verdict-recompute.sh` runs immediately after `phase-result-parse.sh` on the VERIFY path only, deriving a verdict from `verify-session.md` independently of the agent's claim and appending `META|claim-delta|info|{json}` to the log. Same guarantees as item 7 — no gate-stop, `|| true`-guarded, never changes routing. IMPLEMENT and PR-REVIEW recompute rules are deferred. See [pipeline-log-format.md](../../pipeline-log-format.md#claim-delta-entries-rlvr-verdict-recompute).
 4. **Sequential dispatch**: Agents are spawned one at a time. The dispatch loop guarantees only one agent is in flight at a time.
 5. **Bash gates**: Gate decisions are deterministic bash scripts (`gate-check.sh`, `outcome-label-check.sh`), not Claude agents.
 6. **Router-managed loops**: Verify retry and PR iteration loops are managed by the router tracking counters from the pipeline log, not by phase agents internally.
