@@ -37,7 +37,7 @@ from pathlib import Path
 
 # Bumped when the schema changes shape. fleetd refuses to operate against a
 # version it does not recognise rather than misreading tables that moved.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Per-version migration steps, keyed by the version they migrate *to*: an
 # ordered list of statements plus an explicit `additive` flag. Data, never
@@ -54,6 +54,27 @@ SCHEMA_VERSION = 2
 # additive or ship with a real data migration.
 _MIGRATIONS = {
     2: {'additive': False, 'statements': []},
+    # v3 (agent-observer Inc 4): adds the `findings` table only — a brand new
+    # table, PROJECTION class, rebuildable from {tid}-{phase}-findings.jsonl.
+    # No existing table's shape changes, so this is additive.
+    3: {'additive': True, 'statements': [
+        """CREATE TABLE IF NOT EXISTS findings (
+          id           INTEGER PRIMARY KEY AUTOINCREMENT,
+          tid          TEXT    NOT NULL,
+          phase        TEXT    NOT NULL DEFAULT '',
+          gen          INTEGER,
+          type         TEXT    NOT NULL DEFAULT '',
+          severity     TEXT    NOT NULL DEFAULT '',
+          fingerprint  TEXT    NOT NULL,
+          count        INTEGER NOT NULL DEFAULT 1,
+          first_seen   TEXT    NOT NULL DEFAULT '',
+          last_seen    TEXT    NOT NULL DEFAULT '',
+          evidence_json TEXT   NOT NULL DEFAULT '{}',
+          UNIQUE (tid, phase, fingerprint)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_findings_tid ON findings (tid, phase)",
+        "CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings (severity)",
+    ]},
 }
 
 DEFAULT_DB_NAME = 'fleet-state.db'
@@ -734,10 +755,54 @@ class FleetStore:
         self.conn.commit()
         return inserted
 
+    def ingest_findings(self, path):
+        """Upsert every row of a `{tid}-{phase}-findings.jsonl` file.
+
+        Unlike the log-derived projections, this re-reads the whole file
+        every call rather than tracking a byte/line offset in `ingest_state`
+        — `record_findings` (fleetd/observer.py) rewrites the file whole on
+        every count/last_seen update, so there is no stable append-only tail
+        to resume from, and the file stays small enough that a full re-read
+        costs nothing. `tid`/`phase` come from each row's own fields, not the
+        filename — sidesteps the same tid-vs-phase-slug ambiguity
+        `observer.py`'s `_parse_ndjson_filename` exists to solve, for free.
+        """
+        path = Path(path)
+        try:
+            lines = path.read_text().splitlines()
+        except OSError:
+            return 0
+        upserted = 0
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            tid = entry.get('tid')
+            phase = entry.get('phase')
+            fingerprint = entry.get('fingerprint')
+            if not (tid and phase and fingerprint):
+                continue
+            self.conn.execute(
+                'INSERT OR REPLACE INTO findings '
+                '(tid, phase, gen, type, severity, fingerprint, count, '
+                'first_seen, last_seen, evidence_json) '
+                'VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                (tid, phase, entry.get('gen'), entry.get('type', ''),
+                 entry.get('severity', ''), fingerprint, entry.get('count', 1),
+                 entry.get('first_seen', ''), entry.get('last_seen', ''),
+                 json.dumps(entry.get('evidence') or {})))
+            upserted += 1
+        self.conn.commit()
+        return upserted
+
     def ingest_workspace(self, workspace):
-        """Sweep every pipeline and activity log in a workspace."""
+        """Sweep every pipeline log, activity log, and findings file in a workspace."""
         workspace = Path(workspace)
-        counts = {'pipeline': 0, 'activity': 0, 'files': 0}
+        counts = {'pipeline': 0, 'activity': 0, 'findings': 0, 'files': 0}
         if not workspace.is_dir():
             return counts
         for entry in sorted(workspace.iterdir()):
@@ -748,6 +813,9 @@ class FleetStore:
                 counts['files'] += 1
             elif _ACTIVITY_RE.match(entry.name):
                 counts['activity'] += self.ingest_activity_log(entry)
+                counts['files'] += 1
+            elif entry.name.endswith('-findings.jsonl'):
+                counts['findings'] += self.ingest_findings(entry)
                 counts['files'] += 1
         return counts
 
@@ -766,6 +834,7 @@ class FleetStore:
         self.conn.execute('DELETE FROM log_events')
         self.conn.execute('DELETE FROM phase_results')
         self.conn.execute('DELETE FROM activity_events')
+        self.conn.execute('DELETE FROM findings')
         self.conn.execute('DELETE FROM ingest_state')
         self.conn.commit()
         return self.ingest_workspace(workspace)

@@ -253,6 +253,75 @@ class HealthEndpointTest(unittest.TestCase):
             p.wait(timeout=5)
 
 
+class ObserverFindingCountsTest(unittest.TestCase):
+    """agent-observer Inc 4 task 5.2: {severity: count} on /health."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _insert_finding(self, tid, phase, fingerprint, severity):
+        from fleetd import store as store_mod
+
+        path = self.state_dir / f'{tid}-{phase.lower()}-findings.jsonl'
+        existing = path.read_text() if path.is_file() else ''
+        entry = {
+            'type': 'UNEXPECTED_TOOL', 'severity': severity, 'tid': tid,
+            'phase': phase, 'gen': 1, 'fingerprint': fingerprint, 'count': 1,
+            'first_seen': '2026-09-06T10:00:00Z', 'last_seen': '2026-09-06T10:00:00Z',
+            'evidence': {},
+        }
+        path.write_text(existing + json.dumps(entry) + '\n')
+        with store_mod.open_store(self.state_dir) as st:
+            st.ingest_findings(path)
+
+    def test_store_finding_counts_groups_by_severity(self):
+        from fleetd import supervisor as sup_mod
+
+        self._insert_finding('CRE-1', 'APPRAISE', 'fp1', 'HIGH')
+        self._insert_finding('CRE-1', 'IMPLEMENT', 'fp2', 'HIGH')
+        self._insert_finding('CRE-2', 'VERIFY', 'fp3', 'WARN')
+        counts = sup_mod._store_finding_counts(str(self.state_dir))
+        self.assertEqual(counts, {'HIGH': 2, 'WARN': 1})
+
+    def test_empty_store_yields_empty_dict(self):
+        from fleetd import supervisor as sup_mod
+
+        self.assertEqual(sup_mod._store_finding_counts(str(self.state_dir)), {})
+
+    def test_disabled_store_yields_empty_dict_not_none(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+
+        with mock.patch.object(sup_mod, 'FLEET_STORE_ENABLE', False):
+            self.assertEqual(sup_mod._store_finding_counts(str(self.state_dir)), {})
+
+    def test_sync_health_populates_observer_findings(self):
+        from fleetd.supervisor import Supervisor
+
+        self._insert_finding('CRE-1', 'APPRAISE', 'fp1', 'HIGH')
+        sup = Supervisor(state_dir=str(self.state_dir),
+                         pidfile=str(self.state_dir / 'test.pid'))
+        sup._sync_health()
+        self.assertEqual(sup._health_state['observer_findings'], {'HIGH': 1})
+
+    def test_health_payload_includes_observer_findings_key(self):
+        port = _find_free_port()
+        cmd = _fleetd_cmd(self.state_dir, self.state_dir / 'fleetd.pid', port)
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            payload = _wait_health(port)
+            self.assertIsNotNone(payload)
+            self.assertIn('observer_findings', payload)
+            self.assertEqual(payload['observer_findings'], {})
+        finally:
+            p.send_signal(signal.SIGTERM)
+            p.wait(timeout=5)
+
+
 class RegistryObservationTest(unittest.TestCase):
     """Task 4.4: observe-only mode reads existing registry entries."""
 

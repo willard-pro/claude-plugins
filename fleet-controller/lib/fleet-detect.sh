@@ -762,6 +762,49 @@ detect_human_hold() {
   fi
 }
 
+# Observer findings (agent-observer Inc 4). WARN-only, by design — never
+# escalates beyond severity 1, whatever a finding's own `sev=` says: the
+# observer is non-authoritative under any configuration, and letting one of
+# its findings drive a KILL/RESTART would make an advisory sidecar able to
+# act on a ticket, exactly what design.md's Goals rule out. Scoped to the
+# current open spawn bracket only — same `_spawn_bracket_info` convention
+# `detect_runaway_calls` uses — so a finding from an earlier, already-closed
+# phase is not repeatedly re-flagged on every later cycle.
+detect_observer_findings() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+
+  if ! _pipeline_has_history "$tid" "$workspace"; then
+    echo "0"
+    return
+  fi
+
+  local info
+  info=$(_spawn_bracket_info "$tid" "$workspace") || {
+    echo "0"
+    return
+  }
+
+  local start_iso
+  start_iso=$(echo "$info" | awk -F'|' '{print $2}')
+  if [ -z "$start_iso" ]; then
+    echo "0"
+    return
+  fi
+
+  local high_count
+  high_count=$(_pipeline_lines "$tid" "$workspace" |
+    awk -F'|' -v s="$start_iso" '$1 >= s' |
+    command grep -c '|META|observer-finding|.*sev=HIGH' 2>/dev/null || true)
+  high_count="${high_count:-0}"
+
+  if [ "$high_count" -gt 0 ]; then
+    echo "1"
+  else
+    echo "0"
+  fi
+}
+
 # 6. Flow failure detection — scan heartbeat log for retry|flow-sh|fail entries
 detect_flow_failures() {
   local tid="$1"
@@ -1552,7 +1595,7 @@ fleet_detect_all() {
     total=$((total + 1))
 
     # Run all per-ticket detectors, collect max severity
-    local s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 s12 max_sev anomaly_types
+    local s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 s12 s13 max_sev anomaly_types
     if _pipeline_is_held "$tid" "$workspace"; then
       # The router has already exited cleanly for a held ticket — no live
       # process, no open bracket, no heartbeat. The other detectors
@@ -1573,6 +1616,11 @@ fleet_detect_all() {
       s10=0
       s11=0
       s12=$(detect_human_hold "$tid" "$workspace")
+      # A held ticket has no live process and no open spawn bracket — the
+      # router exited cleanly when the agent asked — so there is nothing
+      # for the current-bracket scope to find here, same reasoning as
+      # s1-s4/s6-s11 above.
+      s13=0
     else
       s1=$(detect_phase_failures "$tid" "$workspace")
       s2=$(detect_stalls "$tid" "$workspace")
@@ -1586,12 +1634,13 @@ fleet_detect_all() {
       s10=$(detect_epic_branch_ready "$tid" "$workspace")
       s11=$(detect_runaway_calls "$tid" "$workspace")
       s12=0
+      s13=$(detect_observer_findings "$tid" "$workspace")
     fi
 
     max_sev=0
     anomaly_types=""
 
-    for s in "$s1" "$s2" "$s3" "$s4" "$s5" "$s6" "$s7" "$s8" "$s9" "$s10" "$s11" "$s12"; do
+    for s in "$s1" "$s2" "$s3" "$s4" "$s5" "$s6" "$s7" "$s8" "$s9" "$s10" "$s11" "$s12" "$s13"; do
       [ "$s" -gt "$max_sev" ] && max_sev="$s"
     done
 
@@ -1608,6 +1657,7 @@ fleet_detect_all() {
     [ "$s10" -ge 1 ] && anomaly_types="${anomaly_types} epic-branch-ready(S${s10})"
     [ "$s11" -ge 1 ] && anomaly_types="${anomaly_types} runaway-calls(S${s11})"
     [ "$s12" -ge 1 ] && anomaly_types="${anomaly_types} human-hold(S${s12})"
+    [ "$s13" -ge 1 ] && anomaly_types="${anomaly_types} observer-findings(S${s13})"
     anomaly_types=$(echo "$anomaly_types" | sed 's/^ //')
 
     # Cap severity at 2 (KILL) when auto-restart is disabled

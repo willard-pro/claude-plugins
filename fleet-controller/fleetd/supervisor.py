@@ -680,6 +680,7 @@ class HealthHandler(http.server.BaseHTTPRequestHandler):
             'cycle_count': state.get('cycle_count', 0),
             'last_summary': state.get('last_summary'),
             'pipeline_count': state.get('pipeline_count', 0),
+            'observer_findings': state.get('observer_findings', {}),
         }
         self._send_json(200, payload)
 
@@ -1048,6 +1049,25 @@ def _store_record_exit(state_dir, tid, pid, exit_code, exit_type,
 def _store_record_fence(state_dir, tid, generation):
     return _store_do(state_dir, lambda st: st.set_fence(tid, generation),
                      'record fence')
+
+
+def _store_finding_counts(state_dir):
+    """{severity: count} across every ticket's findings (agent-observer Inc 4).
+
+    Returns {} — not None — on any store failure, so `_health_state`'s
+    default of {} is what `/health` serves rather than a stale prior value;
+    a finding count going briefly blank on a store hiccup is honest, a
+    frozen wrong number is not.
+    """
+    result = _store_do(
+        state_dir,
+        lambda st: {
+            row['severity']: row['n']
+            for row in st.conn.execute(
+                'SELECT severity, COUNT(*) AS n FROM findings GROUP BY severity')
+        },
+        'finding counts')
+    return result if result is not None else {}
 
 
 def _store_record_position(state_dir, tid, step_id, source='dispatch'):
@@ -2546,6 +2566,10 @@ class Supervisor:
             'spawn_enabled': self._spawn_enabled,
             'circuit_breaker_tripped': False,
             'circuit_breaker_reason': None,
+            # agent-observer Inc 4: {severity: count} across every ticket's
+            # findings, or {} when the store is disabled/unavailable — same
+            # fail-soft posture as every other store-backed health field.
+            'observer_findings': {},
         }
 
     # ── lock ────────────────────────────────────────────────────────────────
@@ -2809,6 +2833,8 @@ class Supervisor:
         self._health_state['spawn_enabled'] = self._spawn_enabled
         self._health_state['circuit_breaker_tripped'] = self._circuit_breaker_tripped
         self._health_state['circuit_breaker_reason'] = self._circuit_breaker_reason
+        self._health_state['observer_findings'] = _store_finding_counts(
+            str(self._state_dir))
 
     def update_cycle_result(self, success, completed_at=None):
         """Record the outcome of a detection cycle (for group 5+ consumers)."""

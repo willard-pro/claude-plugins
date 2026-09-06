@@ -83,6 +83,100 @@ test_observer_finding_line_does_not_change_phase_failure_verdict() {
   [ "$before" -eq "$after" ] && [ "$after" -eq 1 ]
 }
 
+test_observer_findings_high_in_current_bracket_returns_warn() {
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-9" "IMPLEMENT" "implement" "waiting" "agent launched"
+  _plog "$ws" "CRE-9" "META" "observer-finding" "done" "type=UNEXPECTED_TOOL sev=HIGH gen=1 fp=abc"
+  source "$LIB_DIR/fleet-detect.sh"
+  local r
+  r=$(detect_observer_findings "CRE-9" "$ws")
+  rm -rf "$ws"
+  [ "$r" -eq 1 ]
+}
+
+test_observer_findings_warn_severity_finding_does_not_escalate() {
+  # Only sev=HIGH findings escalate this detector — a WARN-severity finding
+  # is recorded (findings.jsonl / dashboard) but not surfaced here, matching
+  # design.md's own severity scheme for the eight rules.
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-9" "IMPLEMENT" "implement" "waiting" "agent launched"
+  _plog "$ws" "CRE-9" "META" "observer-finding" "done" "type=REPEATED_FAILURE sev=WARN gen=1 fp=abc"
+  source "$LIB_DIR/fleet-detect.sh"
+  local r
+  r=$(detect_observer_findings "CRE-9" "$ws")
+  rm -rf "$ws"
+  [ "$r" -eq 0 ]
+}
+
+test_observer_findings_no_open_bracket_returns_ok() {
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-9" "IMPLEMENT" "implement" "done" "ok"
+  _plog "$ws" "CRE-9" "META" "observer-finding" "done" "type=UNEXPECTED_TOOL sev=HIGH gen=1 fp=abc"
+  source "$LIB_DIR/fleet-detect.sh"
+  local r
+  r=$(detect_observer_findings "CRE-9" "$ws")
+  rm -rf "$ws"
+  [ "$r" -eq 0 ]
+}
+
+test_observer_findings_from_a_closed_earlier_bracket_are_not_reflagged() {
+  # A HIGH finding from a phase that has already terminated must not keep
+  # tripping this detector on every later cycle — same "current bracket
+  # only" scoping detect_runaway_calls already relies on. Distinct
+  # timestamps matter here: the bracket filter is `$1 >= start_iso`, so an
+  # earlier line sharing the same default timestamp as the new bracket
+  # would be (wrongly) included.
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-9" "APPRAISE" "appraise" "waiting" "agent launched" "2026-06-02T10:00:00Z"
+  _plog "$ws" "CRE-9" "META" "observer-finding" "done" "type=UNEXPECTED_TOOL sev=HIGH gen=1 fp=abc" "2026-06-02T10:00:01Z"
+  _plog "$ws" "CRE-9" "APPRAISE" "appraise" "done" "ok" "2026-06-02T10:00:02Z"
+  _plog "$ws" "CRE-9" "IMPLEMENT" "implement" "waiting" "agent launched" "2026-06-02T10:00:03Z"
+  source "$LIB_DIR/fleet-detect.sh"
+  local r
+  r=$(detect_observer_findings "CRE-9" "$ws")
+  rm -rf "$ws"
+  [ "$r" -eq 0 ]
+}
+
+test_fleet_detect_all_runs_and_reports_every_per_ticket_detector() {
+  # Drift guard (task 5.5): the max-severity loop, the anomaly-labeling
+  # block, and the non-held-branch assignment list must all cover exactly
+  # the same s1..sN slots — a detector added to one but not the others
+  # would run silently uncounted or be labeled but never contribute to
+  # max_sev. 13 as of agent-observer Inc 4 (s1-s12 pre-existing +
+  # detect_observer_findings as s13); detect_blocked_by,
+  # detect_initiative_dispatch and detect_workspace_config run in the
+  # separate fleet-wide path, not this per-ticket sweep.
+  local decl_count loop_count label_count
+  # Unique slot names, not raw line count — detect_abandoned (s5) is
+  # legitimately assigned in both the held and non-held branches.
+  decl_count=$(command grep -oE '^\s*s[0-9]+=\$\(detect_' "$LIB_DIR/fleet-detect.sh" |
+    command grep -oE 's[0-9]+' | sort -u | wc -l)
+  loop_count=$(command grep -oE '"\$s[0-9]+"' "$LIB_DIR/fleet-detect.sh" | sort -u | wc -l)
+  label_count=$(command grep -cE '\[ "\$s[0-9]+" -ge 1 \]' "$LIB_DIR/fleet-detect.sh")
+  [ "$decl_count" -eq 13 ] && [ "$loop_count" -eq 13 ] && [ "$label_count" -eq 13 ]
+}
+
+test_observer_findings_never_escalates_past_warn_via_fleet_detect_all() {
+  # Recent timestamps so only this detector fires — an old default
+  # timestamp would also trip zombie/abandoned and the aggregate max_sev
+  # would say nothing about this detector's own cap.
+  local ws now
+  ws=$(_setup_workspace)
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  _plog "$ws" "CRE-9" "IMPLEMENT" "implement" "waiting" "agent launched" "$now"
+  _plog "$ws" "CRE-9" "META" "observer-finding" "done" "type=UNEXPECTED_TOOL sev=HIGH gen=1 fp=abc" "$now"
+  source "$LIB_DIR/fleet-detect.sh"
+  local json
+  json=$(fleet_detect_all "$ws")
+  rm -rf "$ws"
+  echo "$json" | jq -e '.pipelines[0].severity == 1 and (.pipelines[0].anomalies | contains("observer-findings"))' >/dev/null
+}
+
 test_gate_stop_retryable_returns_restart() {
   local ws
   ws=$(_setup_workspace)
@@ -1204,7 +1298,13 @@ for fn in \
   test_gate_stop_from_gate_check_detected \
   test_initiative_dispatch_notes_stop_file \
   test_initiative_dispatch_no_stop_note_when_unstopped \
-  test_observer_finding_line_does_not_change_phase_failure_verdict; do
+  test_observer_finding_line_does_not_change_phase_failure_verdict \
+  test_observer_findings_high_in_current_bracket_returns_warn \
+  test_observer_findings_warn_severity_finding_does_not_escalate \
+  test_observer_findings_no_open_bracket_returns_ok \
+  test_observer_findings_from_a_closed_earlier_bracket_are_not_reflagged \
+  test_observer_findings_never_escalates_past_warn_via_fleet_detect_all \
+  test_fleet_detect_all_runs_and_reports_every_per_ticket_detector; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

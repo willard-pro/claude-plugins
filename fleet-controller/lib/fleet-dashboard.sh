@@ -43,6 +43,30 @@ _postmortem_issue_count() {
   echo "${_filed:-0}"
 }
 
+# ── Observer findings summary (agent-observer Inc 4) ─────────────────────────
+# Reads {tid}-*-findings.jsonl directly (bash, zero LLM) rather than the
+# SQLite store — the dashboard has never depended on the store being present
+# (fleet_detect_all's own detectors read pipeline/activity logs directly),
+# and findings.jsonl is the same durable file the store itself ingests from.
+# Usage: _observer_findings_summary <tid> <workspace>
+_observer_findings_summary() {
+  local tid="$1"
+  local workspace="${2:-./logs}"
+  local high=0 warn=0 f h w
+  for f in "${workspace}/${tid}"-*-findings.jsonl; do
+    [ -f "$f" ] || continue
+    h=$(jq -s '[.[] | select(.severity=="HIGH")] | length' "$f" 2>/dev/null || echo 0)
+    w=$(jq -s '[.[] | select(.severity=="WARN")] | length' "$f" 2>/dev/null || echo 0)
+    high=$((high + ${h:-0}))
+    warn=$((warn + ${w:-0}))
+  done
+  if [ "$high" -eq 0 ] && [ "$warn" -eq 0 ]; then
+    echo "-"
+  else
+    echo "${high}H/${warn}W"
+  fi
+}
+
 # ── Severity info helper ─────────────────────────────────────────────────────────
 # Combined icon + label for a severity level.
 # When FLEET_AUTO_RESTART=false, severity 3 (RESTART) is capped to 2 (KILL).
@@ -105,8 +129,8 @@ fleet_render_dashboard_from_data() {
   fi
 
   # Header
-  printf "%-12s %-12s %-6s %-8s %-9s %s\n" "TICKET" "PHASE" "STALL" "SEV" "AUTO-RETRO" "ANOMALIES"
-  printf "%-12s %-12s %-6s %-8s %-9s %s\n" "------" "------" "----" "--" "----------" "--------"
+  printf "%-12s %-12s %-6s %-8s %-9s %-9s %s\n" "TICKET" "PHASE" "STALL" "SEV" "AUTO-RETRO" "FINDINGS" "ANOMALIES"
+  printf "%-12s %-12s %-6s %-8s %-9s %-9s %s\n" "------" "------" "----" "--" "----------" "--------" "--------"
 
   # Sort by severity descending, then by ticket ID
   echo "$data" | jq -r '.pipelines | sort_by([-.severity, .tid]) | .[] | "\(.tid)|\(.phase)|\(.hb_age_secs)|\(.severity)|\(.anomalies)"' | while IFS='|' read -r tid phase hb_age sev anomalies; do
@@ -126,7 +150,10 @@ fleet_render_dashboard_from_data() {
     pm_count=$(_postmortem_issue_count "$tid" "$workspace")
     local pm_str="${pm_count} open"
 
-    printf "%-12s %-12s %-6s %s %-9s %s\n" "${tid}" "${phase}" "${stall_str}" "${icon}${label}" "${pm_str}" "${anomalies}"
+    local findings_str
+    findings_str=$(_observer_findings_summary "$tid" "$workspace")
+
+    printf "%-12s %-12s %-6s %s %-9s %-9s %s\n" "${tid}" "${phase}" "${stall_str}" "${icon}${label}" "${pm_str}" "${findings_str}" "${anomalies}"
   done
 
   echo ""
@@ -181,11 +208,13 @@ fleet_write_report_from_data() {
 
     echo "## Health Table"
     echo ""
-    echo "| Ticket | Phase | Stall | Severity | Anomalies |"
-    echo "|--------|-------|-------|----------|-----------|"
+    echo "| Ticket | Phase | Stall | Severity | Findings | Anomalies |"
+    echo "|--------|-------|-------|----------|----------|-----------|"
 
-    echo "$data" | jq -r '.pipelines | sort_by([-.severity, .tid]) | .[] | "| \(.tid) | \(.phase) | \(.hb_age_secs)s | \(.severity) | \(.anomalies) |"' | while IFS= read -r row; do
-      echo "$row"
+    echo "$data" | jq -r '.pipelines | sort_by([-.severity, .tid]) | .[] | "\(.tid)|\(.phase)|\(.hb_age_secs)|\(.severity)|\(.anomalies)"' | while IFS='|' read -r tid phase hb_age sev anomalies; do
+      local findings_str
+      findings_str=$(_observer_findings_summary "$tid" "$workspace")
+      echo "| ${tid} | ${phase} | ${hb_age}s | ${sev} | ${findings_str} | ${anomalies} |"
     done
 
     echo ""
