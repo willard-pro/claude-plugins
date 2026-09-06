@@ -50,6 +50,14 @@ try:
 except ImportError:  # pragma: no cover - phase dispatch unavailable
     _phase_mod = None
 
+# Hold reconciliation. Imported defensively like the store above: a held
+# ticket that cannot be reconciled this cycle simply stays held and is
+# retried next pass — not a reason to take the supervisor down.
+try:
+    from fleetd import gate_hold as _gate_hold_mod
+except ImportError:  # pragma: no cover - gate hold unavailable
+    _gate_hold_mod = None
+
 
 # ── Configuration ──────────────────────────────────────────────────────────
 
@@ -1052,6 +1060,28 @@ def _store_record_position(state_dir, tid, step_id, source='dispatch'):
 def _store_get_position(state_dir, tid):
     return _store_do(state_dir, lambda st: st.get_position(tid),
                      'get position')
+
+
+def _store_ticket_is_held(state_dir, tid):
+    """Whether `tid`'s row currently has `held = 1`.
+
+    Routed through `_store_do` like every other store call: a missing or
+    disabled store degrades to "not held" rather than blocking dispatch —
+    the guard's absence must never be the thing that stalls a ticket.
+    """
+    def _run(st):
+        row = st.get_ticket(tid)
+        return bool(row and row.get('held'))
+    return bool(_store_do(state_dir, _run, 'held check'))
+
+
+def _store_held_tickets(state_dir):
+    return _store_do(state_dir, lambda st: st.held_tickets(), 'held tickets') or []
+
+
+def _store_release_hold(state_dir, tid, hold_id):
+    return _store_do(state_dir, lambda st: st.release_hold(tid, hold_id),
+                     'release hold')
 
 
 # ── OTel exporter lifecycle (D11, task 8.5) ────────────────────────────────
@@ -2354,6 +2384,10 @@ class Supervisor:
         self._otel_pid = None
         self._otel_failures = 0
         self._otel_next_attempt = 0.0
+        # Hold reconciliation's own cadence (design.md D5): `None` means
+        # "never run", so the first cycle always probes any held ticket
+        # rather than waiting a full interval after a restart.
+        self._hold_reconcile_last_run = None
         # Deterministic-failure circuit breaker (worker-reap-recovery task
         # 3.8): a streak of fast, non-zero exits across the fleet — expired
         # auth, a bad CLAUDE_CMD — halts dispatch rather than burning
@@ -3218,6 +3252,17 @@ class Supervisor:
                 )
                 continue
 
+            # A held ticket is parked, not abandoned: leave its entry in
+            # place so dispatch resumes the moment the hold clears, rather
+            # than dropping it on the floor (design.md D8 — this is an
+            # ordering guarantee, not a timing one, because the row is
+            # always written before any release path can run).
+            if _store_ticket_is_held(self._state_dir, tid):
+                print(
+                    f"fleetd[{os.getpid()}]: deferring {tid} — held"
+                )
+                continue
+
             # The supervisor assigns generations, not the queue entry.
             # This ensures a restarted worker always gets a generation
             # higher than any fenced predecessor.
@@ -3485,6 +3530,53 @@ class Supervisor:
         except (OSError, subprocess.SubprocessError):
             pass
 
+    def _hold_reconcile_pass(self):
+        """Probe every held ticket's release predicate and apply the result.
+
+        `held_tickets()` -> `reconcile_hold` per row -> `release_hold` on
+        `RELEASE`, a gate-stop pipeline-log line on `GATE_STOP`, nothing on
+        `HOLD`/`UNAVAILABLE`. Fail-soft throughout, like every other store
+        interaction: a reconcile failure for one ticket must not stop the
+        pass from reaching the rest, and a store outage just means every
+        held ticket stays held until the next pass (design.md D5).
+
+        Called from `run_observe`'s cycle body only — never from
+        `phase_dispatch.py` or any Group-10-flagged path, where it would ship
+        fully tested and never execute (design.md D5, task 7.3).
+        """
+        if _gate_hold_mod is None or _phase_mod is None:
+            return
+        rows = _store_held_tickets(self._state_dir)
+        if not rows:
+            return
+        try:
+            table = _phase_mod.DispatchTable.load()
+        except Exception as exc:  # noqa: BLE001 - a bad table must not wedge the loop
+            print(f"fleetd[{os.getpid()}]: hold reconcile: failed to load "
+                  f"dispatch table: {exc}", file=sys.stderr)
+            return
+        for row in rows:
+            tid = row.get('tid')
+            if not tid:
+                continue
+            log_file = self._state_dir / f'{tid}-pipeline.log'
+            try:
+                decision = _gate_hold_mod.reconcile_hold(
+                    table, tid, row, str(log_file),
+                    lib_dir=str(self._fleet_lib_dir))
+            except Exception as exc:  # noqa: BLE001 - one ticket must not sink the pass
+                print(f"fleetd[{os.getpid()}]: hold reconcile failed for "
+                      f"{tid}: {exc}", file=sys.stderr)
+                continue
+
+            if decision.action == _gate_hold_mod.RELEASE:
+                _store_release_hold(self._state_dir, tid, decision.hold_id)
+            elif decision.action == _gate_hold_mod.GATE_STOP:
+                _append_pipeline_log_line(
+                    self._state_dir, tid, 'META', 'gate-stop', 'fail',
+                    decision.gate_stop_code or 'GATE_HOLD_RECONCILE_FAILED')
+            # HOLD / UNAVAILABLE: the row is deliberately left untouched.
+
     # ── run ─────────────────────────────────────────────────────────────────
 
     # ── OTel exporter supervision ──────────────────────────────────────────
@@ -3628,6 +3720,15 @@ class Supervisor:
 
                 # 4. Consume spawn queue (no-op when spawn is disabled).
                 self._consume_queue(cmd_override=cmd_override)
+
+                # 4a. Hold-reconciliation pass, on its own cadence — a Linear
+                # round trip per held ticket, not the 30s detection interval
+                # (design.md D5). Must stay in this live loop, never the
+                # Group-10-flagged phase-dispatch path (task 7.3).
+                if _gate_hold_mod is not None and _gate_hold_mod.is_due(
+                        self._hold_reconcile_last_run):
+                    self._hold_reconcile_pass()
+                    self._hold_reconcile_last_run = time.time()
 
                 # 4b. Restart the exporter if it died (no-op when disabled,
                 # already running, or still inside its backoff window).

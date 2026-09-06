@@ -124,6 +124,133 @@ class TestSchema(StoreTestCase):
         with self._open() as st:
             self.assertEqual(st.version(), store.SCHEMA_VERSION)
 
+    def test_newer_version_message_names_both_and_does_not_claim_rebuildable(self):
+        with self._open():
+            pass
+        db = store.store_path(self.ws)
+        conn = sqlite3.connect(str(db))
+        conn.execute('UPDATE schema_version SET version = 99 WHERE id = 1')
+        conn.commit()
+        conn.close()
+
+        with self.assertRaises(store.SchemaVersionError) as ctx:
+            store.open_store(self.ws)
+        message = str(ctx.exception)
+        self.assertIn('99', message)
+        self.assertIn(str(store.SCHEMA_VERSION), message)
+        self.assertNotIn('rebuild', message.lower())
+
+    def test_missing_schema_version_row_is_refused(self):
+        with self._open():
+            pass
+        db = store.store_path(self.ws)
+        conn = sqlite3.connect(str(db))
+        conn.execute('DELETE FROM schema_version')
+        conn.commit()
+        conn.close()
+
+        with self.assertRaises(store.SchemaVersionError):
+            store.open_store(self.ws)
+
+    def test_equal_version_open_writes_nothing(self):
+        with self._open():
+            pass
+        db = store.store_path(self.ws)
+        before = sqlite3.connect(str(db)).execute(
+            'SELECT applied_at FROM schema_version WHERE id = 1').fetchone()[0]
+        with self._open():
+            pass
+        after = sqlite3.connect(str(db)).execute(
+            'SELECT applied_at FROM schema_version WHERE id = 1').fetchone()[0]
+        self.assertEqual(before, after)
+
+
+# ── Forward migration ────────────────────────────────────────────────────────
+
+class TestMigration(StoreTestCase):
+    """Exercises store.py's migration machinery with a fabricated future
+    version, since the real v1->v2 step is declared non-additive and never
+    migrates (see TestNonAdditiveGap below)."""
+
+    def setUp(self):
+        super().setUp()
+        self._orig_version = store.SCHEMA_VERSION
+        self._orig_migrations = dict(store._MIGRATIONS)
+
+    def tearDown(self):
+        store.SCHEMA_VERSION = self._orig_version
+        store._MIGRATIONS = self._orig_migrations
+        super().tearDown()
+
+    def _bump_to_fake_additive_version(self, statements):
+        store.SCHEMA_VERSION = self._orig_version + 1
+        store._MIGRATIONS = dict(self._orig_migrations)
+        store._MIGRATIONS[store.SCHEMA_VERSION] = {
+            'additive': True, 'statements': statements}
+
+    def test_additive_gap_migrates_and_preserves_rows(self):
+        with self._open() as st:
+            st.record_position('CRE-1', 'STEP_4')
+
+        self._bump_to_fake_additive_version(
+            ["ALTER TABLE tickets ADD COLUMN fake_probe TEXT NOT NULL DEFAULT ''"])
+
+        with store.open_store(self.ws) as st:
+            self.assertEqual(st.version(), store.SCHEMA_VERSION)
+            ticket = st.get_ticket('CRE-1')
+            columns = {r['name'] for r in
+                      st.conn.execute('PRAGMA table_info(tickets)')}
+        self.assertIn('fake_probe', columns)
+        self.assertEqual(ticket['position'], 'STEP_4')
+
+    def test_migration_is_atomic_on_a_failing_step(self):
+        with self._open():
+            pass
+
+        self._bump_to_fake_additive_version([
+            "ALTER TABLE tickets ADD COLUMN fake_probe TEXT NOT NULL DEFAULT ''",
+            'THIS IS NOT VALID SQL',
+        ])
+
+        with self.assertRaises(store.SchemaVersionError):
+            store.open_store(self.ws)
+
+        db = store.store_path(self.ws)
+        conn = sqlite3.connect(str(db))
+        version = conn.execute(
+            'SELECT version FROM schema_version WHERE id = 1').fetchone()[0]
+        columns = {r[1] for r in conn.execute('PRAGMA table_info(tickets)')}
+        conn.close()
+        self.assertEqual(version, self._orig_version)
+        self.assertNotIn('fake_probe', columns)
+
+    def test_migration_declaration_is_data_not_inferred(self):
+        """Each version carries its own steps and additive flag; nothing
+        derives additivity by diffing the live schema against schema.sql."""
+        for version, decl in store._MIGRATIONS.items():
+            self.assertIn('additive', decl)
+            self.assertIn('statements', decl)
+            self.assertIsInstance(decl['statements'], list)
+
+
+class TestNonAdditiveGap(StoreTestCase):
+
+    def test_v1_store_is_refused_with_recreate_instruction(self):
+        with self._open():
+            pass
+        db = store.store_path(self.ws)
+        conn = sqlite3.connect(str(db))
+        conn.execute('UPDATE schema_version SET version = 1 WHERE id = 1')
+        conn.commit()
+        conn.close()
+
+        with self.assertRaises(store.SchemaVersionError) as ctx:
+            store.open_store(self.ws)
+        message = str(ctx.exception)
+        self.assertIn('non-additive', message)
+        self.assertIn('recreated', message)
+        self.assertNotIn('rebuild', message.lower())
+
 
 # ── Ingestion ────────────────────────────────────────────────────────────────
 
@@ -287,7 +414,7 @@ class TestRebuild(StoreTestCase):
         with self._open() as st:
             st.ingest_workspace(self.ws)
             st.record_position('CRE-1', 'STEP_4')
-            st.set_gate_hold('CRE-1', True, 'complex')
+            st.set_hold('CRE-1', 'gate', 'hold:CRE-1:g0:a1', 'complex')
             wid = st.record_worker_spawn('CRE-1', pid=os.getpid(), generation=3)
 
             st.rebuild_projections(self.ws)
@@ -297,7 +424,7 @@ class TestRebuild(StoreTestCase):
         # These cannot be derived from the logs, which is exactly why fleetd
         # writes them first-hand — a rebuild must not touch them.
         self.assertEqual(ticket['position'], 'STEP_4')
-        self.assertEqual(ticket['gate_held'], 1)
+        self.assertEqual(ticket['held'], 1)
         self.assertEqual(len(workers), 1)
         self.assertEqual(workers[0]['id'], wid)
 
@@ -356,22 +483,119 @@ class TestTicketState(StoreTestCase):
             with self.assertRaises(ValueError):
                 st.record_position('CRE-1', 'STEP_2', source='guessed')
 
-    def test_gate_hold_survives_reopen(self):
+    def test_hold_survives_reopen(self):
         with self._open() as st:
-            st.set_gate_hold('CRE-1', True, 'awaiting human approval')
+            st.set_hold('CRE-1', 'gate', 'hold:CRE-1:g0:a1',
+                       'awaiting human approval')
         with self._open() as st:
             ticket = st.get_ticket('CRE-1')
         # An indefinite pause is a row, not a process that must stay alive.
-        self.assertEqual(ticket['gate_held'], 1)
-        self.assertEqual(ticket['gate_hold_reason'], 'awaiting human approval')
+        self.assertEqual(ticket['held'], 1)
+        self.assertEqual(ticket['hold_kind'], 'gate')
+        self.assertEqual(ticket['hold_id'], 'hold:CRE-1:g0:a1')
+        self.assertEqual(ticket['hold_reason'], 'awaiting human approval')
 
-    def test_gate_hold_release_clears_the_reason(self):
+    def test_release_clears_kind_and_hold_id_but_stamps_released_at(self):
         with self._open() as st:
-            st.set_gate_hold('CRE-1', True, 'awaiting approval')
-            st.set_gate_hold('CRE-1', False)
+            st.set_hold('CRE-1', 'gate', 'hold:CRE-1:g0:a1', 'awaiting approval')
+            st.release_hold('CRE-1', 'hold:CRE-1:g0:a1')
             ticket = st.get_ticket('CRE-1')
-        self.assertEqual(ticket['gate_held'], 0)
-        self.assertEqual(ticket['gate_hold_reason'], '')
+        self.assertEqual(ticket['held'], 0)
+        self.assertEqual(ticket['hold_kind'], '')
+        self.assertEqual(ticket['hold_id'], '')
+        self.assertTrue(ticket['released_at'])
+
+
+# ── Hold transitions (compare-and-swap) ──────────────────────────────────────
+
+class TestHoldTransitions(StoreTestCase):
+
+    def test_mint_hold_id_format(self):
+        with self._open() as st:
+            self.assertEqual(
+                st.mint_hold_id('CRE-9', generation=7, attempt=1),
+                'hold:CRE-9:g7:a1')
+
+    def test_holding_an_already_held_ticket_is_a_noop(self):
+        with self._open() as st:
+            first = st.set_hold('CRE-1', 'gate', 'hold:CRE-1:g0:a1', 'r1')
+            before = st.get_ticket('CRE-1')
+            second = st.set_hold('CRE-1', 'gate', 'hold:CRE-1:g0:a2', 'r2')
+            after = st.get_ticket('CRE-1')
+        self.assertEqual(first, 1)
+        self.assertEqual(second, 0)
+        # The second call changed nothing — same hold_id, reason, held_at.
+        self.assertEqual(before, after)
+
+    def test_release_with_the_wrong_hold_id_is_a_noop(self):
+        with self._open() as st:
+            st.set_hold('CRE-1', 'gate', 'hold:CRE-1:g0:a1', 'r')
+            rowcount = st.release_hold('CRE-1', 'hold:CRE-1:g0:a2')
+            ticket = st.get_ticket('CRE-1')
+        self.assertEqual(rowcount, 0)
+        self.assertEqual(ticket['held'], 1)
+
+    def test_releasing_an_unheld_ticket_is_a_noop(self):
+        with self._open() as st:
+            rowcount = st.release_hold('CRE-1', 'hold:CRE-1:g0:a1')
+        self.assertEqual(rowcount, 0)
+
+    def test_two_identical_set_hold_calls_converge(self):
+        """Exactly one caller sees rowcount 1; the resulting row is the same
+        one a single call would have produced (design.md D2)."""
+        with self._open() as st:
+            a = st.set_hold('CRE-1', 'gate', 'hold:CRE-1:g0:a1', 'r')
+            b = st.set_hold('CRE-1', 'gate', 'hold:CRE-1:g0:a1', 'r')
+            ticket = st.get_ticket('CRE-1')
+        self.assertEqual(sorted([a, b]), [0, 1])
+        self.assertEqual(ticket['hold_id'], 'hold:CRE-1:g0:a1')
+        self.assertEqual(ticket['hold_attempts'], 1)
+
+    def test_hold_release_hold_leaves_attempts_at_two(self):
+        with self._open() as st:
+            st.set_hold('CRE-1', 'gate', 'hold:CRE-1:g0:a1', 'r1')
+            st.release_hold('CRE-1', 'hold:CRE-1:g0:a1')
+            st.set_hold('CRE-1', 'gate', 'hold:CRE-1:g0:a2', 'r2')
+            ticket = st.get_ticket('CRE-1')
+        self.assertEqual(ticket['hold_attempts'], 2)
+
+    def test_held_tickets_are_oldest_first_and_carry_kind_and_id(self):
+        with self._open() as st:
+            st.set_hold('CRE-2', 'gate', 'hold:CRE-2:g0:a1', 'r')
+            st.set_hold('CRE-1', 'gate', 'hold:CRE-1:g0:a1', 'r')
+            # held_at has second resolution — both holds can land in the same
+            # second, so pin distinct values to make the ordering assertion
+            # unambiguous rather than racing the clock.
+            st.conn.execute(
+                "UPDATE tickets SET held_at = '2026-01-01T00:00:00Z' "
+                "WHERE tid = 'CRE-2'")
+            st.conn.execute(
+                "UPDATE tickets SET held_at = '2026-01-01T00:00:05Z' "
+                "WHERE tid = 'CRE-1'")
+            st.conn.commit()
+            rows = st.held_tickets()
+        self.assertEqual([r['tid'] for r in rows], ['CRE-2', 'CRE-1'])
+        for r in rows:
+            self.assertEqual(r['hold_kind'], 'gate')
+            self.assertTrue(r['hold_id'])
+
+    def test_ties_on_held_at_break_by_tid_ascending(self):
+        with self._open() as st:
+            st.set_hold('CRE-2', 'gate', 'hold:CRE-2:g0:a1', 'r')
+            st.set_hold('CRE-1', 'gate', 'hold:CRE-1:g0:a1', 'r')
+            st.conn.execute(
+                "UPDATE tickets SET held_at = '2026-01-01T00:00:00Z' "
+                "WHERE tid IN ('CRE-1', 'CRE-2')")
+            st.conn.commit()
+            rows = st.held_tickets()
+        self.assertEqual([r['tid'] for r in rows], ['CRE-1', 'CRE-2'])
+
+    def test_hold_kind_is_constrained(self):
+        with self._open() as st:
+            st.update_ticket('CRE-1')
+            with self.assertRaises(sqlite3.IntegrityError):
+                st.conn.execute(
+                    "UPDATE tickets SET hold_kind = 'bogus' WHERE tid = 'CRE-1'")
 
     def test_ingested_ticket_is_not_fleetd_owned(self):
         with self._open() as st:

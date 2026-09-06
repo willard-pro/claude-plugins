@@ -1,4 +1,4 @@
--- fleet-controller state store — schema v1.
+-- fleet-controller state store — schema v2.
 --
 -- One SQLite database holding fleet-controller's operational state, replacing
 -- the per-ticket JSON file conventions (run registry, generation fence) and the
@@ -41,9 +41,10 @@ CREATE TABLE IF NOT EXISTS schema_version (
 -- log; `position_source` distinguishes a position fleetd wrote from one derived
 -- once when adopting a ticket a human started.
 --
--- The gate-hold columns are the answer to "where does an indefinite pause
--- live across a fleetd restart": a held ticket is a row, not a process that
--- must stay alive.
+-- The hold columns are the answer to "where does an indefinite pause live
+-- across a fleetd restart": a held ticket is a row, not a process that must
+-- stay alive. The columns name no particular kind of hold — `hold_kind`
+-- selects the release predicate that varies by kind; the row shape does not.
 CREATE TABLE IF NOT EXISTS tickets (
   tid                TEXT PRIMARY KEY,
 
@@ -57,10 +58,26 @@ CREATE TABLE IF NOT EXISTS tickets (
   owner              TEXT    NOT NULL DEFAULT 'manual'
                        CHECK (owner IN ('fleetd', 'manual')),
 
-  -- Gate hold
-  gate_held          INTEGER NOT NULL DEFAULT 0,
-  gate_hold_reason   TEXT    NOT NULL DEFAULT '',
-  gate_held_at       TEXT    NOT NULL DEFAULT '',
+  -- Hold. Kind-agnostic: a hold is a row regardless of what put the ticket
+  -- there, which is what lets an indefinite wait for a human survive a
+  -- fleetd restart without keeping anything alive. hold_id is minted by
+  -- fleetd (`hold:{tid}:g{generation}:a{attempt}`) and is the compare-and-
+  -- swap guard both set_hold and release_hold key on — rowcount, not a
+  -- lock, is the idempotency proof (design.md D2). notify_state/notified_at/
+  -- escalated_at are created here and written by nothing yet — a column
+  -- with no writer is cheaper than a second migration once a notifier
+  -- lands.
+  held               INTEGER NOT NULL DEFAULT 0,
+  hold_kind          TEXT    NOT NULL DEFAULT '' CHECK (hold_kind IN ('', 'gate', 'human')),
+  hold_id            TEXT    NOT NULL DEFAULT '',
+  hold_reason        TEXT    NOT NULL DEFAULT '',
+  held_at            TEXT    NOT NULL DEFAULT '',
+  hold_generation    INTEGER NOT NULL DEFAULT 0,
+  hold_attempts      INTEGER NOT NULL DEFAULT 0,
+  notify_state       TEXT    NOT NULL DEFAULT '' CHECK (notify_state IN ('', 'pending', 'sent', 'failed')),
+  notified_at        TEXT    NOT NULL DEFAULT '',
+  escalated_at       TEXT    NOT NULL DEFAULT '',
+  released_at        TEXT    NOT NULL DEFAULT '',
 
   -- Router-managed cycle counters. Caller-owned state: phase-result's ATTEMPT
   -- field is explicitly not the source of truth for these
@@ -89,6 +106,7 @@ CREATE TABLE IF NOT EXISTS tickets (
 );
 
 CREATE INDEX IF NOT EXISTS idx_tickets_owner ON tickets (owner);
+CREATE INDEX IF NOT EXISTS idx_tickets_held  ON tickets (held);
 
 -- ── workers (fleetd-authored, AUTHORITATIVE) ─────────────────────────────────
 -- One row per spawned process. `phase` is '' for a ticket-level worker (today's

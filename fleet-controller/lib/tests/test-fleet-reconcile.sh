@@ -251,6 +251,25 @@ test_classify_gate_held_crash_before_finalize() {
   }
 }
 
+test_classify_unrecognised_hold_kind_still_gate_held() {
+  # Every hold kind means the same thing to this classifier — "parked, not
+  # dispatchable" — so an unrecognised future kind must still classify as
+  # gate-held via the `held: ` prefix match, never fall through to `done`
+  # (which is documented as permanent and never reconsidered).
+  local ws
+  ws=$(_setup_workspace)
+  local log_file="${ws}/CRE-12-pipeline.log"
+  _plog_line "$log_file" "GATE" "gate" "start" "checking"
+  _plog_line "$log_file" "META" "outcome" "info" "held: some-future-kind"
+
+  local state
+  state=$(fleet_ticket_terminal_state "CRE-12" "$log_file")
+  [ "$state" = "gate-held" ] || {
+    echo "expected gate-held for an unrecognised hold kind, got $state" >&2
+    return 1
+  }
+}
+
 test_classify_incomplete() {
   local ws
   ws=$(_setup_workspace)
@@ -977,6 +996,7 @@ _run "classify fleet-kill after gate-stop as gate-stopped" test_classify_fleet_k
 _run "classify kill-unverified as incomplete" test_classify_kill_unverified_incomplete
 _run "classify gate-held" test_classify_gate_held
 _run "classify gate-held crash before finalize" test_classify_gate_held_crash_before_finalize
+_run "classify unrecognised hold kind as gate-held" test_classify_unrecognised_hold_kind_still_gate_held
 _run "classify incomplete" test_classify_incomplete
 _run "classify missing log" test_classify_missing_log
 _run "classify dead-letter terminal" test_classify_dead_letter_terminal

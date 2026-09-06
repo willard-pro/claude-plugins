@@ -984,6 +984,13 @@ class SpawnAndReapTest(unittest.TestCase):
         # Gate-held outcome → waiting on the human, not terminal.
         self.assertFalse(self._log_terminal(
             '2026-01-01T00:00:00Z|META|outcome|info|held: gate\n'))
+        # An unrecognised hold kind still matches the `held: ` prefix → not
+        # terminal, never `done`. Documented pairwise-sync pair with the bash
+        # classifier's own `held: some-future-kind` regression test
+        # (lib/tests/test-fleet-reconcile.sh) — a divergence here is exactly
+        # the failure this pin exists to catch.
+        self.assertFalse(self._log_terminal(
+            '2026-01-01T00:00:00Z|META|outcome|info|held: some-future-kind\n'))
         # Gate-held marker as last line (crash before finalize) → not terminal.
         self.assertFalse(self._log_terminal(
             '2026-01-01T00:00:00Z|META|gate-held|info|waiting approval\n'))
@@ -1090,6 +1097,270 @@ class SpawnAndReapTest(unittest.TestCase):
                              "should not consume when spawn is disabled")
         finally:
             sup.release_lock()
+
+
+class HoldGuardTest(unittest.TestCase):
+    """A held ticket is never spawned (design.md D8, task 5)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _append_queue_entry(self, tid):
+        queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+        with open(queue_file, 'a') as f:
+            f.write(json.dumps({'tid': tid, 'reason': 'test'}) + '\n')
+
+    def test_held_ticket_is_not_spawned_and_its_entry_survives(self):
+        from fleetd import store
+        from fleetd.supervisor import Supervisor
+
+        with store.open_store(self.workspace) as st:
+            st.set_hold('TST-H1', 'gate', 'hold:TST-H1:g0:a1', 'complex')
+        self._append_queue_entry('TST-H1')
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            consumed = sup._consume_queue(
+                cmd_override=_make_worker_cmd(sleep_secs=5))
+            self.assertEqual(consumed, set(),
+                             "a held ticket must not be spawned")
+            self.assertIsNone(sup._children.get('TST-H1'))
+            queue_file = self.workspace / 'fleet-default-spawn-queue.jsonl'
+            self.assertIn('TST-H1', queue_file.read_text(),
+                          "the queue entry must survive, not be dropped")
+        finally:
+            sup.release_lock()
+
+    def test_ticket_spawns_once_its_hold_is_released(self):
+        from fleetd import store
+        from fleetd.supervisor import Supervisor
+
+        with store.open_store(self.workspace) as st:
+            st.set_hold('TST-H2', 'gate', 'hold:TST-H2:g0:a1', 'complex')
+        self._append_queue_entry('TST-H2')
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=True,
+            max_concurrent=1,
+        )
+        sup.acquire_lock()
+        try:
+            consumed = sup._consume_queue(
+                cmd_override=_make_worker_cmd(sleep_secs=5))
+            self.assertEqual(consumed, set())
+
+            with store.open_store(self.workspace) as st:
+                st.release_hold('TST-H2', 'hold:TST-H2:g0:a1')
+
+            consumed = sup._consume_queue(
+                cmd_override=_make_worker_cmd(sleep_secs=5))
+            self.assertEqual(consumed, {'TST-H2'},
+                             "a released ticket must spawn on the next pass")
+        finally:
+            sup.release_lock()
+
+    def test_disabled_store_degrades_to_todays_behaviour(self):
+        """With the store unavailable, the consume path must behave exactly
+        as it did before this change — the guard's absence must never be
+        what blocks dispatch."""
+        from fleetd.supervisor import Supervisor
+
+        self._append_queue_entry('TST-H3')
+        old_env = os.environ.get('FLEET_STORE_ENABLE')
+        os.environ['FLEET_STORE_ENABLE'] = 'false'
+        try:
+            import fleetd.supervisor as supervisor_mod
+            supervisor_mod.FLEET_STORE_ENABLE = False
+
+            sup = Supervisor(
+                state_dir=str(self.workspace),
+                pidfile=str(self.workspace / 'test.pid'),
+                spawn_enabled=True,
+                max_concurrent=1,
+            )
+            sup.acquire_lock()
+            try:
+                consumed = sup._consume_queue(
+                    cmd_override=_make_worker_cmd(sleep_secs=5))
+                self.assertEqual(consumed, {'TST-H3'})
+            finally:
+                sup.release_lock()
+        finally:
+            if old_env is None:
+                os.environ.pop('FLEET_STORE_ENABLE', None)
+            else:
+                os.environ['FLEET_STORE_ENABLE'] = old_env
+            import fleetd.supervisor as supervisor_mod
+            supervisor_mod.FLEET_STORE_ENABLE = (
+                os.environ.get('FLEET_STORE_ENABLE', 'true') != 'false')
+
+
+class HoldReconcilePassTest(unittest.TestCase):
+    """The hold-reconcile pass is wired into run_observe's live loop on its
+    own cadence, never the phase-dispatch path (design.md D5, task 7)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _supervisor(self):
+        from fleetd.supervisor import Supervisor
+        return Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            spawn_enabled=False,
+        )
+
+    def test_call_site_is_hold_reconcile_pass_method(self):
+        """Load-bearing per design.md D5: a reconciler wired to the dormant
+        phase-dispatch path is indistinguishable from a working one whenever
+        the held set is empty. This proves `run_observe`'s live loop is the
+        method that invokes `_hold_reconcile_pass` — not merely that
+        behaviour looks right on an empty fleet — using the same
+        stub-and-SystemExit pattern as StartupReconciliationTest above.
+        """
+        from fleetd.supervisor import Supervisor
+
+        sup = Supervisor(
+            state_dir=str(self.workspace),
+            pidfile=str(self.workspace / 'test.pid'),
+            port=_find_free_port(),
+            cycle_interval=0.05,
+        )
+        calls = []
+
+        def record(name):
+            def _fn(*args, **kwargs):
+                calls.append(name)
+                return None
+            return _fn
+
+        sup.scan_workers = record('scan_workers')
+        sup.reconcile_orphaned_tickets = record('reconcile_orphaned_tickets')
+        sup.run_detection_cycle = record('run_detection_cycle')
+        sup._reap_children = record('_reap_children')
+        sup._process_kill_requests = record('_process_kill_requests')
+        sup._consume_queue = record('_consume_queue')
+
+        def _hold_reconcile_pass():
+            calls.append('_hold_reconcile_pass')
+            raise SystemExit(0)
+
+        sup._hold_reconcile_pass = _hold_reconcile_pass
+
+        with self.assertRaises(SystemExit):
+            sup.run_observe()
+
+        self.assertIn('_hold_reconcile_pass', calls,
+                      "run_observe must call _hold_reconcile_pass")
+        # `_hold_reconcile_last_run` starts None, and gate_hold.is_due(None)
+        # is always True — so the very first cycle must probe, not wait a
+        # full interval after a restart.
+        self.assertLess(calls.index('_consume_queue'),
+                        calls.index('_hold_reconcile_pass'),
+                        "the pass runs after queue-consume, per task 7.2")
+
+    def test_pass_respects_its_interval_across_cycles(self):
+        import fleetd.supervisor as supervisor_mod
+
+        sup = self._supervisor()
+        calls = []
+        sup._hold_reconcile_pass = lambda: calls.append(True)
+        sup.acquire_lock()
+        try:
+            # Not due: last run is "now".
+            sup._hold_reconcile_last_run = time.time()
+            if supervisor_mod._gate_hold_mod.is_due(
+                    sup._hold_reconcile_last_run):
+                sup._hold_reconcile_pass()
+            self.assertEqual(calls, [])
+
+            # Due: interval elapsed.
+            sup._hold_reconcile_last_run = time.time() - 3600
+            if supervisor_mod._gate_hold_mod.is_due(
+                    sup._hold_reconcile_last_run):
+                sup._hold_reconcile_pass()
+            self.assertEqual(calls, [True])
+        finally:
+            sup.release_lock()
+
+    def test_held_ticket_is_reprobed_across_two_intervals(self):
+        from fleetd import store
+
+        with store.open_store(self.workspace) as st:
+            st.set_hold('TST-R1', 'gate', 'hold:TST-R1:g0:a1', 'complex')
+
+        sup = self._supervisor()
+        probe_calls = []
+
+        import fleetd.gate_hold as gate_hold_mod
+
+        def _probe(tid, hb_log_file='', lib_dir=None):
+            probe_calls.append(tid)
+            return gate_hold_mod.GATE_ENTRY_HELD, []
+
+        real_run_entry_gate = gate_hold_mod.run_entry_gate
+        gate_hold_mod.run_entry_gate = _probe
+        sup.acquire_lock()
+        try:
+            sup._hold_reconcile_pass()
+            sup._hold_reconcile_pass()
+        finally:
+            gate_hold_mod.run_entry_gate = real_run_entry_gate
+            sup.release_lock()
+        self.assertEqual(probe_calls, ['TST-R1', 'TST-R1'])
+
+    def test_empty_held_set_costs_nothing(self):
+        import fleetd.gate_hold as gate_hold_mod
+
+        sup = self._supervisor()
+        calls = []
+        real_run_entry_gate = gate_hold_mod.run_entry_gate
+        gate_hold_mod.run_entry_gate = lambda *a, **k: calls.append(1)
+        sup.acquire_lock()
+        try:
+            sup._hold_reconcile_pass()
+        finally:
+            gate_hold_mod.run_entry_gate = real_run_entry_gate
+            sup.release_lock()
+        self.assertEqual(calls, [])
+
+    def test_release_decision_calls_release_hold_with_the_rows_own_hold_id(self):
+        from fleetd import store
+        import fleetd.gate_hold as gate_hold_mod
+
+        with store.open_store(self.workspace) as st:
+            st.set_hold('TST-R2', 'gate', 'hold:TST-R2:g0:a1', 'complex')
+
+        sup = self._supervisor()
+        real_run_entry_gate = gate_hold_mod.run_entry_gate
+        gate_hold_mod.run_entry_gate = lambda *a, **k: (
+            gate_hold_mod.GATE_ENTRY_PASS, [])
+        sup.acquire_lock()
+        try:
+            sup._hold_reconcile_pass()
+            with store.open_store(self.workspace) as st:
+                ticket = st.get_ticket('TST-R2')
+        finally:
+            gate_hold_mod.run_entry_gate = real_run_entry_gate
+            sup.release_lock()
+        self.assertEqual(ticket['held'], 0)
+        self.assertEqual(ticket['hold_id'], '')
 
 
 class DualInvocationInterlockTest(unittest.TestCase):
