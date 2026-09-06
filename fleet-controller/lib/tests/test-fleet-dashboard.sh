@@ -122,6 +122,82 @@ test_render_formats_stall_under_1m() {
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# _observer_findings_summary / FINDINGS column tests (agent-observer Inc 4)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_write_finding() {
+  local ws="$1" tid="$2" phase="$3" severity="$4" fp="$5"
+  mkdir -p "$ws"
+  cat <<EOF >>"${ws}/${tid}-${phase}-findings.jsonl"
+{"type":"UNEXPECTED_TOOL","severity":"${severity}","tid":"${tid}","phase":"${phase}","gen":1,"fingerprint":"${fp}","count":1,"first_seen":"2026-09-06T10:00:00Z","last_seen":"2026-09-06T10:00:00Z","evidence":{}}
+EOF
+}
+
+test_findings_summary_no_files_returns_dash() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local out
+  out=$(_observer_findings_summary "WIL-1" "$tmpdir")
+  rm -rf "$tmpdir"
+  [ "$out" = "-" ]
+}
+
+test_findings_summary_counts_high_and_warn_separately() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  _write_finding "$tmpdir" "WIL-1" "appraise" "HIGH" "fp1"
+  _write_finding "$tmpdir" "WIL-1" "appraise" "HIGH" "fp2"
+  _write_finding "$tmpdir" "WIL-1" "implement" "WARN" "fp3"
+  local out
+  out=$(_observer_findings_summary "WIL-1" "$tmpdir")
+  rm -rf "$tmpdir"
+  [ "$out" = "2H/1W" ]
+}
+
+test_findings_summary_ignores_other_tickets() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  _write_finding "$tmpdir" "WIL-2" "appraise" "HIGH" "fp1"
+  local out
+  out=$(_observer_findings_summary "WIL-1" "$tmpdir")
+  rm -rf "$tmpdir"
+  [ "$out" = "-" ]
+}
+
+test_render_includes_findings_column_header() {
+  # The header (and thus the FINDINGS column) is only printed with at least
+  # one active pipeline — an empty fleet takes the early "No active
+  # pipelines" return before the header line.
+  local data='{"summary":{"total":1,"healthy":1,"warn":0,"kill":0,"restart":0},"pipelines":[{"tid":"WIL-1","phase":"IMPLEMENT","hb_age_secs":30,"severity":0,"anomalies":"none"}]}'
+  local output
+  output=$(fleet_render_dashboard_from_data "$data" "/tmp/test-ws")
+  echo "$output" | grep -q "FINDINGS"
+}
+
+test_render_shows_findings_for_a_ticket() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  _write_finding "$tmpdir" "WIL-1" "appraise" "HIGH" "fp1"
+  local data='{"summary":{"total":1,"healthy":0,"warn":1,"kill":0,"restart":0},"pipelines":[{"tid":"WIL-1","phase":"APPRAISE","hb_age_secs":30,"severity":1,"anomalies":"none"}]}'
+  local output
+  output=$(fleet_render_dashboard_from_data "$data" "$tmpdir")
+  rm -rf "$tmpdir"
+  echo "$output" | grep -q "1H/0W"
+}
+
+test_write_report_includes_findings_column() {
+  local tmpdir
+  tmpdir=$(mktemp -d)
+  local data='{"summary":{"total":1,"healthy":1,"warn":0,"kill":0,"restart":0},"pipelines":[{"tid":"WIL-1","phase":"IMPLEMENT","hb_age_secs":30,"severity":0,"anomalies":"none"}]}'
+  fleet_write_report_from_data "$data" "$tmpdir" 2>/dev/null
+  local report_file="$tmpdir/reports/fleet-dashboard.md"
+  local ok=1
+  grep -q "Findings" "$report_file" && ok=0
+  rm -rf "$tmpdir"
+  return $ok
+}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # fleet_write_report_from_data tests (3)
 # ═══════════════════════════════════════════════════════════════════════════════
 
@@ -232,7 +308,13 @@ for fn in \
   test_render_fleet_wide_warn_detector \
   test_render_fleet_wide_clear_detector \
   test_write_report_includes_fleet_wide_section \
-  test_write_report_fleet_wide_table_has_detector_row; do
+  test_write_report_fleet_wide_table_has_detector_row \
+  test_findings_summary_no_files_returns_dash \
+  test_findings_summary_counts_high_and_warn_separately \
+  test_findings_summary_ignores_other_tickets \
+  test_render_includes_findings_column_header \
+  test_render_shows_findings_for_a_ticket \
+  test_write_report_includes_findings_column; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

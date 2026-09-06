@@ -887,5 +887,126 @@ class TestSupervisorIntegration(StoreTestCase):
         self.assertFalse(store.store_path(self.ws).exists())
 
 
+# ── findings (agent-observer Inc 4) ─────────────────────────────────────────
+
+def _finding_row(fingerprint='fp1', count=1, tid='CRE-1', phase='APPRAISE'):
+    return {
+        'type': 'UNEXPECTED_TOOL', 'severity': 'HIGH', 'tid': tid, 'phase': phase,
+        'gen': 1, 'fingerprint': fingerprint, 'count': count,
+        'first_seen': '2026-09-06T10:00:00Z', 'last_seen': '2026-09-06T10:05:00Z',
+        'evidence': {'tool': 'Write'},
+    }
+
+
+class TestFindings(StoreTestCase):
+
+    def _write_findings_file(self, tid, phase, rows):
+        path = self.ws / f'{tid}-{phase.lower()}-findings.jsonl'
+        path.write_text('\n'.join(json.dumps(r) for r in rows) + '\n')
+        return path
+
+    def test_schema_v3_creates_the_findings_table(self):
+        with self._open() as st:
+            self.assertEqual(st.version(), 3)
+            tables = {r[0] for r in st.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")}
+        self.assertIn('findings', tables)
+
+    def test_ingest_findings_reads_tid_and_phase_from_the_row_not_the_filename(self):
+        # ingest_findings takes tid/phase from each JSON row, so this proves
+        # it does not need to (and does not) parse them from the filename.
+        path = self._write_findings_file('CRE-1', 'APPRAISE', [_finding_row()])
+        with self._open() as st:
+            n = st.ingest_findings(path)
+            row = st.conn.execute(
+                'SELECT tid, phase, type, severity, count FROM findings').fetchone()
+        self.assertEqual(n, 1)
+        self.assertEqual(row['tid'], 'CRE-1')
+        self.assertEqual(row['phase'], 'APPRAISE')
+        self.assertEqual(row['type'], 'UNEXPECTED_TOOL')
+        self.assertEqual(row['severity'], 'HIGH')
+        self.assertEqual(row['count'], 1)
+
+    def test_ingest_findings_upserts_by_tid_phase_fingerprint_not_duplicate(self):
+        path = self._write_findings_file('CRE-1', 'APPRAISE', [_finding_row(count=1)])
+        with self._open() as st:
+            st.ingest_findings(path)
+            # Simulate record_findings rewriting the file with an incremented count.
+            path.write_text(json.dumps(_finding_row(count=3)) + '\n')
+            st.ingest_findings(path)
+            rows = st.conn.execute('SELECT COUNT(*) AS n FROM findings').fetchone()
+            row = st.conn.execute('SELECT count FROM findings').fetchone()
+        self.assertEqual(rows['n'], 1)
+        self.assertEqual(row['count'], 3)
+
+    def test_ingest_workspace_picks_up_findings_files(self):
+        self._write_findings_file('CRE-1', 'APPRAISE', [_finding_row()])
+        with self._open() as st:
+            counts = st.ingest_workspace(self.ws)
+        self.assertEqual(counts['findings'], 1)
+
+    def test_evidence_json_round_trips(self):
+        row = _finding_row()
+        row['evidence'] = {'tool': 'Write', 'path': '/etc/passwd', 'nested': {'a': 1}}
+        path = self._write_findings_file('CRE-1', 'IMPLEMENT', [row])
+        with self._open() as st:
+            st.ingest_findings(path)
+            stored = st.conn.execute(
+                'SELECT evidence_json FROM findings').fetchone()['evidence_json']
+        self.assertEqual(json.loads(stored), row['evidence'])
+
+    def test_round_trip_delete_and_rebuild_from_jsonl(self):
+        """task 5.6: delete the findings table's data and rebuild it from the
+        JSONL files — every finding reappears identically."""
+        rows = [_finding_row(fingerprint='fp1', tid='CRE-1', phase='APPRAISE'),
+               _finding_row(fingerprint='fp2', tid='CRE-1', phase='APPRAISE', count=5)]
+        self._write_findings_file('CRE-1', 'APPRAISE', rows)
+        self._write_findings_file('CRE-2', 'VERIFY',
+                                  [_finding_row(fingerprint='fp3', tid='CRE-2', phase='VERIFY')])
+
+        with self._open() as st:
+            st.ingest_workspace(self.ws)
+            before = sorted(
+                (dict(r) for r in st.conn.execute(
+                    'SELECT tid, phase, fingerprint, count, evidence_json '
+                    'FROM findings ORDER BY tid, fingerprint')),
+                key=lambda r: (r['tid'], r['fingerprint']))
+
+            st.rebuild_projections(self.ws)
+
+            after = sorted(
+                (dict(r) for r in st.conn.execute(
+                    'SELECT tid, phase, fingerprint, count, evidence_json '
+                    'FROM findings ORDER BY tid, fingerprint')),
+                key=lambda r: (r['tid'], r['fingerprint']))
+
+        self.assertEqual(len(before), 3)
+        self.assertEqual(before, after)
+
+    def test_rebuild_projections_clears_stale_findings_no_longer_on_disk(self):
+        path = self._write_findings_file('CRE-1', 'APPRAISE', [_finding_row()])
+        with self._open() as st:
+            st.ingest_workspace(self.ws)
+            path.unlink()
+            st.rebuild_projections(self.ws)
+            count = st.conn.execute('SELECT COUNT(*) AS n FROM findings').fetchone()['n']
+        self.assertEqual(count, 0)
+
+    def test_malformed_line_is_skipped_not_fatal(self):
+        path = self._write_findings_file('CRE-1', 'APPRAISE', [_finding_row()])
+        with open(path, 'a') as fh:
+            fh.write('not valid json {{{\n')
+        with self._open() as st:
+            n = st.ingest_findings(path)
+            count = st.conn.execute('SELECT COUNT(*) AS n FROM findings').fetchone()['n']
+        self.assertEqual(n, 1)
+        self.assertEqual(count, 1)
+
+    def test_missing_file_returns_zero_not_an_error(self):
+        with self._open() as st:
+            n = st.ingest_findings(self.ws / 'does-not-exist-findings.jsonl')
+        self.assertEqual(n, 0)
+
+
 if __name__ == '__main__':
     unittest.main()

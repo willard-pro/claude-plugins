@@ -32,7 +32,10 @@
         "next_phase": "APPRAISE",
         "description": "Investigate the ticket and produce complexity score",
         "instructions": "Follow the skill exactly.",
-        "agent": "ticket-auto-pipeline:ticket-appraise-agent"
+        "agent": "ticket-auto-pipeline:ticket-appraise-agent",
+        "allowed_paths": [
+          "{TICKET_DIR}"
+        ]
       },
       "pre_dispatch": [
         {
@@ -87,7 +90,10 @@
         "next_phase": "EXEC",
         "description": "Create implementation artifacts (simple-fix.md or OpenSpec change)",
         "instructions": "Follow the skill exactly.",
-        "agent": "ticket-auto-pipeline:ticket-appraise-agent"
+        "agent": "ticket-auto-pipeline:ticket-appraise-agent",
+        "allowed_paths": [
+          "{TICKET_DIR}"
+        ]
       },
       "pre_dispatch": [],
       "post_dispatch": [],
@@ -177,7 +183,11 @@
         "next_phase": "IMPLEMENT",
         "description": "Implement the changes described in the artifact",
         "instructions": "Use Serena for all code navigation. For openspec tickets: first read tasks.md in full, then proceed task by task. Pre-warm by reading all task descriptions before starting implementation.",
-        "agent": "ticket-auto-pipeline:ticket-implement-agent"
+        "agent": "ticket-auto-pipeline:ticket-implement-agent",
+        "allowed_paths": [
+          "{TICKET_DIR}",
+          "{WORKTREE}"
+        ]
       },
       "pre_dispatch": [],
       "post_dispatch": [

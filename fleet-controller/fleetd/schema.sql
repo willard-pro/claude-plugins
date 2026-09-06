@@ -228,6 +228,32 @@ CREATE TABLE IF NOT EXISTS activity_events (
 
 CREATE INDEX IF NOT EXISTS idx_activity_tid ON activity_events (tid, line_no);
 
+-- ── findings (PROJECTION of {tid}-{phase}-findings.jsonl, agent-observer) ────
+-- One row per finding fingerprint. Unlike log_events/activity_events this
+-- source file is NOT append-only — fleetd/observer.py's record_findings
+-- rewrites it whole on every update (count/last_seen change in place) — so
+-- ingestion re-reads the whole file and UPSERTs by (tid, phase, fingerprint)
+-- rather than tracking a line-number offset in ingest_state. Rebuildable:
+-- deleting this table's rows and re-ingesting the JSONL files reproduces
+-- every finding identically (test_store.py round-trip, task 5.6).
+CREATE TABLE IF NOT EXISTS findings (
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  tid          TEXT    NOT NULL,
+  phase        TEXT    NOT NULL DEFAULT '',
+  gen          INTEGER,
+  type         TEXT    NOT NULL DEFAULT '',
+  severity     TEXT    NOT NULL DEFAULT '',
+  fingerprint  TEXT    NOT NULL,
+  count        INTEGER NOT NULL DEFAULT 1,
+  first_seen   TEXT    NOT NULL DEFAULT '',
+  last_seen    TEXT    NOT NULL DEFAULT '',
+  evidence_json TEXT   NOT NULL DEFAULT '{}',
+  UNIQUE (tid, phase, fingerprint)
+);
+
+CREATE INDEX IF NOT EXISTS idx_findings_tid ON findings (tid, phase);
+CREATE INDEX IF NOT EXISTS idx_findings_severity ON findings (severity);
+
 -- ── ingest_state (bookkeeping) ───────────────────────────────────────────────
 -- How far each source file has been ingested, so a sweep tails from where it
 -- left off instead of re-reading the whole file. Truncated or rotated files are

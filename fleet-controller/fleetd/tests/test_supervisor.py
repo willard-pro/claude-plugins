@@ -253,6 +253,75 @@ class HealthEndpointTest(unittest.TestCase):
             p.wait(timeout=5)
 
 
+class ObserverFindingCountsTest(unittest.TestCase):
+    """agent-observer Inc 4 task 5.2: {severity: count} on /health."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _insert_finding(self, tid, phase, fingerprint, severity):
+        from fleetd import store as store_mod
+
+        path = self.state_dir / f'{tid}-{phase.lower()}-findings.jsonl'
+        existing = path.read_text() if path.is_file() else ''
+        entry = {
+            'type': 'UNEXPECTED_TOOL', 'severity': severity, 'tid': tid,
+            'phase': phase, 'gen': 1, 'fingerprint': fingerprint, 'count': 1,
+            'first_seen': '2026-09-06T10:00:00Z', 'last_seen': '2026-09-06T10:00:00Z',
+            'evidence': {},
+        }
+        path.write_text(existing + json.dumps(entry) + '\n')
+        with store_mod.open_store(self.state_dir) as st:
+            st.ingest_findings(path)
+
+    def test_store_finding_counts_groups_by_severity(self):
+        from fleetd import supervisor as sup_mod
+
+        self._insert_finding('CRE-1', 'APPRAISE', 'fp1', 'HIGH')
+        self._insert_finding('CRE-1', 'IMPLEMENT', 'fp2', 'HIGH')
+        self._insert_finding('CRE-2', 'VERIFY', 'fp3', 'WARN')
+        counts = sup_mod._store_finding_counts(str(self.state_dir))
+        self.assertEqual(counts, {'HIGH': 2, 'WARN': 1})
+
+    def test_empty_store_yields_empty_dict(self):
+        from fleetd import supervisor as sup_mod
+
+        self.assertEqual(sup_mod._store_finding_counts(str(self.state_dir)), {})
+
+    def test_disabled_store_yields_empty_dict_not_none(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+
+        with mock.patch.object(sup_mod, 'FLEET_STORE_ENABLE', False):
+            self.assertEqual(sup_mod._store_finding_counts(str(self.state_dir)), {})
+
+    def test_sync_health_populates_observer_findings(self):
+        from fleetd.supervisor import Supervisor
+
+        self._insert_finding('CRE-1', 'APPRAISE', 'fp1', 'HIGH')
+        sup = Supervisor(state_dir=str(self.state_dir),
+                         pidfile=str(self.state_dir / 'test.pid'))
+        sup._sync_health()
+        self.assertEqual(sup._health_state['observer_findings'], {'HIGH': 1})
+
+    def test_health_payload_includes_observer_findings_key(self):
+        port = _find_free_port()
+        cmd = _fleetd_cmd(self.state_dir, self.state_dir / 'fleetd.pid', port)
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        try:
+            payload = _wait_health(port)
+            self.assertIsNotNone(payload)
+            self.assertIn('observer_findings', payload)
+            self.assertEqual(payload['observer_findings'], {})
+        finally:
+            p.send_signal(signal.SIGTERM)
+            p.wait(timeout=5)
+
+
 class RegistryObservationTest(unittest.TestCase):
     """Task 4.4: observe-only mode reads existing registry entries."""
 
@@ -1838,6 +1907,73 @@ class WorkerStdioAndEnvTest(unittest.TestCase):
         idx = cmd.index('--agent')
         self.assertEqual(cmd[idx + 1], 'custom:override')
 
+    def test_build_worker_cmd_uses_stream_json_for_a_phase_worker_when_observer_enabled(self):
+        """Agent Observer Inc 1: the flag flips only phase-level spawns."""
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+        from fleetd.supervisor import _build_worker_cmd
+
+        with mock.patch.object(sup_mod, 'FLEET_OBSERVER_ENABLE', True):
+            cmd = _build_worker_cmd('CRE-9', claude_bin='claude',
+                                    is_phase_worker=True)
+        self.assertIn('--output-format', cmd)
+        idx = cmd.index('--output-format')
+        self.assertEqual(cmd[idx + 1], 'stream-json')
+        self.assertIn('--verbose', cmd)
+        # Never the token-level partial-message flag — Agent Observer stays
+        # tool-call granularity only (task 2.3).
+        self.assertNotIn('--include-partial-messages', cmd)
+
+    def test_build_worker_cmd_stays_json_for_a_ticket_worker_even_when_observer_enabled(self):
+        """The flag never touches a whole-ticket /ticket-auto spawn."""
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+        from fleetd.supervisor import _build_worker_cmd
+
+        with mock.patch.object(sup_mod, 'FLEET_OBSERVER_ENABLE', True):
+            cmd = _build_worker_cmd('CRE-9', claude_bin='claude',
+                                    is_phase_worker=False)
+        idx = cmd.index('--output-format')
+        self.assertEqual(cmd[idx + 1], 'json')
+        self.assertNotIn('--verbose', cmd)
+
+    def test_build_worker_cmd_stays_json_for_a_phase_worker_when_observer_disabled(self):
+        """The default (observer off) is byte-identical to pre-Observer."""
+        from fleetd.supervisor import _build_worker_cmd
+
+        cmd = _build_worker_cmd('CRE-9', claude_bin='claude',
+                                is_phase_worker=True)
+        idx = cmd.index('--output-format')
+        self.assertEqual(cmd[idx + 1], 'json')
+        self.assertNotIn('--verbose', cmd)
+
+    def test_spawn_worker_writes_ndjson_stdout_for_a_phase_worker_when_observer_enabled(self):
+        """spawn_worker's own file-extension choice, independent of cmd_override."""
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+        from fleetd.supervisor import spawn_worker
+
+        with mock.patch.object(sup_mod, 'FLEET_OBSERVER_ENABLE', True):
+            pid, _ = spawn_worker(
+                tid='TST-OBS', generation=1, state_dir=str(self.workspace),
+                phase='VERIFY', cmd_override=[sys.executable, '-c', 'pass'])
+        os.waitpid(pid, 0)
+        self.assertTrue((self.workspace / 'TST-OBS-verify-gen1.ndjson').is_file())
+        self.assertFalse((self.workspace / 'TST-OBS-verify-gen1.json').is_file())
+
+    def test_spawn_worker_writes_json_stdout_for_a_ticket_worker_even_when_observer_enabled(self):
+        """A whole-ticket spawn (phase='') never gets `.ndjson`."""
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+        from fleetd.supervisor import spawn_worker
+
+        with mock.patch.object(sup_mod, 'FLEET_OBSERVER_ENABLE', True):
+            pid, _ = spawn_worker(
+                tid='TST-OBS2', generation=1, state_dir=str(self.workspace),
+                cmd_override=[sys.executable, '-c', 'pass'])
+        os.waitpid(pid, 0)
+        self.assertTrue((self.workspace / 'TST-OBS2-gen1.json').is_file())
+
     def test_spawn_phase_worker_builds_from_the_canonical_table(self):
         """End to end: a step id in, a forked phase worker out."""
         from fleetd.supervisor import spawn_phase_worker
@@ -1859,6 +1995,37 @@ class WorkerStdioAndEnvTest(unittest.TestCase):
             self.assertEqual(entry['phase'], 'VERIFY')
         finally:
             os.waitpid(pid, 0)
+
+    def test_spawn_phase_worker_writes_a_contract_when_observer_enabled(self):
+        """agent-observer Inc 3: the contract is written at spawn under the flag."""
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+        from fleetd.supervisor import spawn_phase_worker
+
+        with mock.patch.object(sup_mod, 'FLEET_OBSERVER_ENABLE', True):
+            pid, session_id, spawn = spawn_phase_worker(
+                'TST-CTR', 'STEP_1', 1, str(self.workspace),
+                log_file='/w/logs/TST-CTR-pipeline.log',
+                cmd_override=[sys.executable, '-c', 'pass'],
+            )
+        os.waitpid(pid, 0)
+        contract_path = self.workspace / 'TST-CTR-appraise-contract.json'
+        self.assertTrue(contract_path.is_file())
+        contract = json.loads(contract_path.read_text())
+        self.assertEqual(contract['phase'], 'APPRAISE')
+        self.assertEqual(contract['tid'], 'TST-CTR')
+
+    def test_spawn_phase_worker_writes_no_contract_when_observer_disabled(self):
+        from fleetd.supervisor import spawn_phase_worker
+
+        pid, session_id, spawn = spawn_phase_worker(
+            'TST-CTR2', 'STEP_1', 1, str(self.workspace),
+            log_file='/w/logs/TST-CTR2-pipeline.log',
+            cmd_override=[sys.executable, '-c', 'pass'],
+        )
+        os.waitpid(pid, 0)
+        self.assertFalse(
+            (self.workspace / 'TST-CTR2-appraise-contract.json').is_file())
 
     def test_redirection_failure_does_not_abort_spawn(self):
         """A stdio-redirect failure still lets the worker spawn and exec."""
@@ -3497,6 +3664,39 @@ def _get_severity(result, tid):
 
 
 # ── Commercial Evidence MVP Branch C: fleet-cost-events ──────────────────
+
+
+class WorkerGenFileTest(unittest.TestCase):
+    """Agent Observer: `_worker_gen_file` resolves whichever extension the
+    spawn that wrote this generation actually used, not the flag's current
+    value — a mid-run toggle or restart must not silently point a reader at
+    a file that was never written."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.workspace = Path(self._tmp.name)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def test_ticket_level_is_always_json(self):
+        from fleetd.supervisor import _worker_gen_file
+
+        path = _worker_gen_file(str(self.workspace), 'CRE-9', '', 1)
+        self.assertEqual(path.name, 'CRE-9-gen1.json')
+
+    def test_phase_level_prefers_ndjson_when_it_exists(self):
+        from fleetd.supervisor import _worker_gen_file
+
+        (self.workspace / 'CRE-9-verify-gen1.ndjson').write_text('{}')
+        path = _worker_gen_file(str(self.workspace), 'CRE-9', 'VERIFY', 1)
+        self.assertEqual(path.name, 'CRE-9-verify-gen1.ndjson')
+
+    def test_phase_level_falls_back_to_json_when_no_ndjson_exists(self):
+        from fleetd.supervisor import _worker_gen_file
+
+        path = _worker_gen_file(str(self.workspace), 'CRE-9', 'VERIFY', 1)
+        self.assertEqual(path.name, 'CRE-9-verify-gen1.json')
 
 
 class CostEventTest(unittest.TestCase):

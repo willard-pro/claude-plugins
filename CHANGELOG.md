@@ -17,6 +17,58 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## fleet-controller 0.25.0 (2026-09-06)
+
+`agent-observer` (`next.md`). A phase worker's own claimed verdict is the only
+signal fleetd trusts about what happened inside a run — a claim contradiction,
+a scope violation, or a wandering-off-script tool call has no detector. This
+ships a non-authoritative sidecar that tails phase workers' raw transcripts and
+turns them into deterministic, evidence-backed findings, without ever gating,
+killing, or reasoning over them with an LLM.
+
+- **`fleetd/observer.py`**, one fleet-wide process supervised the same way as
+  `otel.py` (spawn/backoff/reap/stop). Tails every phase worker's
+  `--output-format stream-json --verbose` transcript (opt-in via
+  `FLEET_OBSERVER_ENABLE=true`, which also flips phase-worker spawns from
+  `json` to the streaming format) and translates each frame into a compact
+  internal event stream: tool calls, tool results, claimed verdicts, session
+  start/end, with secret redaction and field truncation throughout.
+- **8 deterministic rules**, zero LLM cost: `CLAIM_CONTRADICTION` (claimed
+  verdict vs. the phase's own `_FAILING_VERDICTS`), `REPEATED_FAILURE`,
+  `SCOPE_VIOLATION` (against a per-phase `allowed_paths` contract),
+  `UNEXPECTED_TOOL` (against the spawned agent's own `agents/*.md` frontmatter
+  allowlist), `RUNAWAY_COST` (rough USD/token estimate, explicitly not
+  `total_cost_usd`), `LONG_TOOL_CALL`, `DEGRADED_SESSION` (missing/unhealthy
+  MCP servers), `PERMISSION_DENIED`. Every rule follows the same "never guess
+  a default — disable when unresolved" discipline: an unresolvable
+  `allowed_paths` template disables `SCOPE_VIOLATION` for that phase rather
+  than silently allowing or silently flagging everything.
+- **Per-phase contract**, written by the supervisor before each observed spawn
+  (`build_phase_contract` in `phase_dispatch.py`): objective, expected
+  behaviour, allowed tools/paths, success/failure verdict sets, claim
+  predicates — sourced from the dispatch table and the agent's own
+  frontmatter, never duplicated by hand.
+- **Findings surfaced three ways**: a `findings` table (schema v3, PROJECTION
+  class, rebuildable from the per-ticket `*-findings.jsonl` files),
+  `/health`'s `observer_findings` severity counts, a FINDINGS column in
+  `fleet-dashboard.sh`'s terminal and markdown renderers, and
+  `detect_observer_findings` — the 16th detection engine, bracket-scoped and
+  hard-capped at WARN for the same reason `detect_human_hold` is: the
+  observer has no authority to request a `KILL`, so its bash-side surfacing
+  must never manufacture one.
+- Two bugs caught and fixed during implementation, both with dedicated
+  regression tests: a released stream's leftover `.ndjson` file being re-tailed
+  and re-emitted forever on the next poll, and a late-arriving
+  `META|observer-finding` line flipping terminal-state classification to
+  "not done" when it landed after the phase's own `META|outcome` line during
+  the observer's async grace-drain window.
+- Fully inert when `FLEET_OBSERVER_ENABLE` is unset (the default): phase
+  workers keep the plain `json` output format, no contract is written, no
+  sidecar spawns.
+- 640/640 fleetd tests, 79/79 `test-fleet-detect.sh`, 24/24
+  `test-fleet-dashboard.sh`; `make lint`/`fmt-check`/`check-generated` all
+  green.
+
 ## 0.44.0 (2026-09-06)
 
 `rlvr-verdict-recompute` (`next.md` Step 4). `rlvr-phase-result-contract`
