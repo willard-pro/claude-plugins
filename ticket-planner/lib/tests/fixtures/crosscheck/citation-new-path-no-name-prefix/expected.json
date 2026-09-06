@@ -1,0 +1,6 @@
+{
+  "blocking": 0,
+  "warn": 0,
+  "accepted": 0,
+  "notes": "Bare `path:line`-less TargetSymbols entries with no `Name:` prefix carrying their own \"(new)\" annotation directly on the path (\"worker/llm/cascade.py (new)\") — modeled on the real false positive found on VS-6 (INIT-1788101975-8566), where $symbol is empty for a no-`Name:`-prefix entry so the symbol-side marked-new check never ran and both new-file citations false-flagged CITATION_UNRESOLVED (willard-pro/claude-plugins#304). A sibling entry citing an existing file+line (worker/main.py:5) is included to confirm the fix doesn't loosen normal resolution. Regression: must stay clean."
+}
