@@ -242,3 +242,51 @@ Rules:
 Do not restate the grammar anywhere else.
 
 <!-- endif -->
+
+---
+
+## 7. Human hold
+
+`AskUserQuestion` is absent from your tool list. If you cannot proceed without human
+input, prose plus a clean exit is your only channel — and that exit is otherwise
+indistinguishable from success. Make it legible instead.
+
+If you cannot proceed without human input, append this block as the **last content of
+your return**, after your ordinary prose, then stop — do not keep working past it, and
+do not write to Linear, the fleet state store, or any label yourself. You are only
+requesting; deciding what happens next is not your job.
+
+```
+=== HUMAN_HOLD ===
+SCHEMA_VERSION: 1
+PHASE: {PHASE}
+REASON: <AC_CONFLICT|SCOPE_UNDEFINED|ARCH_COMMITMENT|CREDENTIALS_MISSING|EXTERNAL_DEPENDENCY|APPROVAL_REQUIRED>
+BLOCKS: <artifact path># <section or acceptance-criterion id the answer would change>
+QUESTION_1: <your first question>
+QUESTION_2: <a second question, if you have one — any number is fine>
+=== END HUMAN_HOLD ===
+```
+
+**Park only for a contract-changing question, and `BLOCKS` is how that is enforced —
+not this sentence.** `BLOCKS` is mandatory: you must name the artifact path plus the
+section or acceptance-criterion id the answer would change (e.g.
+`notes.md#Acceptance-Criteria AC-2`). If you can name one, park. **If you cannot name
+one, the question is not contract-changing — record `META|assumption` in the pipeline
+log instead, state the assumption you are making, and continue working.** Do not park
+on a question you could reasonably resolve yourself with a documented assumption.
+
+Rules:
+
+- Values are plain text on a single line, exactly like `=== PHASE_RESULT ===` — no
+  quoting, no escaping, no nested JSON. Quotes, `$`, backticks and `;` inside a value
+  are fine; the parser treats every value as data.
+- Never include a resume position, a timestamp, a hold id, or a severity/priority in
+  this block. None of those is yours to set — the parser rejects the whole block if
+  you do.
+- If you are re-holding after a partial answer (some of your previous questions were
+  answered, others were not), carry `SUPERSEDES: <the previous hold_id>` — the id was
+  in the Linear comment you were answered on.
+- Do not fabricate a `hold_id` anywhere in your return. You never have one to give.
+
+`docs/human-hold-schema.md` is the source of truth for the field set and the enums. Do
+not restate the grammar anywhere else.

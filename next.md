@@ -202,14 +202,22 @@ clean). Sequence — apply strictly in this order, one `/opsx:apply` + PR per ch
    change and the dependent one below are safe in either review order. Ships standalone value:
    gate holds get a live reconciler for the first time. The store/CAS/wiring half of Step 3 is
    done — `human-hold-protocol` below is now unblocked.
-2. `human-hold-protocol` — `=== HUMAN_HOLD ===` marker, `human-hold-parse.sh`, the preamble
-   section, `held: human`, the Linear hold comment, registering the `'human'` release predicate,
-   `detect_human_hold`, `fleet_notify_hold`. Depends on 1 (now unblocked).
+2. **`human-hold-protocol` — implemented 2026-09-06 on `feat/human-hold-store-foundation`
+   (ticket-auto-pipeline 0.43.0, fleet-controller 0.24.0), 43/43 tasks (two are inherently
+   live/operational and are follow-ups below, not unchecked work), `make lint`/`fmt-check`/
+   `check-generated`/`test` all green.** `=== HUMAN_HOLD ===` marker + `human-hold-parse.sh`
+   (redaction, four refused fields, `absent` writes nothing while `invalid` still logs), the
+   preamble section, `held: human` in `pipeline-finalize.sh`, `detect_human_hold` and
+   `fleet_notify_hold` (both pipeline-log-driven — live today, no store dependency), the `human`
+   release predicate registered into `gate_hold.py`'s dispatch, `post_human_hold_comment` +
+   `human_hold_attempt_exceeds_max` (`HUMAN_HOLD_EXHAUSTED`), `human_hold_requested`/
+   `human_hold_parse_status` on `runs.jsonl`'s `run` event. `needs-info` reused unchanged.
 
 Makes "blocked on a human" a first-class recoverable fleet state — a hold is a row, not a stalled
 process. Reviewed to 10/10 on 2026-09-03. Step 0 already removed its two urgent bug fixes.
 
-**Three corrections to the plan, found while writing the changes:**
+**Four corrections to the plan, found while writing the changes (three while proposing, one while
+implementing):**
 
 1. **Detector severity caps at 1, not 2.** The plan specifies severity 1 at 2h → **2** at 24h,
    reasoning "severity 3 triggers intervention, and a ticket must never be killed for waiting on
@@ -227,9 +235,38 @@ process. Reviewed to 10/10 on 2026-09-03. Step 0 already removed its two urgent 
    safe only because no production store exists. The migration machinery added in change 1
    governs v2 onward, and v2 is the last version permitted to take that shortcut. Once it exists,
    the evidence queue-wait column (carry the enqueue timestamp into `workers`) is a one-liner.
+4. **`fleet_notify_hold`'s idempotency keys off a per-ticket sidecar file, not the store's
+   `notify_state` column** design.md D7 names as authoritative. A bash library cannot write the
+   fleet state store — fleetd is its sole writer — and the row carries no question/blocks text
+   regardless, so the notifier needs the pipeline log either way. It keeps `{tid}-hold-notify.json`
+   instead, exactly the pattern `fleet_slack_post` already used for its own thread bookkeeping.
+   Every observable guarantee in the spec (one send per hold, restart-safe, failure retried,
+   escalate once) holds under this mechanism; only the storage location moved.
 
-Regression test: replay the 160h held-ticket pipeline log — it is the bug's own reproduction.
-Scrub ticket ids before adding it to fixtures (public repo).
+Regression fixture: `fleet-controller/lib/tests/fixtures/human-hold-160h-pipeline.log` — synthetic
+and scrubbed (no real ticket data exists to replay; the actual 160h incident used a different,
+pre-this-mechanism ask-form), shaped like the incident this change targets.
+
+**Follow-ups, deliberately deferred rather than guessed at:**
+
+- **No live caller creates a `hold_kind='human'` row yet.** Nothing calls `store.set_hold` for a
+  fresh human-hold request — the same pre-existing, explicitly accepted gap
+  `human-hold-store-foundation` left for the `gate` kind ("`gate_hold.py` has no live caller").
+  `post_human_hold_comment`/`human_hold_attempt_exceeds_max`/the `human` predicate all ship
+  tested and ready; wiring `META|human-hold` → `store.set_hold` → Linear comment → first notify
+  is real, scoped follow-up work, not done here speculatively.
+- **Task 8.2 (measure real emission rate) needs a week of real runs** — cannot be done from this
+  session. `human_hold_requested`/`human_hold_parse_status` now exist on `runs.jsonl`'s `run`
+  event specifically so this is a `jq` query once runs exist, per design.md's Risk: if the rate
+  stays near zero, the honest conclusion is the preamble channel doesn't work and the request must
+  come from somewhere deterministic — do not build further consumers before that measurement.
+- **Task 9.5 (end-to-end against real Linear)** needs a live fleetd + a scratch ticket on the
+  tickets host — same "live verification pending" status prior changes in this queue have shipped
+  under (e.g. `fleet-reconcile-gate-retry`).
+- **Migrating the four legacy ask-forms** (`needs-info` label alone, `[needs-human]` in
+  `notes.md`, `META|human-decision`, prose in an agent return) onto this mechanism — explicitly
+  out of scope per design.md's Open Questions; revisit once the emission-rate measurement above
+  lands, since migrating onto an unused mechanism is wasted work.
 
 ---
 

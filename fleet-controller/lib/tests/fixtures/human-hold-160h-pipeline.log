@@ -1,0 +1,8 @@
+2026-01-01T00:00:00Z|META|schema|info|1
+2026-01-01T00:00:01Z|META|run-id|info|{"run_id":"TEST-1-2026-01-01T00:00:01Z-1","gen":1,"trigger":"fleet","pid":1001}
+2026-01-01T00:00:02Z|APPRAISE|setup-workspace|start|Setting up workspace
+2026-01-01T00:00:05Z|APPRAISE|complexity-sweep|done|complex
+2026-01-01T00:00:10Z|EXEC|load-workspace|start|Loading workspace
+2026-01-01T00:00:12Z|META|human-hold|waiting|{"schema_version":1,"phase":"EXEC","reason":"AC_CONFLICT","blocks":"simple-fix.md#Acceptance-Criteria","supersedes":"","questions":[{"id":1,"text":"AC-1 says archive silently; AC-3 says notify the owner. Which wins?"},{"id":2,"text":"Should the archive job run against the primary or the replica?"},{"id":3,"text":"Is a soft-delete acceptable, or must records be purged?"},{"id":4,"text":"Who is the owner to notify for AC-3 if it wins?"}],"parse_status":"ok","parse_error":""}
+2026-01-01T00:00:13Z|META|outcome|info|held: human
+2026-01-01T00:00:20Z|META|worker-exit|done|code=0 type=exit gen=1 killed_by_fleet=false

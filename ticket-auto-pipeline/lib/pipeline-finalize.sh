@@ -28,6 +28,39 @@ if [ -z "$TICKET_ID" ] || [ -z "$LOG_FILE" ]; then
   exit "${EXIT_CODE}"
 fi
 
+# ── Human hold detection (human-hold-protocol) ──────────────────────────────
+# True when the log's latest *valid* human-hold record has no later
+# `META|human-hold-released` marker. Mirrors the `held: gate` sibling: a hold
+# is a log fact here, not a store lookup — pipeline-finalize.sh runs inside
+# the router/worker process, which never opens the fleet state store. An
+# `invalid` record is deliberately NOT a hold (human-hold-request spec: "An
+# invalid request creates no hold row") — it stays visible to
+# `detect_human_hold` without parking the ticket on a premise nothing could
+# parse.
+_pf_has_unreleased_human_hold() {
+  local log_file="$1"
+  local last_valid_lineno=0 lineno=0 line step msg
+  while IFS= read -r line; do
+    lineno=$((lineno + 1))
+    step=$(printf '%s' "$line" | awk -F'|' '{print $3}')
+    [ "$step" = "human-hold" ] || continue
+    msg=$(printf '%s' "$line" | awk -F'|' '{s=$5; for(i=6;i<=NF;i++) s=s"|"$i; print s}')
+    case "$msg" in *'"parse_status":"ok"'*) last_valid_lineno=$lineno ;; esac
+  done <"$log_file"
+  [ "$last_valid_lineno" -gt 0 ] || return 1
+
+  local released_lineno=0
+  lineno=0
+  while IFS= read -r line; do
+    lineno=$((lineno + 1))
+    step=$(printf '%s' "$line" | awk -F'|' '{print $3}')
+    [ "$step" = "human-hold-released" ] && released_lineno=$lineno
+  done <"$log_file"
+
+  [ "$released_lineno" -gt "$last_valid_lineno" ] && return 1
+  return 0
+}
+
 # ── Post-outcome evidence sequence (Branch B, Commercial Evidence MVP) ──────
 # Runs AFTER META|outcome is already on disk (guaranteed by every call site
 # below). Every step is wrapped `|| true` and never touches EXIT_CODE or the
@@ -137,6 +170,8 @@ elif [ "$EXIT_CODE" -eq 0 ]; then
   _outcome_summary="completed: STEP_6"
 elif grep -q '|META|gate-held|' "$LOG_FILE" 2>/dev/null; then
   _outcome_summary="held: gate"
+elif _pf_has_unreleased_human_hold "$LOG_FILE"; then
+  _outcome_summary="held: human"
 elif grep -q '|META|gate-stop|fail|' "$LOG_FILE" 2>/dev/null; then
   _gs_code=$(grep '|META|gate-stop|fail|' "$LOG_FILE" | tail -1 | awk -F'|' '{for(i=5;i<=NF;i++) printf "%s%s", $i, (i==NF?"":"|")}')
   _outcome_summary="stopped: gate-stop ${_gs_code}"

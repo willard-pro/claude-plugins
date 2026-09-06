@@ -17,6 +17,78 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## 0.43.0 (2026-09-06), fleet-controller 0.24.0
+
+`human-hold-protocol` (`next.md` Step 3, remainder). `human-hold-store-foundation`
+gave a hold a row; this ships the half a human actually touches. Production
+evidence: one ticket sat gate-held on four unanswered questions for 160 hours,
+reaching generation 8 through respawn, while `fleetd.log` recorded the daemon
+behaving correctly and nobody being told. `AskUserQuestion` is absent from the
+`claude -p` tool list, so a headless worker's only channel was prose plus a clean
+exit — indistinguishable from success.
+
+- **New `=== HUMAN_HOLD ===` marker and `lib/human-hold-parse.sh`**
+  (ticket-auto-pipeline), modelled line-for-line on `phase-result-parse.sh`:
+  `SCHEMA_VERSION`, `PHASE`, a six-value `REASON` enum, mandatory `BLOCKS`
+  (the structural park-vs-assume test — an unenforceable prose rule made into
+  a field a script can check), ≥1 numbered `QUESTION_n`, optional
+  `SUPERSEDES`. Four fields are refused outright (a resume position,
+  `HELD_AT`, `HOLD_ID`, `SEVERITY`/`PRIORITY`) — an agent cannot set what it
+  does not own. Every question value and `BLOCKS` pass through secret
+  redaction before the record is built. A rejected block still writes
+  `parse_status: "invalid"` — a swallowed ask is the exact bug this ships to
+  fix — but "no block at all" writes nothing at all, unlike the sibling
+  parser's `UNKNOWN`-on-absent convention: the common case must cost nothing.
+- **New `§ Human hold` in `lib/skill-preamble-auto.md`.** Shared preamble, so
+  every phase gains it — the observed asks come from APPRAISE and EXEC, which
+  deliberately do not emit `PHASE_RESULT`.
+- **`pipeline-finalize.sh` writes `held: human`** for an unreleased, valid
+  request — the exact sibling of `held: gate`. No terminal-classifier change:
+  both already match the `held: ` prefix (Step 0).
+- **New `detect_human_hold` in `fleet-detect.sh`** (fleet-controller),
+  log-only, capped at severity 1 for any hold age — deliberately, not a
+  conservative default. Severity 2 in this codebase is already an
+  intervention (finalize the pipeline log); applied to a held ticket it would
+  overwrite the very `held:` outcome that is the hold's own audit record,
+  making a waiting ticket look finished. Escalation for a long-unanswered
+  hold moves to the notifier instead.
+- **New `fleet_notify_hold` in `fleet-notify.sh`**, built like
+  `fleet_notify_worker_event`: observed facts only. Sends once per hold,
+  escalates once more at `FLEET_HOLD_ESCALATE_HOURS` (24h default), and
+  never blocks a transition. Its idempotency is a deliberate deviation from
+  design.md D7's "authoritative row" framing: a bash library cannot write
+  the fleet state store (fleetd is its sole writer), so it keeps its own
+  per-ticket sidecar file instead — the same pattern `fleet_slack_post`
+  already used for its own thread bookkeeping.
+- **`human` release predicate registered into `gate_hold.py`'s dispatch**
+  (the slot `human-hold-store-foundation` reserved but left `UNAVAILABLE`).
+  Three conditions, all required: a Linear comment after `held_at`, a
+  non-bot author, the `hold_id` quoted in the body — the non-bot condition
+  is load-bearing, since `flow.sh` and `ticket-appraise-exec` both post
+  comments and a naive "any comment newer than held_at" predicate would
+  release its own hold within one poll interval. Any API failure is a third
+  value, `UNAVAILABLE`, never collapsed into "not answered" — an outage must
+  never exhaust attempts or gate-stop a ticket. A hold's `hold_generation` at
+  or below the ticket's fenced generation refuses release. New
+  `post_human_hold_comment` and `human_hold_attempt_exceeds_max` primitives
+  (`HUMAN_HOLD_EXHAUSTED` at `FLEET_HOLD_MAX_ATTEMPTS`, default 3) — like the
+  reconcile predicate itself, these ship tested but with no live caller yet,
+  the same accepted state `gate_hold.py`'s whole mechanism was already in for
+  the `gate` kind.
+- `needs-info` is reused unchanged as the Linear-side label — no new label.
+- `runs.jsonl`'s `run` event gains `human_hold_requested`/
+  `human_hold_parse_status`, so the emission rate (does the preamble
+  instruction actually get followed?) is a `jq` query away rather than an
+  assumption once real runs exist.
+
+Deliberately **not** built in this change: the wiring that would make
+`gate_hold.py`'s `human` predicate live in production (nothing yet calls
+`store.set_hold` for a fresh human-hold request, mirroring the identical,
+already-accepted gap for the `gate` kind), and any change to
+`ticket-auto/SKILL.md`'s dispatch loop or `detect-resume.sh` — this ships the
+protocol and measures whether it's used before building further consumers on
+an unmeasured assumption.
+
 ## fleet-controller 0.23.0 (2026-09-06)
 
 `human-hold-store-foundation` (`next.md` Step 3, foundation half). `gate_hold.py`

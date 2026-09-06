@@ -95,6 +95,7 @@ test-lib:
 	# pipeline-integrity tests
 	bash ticket-auto-pipeline/lib/tests/test-return-completeness.sh
 	bash ticket-auto-pipeline/lib/tests/test-phase-result-parse.sh
+	bash ticket-auto-pipeline/lib/tests/test-human-hold-parse.sh
 	bash ticket-auto-pipeline/lib/tests/test-corrections.sh
 	bash ticket-auto-pipeline/lib/tests/test-guidance-store.sh
 	# retro GitHub issues tests
@@ -111,6 +112,7 @@ test-fleetd:
 	python3 -m pytest fleet-controller/fleetd/tests/test_store.py -v
 	python3 -m pytest fleet-controller/fleetd/tests/test_phase_dispatch.py -v
 	python3 -m pytest fleet-controller/fleetd/tests/test_gate_hold.py -v
+	python3 -m pytest fleet-controller/fleetd/tests/test_human_hold_integration.py -v
 	python3 -m pytest fleet-controller/fleetd/tests/test_preamble.py -v
 	python3 -m pytest fleet-controller/fleetd/tests/test_orchestration.py -v
 	python3 -m pytest fleet-controller/fleetd/tests/test_otel.py -v

@@ -48,6 +48,55 @@ _finalize() {
   PATH="$_ws/bin:$PATH" HOME="$_ws/home" bash "$LIB_DIR/pipeline-finalize.sh" "$tid" "$exit_code" "$log"
 }
 
+# ── held: human branch (human-hold-protocol) ─────────────────────────────────
+
+test_held_human_written_for_unreleased_valid_hold() {
+  _setup
+  local log="$_ws/logs/CRE-9-pipeline.log"
+  cat >"$log" <<'EOF'
+2026-09-01T00:00:00Z|META|schema|info|1
+2026-09-01T00:00:01Z|APPRAISE|setup-workspace|start|begin
+2026-09-01T00:00:02Z|META|human-hold|waiting|{"schema_version":1,"phase":"APPRAISE","reason":"SCOPE_UNDEFINED","blocks":"notes.md#AC-2","supersedes":"","questions":[{"id":1,"text":"which archive?"}],"parse_status":"ok","parse_error":""}
+EOF
+  unset LINEAR_API_KEY
+  _finalize "CRE-9" 1 "$log" >/dev/null 2>&1
+  local last
+  last=$(tail -1 "$log")
+  _teardown
+  echo "$last" | grep -q '|META|outcome|info|held: human'
+}
+
+test_invalid_human_hold_does_not_park() {
+  _setup
+  local log="$_ws/logs/CRE-10-pipeline.log"
+  cat >"$log" <<'EOF'
+2026-09-01T00:00:00Z|META|schema|info|1
+2026-09-01T00:00:02Z|META|human-hold|waiting|{"schema_version":1,"phase":"APPRAISE","reason":"","blocks":"","supersedes":"","questions":[],"parse_status":"invalid","parse_error":"missing required field: REASON"}
+EOF
+  unset LINEAR_API_KEY
+  _finalize "CRE-10" 1 "$log" >/dev/null 2>&1
+  local last
+  last=$(tail -1 "$log")
+  _teardown
+  ! echo "$last" | grep -q 'held: human'
+}
+
+test_released_human_hold_does_not_re_park() {
+  _setup
+  local log="$_ws/logs/CRE-11-pipeline.log"
+  cat >"$log" <<'EOF'
+2026-09-01T00:00:00Z|META|schema|info|1
+2026-09-01T00:00:02Z|META|human-hold|waiting|{"schema_version":1,"phase":"APPRAISE","reason":"SCOPE_UNDEFINED","blocks":"notes.md#AC-2","supersedes":"","questions":[{"id":1,"text":"which archive?"}],"parse_status":"ok","parse_error":""}
+2026-09-01T01:00:00Z|META|human-hold-released|info|hold:CRE-11:g1:a1
+EOF
+  unset LINEAR_API_KEY
+  _finalize "CRE-11" 1 "$log" >/dev/null 2>&1
+  local last
+  last=$(tail -1 "$log")
+  _teardown
+  ! echo "$last" | grep -q 'held: human'
+}
+
 # ── Outcome ordering ─────────────────────────────────────────────────────────
 
 test_outcome_remains_last_line() {
@@ -191,6 +240,9 @@ EOF
 FILTER="${1:-}"
 
 for fn in \
+  test_held_human_written_for_unreleased_valid_hold \
+  test_invalid_human_hold_does_not_park \
+  test_released_human_hold_does_not_re_park \
   test_outcome_remains_last_line \
   test_exactly_one_run_line \
   test_idempotent_rerun_does_not_duplicate_run_event \

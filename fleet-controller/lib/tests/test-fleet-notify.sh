@@ -186,6 +186,166 @@ test_notify_call_site_is_scoped_to_dead_letter_branch() {
     grep -B5 'fleet_notify_worker_event "\$tid"' "$reconcile" | grep -q "orphaned-after-max-restarts"
 }
 
+# ── fleet_notify_hold (human-hold-protocol) ─────────────────────────────────
+
+_hold_payload() {
+  printf '{"schema_version":1,"phase":"APPRAISE","reason":"SCOPE_UNDEFINED","blocks":"notes.md#AC-2","supersedes":"","questions":[{"id":1,"text":"which archive?"},{"id":2,"text":"csv or xlsx?"}],"parse_status":"ok","parse_error":""}'
+}
+
+_write_hold_log() {
+  local state_dir="$1" tid="$2" held_at="${3:-2026-08-01T00:00:00Z}"
+  printf '%s|META|human-hold|waiting|%s\n' "$held_at" "$(_hold_payload)" \
+    >"$state_dir/${tid}-pipeline.log"
+}
+
+test_hold_created_sends_and_includes_questions() {
+  local state_dir bindir capture
+  state_dir=$(_mktemp_test_dir)
+  bindir=$(_with_stub_path)
+  capture="$state_dir/.capture"
+  _write_hold_log "$state_dir" "TST-10"
+  SLACK_BOT_TOKEN="xoxb-test" SLACK_CHANNEL="#alerts" FAKE_CURL_CAPTURE="$capture" \
+    PATH="$bindir:$PATH" fleet_notify_hold "TST-10" "$state_dir" "created" >/dev/null 2>&1
+  grep -q "TST-10" "$capture" && grep -q "which archive" "$capture" && grep -q "csv or xlsx" "$capture"
+}
+
+test_hold_created_writes_sent_sidecar() {
+  local state_dir bindir
+  state_dir=$(_mktemp_test_dir)
+  bindir=$(_with_stub_path)
+  _write_hold_log "$state_dir" "TST-11"
+  SLACK_BOT_TOKEN="xoxb-test" SLACK_CHANNEL="#alerts" \
+    PATH="$bindir:$PATH" fleet_notify_hold "TST-11" "$state_dir" "created" >/dev/null 2>&1
+  grep -q '"notify_state": "sent"' "$state_dir/TST-11-hold-notify.json"
+}
+
+test_hold_created_twice_sends_once() {
+  local state_dir bindir capture n
+  state_dir=$(_mktemp_test_dir)
+  bindir=$(_with_stub_path)
+  capture="$state_dir/.capture"
+  _write_hold_log "$state_dir" "TST-12"
+  SLACK_BOT_TOKEN="xoxb-test" SLACK_CHANNEL="#alerts" FAKE_CURL_CAPTURE="$capture" \
+    PATH="$bindir:$PATH" fleet_notify_hold "TST-12" "$state_dir" "created" >/dev/null 2>&1
+  rm -f "$capture"
+  SLACK_BOT_TOKEN="xoxb-test" SLACK_CHANNEL="#alerts" FAKE_CURL_CAPTURE="$capture" \
+    PATH="$bindir:$PATH" fleet_notify_hold "TST-12" "$state_dir" "created" >/dev/null 2>&1
+  [ ! -f "$capture" ]
+}
+
+test_hold_restart_does_not_resend() {
+  # A fresh sourcing of this library (simulating a daemon restart) reads the
+  # same sidecar off disk and must still send nothing for an already-sent hold.
+  local state_dir bindir capture
+  state_dir=$(_mktemp_test_dir)
+  bindir=$(_with_stub_path)
+  capture="$state_dir/.capture"
+  _write_hold_log "$state_dir" "TST-13"
+  SLACK_BOT_TOKEN="xoxb-test" SLACK_CHANNEL="#alerts" \
+    PATH="$bindir:$PATH" fleet_notify_hold "TST-13" "$state_dir" "created" >/dev/null 2>&1
+  (
+    unset -f fleet_notify_hold fleet_slack_post fleet_notify_worker_event 2>/dev/null
+    source "$LIB_DIR/fleet-notify.sh"
+    SLACK_BOT_TOKEN="xoxb-test" SLACK_CHANNEL="#alerts" FAKE_CURL_CAPTURE="$capture" \
+      PATH="$bindir:$PATH" fleet_notify_hold "TST-13" "$state_dir" "created" >/dev/null 2>&1
+  )
+  [ ! -f "$capture" ]
+}
+
+test_hold_transport_failure_marks_failed_and_completes() {
+  local state_dir bindir
+  state_dir=$(_mktemp_test_dir)
+  bindir=$(_with_stub_path)
+  _write_hold_log "$state_dir" "TST-14"
+  local rc
+  SLACK_BOT_TOKEN="xoxb-test" SLACK_CHANNEL="#alerts" FAKE_CURL_MODE="fail" \
+    PATH="$bindir:$PATH" fleet_notify_hold "TST-14" "$state_dir" "created" >/dev/null 2>&1
+  rc=$?
+  [ "$rc" -eq 0 ] && grep -q '"notify_state": "failed"' "$state_dir/TST-14-hold-notify.json"
+}
+
+test_hold_failed_send_is_retried_on_a_later_pass() {
+  local state_dir bindir capture
+  state_dir=$(_mktemp_test_dir)
+  bindir=$(_with_stub_path)
+  capture="$state_dir/.capture"
+  _write_hold_log "$state_dir" "TST-15"
+  SLACK_BOT_TOKEN="xoxb-test" SLACK_CHANNEL="#alerts" FAKE_CURL_MODE="fail" \
+    PATH="$bindir:$PATH" fleet_notify_hold "TST-15" "$state_dir" "created" >/dev/null 2>&1
+  SLACK_BOT_TOKEN="xoxb-test" SLACK_CHANNEL="#alerts" FAKE_CURL_CAPTURE="$capture" \
+    PATH="$bindir:$PATH" fleet_notify_hold "TST-15" "$state_dir" "created" >/dev/null 2>&1
+  [ -f "$capture" ] && grep -q '"notify_state": "sent"' "$state_dir/TST-15-hold-notify.json"
+}
+
+test_hold_no_slack_config_degrades_to_log_line_and_succeeds() {
+  local state_dir rc out
+  state_dir=$(_mktemp_test_dir)
+  unset SLACK_BOT_TOKEN SLACK_CHANNEL
+  _write_hold_log "$state_dir" "TST-16"
+  out=$(fleet_notify_hold "TST-16" "$state_dir" "created" 2>&1)
+  rc=$?
+  [ "$rc" -eq 0 ] && [[ "$out" == *"log-only"* ]]
+}
+
+test_hold_escalation_fires_once_at_threshold() {
+  local state_dir bindir capture old_held_at
+  state_dir=$(_mktemp_test_dir)
+  bindir=$(_with_stub_path)
+  capture="$state_dir/.capture"
+  old_held_at=$(date -u -d '30 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+  _write_hold_log "$state_dir" "TST-17" "$old_held_at"
+  SLACK_BOT_TOKEN="xoxb-test" SLACK_CHANNEL="#alerts" FAKE_CURL_CAPTURE="$capture" \
+    PATH="$bindir:$PATH" fleet_notify_hold "TST-17" "$state_dir" "escalate" >/dev/null 2>&1
+  [ -f "$capture" ] && grep -q '"escalated_at"' "$state_dir/TST-17-hold-notify.json" &&
+    ! grep -q '"escalated_at": ""' "$state_dir/TST-17-hold-notify.json"
+}
+
+test_hold_escalation_does_not_repeat() {
+  local state_dir bindir capture old_held_at
+  state_dir=$(_mktemp_test_dir)
+  bindir=$(_with_stub_path)
+  capture="$state_dir/.capture"
+  old_held_at=$(date -u -d '30 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+  _write_hold_log "$state_dir" "TST-18" "$old_held_at"
+  SLACK_BOT_TOKEN="xoxb-test" SLACK_CHANNEL="#alerts" \
+    PATH="$bindir:$PATH" fleet_notify_hold "TST-18" "$state_dir" "escalate" >/dev/null 2>&1
+  SLACK_BOT_TOKEN="xoxb-test" SLACK_CHANNEL="#alerts" FAKE_CURL_CAPTURE="$capture" \
+    PATH="$bindir:$PATH" fleet_notify_hold "TST-18" "$state_dir" "escalate" >/dev/null 2>&1
+  [ ! -f "$capture" ]
+}
+
+test_hold_escalation_below_threshold_sends_nothing() {
+  local state_dir bindir capture recent_held_at
+  state_dir=$(_mktemp_test_dir)
+  bindir=$(_with_stub_path)
+  capture="$state_dir/.capture"
+  recent_held_at=$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%SZ)
+  _write_hold_log "$state_dir" "TST-19" "$recent_held_at"
+  SLACK_BOT_TOKEN="xoxb-test" SLACK_CHANNEL="#alerts" FAKE_CURL_CAPTURE="$capture" \
+    PATH="$bindir:$PATH" fleet_notify_hold "TST-19" "$state_dir" "escalate" >/dev/null 2>&1
+  [ ! -f "$capture" ]
+}
+
+test_hold_no_record_is_a_silent_no_op() {
+  local state_dir rc
+  state_dir=$(_mktemp_test_dir)
+  rc=0
+  fleet_notify_hold "TST-20" "$state_dir" "created" >/dev/null 2>&1 || rc=$?
+  [ "$rc" -eq 0 ]
+}
+
+test_hold_invalid_record_is_a_silent_no_op() {
+  local state_dir bindir capture
+  state_dir=$(_mktemp_test_dir)
+  bindir=$(_with_stub_path)
+  capture="$state_dir/.capture"
+  printf '2026-08-01T00:00:00Z|META|human-hold|waiting|{"schema_version":1,"phase":"APPRAISE","reason":"","blocks":"","supersedes":"","questions":[],"parse_status":"invalid","parse_error":"x"}\n' \
+    >"$state_dir/TST-21-pipeline.log"
+  SLACK_BOT_TOKEN="xoxb-test" SLACK_CHANNEL="#alerts" FAKE_CURL_CAPTURE="$capture" \
+    PATH="$bindir:$PATH" fleet_notify_hold "TST-21" "$state_dir" "created" >/dev/null 2>&1
+  [ ! -f "$capture" ]
+}
+
 # ── dispatch ─────────────────────────────────────────────────────────────
 
 FILTER="${1:-}"
@@ -199,7 +359,19 @@ for fn in \
   test_worker_event_includes_last_assistant_message_when_present \
   test_worker_event_renders_elapsed_from_started_at_run_file \
   test_dead_letter_event_includes_reason \
-  test_notify_call_site_is_scoped_to_dead_letter_branch; do
+  test_notify_call_site_is_scoped_to_dead_letter_branch \
+  test_hold_created_sends_and_includes_questions \
+  test_hold_created_writes_sent_sidecar \
+  test_hold_created_twice_sends_once \
+  test_hold_restart_does_not_resend \
+  test_hold_transport_failure_marks_failed_and_completes \
+  test_hold_failed_send_is_retried_on_a_later_pass \
+  test_hold_no_slack_config_degrades_to_log_line_and_succeeds \
+  test_hold_escalation_fires_once_at_threshold \
+  test_hold_escalation_does_not_repeat \
+  test_hold_escalation_below_threshold_sends_nothing \
+  test_hold_no_record_is_a_silent_no_op \
+  test_hold_invalid_record_is_a_silent_no_op; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

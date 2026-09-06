@@ -450,7 +450,7 @@ Four event kinds, one writer each, folded by consumers on `tid`/`run_id`:
 # run — lib/run-summary.sh's run_summary_json, appended once per run by
 # lib/pipeline-finalize.sh's post-outcome sequence (idempotent: guarded on
 # an existing run event for this run_id).
-{"kind":"run","tid":"CRE-40","run_id":"CRE-40-2026-09-05T18:00:00Z-4821","gen":null,"trigger":"manual","versions":{"ticket_auto":"0.41.0","fleet":null,"cc":"2.1.261","model_default":null},"models":["claude-sonnet-4"],"complexity":"simple","type":"bug","planned":false,"estimate":null,"autonomy":"auto","ticket_created_at":"2026-09-01T00:00:00Z","started_at":"2026-09-05T18:00:00Z","ended_at":"2026-09-05T18:10:00Z","outcome":"completed: STEP_6","exit_code":0,"gate_held_at":null,"resumed_after_hold_ms":null,"verify_attempts":1,"review_iterations":0,"fix_rounds":0,"reconcile_cycles":0,"gate_stops":[],"pr":{"pr":42,"url":"https://github.com/acme/repo/pull/42","repo":"acme/repo"},"merge_decision":"merged","tokens":{"in":1000,"out":500,"cache":100,"cache_read":80,"cache_write":20},"phase_elapsed_ms":{"VERIFY":5000},"observed_at":"2026-09-05T18:10:01Z"}
+{"kind":"run","tid":"CRE-40","run_id":"CRE-40-2026-09-05T18:00:00Z-4821","gen":null,"trigger":"manual","versions":{"ticket_auto":"0.41.0","fleet":null,"cc":"2.1.261","model_default":null},"models":["claude-sonnet-4"],"complexity":"simple","type":"bug","planned":false,"estimate":null,"autonomy":"auto","ticket_created_at":"2026-09-01T00:00:00Z","started_at":"2026-09-05T18:00:00Z","ended_at":"2026-09-05T18:10:00Z","outcome":"completed: STEP_6","exit_code":0,"gate_held_at":null,"resumed_after_hold_ms":null,"verify_attempts":1,"review_iterations":0,"fix_rounds":0,"reconcile_cycles":0,"gate_stops":[],"pr":{"pr":42,"url":"https://github.com/acme/repo/pull/42","repo":"acme/repo"},"merge_decision":"merged","tokens":{"in":1000,"out":500,"cache":100,"cache_read":80,"cache_write":20},"phase_elapsed_ms":{"VERIFY":5000},"human_hold_requested":false,"human_hold_parse_status":null,"observed_at":"2026-09-05T18:10:01Z"}
 
 # merge — lib/merge-poll.sh, the single merge-truth implementation. One or
 # more per PR as state changes (open → merged/closed/stale/unknown-repo).
@@ -485,6 +485,16 @@ once its run is older than `MERGE_POLL_MAX_AGE_DAYS` (default 14) with no
 terminal state yet — converting "we stopped checking" into an honest event
 instead of silence. A `pr` with no resolvable `repo` gets `state:"unknown-repo"`
 exactly once, never retried.
+
+`human_hold_requested`/`human_hold_parse_status` (human-hold-protocol task 8.1) are
+scoped to the same run window as the counters above: `true`/`"ok"` when the run's own
+window carries a valid `META|human-hold` record, `true`/`"invalid"` for a malformed
+one, `false`/`null` when the run never emitted one — the overwhelmingly common case.
+Nothing else in the pipeline consumes this field; it exists to answer one question
+before any further consumer is built on it — how often is `=== HUMAN_HOLD ===` ever
+actually emitted (task 8.2) — because emission depends on an agent following a
+preamble instruction and no bash gate can observe compliance, the same reason
+`phase-result`'s own emission rate had to be measured rather than assumed.
 
 No schema change: `runs.jsonl` is created on first append, is independent of
 the pipeline log's own schema version, and this section is purely additive.
@@ -635,6 +645,64 @@ not both.
 
 `META|gate-warn|RETURN_INCOMPLETE` and `META|verifier-result` may coexist in the same log. Downstream consumers SHALL read only the verifier-result line, never both, to avoid double-counting.
 
+### Human-hold entries (human-hold-protocol)
+
+An agent's request for human input, made durable and detectable instead of a silent
+clean exit — `AskUserQuestion` is absent from the `claude -p` tool list, so prose plus
+exit was previously the only channel a headless worker had. Written by
+`lib/human-hold-parse.sh`, which parses the terminal `=== HUMAN_HOLD ===` block from
+the agent's captured return. The MSG is a JSON object:
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|human-hold|waiting|{\"schema_version\":1,\"phase\":\"APPRAISE\",\"reason\":\"SCOPE_UNDEFINED\",\"blocks\":\"notes.md#AC-2\",\"supersedes\":\"\",\"questions\":[{\"id\":1,\"text\":\"which archive?\"}],\"parse_status\":\"ok\",\"parse_error\":\"\"}" >> "$LOG_FILE"
+```
+
+JSON fields: `schema_version` (integer), `phase` (any pipeline phase — not restricted
+to the loop-bearing three `phase-result` covers), `reason` (one of six closed values,
+see [docs/human-hold-schema.md](docs/human-hold-schema.md)), `blocks` (the artifact
+path plus section/AC id the answer would change — mandatory, the structural
+park-versus-assume test), `supersedes` (the prior `hold_id`, when re-holding after a
+partial answer), `questions` (array of `{id, text}`, `text` already secret-redacted),
+`parse_status` (`ok`|`invalid`|`absent`), `parse_error` (string).
+
+The full field set, enums and worked examples are in
+[docs/human-hold-schema.md](docs/human-hold-schema.md).
+
+**Status is `waiting`, not `info`** — unlike `phase-result`, this line names a state
+the ticket is now in, not a claim about work already done.
+
+**No block at all writes nothing.** Unlike `phase-result`'s `UNKNOWN`-on-absent
+convention, "no hold requested" is the overwhelmingly common case and is a non-event:
+`human-hold-parse.sh` writes nothing to the log when the agent's return carries no
+`=== HUMAN_HOLD ===` block at all. An `invalid` record (a block was present but failed
+the contract) IS still written — a swallowed ask is the defect this channel exists to
+fix.
+
+**The record never carries a `hold_id`.** The agent never has one to give —
+`store.mint_hold_id` (fleetd, `fleet-controller/fleetd/store.py`) is the only minter,
+and this parser never opens the fleet state store. This is what makes an `invalid`
+record structurally unreleasable: there is nothing in it a release predicate could
+match against.
+
+`META|human-hold-released|info|<hold_id>` is the sibling marker a hold's release
+writes — the "unreleased" half of "an unreleased, valid human hold" that
+`pipeline-finalize.sh`'s `held: human` branch and fleetd's hold-creation pass both
+check for (the latest valid `human-hold` record with no later `human-hold-released`
+line after it). Written by whatever completes the release — today, fleetd's Python
+release path, mirroring the `gate` kind's reconcile pass.
+
+### Assumption entries
+
+`META|assumption|info|<what was assumed>` — the park-versus-assume rule's other
+branch. When an agent's `BLOCKS` for a would-be human-hold names no real artifact
+section (see `docs/human-hold-schema.md`), the preamble instructs it to record the
+assumption it is making here and continue, rather than park. Free-text MSG, no JSON
+envelope — this is a note for a human reader, not a machine contract.
+
+```bash
+echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|assumption|info|No archived-record guidance in the ticket; assuming archived records are excluded from the export, per the existing 'active records only' default elsewhere in this service." >> "$LOG_FILE"
+```
+
 ## Schema version header
 
 Every new pipeline log begins with a schema declaration as its first line:
@@ -670,6 +738,7 @@ echo "$(date -u +%Y-%m-%dT%H:%M:%SZ)|META|gate-stop|fail|<CODE>" >> "$LOG_FILE"
 | `BRANCH_DIRECTIVE_INVALID` | Parent epic has a malformed `## Branch Directive` block — gate-stop, no fallback (Step 0.5) |
 | `CODE_REVIEW_EXHAUSTED` | Code-review fix-and-re-review loop reached 3 cycles with medium+ severity findings still open (Step 4b) |
 | `RECONCILE_EXHAUSTED` | `RECONCILE_CYCLE` reached 3 — gate hold → re-approve → re-hold cycle capped, needs human review (Step 3.5) |
+| `HUMAN_HOLD_EXHAUSTED` | A human-hold request would push `hold_attempts` past `FLEET_HOLD_MAX_ATTEMPTS` (default 3) — the ask → partial-answer → re-ask cycle is capped, needs human review. Written by fleetd, not the router (`human-hold-protocol`, mirrors `RECONCILE_EXHAUSTED`'s shape) |
 
 ## Ordering guarantees
 

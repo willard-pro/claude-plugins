@@ -411,6 +411,185 @@ test_abandoned_very_old_returns_restart() {
   )
 }
 
+# ── Human hold detection (human-hold-protocol) ───────────────────────────────────
+
+_hold_line() {
+  # A canonical, valid human-hold JSON payload — no pipes inside, safe for _plog.
+  printf '{"schema_version":1,"phase":"APPRAISE","reason":"SCOPE_UNDEFINED","blocks":"notes.md#AC-2","supersedes":"","questions":[{"id":1,"text":"which archive?"}],"parse_status":"ok","parse_error":""}'
+}
+
+_invalid_hold_line() {
+  printf '{"schema_version":1,"phase":"APPRAISE","reason":"","blocks":"","supersedes":"","questions":[],"parse_status":"invalid","parse_error":"missing required field: REASON"}'
+}
+
+test_human_hold_no_file_returns_ok() {
+  local ws
+  ws=$(_setup_workspace)
+  source "$LIB_DIR/fleet-detect.sh"
+  local r
+  r=$(detect_human_hold "NOEXIST-99" "$ws")
+  rm -rf "$ws"
+  [ "$r" -eq 0 ]
+}
+
+test_human_hold_not_held_returns_ok() {
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-9" "META" "outcome" "info" "completed: STEP_6"
+  source "$LIB_DIR/fleet-detect.sh"
+  local r
+  r=$(detect_human_hold "CRE-9" "$ws")
+  rm -rf "$ws"
+  [ "$r" -eq 0 ]
+}
+
+test_human_hold_below_threshold_returns_ok() {
+  local ws recent
+  ws=$(_setup_workspace)
+  recent=$(date -u -d '30 minutes ago' +%Y-%m-%dT%H:%M:%SZ)
+  _plog "$ws" "CRE-9" "META" "human-hold" "waiting" "$(_hold_line)" "$recent"
+  _plog "$ws" "CRE-9" "META" "outcome" "info" "held: human" "$recent"
+  (
+    export FLEET_HOLD_WARN_HOURS=2
+    source "$LIB_DIR/fleet-detect.sh"
+    local r
+    r=$(detect_human_hold "CRE-9" "$ws")
+    rm -rf "$ws"
+    [ "$r" -eq 0 ]
+  )
+}
+
+test_human_hold_at_threshold_returns_warn() {
+  local ws old
+  ws=$(_setup_workspace)
+  old=$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+  _plog "$ws" "CRE-9" "META" "human-hold" "waiting" "$(_hold_line)" "$old"
+  _plog "$ws" "CRE-9" "META" "outcome" "info" "held: human" "$old"
+  (
+    export FLEET_HOLD_WARN_HOURS=2
+    source "$LIB_DIR/fleet-detect.sh"
+    local r
+    r=$(detect_human_hold "CRE-9" "$ws")
+    rm -rf "$ws"
+    [ "$r" -eq 1 ]
+  )
+}
+
+test_human_hold_very_old_still_warns_never_more() {
+  local ws very_old
+  ws=$(_setup_workspace)
+  very_old=$(date -u -d '160 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+  _plog "$ws" "CRE-9" "META" "human-hold" "waiting" "$(_hold_line)" "$very_old"
+  _plog "$ws" "CRE-9" "META" "outcome" "info" "held: human" "$very_old"
+  (
+    export FLEET_HOLD_WARN_HOURS=2
+    source "$LIB_DIR/fleet-detect.sh"
+    local r
+    r=$(detect_human_hold "CRE-9" "$ws")
+    rm -rf "$ws"
+    [ "$r" -eq 1 ]
+  )
+}
+
+test_human_hold_gate_hold_returns_ok() {
+  # Held for a different kind — not this detector's concern.
+  local ws old
+  ws=$(_setup_workspace)
+  old=$(date -u -d '3 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+  _plog "$ws" "CRE-9" "GATE" "gate" "fail" "held: complex ticket" "$old"
+  _plog "$ws" "CRE-9" "META" "outcome" "info" "held: gate" "$old"
+  (
+    export FLEET_HOLD_WARN_HOURS=2
+    source "$LIB_DIR/fleet-detect.sh"
+    local r
+    r=$(detect_human_hold "CRE-9" "$ws")
+    rm -rf "$ws"
+    [ "$r" -eq 0 ]
+  )
+}
+
+test_human_hold_invalid_record_returns_warn_even_unheld() {
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-9" "META" "human-hold" "waiting" "$(_invalid_hold_line)"
+  source "$LIB_DIR/fleet-detect.sh"
+  local r
+  r=$(detect_human_hold "CRE-9" "$ws")
+  rm -rf "$ws"
+  [ "$r" -eq 1 ]
+}
+
+test_human_hold_never_exceeds_one() {
+  local ws very_old
+  ws=$(_setup_workspace)
+  very_old=$(date -u -d '400 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+  _plog "$ws" "CRE-9" "META" "human-hold" "waiting" "$(_hold_line)" "$very_old"
+  _plog "$ws" "CRE-9" "META" "outcome" "info" "held: human" "$very_old"
+  (
+    export FLEET_HOLD_WARN_HOURS=2
+    source "$LIB_DIR/fleet-detect.sh"
+    local r
+    r=$(detect_human_hold "CRE-9" "$ws")
+    rm -rf "$ws"
+    [ "$r" -ne 2 ] && [ "$r" -ne 3 ] && [ "$r" -ne 4 ]
+  )
+}
+
+test_human_hold_held_ticket_runs_only_two_detectors() {
+  # A held ticket must run detect_abandoned and detect_human_hold only —
+  # every other per-ticket detector must report 0 for it (fleet-detection
+  # spec: "process-liveness detectors stay skipped for held tickets").
+  local ws old
+  ws=$(_setup_workspace)
+  old=$(date -u -d '3 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+  _plog "$ws" "CRE-9" "IMPLEMENT" "implement" "waiting" "agent launched" "$old"
+  _plog "$ws" "CRE-9" "META" "human-hold" "waiting" "$(_hold_line)" "$old"
+  _plog "$ws" "CRE-9" "META" "outcome" "info" "held: human" "$old"
+  (
+    export FLEET_HOLD_WARN_HOURS=2 FLEET_ZOMBIE_SECS=1
+    source "$LIB_DIR/fleet-detect.sh"
+    local json
+    json=$(fleet_detect_all "$ws")
+    rm -rf "$ws"
+    echo "$json" | jq -e '.pipelines[0].anomalies | contains("human-hold") and (contains("zombie") | not) and (contains("stall") | not) and (contains("loop") | not)' >/dev/null
+  )
+}
+
+test_human_hold_fixture_replay_reports_warn() {
+  # Regression corpus for the production incident (human-hold-protocol task
+  # 4.5, 1.3): a scrubbed synthetic log shaped like the 160-hour held ticket
+  # that motivated this change. Before this change no detector recognised
+  # `META|human-hold` at all; detect_human_hold now reports it.
+  local ws
+  ws=$(_setup_workspace)
+  cp "$SCRIPT_DIR/fixtures/human-hold-160h-pipeline.log" "$ws/TEST-1-pipeline.log"
+  (
+    export FLEET_HOLD_WARN_HOURS=2
+    source "$LIB_DIR/fleet-detect.sh"
+    local r
+    r=$(detect_human_hold "TEST-1" "$ws")
+    rm -rf "$ws"
+    [ "$r" -eq 1 ]
+  )
+}
+
+test_human_hold_aggregator_output_valid_json() {
+  local ws old
+  ws=$(_setup_workspace)
+  old=$(date -u -d '3 hours ago' +%Y-%m-%dT%H:%M:%SZ)
+  _plog "$ws" "CRE-9" "META" "human-hold" "waiting" "$(_hold_line)" "$old"
+  _plog "$ws" "CRE-9" "META" "outcome" "info" "held: human" "$old"
+  (
+    export FLEET_HOLD_WARN_HOURS=2
+    source "$LIB_DIR/fleet-detect.sh"
+    local json
+    json=$(fleet_detect_all "$ws")
+    rm -rf "$ws"
+    echo "$json" | jq -e . >/dev/null &&
+      echo "$json" | jq -e '.pipelines[0].severity == 1' >/dev/null
+  )
+}
+
 # ── Flow failure detection (6th detector) ───────────────────────────────────────
 
 test_flow_failures_no_hb_file_returns_ok() {
@@ -964,6 +1143,17 @@ for fn in \
   test_abandoned_recent_no_outcome_returns_ok \
   test_abandoned_old_no_outcome_returns_warn \
   test_abandoned_very_old_returns_restart \
+  test_human_hold_no_file_returns_ok \
+  test_human_hold_not_held_returns_ok \
+  test_human_hold_below_threshold_returns_ok \
+  test_human_hold_at_threshold_returns_warn \
+  test_human_hold_very_old_still_warns_never_more \
+  test_human_hold_gate_hold_returns_ok \
+  test_human_hold_invalid_record_returns_warn_even_unheld \
+  test_human_hold_never_exceeds_one \
+  test_human_hold_held_ticket_runs_only_two_detectors \
+  test_human_hold_fixture_replay_reports_warn \
+  test_human_hold_aggregator_output_valid_json \
   test_flow_failures_no_hb_file_returns_ok \
   test_flow_failures_zero_failures_returns_ok \
   test_flow_failures_one_failure_returns_warn \
