@@ -5,7 +5,7 @@ bottom. Update the checkboxes as work lands; move completed steps to the archive
 
 > Public repo — no ticket IDs, no customer data in this file.
 
-Last reviewed: 2026-09-05 (re-sequenced after the commercial-evidence audit)
+Last reviewed: 2026-09-06 (Step 5 landed; Step 6 held for real-run validation)
 
 ---
 
@@ -335,6 +335,14 @@ Probe fixtures used: `fleet-controller/fleetd/tests/fixtures/stream-json-*.ndjso
 ---
 
 ## Step 6 — Agent Mesh MVP (PC agent ↔ server agent)
+
+**Held (2026-09-06): do not start until a few real ticket runs have exercised the recent
+batch of changes** (Steps 3/4/5 — human-hold, RLVR verdict recompute, agent-observer — plus
+the commercial-evidence branches). All of it is implemented and unit-tested but largely
+unverified against live fleetd/Linear traffic on the tickets host. Agent Mesh's task-delegation
+phase (Phase 3) adds another consumer of the same reap path several of those changes just
+touched (`fleetd/supervisor.py`) — better to know the current batch is solid first than debug
+two layers of new behavior at once.
 
 **Plan:** `~/.claude/plans/i-want-you-to-zesty-quilt.md`
 
