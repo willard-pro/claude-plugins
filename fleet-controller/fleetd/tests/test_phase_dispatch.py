@@ -75,6 +75,7 @@ from fleetd.phase_dispatch import (  # noqa: E402
     resolve_ticket_type,
     resolve_ticket_complexity,
     resolve_loop_counters,
+    run_gate_check,
     needs_retro,
     RetroDecision,
     RETRO_REASON_GATE_STOP,
@@ -1926,6 +1927,33 @@ class TestResolveLoopCounters(unittest.TestCase):
             'RECONCILE_CYCLE': 1, 'VERIFY_ATTEMPTS': 2,
             'ITERATION': 3, 'PR_FEEDBACK_CYCLE': 4,
         })
+
+
+class TestRunGateCheck(unittest.TestCase):
+    """STEP_2_5/STEP_3's synchronous bash gate (task 10.1.9)."""
+
+    def test_a_missing_lib_dir_fails_closed_to_structural_failure(self):
+        with tempfile.TemporaryDirectory() as empty_lib:
+            with tempfile.TemporaryDirectory() as tmp:
+                log_file = Path(tmp) / 'CRE-1-pipeline.log'
+                log_file.write_text('')
+                code = run_gate_check('CRE-1', str(log_file), lib_dir=empty_lib)
+        self.assertEqual(code, 2)
+
+    def test_a_real_script_runs_against_the_real_lib(self):
+        # A nonexistent ticket has no notes.md, no complexity, no Linear
+        # context to auto-approve against — what is under test is that the
+        # real script was reached and its own exit code came back, one of
+        # the table's three defined codes, not that it approved anything.
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = Path(tmp) / 'CRE-NONEXISTENT-pipeline.log'
+            log_file.write_text('')
+            hb_log_file = Path(tmp) / 'CRE-NONEXISTENT-heartbeat.log'
+            hb_log_file.write_text('')
+            code = run_gate_check(
+                'CRE-NONEXISTENT', str(log_file), str(hb_log_file),
+                lib_dir=TICKET_AUTO_LIB, timeout=30)
+        self.assertIn(code, (0, 1, 2))
 
 
 if __name__ == '__main__':

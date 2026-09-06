@@ -647,6 +647,417 @@ class PhaseDispatchFirstDispatchTest(unittest.TestCase):
         dispatch_phase.assert_not_called()
 
 
+class PhaseDispatchStepLockedTest(unittest.TestCase):
+    """Task 10.1.9: `_dispatch_step_locked` — dispatching one step_id
+    however its `action` requires (fork, synchronous bash gate,
+    conditional retro, or a deliberate defer for `agent_sequence`)."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self._tmp.name)
+        self.log_file = self.state_dir / 'CRE-30-pipeline.log'
+        self.log_file.write_text('')
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _supervisor(self):
+        from fleetd.supervisor import Supervisor
+        return Supervisor(
+            state_dir=str(self.state_dir),
+            pidfile=str(self.state_dir / 'test.pid'),
+        )
+
+    def _table(self):
+        from fleetd import phase_dispatch as phase_mod
+        return phase_mod.DispatchTable.load()
+
+    def test_bash_gate_auto_approve_advances_past_step_2_5(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+        from fleetd import phase_dispatch as phase_mod
+
+        sup = self._supervisor()
+        with mock.patch.object(phase_mod, 'run_gate_check', return_value=0), \
+             mock.patch.object(sup, 'spawn_phase') as spawn_phase:
+            dispatched = sup._dispatch_step_locked(
+                'CRE-30', 'STEP_2_5', self._table(), str(self.log_file),
+                '', '', 'dispatched')
+
+        self.assertTrue(dispatched)
+        spawn_phase.assert_called_once()
+        self.assertEqual(spawn_phase.call_args[0][1], 'STEP_4')
+
+    def test_bash_gate_held_creates_a_hold_not_a_spawn(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+        from fleetd import phase_dispatch as phase_mod
+
+        sup = self._supervisor()
+        with mock.patch.object(phase_mod, 'run_gate_check', return_value=1), \
+             mock.patch.object(sup_mod, '_create_phase_dispatch_hold',
+                               return_value='hold:CRE-30:g1:a0') as create_hold, \
+             mock.patch.object(sup, 'spawn_phase') as spawn_phase:
+            dispatched = sup._dispatch_step_locked(
+                'CRE-30', 'STEP_2_5', self._table(), str(self.log_file),
+                '', '', 'dispatched')
+
+        self.assertTrue(dispatched)
+        spawn_phase.assert_not_called()
+        create_hold.assert_called_once()
+
+    def test_bash_gate_structural_failure_finalizes(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+        from fleetd import phase_dispatch as phase_mod
+
+        sup = self._supervisor()
+        with mock.patch.object(phase_mod, 'run_gate_check', return_value=2), \
+             mock.patch.object(sup_mod._orchestration_mod, 'finalize_terminal') \
+                as finalize_terminal, \
+             mock.patch.object(sup, 'spawn_phase') as spawn_phase:
+            dispatched = sup._dispatch_step_locked(
+                'CRE-30', 'STEP_2_5', self._table(), str(self.log_file),
+                '', '', 'dispatched')
+
+        self.assertTrue(dispatched)
+        spawn_phase.assert_not_called()
+        finalize_terminal.assert_called_once()
+        self.assertEqual(finalize_terminal.call_args[0][2], 1)
+
+    def test_step6_spawns_retro_when_needed(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+        from fleetd import phase_dispatch as phase_mod
+
+        decision = phase_mod.RetroDecision(True, ('VERIFY fail',), False)
+        sup = self._supervisor()
+        with mock.patch.object(phase_mod, 'needs_retro', return_value=decision), \
+             mock.patch.object(sup, 'spawn_phase') as spawn_phase:
+            dispatched = sup._dispatch_step_locked(
+                'CRE-30', 'STEP_6', self._table(), str(self.log_file),
+                '', '', 'dispatched')
+
+        self.assertTrue(dispatched)
+        spawn_phase.assert_called_once()
+        self.assertEqual(spawn_phase.call_args[0][1], 'STEP_6')
+
+    def test_step6_finalizes_directly_when_retro_not_needed(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+        from fleetd import phase_dispatch as phase_mod
+
+        decision = phase_mod.RetroDecision(False, (), False)
+        sup = self._supervisor()
+        with mock.patch.object(phase_mod, 'needs_retro', return_value=decision), \
+             mock.patch.object(sup_mod._orchestration_mod, 'finalize_terminal') \
+                as finalize_terminal, \
+             mock.patch.object(sup, 'spawn_phase') as spawn_phase:
+            dispatched = sup._dispatch_step_locked(
+                'CRE-30', 'STEP_6', self._table(), str(self.log_file),
+                '', '', 'dispatched')
+
+        self.assertTrue(dispatched)
+        spawn_phase.assert_not_called()
+        finalize_terminal.assert_called_once()
+        self.assertEqual(finalize_terminal.call_args[0][2], 0)
+
+    def test_step6_drift_writes_a_log_line_before_deciding(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+        from fleetd import phase_dispatch as phase_mod
+
+        decision = phase_mod.RetroDecision(False, (), True)
+        sup = self._supervisor()
+        with mock.patch.object(phase_mod, 'needs_retro', return_value=decision), \
+             mock.patch.object(sup_mod._orchestration_mod, 'finalize_terminal'), \
+             mock.patch.object(sup, 'spawn_phase'):
+            sup._dispatch_step_locked(
+                'CRE-30', 'STEP_6', self._table(), str(self.log_file),
+                '', '', 'dispatched')
+
+        self.assertIn('META|drift|warn|', self.log_file.read_text())
+
+    def test_agent_sequence_defers_and_records_position(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+
+        sup = self._supervisor()
+        with mock.patch.object(sup, 'spawn_phase') as spawn_phase:
+            dispatched = sup._dispatch_step_locked(
+                'CRE-30', 'STEP_5', self._table(), str(self.log_file),
+                '', '', 'dispatched')
+
+        self.assertFalse(dispatched)
+        spawn_phase.assert_not_called()
+        position = sup_mod._store_get_position(str(self.state_dir), 'CRE-30')
+        self.assertEqual(position['position'], 'STEP_5')
+
+    def test_pr_iterate_dispatches_via_spawn_pr_iterate(self):
+        from unittest import mock
+        from fleetd import phase_dispatch as phase_mod
+
+        sup = self._supervisor()
+        with mock.patch.object(sup, 'spawn_pr_iterate') as spawn_pr_iterate:
+            dispatched = sup._dispatch_step_locked(
+                'CRE-30', phase_mod.PR_ITERATE, self._table(),
+                str(self.log_file), 'hb.log', 'env.sh', 'dispatched')
+
+        self.assertTrue(dispatched)
+        spawn_pr_iterate.assert_called_once()
+        self.assertEqual(spawn_pr_iterate.call_args[0][0], 'CRE-30')
+
+    def test_an_unknown_step_id_defers_without_raising(self):
+        sup = self._supervisor()
+        dispatched = sup._dispatch_step_locked(
+            'CRE-30', 'STEP_NOPE', self._table(), str(self.log_file),
+            '', '', 'dispatched')
+        self.assertFalse(dispatched)
+
+
+class PhaseDispatchAdvanceTest(unittest.TestCase):
+    """Task 10.1.9: `_advance_phase_dispatch_locked` — the reap-driven
+    step-transition counterpart to `_dispatch_phase_locked`'s first
+    dispatch. `next_step`'s decision is exercised through real log content
+    (exit-code fallback classification) rather than mocked, since the
+    classification rules themselves already have dedicated coverage in
+    test_phase_dispatch.py; what is under test here is the wiring."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _supervisor(self):
+        from fleetd.supervisor import Supervisor
+        return Supervisor(
+            state_dir=str(self.state_dir),
+            pidfile=str(self.state_dir / 'test.pid'),
+        )
+
+    def _entry(self, tid, step_id, log_file, phase='IMPLEMENT',
+              log_line_offset=0, **extra):
+        entry = {
+            'phase': phase, 'step_id': step_id, 'log_file': str(log_file),
+            'hb_log_file': '', 'env_file': '', 'reason': 'dispatched',
+            'log_line_offset': log_line_offset,
+        }
+        entry.update(extra)
+        return entry
+
+    def test_advance_dispatches_the_next_spawning_step(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+
+        log_file = self.state_dir / 'CRE-31-pipeline.log'
+        log_file.write_text('')
+        sup = self._supervisor()
+        entry = self._entry('CRE-31', 'STEP_4', log_file, phase='IMPLEMENT')
+        with mock.patch.object(sup, 'spawn_phase') as spawn_phase:
+            sup._advance_phase_dispatch_locked('CRE-31', entry, 0, 'exit')
+
+        spawn_phase.assert_called_once()
+        self.assertEqual(spawn_phase.call_args[0][1], 'STEP_4_5')
+
+    def test_a_failed_verify_retries_implement(self):
+        from unittest import mock
+
+        log_file = self.state_dir / 'CRE-32-pipeline.log'
+        log_file.write_text('')
+        sup = self._supervisor()
+        entry = self._entry('CRE-32', 'STEP_4_5', log_file, phase='VERIFY')
+        with mock.patch.object(sup, 'spawn_phase') as spawn_phase:
+            sup._advance_phase_dispatch_locked('CRE-32', entry, 1, 'exit')
+
+        spawn_phase.assert_called_once()
+        self.assertEqual(spawn_phase.call_args[0][1], 'STEP_4')
+
+    def test_terminal_finalizes_via_orchestration(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+
+        log_file = self.state_dir / 'CRE-33-pipeline.log'
+        log_file.write_text('')
+        sup = self._supervisor()
+        entry = self._entry('CRE-33', 'STEP_6', log_file, phase='MAINTENANCE')
+        with mock.patch.object(sup_mod._orchestration_mod, 'finalize_terminal') \
+                as finalize_terminal:
+            sup._advance_phase_dispatch_locked('CRE-33', entry, 0, 'exit')
+
+        finalize_terminal.assert_called_once()
+        self.assertEqual(finalize_terminal.call_args[0][2], 0)
+
+    def test_a_hold_is_created_when_gate_reconcile_holds_again(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+
+        log_file = self.state_dir / 'CRE-34-pipeline.log'
+        log_file.write_text(
+            '2026-09-06T10:00:00Z|GATE|reconcile|done|cycle#1|held: gate\n')
+        sup = self._supervisor()
+        entry = self._entry('CRE-34', 'STEP_3_5', log_file, phase='GATE')
+        with mock.patch.object(sup_mod, '_create_phase_dispatch_hold',
+                               return_value='hold:CRE-34:g1:a0') as create_hold, \
+             mock.patch.object(sup, 'spawn_phase') as spawn_phase:
+            sup._advance_phase_dispatch_locked('CRE-34', entry, 0, 'exit')
+
+        spawn_phase.assert_not_called()
+        create_hold.assert_called_once()
+
+    def test_bracket_offset_excludes_an_earlier_attempts_gate_stop(self):
+        from unittest import mock
+
+        log_file = self.state_dir / 'CRE-35-pipeline.log'
+        log_file.write_text(
+            '2026-09-06T09:00:00Z|META|gate-stop|fail|STALE_FROM_LAST_ATTEMPT\n'
+            '2026-09-06T10:00:00Z|META|schema|info|1\n'
+        )
+        offset = 1  # skip the stale gate-stop line above
+        sup = self._supervisor()
+        entry = self._entry(
+            'CRE-35', 'STEP_4', log_file, phase='IMPLEMENT',
+            log_line_offset=offset)
+        with mock.patch.object(sup, 'spawn_phase') as spawn_phase:
+            sup._advance_phase_dispatch_locked('CRE-35', entry, 0, 'exit')
+
+        # A clean exit with the stale gate-stop excluded from the bracket
+        # classifies 'done' (rung 4, clean exit) and advances normally —
+        # if the offset were ignored, rung 1 would fire on the stale line
+        # and this would finalize instead.
+        spawn_phase.assert_called_once()
+        self.assertEqual(spawn_phase.call_args[0][1], 'STEP_4_5')
+
+    def test_step_1_bug_routes_to_reproduce(self):
+        from unittest import mock
+        from fleetd import phase_dispatch as phase_mod
+
+        log_file = self.state_dir / 'CRE-36-pipeline.log'
+        log_file.write_text('')
+        sup = self._supervisor()
+        entry = self._entry('CRE-36', 'STEP_1', log_file, phase='APPRAISE')
+        with mock.patch.object(phase_mod, 'resolve_ticket_type',
+                               return_value='bug'), \
+             mock.patch.object(sup, 'spawn_phase') as spawn_phase:
+            sup._advance_phase_dispatch_locked('CRE-36', entry, 0, 'exit')
+
+        spawn_phase.assert_called_once()
+        self.assertEqual(spawn_phase.call_args[0][1], 'STEP_1_5')
+
+    def test_ticket_type_is_resolved_once_and_cached(self):
+        from unittest import mock
+        from fleetd import phase_dispatch as phase_mod
+
+        sup = self._supervisor()
+        with mock.patch.object(phase_mod, 'resolve_ticket_type',
+                               return_value='feature') as resolve_type:
+            first = sup._resolve_is_bug_locked('CRE-37')
+            second = sup._resolve_is_bug_locked('CRE-37')
+
+        self.assertFalse(first)
+        self.assertFalse(second)
+        resolve_type.assert_called_once()
+
+    def test_a_missing_step_id_is_a_noop_not_a_crash(self):
+        log_file = self.state_dir / 'CRE-38-pipeline.log'
+        log_file.write_text('')
+        sup = self._supervisor()
+        entry = self._entry('CRE-38', '', log_file, phase='IMPLEMENT')
+        sup._advance_phase_dispatch_locked('CRE-38', entry, 0, 'exit')  # no raise
+
+
+class PhaseDispatchReapWiringTest(unittest.TestCase):
+    """Task 10.1.9: `_reap_children_locked` routes a reaped phase worker
+    through `_advance_phase_dispatch_locked` instead of the manual-router-
+    oriented reconcile path, and only when the flag is set — a real fork
+    and reap, not a mocked one, since what is under test is the branch
+    inside `_reap_children_locked` itself."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _supervisor(self):
+        from fleetd.supervisor import Supervisor
+        return Supervisor(
+            state_dir=str(self.state_dir),
+            pidfile=str(self.state_dir / 'test.pid'),
+            spawn_enabled=True, max_concurrent=1,
+        )
+
+    def test_reap_calls_advance_phase_dispatch_when_flag_is_set(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+
+        sup = self._supervisor()
+        sup.acquire_lock()
+        try:
+            log_file = self.state_dir / 'CRE-39-pipeline.log'
+            log_file.write_text('')
+            sup.spawn_phase(
+                'CRE-39', 'STEP_4', str(log_file),
+                cmd_override=[sys.executable, '-c', 'pass'])
+            time.sleep(1)
+
+            with mock.patch.object(sup_mod, 'FLEET_PHASE_DISPATCH_ENABLE', True), \
+                 mock.patch.object(sup, '_advance_phase_dispatch_locked') \
+                    as advance:
+                non_terminal = sup._reap_children_locked()
+        finally:
+            sup.release_lock()
+
+        self.assertEqual(non_terminal, [])
+        advance.assert_called_once()
+        self.assertEqual(advance.call_args[0][0], 'CRE-39')
+
+    def test_reap_uses_the_manual_reconcile_path_when_flag_is_unset(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+
+        sup = self._supervisor()
+        sup.acquire_lock()
+        try:
+            log_file = self.state_dir / 'CRE-40-pipeline.log'
+            log_file.write_text('')
+            sup.spawn_phase(
+                'CRE-40', 'STEP_4', str(log_file),
+                cmd_override=[sys.executable, '-c', 'pass'])
+            time.sleep(1)
+
+            self.assertFalse(sup_mod.FLEET_PHASE_DISPATCH_ENABLE)
+            with mock.patch.object(sup, '_advance_phase_dispatch_locked') \
+                    as advance:
+                non_terminal = sup._reap_children_locked()
+        finally:
+            sup.release_lock()
+
+        advance.assert_not_called()
+        self.assertEqual(non_terminal, ['CRE-40'])
+
+    def test_spawn_pr_iterate_registers_a_killable_child(self):
+        sup = self._supervisor()
+        sup.acquire_lock()
+        try:
+            log_file = self.state_dir / 'CRE-41-pipeline.log'
+            log_file.write_text('')
+            pid, _sid, spawn = sup.spawn_pr_iterate(
+                'CRE-41', str(log_file),
+                cmd_override=_make_ignoring_worker(sleep_secs=30))
+            child = sup._children.get('CRE-41')
+            self.assertIsNotNone(child)
+            self.assertEqual(child['pid'], pid)
+            self.assertEqual(child['phase'], 'PR-REVIEW')
+            from fleetd import phase_dispatch as phase_mod
+            self.assertEqual(child['step_id'], phase_mod.PR_ITERATE)
+        finally:
+            sup.kill_worker('CRE-41', grace_secs=1)
+            sup.release_lock()
+
+
 class RegistryObservationTest(unittest.TestCase):
     """Task 4.4: observe-only mode reads existing registry entries."""
 

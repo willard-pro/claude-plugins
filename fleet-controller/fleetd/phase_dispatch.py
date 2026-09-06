@@ -1783,6 +1783,39 @@ def resolve_loop_counters(log_lines):
     }
 
 
+# ── Bash-only step dispatch (task 10.1.9, design.md D22) ────────────────────
+#
+# STEP_2_5/STEP_3 is the one loop-bearing-shaped step with no agent spawn at
+# all (`action: bash` — table_type "Bash only") — `gate-check.sh` decides it,
+# synchronously, in one subprocess call. `next_step` already routes on its
+# exit code (0/1/2); this is the missing piece that actually runs it, mirroring
+# `resolve_ticket_complexity`'s shell-out discipline rather than a second
+# implementation of the gate logic itself.
+
+
+def run_gate_check(tid, log_file, hb_log_file='', mode='entry', lib_dir=None,
+                   timeout=60):
+    """Run `gate-check.sh` for STEP_2_5/STEP_3 and return its exit code.
+
+    Returns `2` (the table's own "structural failure" code) when the script
+    cannot even be invoked (missing lib, timeout) — fails toward the gate-stop
+    branch rather than toward silent auto-approval, matching every other
+    fail-closed resolver in this module.
+    """
+    lib = Path(lib_dir) if lib_dir else ticket_auto_lib_dir()
+    script = lib / 'gate-check.sh'
+    if not script.is_file():
+        return 2
+    args = ['bash', str(script), tid, str(log_file), str(hb_log_file or ''),
+            '--mode', mode]
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True,
+                              timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return 2
+    return proc.returncode
+
+
 # ── Step transitions (task 10.1, design.md D22) ─────────────────────────────
 #
 # Groups 1-9/11 give fleetd every primitive to run ONE phase. Nothing decided
