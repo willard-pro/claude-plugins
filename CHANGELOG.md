@@ -19,11 +19,47 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 
 ## fleet-controller 0.26.0 (2026-09-06)
 
-fleetd now gates its own startup on `lib/fleet-env-check.sh`, refusing to
-boot when the environment is misconfigured — the daemon-process equivalent
-of ticket-auto-pipeline's Step-0 `validate-env` guard, which fleetd has no
-LLM turn to run inline since it's the process doing the work, not a
-prompt reading a guard.
+Task group 10.1 of `openspec/changes/fleetd-phase-supervisor` (design.md D22):
+the phase-dispatch step-transition function, gated behind
+`FLEET_PHASE_DISPATCH_ENABLE` (default `false`, a true no-op when unset).
+Where the ticket-level path spawns one long-lived `claude -p '/ticket-auto
+--auto'` worker that sequences every phase itself, phase-dispatch spawns one
+short-lived `claude -p '/ticket-<phase>'` worker per phase and lets fleetd
+decide done/fail deterministically from exit code, log markers, and
+`META|phase-result` — never from agent prose.
+
+- `phase_dispatch.next_step(table, step_id, outcome, counters)` — pure
+  14-step state-machine transition function driving the whole path.
+- Reap-driven step advancement (`_advance_phase_dispatch_locked`,
+  `_act_on_next_step_locked`, `_dispatch_step_locked`): a reaped phase
+  worker's exit now drives the next dispatch, hold, or finalize directly,
+  with the existing VERIFY (STEP_4_5) and PR-REVIEW-iterate (STEP_4_6) retry
+  caps finalizing instead of looping forever once exhausted.
+- Gate holds (STEP_2_5/STEP_3_5) created through the existing
+  `store.set_hold`/`mint_hold_id` path and released by the existing
+  reconciler — no new hold mechanism.
+- `orchestration.finalize_terminal` wired to the same finalize path
+  `pipeline-finalize.sh` uses for the manual router; STEP_6 retro
+  auto-trigger conditions; auto-merge ticket-complexity resolution
+  (STEP_4_6 OK → STEP_5).
+- First-dispatch queue wiring (`_dispatch_phase_locked`) so a queued ticket
+  entering with the flag on starts on the phase-dispatch path from STEP_1.
+- Regression suite (`PhaseDispatchRegressionPassTest`, 4 tests): full happy
+  path with real forked children and no `claude` spawn, VERIFY and
+  PR-REVIEW loop-cap exhaustion, and a gate hold created by the reap path
+  released by the pre-existing reconciler — proving the pieces from 10.1.1
+  through 10.1.9 actually compose.
+
+**Rollout is still off by default and not yet promoted.** 10.2 (run the
+path on a subset of real tickets and compare outcomes) and 10.4 (promotion)
+are deliberately left as follow-up operational work, not part of this
+release.
+
+fleetd now also gates its own startup on `lib/fleet-env-check.sh`, refusing
+to boot when the environment is misconfigured — the daemon-process
+equivalent of ticket-auto-pipeline's Step-0 `validate-env` guard, which
+fleetd has no LLM turn to run inline since it's the process doing the
+work, not a prompt reading a guard.
 
 - `_run_startup_env_check()` in `fleetd/__main__.py` shells out to the
   existing check script before constructing the `Supervisor` and exits
@@ -33,11 +69,16 @@ prompt reading a guard.
 - Opt out with `FLEET_STARTUP_ENV_CHECK=false`, now set by default inside
   fleetd's own subprocess-spawning tests (they exercise supervisor
   mechanics only, with no dependency on a real `LINEAR_API_KEY`/`CLAUDE_CMD`).
-- Fixed a pre-existing bug in `fleet-env-check.sh` found while wiring this
-  up: an auto-derived `REPOS_ROOT` (status `auto` — successfully derived,
-  nothing wrong) was incrementing the issue counter the same as a genuinely
-  missing one, which would have made the new startup gate refuse to boot
-  on a perfectly valid, un-declared `REPOS_ROOT`.
+- Fixed two pre-existing bugs in `fleet-env-check.sh` found while wiring
+  this up, both of the same shape — a status that means "this is fine"
+  was incrementing the issue counter as if it meant "this is missing,"
+  which would have made the new startup gate refuse to boot on a
+  perfectly valid, zero-config environment:
+  - an auto-derived `REPOS_ROOT` (status `auto` — successfully derived,
+    nothing wrong)
+  - `FLEET_WORKER_PERMISSION_MODE` left unset (status now `auto` —
+    fleetd's own documented default is to fall back to
+    `bypassPermissions`, not a gap the operator must close)
 
 ## fleet-controller 0.25.0 (2026-09-06)
 

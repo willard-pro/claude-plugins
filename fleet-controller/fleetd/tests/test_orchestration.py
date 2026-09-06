@@ -196,6 +196,19 @@ class TestAutoMerge(unittest.TestCase):
         self.assertEqual(result.status, orchestration.OK)
         self.assertIn(['pr', 'merge', '412', '--squash', '--auto'], self.calls)
 
+    def test_wired_through_step_4_6s_own_post_dispatch(self):
+        # task 10.1.7 — confirms the table-driven path (the real STEP_4_6
+        # entry, not a hand-called run_auto_merge) reaches the merge, given a
+        # ctx populated the way the eventual dispatch wiring will populate
+        # it (autonomy/integration_branch from PreambleResult.fields,
+        # complexity from resolve_ticket_complexity).
+        table = DispatchTable.load(TABLE_PATH)
+        results = orchestration.run_step_orchestration(
+            table, 'STEP_4_6', 'post_dispatch', self._ctx())
+        self.assertIn(['pr', 'merge', '412', '--squash', '--auto'], self.calls)
+        self.assertTrue(any(r.kind == 'auto_merge' and r.status == orchestration.OK
+                            for r in results))
+
     def test_manual_mode_never_merges(self):
         result = orchestration.run_auto_merge({'kind': 'auto_merge'},
                                               self._ctx(autonomy='manual'))
@@ -364,6 +377,77 @@ class TestBashAndFlowItems(unittest.TestCase):
                 sp.run = real
         self.assertTrue(result.blocking)
         self.assertIn('STATE_ASSERTION_FAILED', result.detail)
+
+
+class TestFinalizeTerminal(unittest.TestCase):
+    """`orchestration.finalize_terminal` — task 10.1.5, design.md D22.
+
+    Fake `worktree`/`finalize` runners stand in for the real bash scripts:
+    what is under test is the branching and ordering (gate-stop line first,
+    worktree release ONLY on a clean exit, finalize called either way), not
+    `pipeline-finalize.sh`'s or `worktree.sh`'s own behaviour — those have no
+    dedicated coverage yet and are out of this subtask's scope.
+    """
+
+    def setUp(self):
+        self.table = DispatchTable.load(TABLE_PATH)
+        self.calls = []
+        self.runners = {
+            'worktree': self._fake_runner('worktree'),
+            'finalize': self._fake_runner('finalize'),
+        }
+
+    def _fake_runner(self, kind):
+        def _runner(item, ctx, lib_dir=None):
+            self.calls.append((kind, dict(ctx)))
+            return orchestration.StepResult(kind, orchestration.OK, kind,
+                                            False, 0)
+        return _runner
+
+    def test_a_clean_exit_releases_the_worktree_before_finalizing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = str(Path(tmp) / 'CRE-1-pipeline.log')
+            Path(log_file).write_text('')
+            results = orchestration.finalize_terminal(
+                self.table, 'CRE-1', 0, '', log_file, runners=self.runners)
+            log_contents = Path(log_file).read_text()
+        self.assertEqual([c[0] for c in self.calls], ['worktree', 'finalize'])
+        self.assertEqual(len(results), 2)
+        self.assertEqual(log_contents, '')
+
+    def test_a_gate_stop_terminal_writes_the_line_and_skips_the_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = str(Path(tmp) / 'CRE-2-pipeline.log')
+            Path(log_file).write_text('')
+            orchestration.finalize_terminal(
+                self.table, 'CRE-2', 1, 'VERIFY_EXHAUSTED', log_file,
+                runners=self.runners)
+            log_contents = Path(log_file).read_text()
+        self.assertEqual([c[0] for c in self.calls], ['finalize'])
+        self.assertIn('|META|gate-stop|fail|VERIFY_EXHAUSTED', log_contents)
+
+    def test_a_block_verdict_terminal_has_no_code_but_still_finalizes(self):
+        # STEP_4_6's ❌ BLOCK verdict is a gate-stop with no named code
+        # (SKILL.md never assigns one) — next_step returns gate_stop_code=''.
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = str(Path(tmp) / 'CRE-3-pipeline.log')
+            Path(log_file).write_text('')
+            orchestration.finalize_terminal(
+                self.table, 'CRE-3', 1, '', log_file, runners=self.runners)
+            log_contents = Path(log_file).read_text()
+        self.assertEqual([c[0] for c in self.calls], ['finalize'])
+        self.assertEqual(log_contents, '')
+
+    def test_ctx_carries_tid_exit_code_and_log_file_to_every_runner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = str(Path(tmp) / 'CRE-4-pipeline.log')
+            Path(log_file).write_text('')
+            orchestration.finalize_terminal(
+                self.table, 'CRE-4', 0, '', log_file, runners=self.runners)
+        for _, ctx in self.calls:
+            self.assertEqual(ctx['tid'], 'CRE-4')
+            self.assertEqual(ctx['exit_code'], 0)
+            self.assertEqual(ctx['LOG_FILE'], log_file)
 
 
 if __name__ == '__main__':

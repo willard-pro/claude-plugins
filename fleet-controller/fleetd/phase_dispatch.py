@@ -1669,3 +1669,463 @@ def last_verify_checkpoint(log_lines):
     if last_step in _VERIFY_UNRESUMABLE_SUBSTEPS:
         return 'build-plan'
     return last_step
+
+
+# ── Ticket type resolution (task 10.1.2, design.md D22) ─────────────────────
+#
+# STEP_1_5's table `condition` ("bug tickets only") needs the ticket's type
+# label. Shells out to `linear-api.sh`'s own `get_issue` rather than
+# reimplementing the GraphQL query or the labels field shape (same
+# discipline as `preamble.py`'s D13/D17 calls) — resolve once at first
+# dispatch and cache the result; a ticket's type label is fixed at creation
+# and never toggled mid-run (`state-machine.json`'s `planner_labels` table).
+
+_TICKET_TYPE_LABELS = ('bug', 'feature', 'improvement', 'security', 'chore')
+
+
+def resolve_ticket_type(tid, lib_dir=None, timeout=30):
+    """The ticket's type label (`bug`/`feature`/...), or `None` if unresolvable.
+
+    A missing/unresolvable label degrades to `None` (treated as "not a bug"
+    by every caller) rather than raising — the same fail-soft posture
+    `_agent_md_path`/`_parse_env_file` already take for optional context this
+    module cannot get without a live Linear read.
+    """
+    lib_dir = lib_dir or os.environ.get(
+        'CLAUDE_SKILLS_LIB', os.path.expanduser('~/.claude/skills/lib'))
+    script = f'source "{lib_dir}/linear-api.sh" >/dev/null 2>&1 && get_issue "$1"'
+    try:
+        proc = subprocess.run(
+            ['bash', '-c', script, 'bash', tid],
+            capture_output=True, text=True, timeout=timeout)
+        issue = json.loads(proc.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    nodes = ((issue.get('labels') or {}).get('nodes')) or []
+    labels = {(n.get('name') or '').lower() for n in nodes}
+    for label in _TICKET_TYPE_LABELS:
+        if label in labels:
+            return label
+    return None
+
+
+# ── Ticket complexity resolution (task 10.1.7, design.md D22) ──────────────
+#
+# `orchestration.run_auto_merge` (STEP_4_6's `auto_merge` post_dispatch item)
+# was already implemented and already tested against a hand-built `ctx` —
+# what it never had was a live source for `ctx['complexity']`. `autonomy` and
+# `integration_branch` are already resolved once per ticket by
+# `preamble.run_preamble` (its `PreambleResult.fields['AUTONOMY']`/
+# `['INTEGRATION_BRANCH']`); complexity is not a preamble concern — it is set
+# by the appraise phase into `notes.md`'s `## Complexity` section, and
+# `detect-resume.sh` derives its own COMPLEXITY variable from exactly that
+# file, via `ticket-dir.sh`'s `resolve_ticket_dir` + `notes-parse.sh`'s
+# `get_complexity`. This resolves the same pair rather than a second
+# implementation of either.
+
+
+def resolve_ticket_complexity(tid, repos_root='', lib_dir=None, timeout=30):
+    """The ticket's complexity score (`simple`/`complex`), or `''` if
+    unresolvable.
+
+    `run_auto_merge` treats anything but the literal `'simple'` as
+    ineligible, so an unresolvable complexity (no workspace directory found,
+    no `notes.md`, no `## Complexity` section) fails closed the same way an
+    absent `AUTONOMY` already does — never raises.
+    """
+    lib_dir = lib_dir or os.environ.get(
+        'CLAUDE_SKILLS_LIB', os.path.expanduser('~/.claude/skills/lib'))
+    script = (
+        f'source "{lib_dir}/ticket-dir.sh" >/dev/null 2>&1 && '
+        f'source "{lib_dir}/notes-parse.sh" >/dev/null 2>&1 && '
+        f'_dir=$(resolve_ticket_dir "$1" "$2") && get_complexity "$_dir"'
+    )
+    try:
+        proc = subprocess.run(
+            ['bash', '-c', script, 'bash', tid, repos_root or '.'],
+            capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return ''
+    if proc.returncode != 0:
+        return ''
+    return (proc.stdout or '').strip()
+
+
+# ── Loop counter resolution (task 10.1.8, design.md D22) ────────────────────
+#
+# `evaluate_loop`'s `counters` dict has no store-backed table to read from —
+# design.md's own decision is that these are derived from the pipeline log,
+# the same way `detect-resume.sh` derives its own COUNTER variables, via
+# `grep -c` over field-anchored patterns. Reusing `_retro_anchored` (defined
+# below with `needs_retro`) rather than a second field-match helper keeps the
+# two log-scanning functions in this module sharing one anchoring rule.
+
+_LOOP_COUNTER_PATTERNS = {
+    'RECONCILE_CYCLE': 'GATE|reconcile|done|cycle#',
+    'VERIFY_ATTEMPTS': 'VERIFY|verify|fail|',
+    'ITERATION': 'PR-REVIEW|pr-review|done|WARN',
+    'PR_FEEDBACK_CYCLE': 'PR-REVIEW|pr-reconcile|done|cycle#',
+}
+
+
+def resolve_loop_counters(log_lines):
+    """The four loop-cap counters `evaluate_loop` reads, derived from the log.
+
+    Ports `detect-resume.sh`'s four `grep -c '^[^|]*|...'` patterns exactly —
+    RECONCILE_CYCLE, VERIFY_ATTEMPTS, ITERATION, PR_FEEDBACK_CYCLE — so a
+    Python reimplementation cannot silently diverge from the bash one. `''`
+    (no matching lines) resolves to `0`, matching `detect-resume.sh`'s own
+    `${VAR:-0}` fallback after an empty grep.
+    """
+    return {
+        name: sum(1 for line in log_lines if _retro_anchored(line, literal))
+        for name, literal in _LOOP_COUNTER_PATTERNS.items()
+    }
+
+
+# ── Bash-only step dispatch (task 10.1.9, design.md D22) ────────────────────
+#
+# STEP_2_5/STEP_3 is the one loop-bearing-shaped step with no agent spawn at
+# all (`action: bash` — table_type "Bash only") — `gate-check.sh` decides it,
+# synchronously, in one subprocess call. `next_step` already routes on its
+# exit code (0/1/2); this is the missing piece that actually runs it, mirroring
+# `resolve_ticket_complexity`'s shell-out discipline rather than a second
+# implementation of the gate logic itself.
+
+
+def run_gate_check(tid, log_file, hb_log_file='', mode='entry', lib_dir=None,
+                   timeout=60):
+    """Run `gate-check.sh` for STEP_2_5/STEP_3 and return its exit code.
+
+    Returns `2` (the table's own "structural failure" code) when the script
+    cannot even be invoked (missing lib, timeout) — fails toward the gate-stop
+    branch rather than toward silent auto-approval, matching every other
+    fail-closed resolver in this module.
+    """
+    lib = Path(lib_dir) if lib_dir else ticket_auto_lib_dir()
+    script = lib / 'gate-check.sh'
+    if not script.is_file():
+        return 2
+    args = ['bash', str(script), tid, str(log_file), str(hb_log_file or ''),
+            '--mode', mode]
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True,
+                              timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return 2
+    return proc.returncode
+
+
+# ── Step transitions (task 10.1, design.md D22) ─────────────────────────────
+#
+# Groups 1-9/11 give fleetd every primitive to run ONE phase. Nothing decided
+# which step_id comes next once a phase finishes — this is that function.
+# It plays the role `detect-resume.sh`'s backward log scan plays for the
+# manual router, but computes forward from "the step that just finished plus
+# its classified outcome" (already available from `classify_phase`/
+# `evaluate_loop`) rather than re-deriving position from scratch each time,
+# per D7's decision not to shell out to `detect-resume.sh` on the normal path.
+#
+# `PR_ITERATE` is a synthetic step_id, not present in `dispatch-table.json`.
+# SKILL.md's own PR-REVIEW/WARN loop body spawns `/ticket-pr-iterate` as a
+# hardcoded exception, never a table-declared step — the same is true here;
+# see `build_pr_iterate_spawn` below rather than `build_phase_spawn`, which
+# requires a real table entry.
+PR_ITERATE = 'PR_ITERATE'
+
+NEXT_ADVANCE = 'advance'
+NEXT_TERMINAL = 'terminal'
+NEXT_HOLD = 'hold'
+
+NextStep = namedtuple(
+    'NextStep',
+    'kind step_id exit_code gate_stop_code hold_kind resume_step_id detail',
+)
+NextStep.__doc__ = """Where dispatch goes after one step finishes.
+
+kind           — 'advance' (dispatch `step_id` next), 'terminal' (write the
+                 finalize record and stop dispatching this ticket) or 'hold'
+                 (create a `gate`-kind hold row and stop dispatching — the
+                 already-live `Supervisor._hold_reconcile_pass`
+                 (human-hold-store-foundation) does the release probe; this
+                 function only ever creates the row).
+step_id        — the next step to dispatch, kind='advance' only. May be
+                 `PR_ITERATE`, which is not a real dispatch-table step_id —
+                 see `build_pr_iterate_spawn`.
+exit_code      — the code `pipeline-finalize.sh`'s equivalent should use,
+                 kind='terminal' only (0 success, 1 gate-stop/exhaustion).
+gate_stop_code — the named gate-stop code to record, kind='terminal' only,
+                 '' when the terminal is a clean success (STEP_6 done).
+hold_kind      — always 'gate' today (kind='hold' only) — `human` holds are
+                 created by `human-hold-parse.sh`/`gate_hold.py`'s own path,
+                 never by a step transition.
+resume_step_id — always `STEP_3_5` today (kind='hold' only). `_hold_reconcile_pass`
+                 clears the hold row but never touches `position` (design.md
+                 D5 — it must stay a thin, generic reconciler, not a second
+                 phase-dispatch authority). The caller must record this as
+                 the ticket's position *at hold-creation time*, alongside
+                 `store.set_hold`, so the position a plain release leaves
+                 behind is already correct — mirrors `detect-resume.sh`'s own
+                 `GATE_HELD` + approved-label → `STEP_3_5` transition, the
+                 manual router's parity requirement (both hold sites, the
+                 first hold from `STEP_2_5` and a re-hold from `STEP_3_5`
+                 itself, resume at the same place — the reconcile agent,
+                 never straight back to the bash gate).
+detail         — human-readable reason, for logging only.
+"""
+
+
+def _advance(step_id, detail=''):
+    return NextStep(NEXT_ADVANCE, step_id, None, '', '', '', detail)
+
+
+def _terminal(exit_code, gate_stop_code='', detail=''):
+    return NextStep(NEXT_TERMINAL, '', exit_code, gate_stop_code, '', '', detail)
+
+
+def _hold(kind, detail=''):
+    return NextStep(NEXT_HOLD, '', None, '', kind, 'STEP_3_5', detail)
+
+
+def _gate_reconcile_held(log_lines):
+    """Did the most recent GATE-reconcile completion hold again?
+
+    Mirrors `detect-resume.sh`'s own distinction exactly: `GATE|reconcile|
+    done|clean` advances the pipeline, `GATE|reconcile|done|cycle#N|held:
+    ...` does not, even though both are `done` (GATE is not loop-bearing/
+    phase-result-bearing, so `classify_phase` cannot tell them apart — this
+    is intentionally a GATE-specific check, not a generalizable one).
+    """
+    for line in reversed(log_lines):
+        fields = line.split('|', 4)
+        if len(fields) == 5 and fields[1] == 'GATE' \
+                and fields[2] == 'reconcile' and fields[3] == 'done':
+            return 'held:' in fields[4]
+    return False
+
+
+def next_step(table, step_id, result, counters, log_lines=(), is_bug=False):
+    """Given the step that just finished and its result, what happens next.
+
+    `result` is a `PhaseOutcome` (from `classify_phase`) for every agent-
+    spawning step, or a plain `int` exit code for a bash-only step
+    (`STEP_2_5`/`STEP_3` — `gate-check.sh`, already run by
+    `orchestration.run_bash_item`, which owns the exit-code semantics; this
+    function only routes on the number). `log_lines` must be scoped to the
+    step's own bracket, same contract as `classify_phase`. `counters` is the
+    same dict `evaluate_loop` already takes. `is_bug` resolves STEP_1_5's
+    table `condition` — see the caller-side note on caching it per ticket,
+    not re-fetching per step.
+
+    Ported step by step from `SKILL.md`'s Dispatch Loop / `detect-resume.sh`
+    — see design.md D22 for the full transition table and the two things
+    deliberately not ported (STEP_5_5 PR-comment reconciliation, phase
+    inspectors).
+    """
+    counters = counters or {}
+
+    if step_id == 'STEP_1':
+        return _advance('STEP_1_5' if is_bug else 'STEP_2', 'appraise done')
+
+    if step_id == 'STEP_1_5':
+        return _advance('STEP_2', 'reproduce done')
+
+    if step_id == 'STEP_2':
+        return _advance('STEP_2_5', 'exec done')
+
+    if step_id in ('STEP_2_5', 'STEP_3'):
+        exit_code = int(result)
+        if exit_code == 0:
+            return _advance('STEP_4', 'gate auto-approved')
+        if exit_code == 1:
+            return _hold('gate', 'gate held for approval')
+        return _terminal(1, '', 'gate-check structural failure (exit 2)')
+
+    if step_id == 'STEP_3_5':
+        loop_decision = evaluate_loop(
+            table, step_id, counters, when='pre_dispatch')
+        if loop_decision.action == LOOP_GATE_STOP:
+            return _terminal(
+                1, loop_decision.gate_stop_code, loop_decision.detail)
+        if _gate_reconcile_held(log_lines):
+            return _hold('gate', 'gate reconcile held again')
+        return _advance('STEP_4', 'gate reconcile clean')
+
+    if step_id == 'STEP_4':
+        return _advance('STEP_4_5', 'implement done')
+
+    if step_id == 'STEP_4_5':
+        if result.result == 'done':
+            return _advance('STEP_4_6', 'verify passed')
+        loop_decision = evaluate_loop(
+            table, step_id, counters, when='post_dispatch')
+        if loop_decision.action == LOOP_GATE_STOP:
+            return _terminal(
+                1, loop_decision.gate_stop_code, loop_decision.detail)
+        return _advance('STEP_4', 'verify failed, retry implement')
+
+    if step_id == 'STEP_4_6':
+        verdict = result.verdict
+        if verdict == 'OK':
+            return _advance('STEP_5', 'pr-review passed')
+        if verdict == 'WARN':
+            loop_decision = evaluate_loop(
+                table, step_id, counters, when='post_dispatch')
+            if loop_decision.action == LOOP_GATE_STOP:
+                return _terminal(
+                    1, loop_decision.gate_stop_code, loop_decision.detail)
+            return _advance(PR_ITERATE, 'pr-review warn, iterate')
+        return _terminal(1, '', f'pr-review blocked (verdict={verdict!r})')
+
+    if step_id == PR_ITERATE:
+        return _advance('STEP_4', 'pr-iterate done, re-implement')
+
+    if step_id == 'STEP_5':
+        # STEP_5_5 (PR comment reconciliation) is deliberately not ported —
+        # design.md D22.
+        return _advance('STEP_6', 'document/wiki-maintenance done')
+
+    if step_id == 'STEP_6':
+        return _terminal(0, '', 'pipeline complete')
+
+    raise DispatchTableError(f'next_step: unknown step_id {step_id!r}')
+
+
+def build_pr_iterate_spawn(tid, log_file, hb_log_file='', env_file='',
+                          extra_env=None):
+    """The one spawn `next_step` can return with no dispatch-table entry.
+
+    Mirrors `build_phase_spawn`'s `PhaseSpawn` shape exactly, so a caller
+    never has to special-case the return type — only the source of the
+    values differs (hardcoded here, table-driven there), matching
+    SKILL.md's own treatment of this exact loop body as inline prose rather
+    than a table row.
+    """
+    env = {
+        'LOG_FILE': str(log_file or ''),
+        'HB_LOG_FILE': str(hb_log_file or ''),
+        'HUSKY': '0',
+        'FLEET_TICKET_ID': str(tid),
+        'FLEET_PHASE': 'PR-REVIEW',
+        'FLEET_STEP': 'pr-iterate',
+        'FLEET_DISPATCH_STEP_ID': PR_ITERATE,
+    }
+    if env_file:
+        env['FLEET_TICKET_ENV_FILE'] = str(env_file)
+    if extra_env:
+        env.update({k: str(v) for k, v in extra_env.items()})
+
+    return PhaseSpawn(
+        step_id=PR_ITERATE,
+        step='pr-iterate',
+        phase='PR-REVIEW',
+        skill='/ticket-pr-iterate',
+        prompt=f'/ticket-pr-iterate {tid}. '
+               f'Apply the requested changes from the PR review.',
+        env=env,
+        attempt=None,
+        loop_bearing=True,
+        next_phase='PR-REVIEW',
+        agent=None,
+    )
+
+
+# ── STEP_6 retro auto-trigger (task 10.1.6, design.md D22) ─────────────────
+#
+# STEP_6's table `spawn` (the `/ticket-retro` agent) is `conditional_on:
+# "NEEDS_RETRO"` — `build_phase_spawn(table, 'STEP_6', ...)` already builds
+# that spawn correctly (it does not interpret `conditional_on`, same as every
+# other extra table field it ignores), so the only missing piece is this
+# decision: whether to call it at all.
+
+RETRO_REASON_GATE_STOP = 'gate-stop fired'
+RETRO_REASON_NO_SUCCESS = 'no VERIFY PASS + PR-REVIEW OK'
+RETRO_REASON_FALLBACK = 'heartbeat fallback event'
+# Deliberately not the bare gate-stop code as a quoted literal — that string
+# belongs to STEP_4_5's table entry alone (see `needs_retro`, which reads it
+# via `table.loop`), and `TestLoopCaps.test_caps_are_not_duplicated_as_
+# python_constants` fails loudly if a second Python literal ever claims it.
+RETRO_REASON_VERIFY_EXHAUSTED = 'VERIFY exhaustion code present'
+RETRO_REASON_VERIFY_FAIL = 'VERIFY fail'
+
+RetroDecision = namedtuple('RetroDecision', 'needed reasons drift_detected')
+RetroDecision.__doc__ = """Whether STEP_6 should auto-trigger `/ticket-retro`.
+
+needed         — True if any condition fired.
+reasons        — tuple of the condition names that fired, in check order.
+drift_detected — condition 3 (a heartbeat `|fallback|` event) specifically.
+                 SKILL.md's own check writes `META|drift|warn|...` to the
+                 pipeline log as part of this same condition; that write is
+                 the caller's job here (matching every other log-writing
+                 side effect in this module — an evaluator reports, the
+                 dispatch wiring or `orchestration.finalize_terminal` acts),
+                 not this function's, so a test can call this read-only.
+"""
+
+
+def _retro_anchored(line, literal):
+    """Field-anchored match: `^[^|]*|<literal>` in the bash checks this
+    ports — the first field (the ISO timestamp) is any run of non-pipe
+    chars, and `literal` must follow it exactly."""
+    parts = line.split('|', 1)
+    return len(parts) == 2 and parts[1].startswith(literal)
+
+
+def needs_retro(table, log_file, hb_log_file=''):
+    """Should STEP_6 auto-trigger a `/ticket-retro` agent?
+
+    Ports SKILL.md's 5-condition retro-trigger check verbatim: a gate-stop
+    fired anywhere in the log; the run lacks a *positive* success marker —
+    both a `VERIFY|verify|done|PASS` line AND a `PR-REVIEW|pr-review|done|OK`
+    line — tested as their absence, never as the absence of the STEP_6
+    outcome line itself (that line is written by this same step, so testing
+    for it was tautologically true on every run — GitHub #149); a heartbeat
+    `|fallback|` event fired; STEP_4_5's own gate-stop code (`VERIFY_
+    EXHAUSTED` in the shipped table, read via `table.loop` rather than
+    hardcoded — see the constant's own comment above) appears anywhere (a
+    safety net for condition 1 — gate-stop lines written inside an agent
+    sub-shell may not be visible to the router's own file descriptor); or an
+    explicit `VERIFY|verify|fail|` line appears (same sub-shell concern).
+    Conditions 4/5 duplicate condition 1 in the common case; kept because
+    the manual router keeps them.
+
+    A missing `log_file` or `hb_log_file` (or an empty `hb_log_file`, the
+    common case when heartbeat logging is off) reads as no lines — matching
+    bash's own `2>/dev/null`-suppressed grep failure, never an error.
+    """
+    try:
+        lines = Path(log_file).read_text().splitlines()
+    except OSError:
+        lines = []
+
+    reasons = []
+    if any('|META|gate-stop|fail|' in line for line in lines):
+        reasons.append(RETRO_REASON_GATE_STOP)
+
+    has_verify_pass = any(
+        _retro_anchored(line, 'VERIFY|verify|done|PASS') for line in lines)
+    has_pr_review_ok = any(
+        _retro_anchored(line, 'PR-REVIEW|pr-review|done|OK')
+        for line in lines)
+    if not (has_verify_pass and has_pr_review_ok):
+        reasons.append(RETRO_REASON_NO_SUCCESS)
+
+    try:
+        hb_lines = (Path(hb_log_file).read_text().splitlines()
+                   if hb_log_file else [])
+    except OSError:
+        hb_lines = []
+    drift_detected = any('|fallback|' in line for line in hb_lines)
+    if drift_detected:
+        reasons.append(RETRO_REASON_FALLBACK)
+
+    verify_exhausted_code = str((table.loop('STEP_4_5') or {})
+                                .get('gate_stop_code') or '')
+    if verify_exhausted_code and any(
+            verify_exhausted_code in line for line in lines):
+        reasons.append(RETRO_REASON_VERIFY_EXHAUSTED)
+
+    if any(_retro_anchored(line, 'VERIFY|verify|fail|') for line in lines):
+        reasons.append(RETRO_REASON_VERIFY_FAIL)
+
+    return RetroDecision(bool(reasons), tuple(reasons), drift_detected)
