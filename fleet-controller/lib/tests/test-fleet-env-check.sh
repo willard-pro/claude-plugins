@@ -234,16 +234,18 @@ test_summary_file_written() {
 
 # ── Worker permission mode (worker-reap-recovery, task 2.7) ─────────────────
 
-test_permission_mode_missing_when_not_configured() {
-  local tmpdir out
+test_permission_mode_auto_when_not_configured_and_not_an_issue() {
+  local tmpdir out exit_code=0
   tmpdir=$(mktemp -d)
   _mk_project_dir "$tmpdir"
   out=$(
     unset CLAUDE_CMD
-    LINEAR_API_KEY=x _env_vars "$tmpdir"
-  )
+    LINEAR_API_KEY=x bash "$LIB_DIR/fleet-env-check.sh" "$tmpdir" 2>/dev/null
+  ) || exit_code=$?
   rm -rf "$tmpdir"
-  [[ "$(_row "$out" "FLEET_WORKER_PERMISSION_MODE")" == *"|missing|"* ]]
+  # fleetd's own documented zero-config default (bypassPermissions) must
+  # never be the reason fleetd's startup env-check gate refuses to boot.
+  [[ "$(_row "$out" "FLEET_WORKER_PERMISSION_MODE")" == *"|auto|"* ]] && [ "$exit_code" -eq 0 ]
 }
 
 test_permission_mode_ok_when_claude_cmd_specifies_one() {
@@ -332,7 +334,7 @@ for fn in \
   test_gh_required_only_when_auto_pr_on \
   test_rowcount_matches_emitted_rows \
   test_summary_file_written \
-  test_permission_mode_missing_when_not_configured \
+  test_permission_mode_auto_when_not_configured_and_not_an_issue \
   test_permission_mode_ok_when_claude_cmd_specifies_one \
   test_not_root_ok_for_normal_user \
   test_claude_code_simple_ok_when_unset \

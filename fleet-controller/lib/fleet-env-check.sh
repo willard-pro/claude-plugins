@@ -214,17 +214,21 @@ _var "FLEET_EPIC_AUTO_PR" "info" "$_epic_auto_pr" "env" "gh + GITHUB_PERSONAL_AC
 # ── Worker permission mode (worker-reap-recovery) ────────────────────────────
 # fleetd itself always emits an explicit --permission-mode unless CLAUDE_CMD
 # already supplies one (see supervisor.py _cmd_already_sets_permission_mode) —
-# so "missing" here means the operator's CLAUDE_CMD has NOT opted out and
-# nothing further to configure, "ok" means CLAUDE_CMD has explicitly taken
-# over the decision. Either way, `--restricted` and root both silently defeat
-# bypassPermissions, so both are checked regardless.
+# so the default branch below is a working, intended configuration (fleetd
+# falls back to bypassPermissions on its own), not a gap the operator must
+# close. It must NOT increment `issues`: this script is also fleetd's
+# startup gate (__main__.py._run_startup_env_check refuses to boot on any
+# nonzero exit), and fleetd's own documented zero-config default cannot be
+# the thing that stops fleetd from starting zero-config. "ok" means
+# CLAUDE_CMD has explicitly taken over the decision. Either way,
+# `--restricted` and root both silently defeat bypassPermissions, so both
+# are checked regardless.
 
 _cmd_for_mode_check="${CLAUDE_CMD:-}"
 if [ -n "$_cmd_for_mode_check" ] && { [[ "$_cmd_for_mode_check" == *"--permission-mode"* ]] || [[ "$_cmd_for_mode_check" == *"--dangerously-skip-permissions"* ]] || [[ "$_cmd_for_mode_check" == *"--bypass"* ]]; }; then
   _var "FLEET_WORKER_PERMISSION_MODE" "ok" "(from CLAUDE_CMD)" "env" "CLAUDE_CMD already specifies a permission mode — fleetd will not double-specify"
 else
-  _var "FLEET_WORKER_PERMISSION_MODE" "missing" "${FLEET_WORKER_PERMISSION_MODE:-bypassPermissions}" "env" "no explicit mode configured — fleetd defaults to bypassPermissions; run the preflight probe below to confirm"
-  issues=$((issues + 1))
+  _var "FLEET_WORKER_PERMISSION_MODE" "auto" "${FLEET_WORKER_PERMISSION_MODE:-bypassPermissions}" "env" "no explicit mode configured — fleetd defaults to bypassPermissions; run the preflight probe below to confirm"
 fi
 
 if [ "$(id -u)" = "0" ]; then

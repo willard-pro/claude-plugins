@@ -269,6 +269,37 @@ class StartupEnvCheckGateTest(unittest.TestCase):
             p.send_signal(signal.SIGTERM)
             p.wait(timeout=5)
 
+    def test_startup_proceeds_with_zero_config_permission_mode_default(self):
+        """fleetd's actual zero-config default — LINEAR_API_KEY plus a
+        resolvable CLAUDE_BIN, no explicit CLAUDE_CMD or
+        FLEET_WORKER_PERMISSION_MODE — must not be blocked by its own
+        startup gate. Regression: fleet-env-check.sh used to report
+        FLEET_WORKER_PERMISSION_MODE as `missing` and count it as an issue
+        whenever CLAUDE_CMD didn't itself spell out a permission flag, even
+        though fleetd's own documented behaviour is to fall back to
+        bypassPermissions in exactly that case — so the gate refused to
+        start fleetd in its own documented default configuration."""
+        cmd = _fleetd_cmd(self.state_dir, self.pidfile, self.port)
+        p = subprocess.Popen(
+            cmd,
+            env=self._env(
+                FLEET_STARTUP_ENV_CHECK='true',
+                LINEAR_API_KEY='x',
+                CLAUDE_BIN='bash',
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            payload = _wait_health(self.port)
+            self.assertIsNotNone(
+                payload,
+                "fleetd should start with the zero-config permission-mode default",
+            )
+        finally:
+            p.send_signal(signal.SIGTERM)
+            p.wait(timeout=5)
+
 
 class HealthEndpointTest(unittest.TestCase):
     """Task 4.6: health endpoint behaviour."""
