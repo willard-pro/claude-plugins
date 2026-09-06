@@ -67,6 +67,22 @@ test_phase_failure_general_fail_returns_warn() {
   [ "$r" -eq 1 ]
 }
 
+test_observer_finding_line_does_not_change_phase_failure_verdict() {
+  # agent-observer Inc 3 task 4.10: a META|observer-finding line must be
+  # inert to the existing detectors — before/after must be byte-identical.
+  local ws
+  ws=$(_setup_workspace)
+  _plog "$ws" "CRE-47" "IMPLEMENT" "implement" "fail" "build error"
+  source "$LIB_DIR/fleet-detect.sh"
+  local before
+  before=$(detect_phase_failures "CRE-47" "$ws")
+  _plog "$ws" "CRE-47" "META" "observer-finding" "done" "type=UNEXPECTED_TOOL sev=HIGH gen=1 fp=abc123"
+  local after
+  after=$(detect_phase_failures "CRE-47" "$ws")
+  rm -rf "$ws"
+  [ "$before" -eq "$after" ] && [ "$after" -eq 1 ]
+}
+
 test_gate_stop_retryable_returns_restart() {
   local ws
   ws=$(_setup_workspace)
@@ -1187,7 +1203,8 @@ for fn in \
   test_gate_held_abandoned_detected \
   test_gate_stop_from_gate_check_detected \
   test_initiative_dispatch_notes_stop_file \
-  test_initiative_dispatch_no_stop_note_when_unstopped; do
+  test_initiative_dispatch_no_stop_note_when_unstopped \
+  test_observer_finding_line_does_not_change_phase_failure_verdict; do
   [ -z "$FILTER" ] || [[ "$fn" == *"$FILTER"* ]] || continue
   _run "$fn" "$fn"
 done

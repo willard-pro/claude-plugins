@@ -112,6 +112,17 @@ FLEET_OBSERVER_MAX_FIELD="${FLEET_OBSERVER_MAX_FIELD:-512}"
 # phase's generations) and are unaffected by this var.
 FLEET_OBSERVER_LOG_RETENTION="${FLEET_OBSERVER_LOG_RETENTION:-3}"
 
+# Cumulative assistant-frame `usage`-derived cost (USD) within one phase
+# generation above which the RUNAWAY_COST finding fires. WARN-only — never
+# gates a ticket, same as every other observer finding.
+FLEET_OBSERVER_COST_WARN_USD="${FLEET_OBSERVER_COST_WARN_USD:-2.00}"
+
+# Seconds between a tool_call and its matching tool_result above which the
+# LONG_TOOL_CALL finding fires. A single slow tool (a long test run, a large
+# clone) is normal; this exists to catch a tool that never seems to return
+# relative to the phase's other calls, not to police individual tool latency.
+FLEET_OBSERVER_LONG_TOOL_SECS="${FLEET_OBSERVER_LONG_TOOL_SECS:-120}"
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────────
 # When false (the default), fleetd sits idle — detection runs and health/status
 # are served, but no epic is auto-enqueued; dispatch happens only when explicitly

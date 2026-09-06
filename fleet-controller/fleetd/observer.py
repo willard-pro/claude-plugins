@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import re
@@ -73,6 +74,17 @@ def _env_int(name, default):
         return default
 
 
+def _env_float(name, default):
+    try:
+        return float(os.environ.get(name, '') or default)
+    except (TypeError, ValueError):
+        return default
+
+
+DEFAULT_COST_WARN_USD = 2.00
+DEFAULT_LONG_TOOL_SECS = 120
+
+
 @dataclass
 class ObserverConfig:
     log_dir: str = './logs'
@@ -80,6 +92,8 @@ class ObserverConfig:
     grace_secs: int = DEFAULT_GRACE_SECS
     max_field: int = DEFAULT_MAX_FIELD
     log_retention: int = DEFAULT_LOG_RETENTION
+    cost_warn_usd: float = DEFAULT_COST_WARN_USD
+    long_tool_secs: int = DEFAULT_LONG_TOOL_SECS
 
     @classmethod
     def from_env(cls, log_dir=None):
@@ -90,6 +104,10 @@ class ObserverConfig:
             max_field=_env_int('FLEET_OBSERVER_MAX_FIELD', DEFAULT_MAX_FIELD),
             log_retention=_env_int(
                 'FLEET_OBSERVER_LOG_RETENTION', DEFAULT_LOG_RETENTION),
+            cost_warn_usd=_env_float(
+                'FLEET_OBSERVER_COST_WARN_USD', DEFAULT_COST_WARN_USD),
+            long_tool_secs=_env_int(
+                'FLEET_OBSERVER_LONG_TOOL_SECS', DEFAULT_LONG_TOOL_SECS),
         )
 
     def idle_timeout_secs(self):
@@ -276,18 +294,35 @@ def _content_items(frame, item_type):
     return [c for c in content if isinstance(c, dict) and c.get('type') == item_type]
 
 
+#: Tools whose file-path argument SCOPE_VIOLATION (Inc 3) must read back
+#: reliably. Extracted as its own untruncated field at translation time
+#: rather than re-parsed out of `input` later — `input`'s JSON can be cut
+#: mid-string by `_truncate` (a Write's `content` value routinely exceeds
+#: `FLEET_OBSERVER_MAX_FIELD`), which would silently break a naive
+#: `json.loads(event['input'])` the instant a call's payload got truncated.
+#: Paths are short, so this field is never itself truncated.
+_PATH_BEARING_TOOLS = frozenset({'Write', 'Edit', 'Read'})
+
+
 def _tool_call_events(frame, redact, max_field):
     parent = frame.get('parent_tool_use_id')
     events = []
     for item in _content_items(frame, 'tool_use'):
-        raw_input = json.dumps(item.get('input') or {}, default=str)
-        events.append({
+        name = item.get('name')
+        raw_input_obj = item.get('input') or {}
+        raw_input = json.dumps(raw_input_obj, default=str)
+        event = {
             'kind': 'tool_call',
             'tool_use_id': item.get('id'),
-            'name': item.get('name'),
+            'name': name,
             'input': _truncate(redact(raw_input), max_field),
             'parent_tool_use_id': parent,
-        })
+        }
+        if name in _PATH_BEARING_TOOLS and isinstance(raw_input_obj, dict):
+            path = raw_input_obj.get('file_path') or raw_input_obj.get('path')
+            if path:
+                event['path'] = str(path)
+        events.append(event)
     return events
 
 
@@ -356,6 +391,29 @@ def _session_end_event(frame):
     }
 
 
+#: Rough order-of-magnitude USD-per-token rates for RUNAWAY_COST's running
+#: estimate (Inc 3) — NOT the same source as `total_cost_usd`, which the API
+#: only reports on the terminal `result` frame, too late to catch a phase
+#: still burning tokens mid-run. A blended, deliberately conservative rate
+#: rather than a precise per-model table that would need updating every
+#: pricing change: this rule's job is "is this phase burning much more than
+#: usual", not "what will the invoice say".
+_EST_INPUT_USD_PER_TOKEN = 3.0 / 1_000_000
+_EST_OUTPUT_USD_PER_TOKEN = 15.0 / 1_000_000
+_EST_CACHE_READ_USD_PER_TOKEN = 0.30 / 1_000_000
+
+
+def _estimate_frame_cost(usage):
+    if not isinstance(usage, dict):
+        return 0.0
+    return (
+        (usage.get('input_tokens') or 0) * _EST_INPUT_USD_PER_TOKEN
+        + (usage.get('cache_creation_input_tokens') or 0) * _EST_INPUT_USD_PER_TOKEN
+        + (usage.get('output_tokens') or 0) * _EST_OUTPUT_USD_PER_TOKEN
+        + (usage.get('cache_read_input_tokens') or 0) * _EST_CACHE_READ_USD_PER_TOKEN
+    )
+
+
 class PhaseStreamTranslator:
     """Turns one phase worker's NDJSON lines into normalized event dicts.
 
@@ -378,6 +436,11 @@ class PhaseStreamTranslator:
         self._redact = redact
         self._max_field = max_field
         self.finalized_at = None
+        # RUNAWAY_COST (Inc 3) running total — updated whenever an assistant
+        # frame carries a `usage` dict, independent of whether that frame
+        # also produces a tool_call event (a pure-text turn has no tool_use
+        # content but still spends tokens).
+        self.estimated_cost_usd = 0.0
 
     def feed_line(self, line, now):
         line = line.strip()
@@ -399,6 +462,9 @@ class PhaseStreamTranslator:
         elif ftype == 'assistant':
             raw_events.extend(
                 _tool_call_events(frame, self._redact, self._max_field))
+            usage = (frame.get('message') or {}).get('usage')
+            if usage:
+                self.estimated_cost_usd += _estimate_frame_cost(usage)
         elif ftype == 'user':
             raw_events.extend(
                 _tool_result_events(frame, self._redact, self._max_field))
@@ -419,6 +485,487 @@ class PhaseStreamTranslator:
         return event
 
 
+# ── Deterministic rules (agent-observer Inc 3, design.md Non-Goals: zero LLM
+# cost) ──────────────────────────────────────────────────────────────────────
+# Every rule below is computed from structured evidence — tool names, exit
+# codes, contract comparisons — never from matching prose. A rule returns a
+# finding dict (or a list of them) with no `count`/`first_seen`/`last_seen`
+# fields; `_merge_findings` (below) adds those when writing to disk.
+
+_PIPELINE_LINE_RE = re.compile(r'^([^|]*)\|([^|]*)\|([^|]*)\|([^|]*)\|(.*)$')
+
+
+def _read_contract(log_dir, tid, phase):
+    path = Path(log_dir) / f'{tid}-{phase.lower()}-contract.json'
+    try:
+        return json.loads(path.read_text())
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def _read_pipeline_log_tail(log_dir, tid):
+    path = Path(log_dir) / f'{tid}-pipeline.log'
+    try:
+        return path.read_text().splitlines()
+    except OSError:
+        return []
+
+
+def _last_run_id(log_lines):
+    """The most recent `META|run-id|info|{json}` line's `run_id`, or None."""
+    run_id = None
+    for line in log_lines:
+        match = _PIPELINE_LINE_RE.match(line.rstrip('\n'))
+        if not match:
+            continue
+        _iso, phase, step, _status, msg = match.groups()
+        if phase == 'META' and step == 'run-id':
+            try:
+                payload = json.loads(msg)
+            except (ValueError, TypeError):
+                continue
+            run_id = payload.get('run_id') or run_id
+    return run_id
+
+
+def _last_phase_result_for(log_lines, phase):
+    """The most recent `META|phase-result` payload whose own `phase` field
+    matches `phase` — the authoritative `claimed_verdict` CLAIM_CONTRADICTION
+    anchors on (design.md D3), a separate bash-written artifact from this
+    observer's own best-effort `claim` event."""
+    result = None
+    for line in log_lines:
+        match = _PIPELINE_LINE_RE.match(line.rstrip('\n'))
+        if not match:
+            continue
+        _iso, log_phase, step, _status, msg = match.groups()
+        if log_phase == 'META' and step == 'phase-result':
+            try:
+                payload = json.loads(msg)
+            except (ValueError, TypeError):
+                continue
+            if payload.get('phase') == phase:
+                result = payload
+    return result
+
+
+def _fingerprint(finding_type, run_id, phase, gen, evidence_key):
+    raw = f'{finding_type}|{run_id or ""}|{phase}|{gen}|{evidence_key}'
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+
+def _pair_tool_events(events):
+    """(tool_call, tool_result) pairs joined on `tool_use_id`, call order."""
+    calls = {}
+    pairs = []
+    for event in events:
+        kind = event.get('kind')
+        tool_use_id = event.get('tool_use_id')
+        if not tool_use_id:
+            continue
+        if kind == 'tool_call':
+            calls[tool_use_id] = event
+        elif kind == 'tool_result' and tool_use_id in calls:
+            pairs.append((calls.pop(tool_use_id), event))
+    return pairs
+
+
+def _command_matches(text, predicates):
+    if not text:
+        return False
+    for substring in predicates.get('command_substrings') or []:
+        if substring and substring in text:
+            return True
+    return False
+
+
+def _tool_matches_claim_predicate(call_event, predicates):
+    name = call_event.get('name') or ''
+    for prefix in predicates.get('tool_name_prefixes') or []:
+        if name.startswith(prefix):
+            return True
+    return _command_matches(call_event.get('input') or '', predicates)
+
+
+def rule_claim_contradiction(events, contract, log_lines, tid, phase, gen):
+    """design.md D3: `claimed_verdict` (from `META|phase-result`, never
+    prose) is in the phase's passing set, but the last observed
+    claim-predicate-matching tool run failed and no later passing run of the
+    same class follows. Disabled (returns None) whenever the phase has no
+    verdict vocabulary, or the phase-result claim itself isn't a clean
+    `parse_status: ok` pass — an UNKNOWN/invalid claim isn't a claim to
+    contradict."""
+    if contract is None:
+        return None
+    passing = set((contract.get('success_criteria') or {}).get('claimed_verdict_in') or [])
+    if not passing:
+        return None
+    claim = _last_phase_result_for(log_lines, phase)
+    if not claim or claim.get('parse_status') != 'ok':
+        return None
+    verdict = (claim.get('claimed_verdict') or '').upper()
+    if verdict not in passing:
+        return None
+
+    predicates = contract.get('claim_predicates') or {}
+    last_passed = None
+    for call, result in _pair_tool_events(events):
+        if _tool_matches_claim_predicate(call, predicates):
+            last_passed = not result.get('is_error')
+    if last_passed is False:
+        run_id = _last_run_id(log_lines)
+        return {
+            'type': 'CLAIM_CONTRADICTION',
+            'severity': 'HIGH',
+            'tid': tid, 'phase': phase, 'gen': gen,
+            'fingerprint': _fingerprint('CLAIM_CONTRADICTION', run_id, phase, gen,
+                                        f'{verdict}:last-test-class-run-failed'),
+            'evidence': {'claimed_verdict': verdict, 'last_test_class_run': 'failed'},
+        }
+    return None
+
+
+def rule_repeated_failure(events, log_lines, tid, phase, gen, threshold=3):
+    """The same (tool, normalized command) failing `threshold`+ times."""
+    run_id = _last_run_id(log_lines)
+    counts = {}
+    for call, result in _pair_tool_events(events):
+        if not result.get('is_error'):
+            continue
+        key = (call.get('name'), call.get('input'))
+        counts[key] = counts.get(key, 0) + 1
+    findings = []
+    for (name, command), count in counts.items():
+        if count < threshold:
+            continue
+        findings.append({
+            'type': 'REPEATED_FAILURE',
+            'severity': 'WARN',
+            'tid': tid, 'phase': phase, 'gen': gen,
+            'fingerprint': _fingerprint('REPEATED_FAILURE', run_id, phase, gen,
+                                        f'{name}:{command}'),
+            'evidence': {'tool': name, 'command': command, 'count': count},
+        })
+    return findings
+
+
+def rule_scope_violation(events, contract, log_lines, tid, phase, gen):
+    """A Write/Edit outside every resolved `allowed_paths` prefix. Disabled
+    (returns []) whenever the contract couldn't resolve `allowed_paths` —
+    design.md D4: a wrong default here produces confident false findings,
+    the fastest way to get the whole subsystem ignored."""
+    if contract is None:
+        return []
+    allowed = contract.get('allowed_paths')
+    if not allowed:
+        return []
+    run_id = _last_run_id(log_lines)
+    findings = []
+    seen = set()
+    for event in events:
+        if event.get('kind') != 'tool_call' or event.get('name') not in ('Write', 'Edit'):
+            continue
+        path = event.get('path')
+        if not path or path in seen:
+            continue
+        if any(path == root or path.startswith(root.rstrip('/') + '/') for root in allowed):
+            continue
+        seen.add(path)
+        findings.append({
+            'type': 'SCOPE_VIOLATION',
+            'severity': 'HIGH',
+            'tid': tid, 'phase': phase, 'gen': gen,
+            'fingerprint': _fingerprint('SCOPE_VIOLATION', run_id, phase, gen, path),
+            'evidence': {'tool': event.get('name'), 'path': path, 'allowed_paths': allowed},
+        })
+    return findings
+
+
+def rule_unexpected_tool(events, contract, log_lines, tid, phase, gen):
+    """A tool_call whose name is absent from the contract's `allowed_tools`.
+    Disabled (returns []) when `allowed_tools` is None — no known allowlist
+    means no known violation, never "allow nothing"."""
+    if contract is None:
+        return []
+    allowed_tools = contract.get('allowed_tools')
+    if allowed_tools is None:
+        return []
+    allowed_set = set(allowed_tools)
+    run_id = _last_run_id(log_lines)
+    findings = []
+    seen = set()
+    for event in events:
+        if event.get('kind') != 'tool_call':
+            continue
+        name = event.get('name')
+        if not name or name in allowed_set or name in seen:
+            continue
+        seen.add(name)
+        findings.append({
+            'type': 'UNEXPECTED_TOOL',
+            'severity': 'HIGH',
+            'tid': tid, 'phase': phase, 'gen': gen,
+            'fingerprint': _fingerprint('UNEXPECTED_TOOL', run_id, phase, gen, name),
+            'evidence': {'tool': name, 'allowed_tools': allowed_tools},
+        })
+    return findings
+
+
+def rule_runaway_cost(estimated_cost_usd, log_lines, tid, phase, gen, threshold_usd):
+    if estimated_cost_usd < threshold_usd:
+        return None
+    run_id = _last_run_id(log_lines)
+    return {
+        'type': 'RUNAWAY_COST',
+        'severity': 'WARN',
+        'tid': tid, 'phase': phase, 'gen': gen,
+        'fingerprint': _fingerprint('RUNAWAY_COST', run_id, phase, gen,
+                                    f'over-{threshold_usd}'),
+        'evidence': {'estimated_cost_usd': round(estimated_cost_usd, 4),
+                    'threshold_usd': threshold_usd},
+    }
+
+
+def rule_long_tool_call(events, log_lines, tid, phase, gen, threshold_secs):
+    """`tool_call` -> `tool_result` wall-clock delta above threshold.
+
+    Delta is measured between the observer's own `observed_at` timestamps
+    (poll-interval resolution, not the tool's true start/end time) — a
+    genuinely long-running tool spans multiple poll cycles and is caught
+    with that coarse granularity; a fast one never approaches the threshold
+    regardless of the imprecision.
+    """
+    run_id = _last_run_id(log_lines)
+    findings = []
+    for call, result in _pair_tool_events(events):
+        try:
+            start = datetime.strptime(call['observed_at'], '%Y-%m-%dT%H:%M:%SZ')
+            end = datetime.strptime(result['observed_at'], '%Y-%m-%dT%H:%M:%SZ')
+        except (KeyError, ValueError, TypeError):
+            continue
+        elapsed = (end - start).total_seconds()
+        if elapsed < threshold_secs:
+            continue
+        tool_use_id = call.get('tool_use_id') or ''
+        findings.append({
+            'type': 'LONG_TOOL_CALL',
+            'severity': 'WARN',
+            'tid': tid, 'phase': phase, 'gen': gen,
+            'fingerprint': _fingerprint('LONG_TOOL_CALL', run_id, phase, gen, tool_use_id),
+            'evidence': {'tool': call.get('name'), 'tool_use_id': tool_use_id,
+                        'elapsed_secs': elapsed},
+        })
+    return findings
+
+
+#: MCP server name substrings this pipeline's phases genuinely depend on.
+#: Not a full "contract-named server" mechanism (design.md's original
+#: phrasing) — that would need a new contract field this late in the task
+#: list for marginal precision, since MCP server naming is inconsistent
+#: across installs (observed directly: "linear-server" alongside
+#: "plugin:cloudflare:cloudflare-api"-shaped names for unrelated plugins).
+#: Linear is a hard dependency of every phase (env-check.sh); Playwright is
+#: VERIFY's own UAT driver.
+_DEGRADED_SERVER_SUBSTRINGS = {
+    None: ('linear',),
+    'VERIFY': ('linear', 'playwright'),
+}
+_DEGRADED_MCP_STATUSES = frozenset({'failed', 'needs-auth', 'pending'})
+
+
+def rule_degraded_session(events, log_lines, tid, phase, gen):
+    session_start = next((e for e in events if e.get('kind') == 'session_start'), None)
+    if not session_start:
+        return []
+    substrings = _DEGRADED_SERVER_SUBSTRINGS.get(phase, _DEGRADED_SERVER_SUBSTRINGS[None])
+    run_id = _last_run_id(log_lines)
+    findings = []
+    for server in session_start.get('mcp_servers') or []:
+        name = (server.get('name') or '')
+        status = server.get('status')
+        if status not in _DEGRADED_MCP_STATUSES:
+            continue
+        if not any(sub in name.lower() for sub in substrings):
+            continue
+        findings.append({
+            'type': 'DEGRADED_SESSION',
+            'severity': 'WARN',
+            'tid': tid, 'phase': phase, 'gen': gen,
+            'fingerprint': _fingerprint('DEGRADED_SESSION', run_id, phase, gen,
+                                        f'{name}:{status}'),
+            'evidence': {'server': name, 'status': status},
+        })
+    return findings
+
+
+def rule_permission_denied(events, log_lines, tid, phase, gen):
+    session_end = next((e for e in events if e.get('kind') == 'session_end'), None)
+    if not session_end:
+        return []
+    denials = session_end.get('permission_denials') or []
+    if not denials:
+        return []
+    run_id = _last_run_id(log_lines)
+    key = json.dumps(denials, sort_keys=True, default=str)
+    return [{
+        'type': 'PERMISSION_DENIED',
+        'severity': 'WARN',
+        'tid': tid, 'phase': phase, 'gen': gen,
+        'fingerprint': _fingerprint('PERMISSION_DENIED', run_id, phase, gen, key),
+        'evidence': {'count': len(denials), 'denials': denials[:5]},
+    }]
+
+
+def evaluate_rules(events, contract, log_lines, estimated_cost_usd, tid, phase, gen,
+                   cost_warn_usd, long_tool_secs):
+    """Every rule against the full accumulated event history for one phase
+    generation. Returns a flat list of findings (possibly empty) — never
+    raises; a rule that cannot resolve its inputs returns nothing rather
+    than guessing (design.md D4)."""
+    findings = []
+    claim = rule_claim_contradiction(events, contract, log_lines, tid, phase, gen)
+    if claim:
+        findings.append(claim)
+    findings.extend(rule_repeated_failure(events, log_lines, tid, phase, gen))
+    findings.extend(rule_scope_violation(events, contract, log_lines, tid, phase, gen))
+    findings.extend(rule_unexpected_tool(events, contract, log_lines, tid, phase, gen))
+    runaway = rule_runaway_cost(estimated_cost_usd, log_lines, tid, phase, gen, cost_warn_usd)
+    if runaway:
+        findings.append(runaway)
+    findings.extend(rule_long_tool_call(events, log_lines, tid, phase, gen, long_tool_secs))
+    findings.extend(rule_degraded_session(events, log_lines, tid, phase, gen))
+    findings.extend(rule_permission_denied(events, log_lines, tid, phase, gen))
+    return findings
+
+
+# ── Findings persistence and the pipeline-log integration point (D5) ───────
+
+def _findings_path(log_dir, tid, phase):
+    return Path(log_dir) / f'{tid}-{phase.lower()}-findings.jsonl'
+
+
+def _read_findings(path):
+    """{fingerprint: entry} from an existing findings.jsonl, or {}."""
+    try:
+        lines = Path(path).read_text().splitlines()
+    except OSError:
+        return {}
+    out = {}
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        fingerprint = entry.get('fingerprint')
+        if fingerprint:
+            out[fingerprint] = entry
+    return out
+
+
+def _write_findings(path, findings_by_fingerprint):
+    lines = [json.dumps(entry) for entry in findings_by_fingerprint.values()]
+    text = '\n'.join(lines) + ('\n' if lines else '')
+    try:
+        Path(path).write_text(text)
+    except OSError:
+        pass
+
+
+def _strip_pipes(value):
+    return str(value).replace('|', '_')
+
+
+def _pipeline_log_already_terminal(log_lines):
+    """True once ANY `META|outcome` or `META|dead-letter` line exists.
+
+    Guards against a real race this rule engine can otherwise cause: the
+    observer runs asynchronously and may still be draining its grace period
+    after a phase's own terminal write, so a finding can legitimately be
+    computed *after* `META|outcome` already landed. Appending anything after
+    that line changes what "the last line" means to every consumer that
+    classifies terminal state that way (`_log_reached_terminal`, its bash
+    counterpart, `detect-resume.sh`) — confirmed empirically: an
+    observer-finding line appended after a real outcome line flips
+    `_log_reached_terminal` from True to False. Conservative on purpose:
+    this does not replicate `_log_reached_terminal`'s held/gate-stop
+    nuances (still-open holds, gate-stops that leave the log non-terminal)
+    — it treats *any* outcome-or-dead-letter line as "stop appending",
+    which only ever skips a late pipeline-log line for a finding, never
+    causes one to wrongly appear. `findings.jsonl` is written regardless;
+    only the pipeline-log integration point is held back.
+    """
+    for line in log_lines:
+        match = _PIPELINE_LINE_RE.match(line.rstrip('\n'))
+        if not match:
+            continue
+        _iso, phase, step, _status, _msg = match.groups()
+        if phase == 'META' and step in ('outcome', 'dead-letter'):
+            return True
+    return False
+
+
+def _append_observer_finding_log_line(log_dir, tid, finding):
+    """The sole integration point (design.md D5): one
+    `META|observer-finding|done|type=... sev=... gen=... fp=...` line per
+    *newly created* fingerprint — never per repeat detection, matching the
+    gate-hold precedent elsewhere in this codebase for the same anti-spam
+    reason. `status` is always `done` (schema-valid; never invented) and
+    every interpolated field has pipe characters stripped before it ever
+    reaches a log fleetd's own classifiers read (existing `hb_write` rule,
+    reused).
+    """
+    path = Path(log_dir) / f'{tid}-pipeline.log'
+    ts = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
+    msg = (
+        f"type={_strip_pipes(finding['type'])} "
+        f"sev={_strip_pipes(finding['severity'])} "
+        f"gen={_strip_pipes(finding['gen'])} "
+        f"fp={_strip_pipes(finding['fingerprint'])}"
+    )
+    line = f'{ts}|META|observer-finding|done|{msg}\n'
+    try:
+        with open(path, 'a') as fh:
+            fh.write(line)
+    except OSError:
+        pass
+
+
+def record_findings(log_dir, tid, phase, findings, now, log_lines=()):
+    """Merge `findings` into the on-disk store (findings.jsonl), appending a
+    pipeline-log line only for fingerprints not already present — and only
+    when the ticket's pipeline log hasn't already reached its terminal
+    outcome (`_pipeline_log_already_terminal`). Returns the list of newly
+    created entries (findings.jsonl is updated for all of them regardless of
+    whether the pipeline-log line was held back).
+    """
+    if not findings:
+        return []
+    path = _findings_path(log_dir, tid, phase)
+    existing = _read_findings(path)
+    now_iso = _iso(now) if isinstance(now, (int, float)) else now
+    created = []
+    for finding in findings:
+        fingerprint = finding['fingerprint']
+        if fingerprint in existing:
+            existing[fingerprint]['count'] += 1
+            existing[fingerprint]['last_seen'] = now_iso
+            continue
+        entry = dict(finding)
+        entry['count'] = 1
+        entry['first_seen'] = now_iso
+        entry['last_seen'] = now_iso
+        existing[fingerprint] = entry
+        created.append(entry)
+    _write_findings(path, existing)
+    if created and not _pipeline_log_already_terminal(log_lines):
+        for entry in created:
+            _append_observer_finding_log_line(log_dir, tid, entry)
+    return created
+
+
 # ── Per-file tracking and the observer loop ─────────────────────────────────
 
 @dataclass
@@ -431,6 +978,17 @@ class TrackedStream:
     translator: PhaseStreamTranslator
     last_activity: float
     grace_start: float = None
+    # All events translated so far this generation (Inc 3 rules need the full
+    # history — REPEATED_FAILURE's count and UNEXPECTED_TOOL's allowlist scan
+    # both look across everything a stream has done, not just this poll's
+    # increment). Bounded by the same truncation/redaction every individual
+    # event already went through; a phase's own event volume stays modest
+    # relative to the raw NDJSON it was derived from.
+    all_events: list = None
+
+    def __post_init__(self):
+        if self.all_events is None:
+            self.all_events = []
 
 
 class Observer:
@@ -497,6 +1055,26 @@ class Observer:
             return
         self.events_written += len(events)
 
+    def _evaluate_and_record_findings(self, ts, now):
+        """Inc 3: run every deterministic rule against `ts`'s full event
+        history and persist any findings. Never raises — a rule-evaluation
+        failure costs this poll's finding coverage, never the pipeline
+        (design.md Goals): the observer's own bugs must not become a second
+        way to hurt a ticket."""
+        try:
+            contract = _read_contract(self.config.log_dir, ts.tid, ts.phase)
+            log_lines = _read_pipeline_log_tail(self.config.log_dir, ts.tid)
+            findings = evaluate_rules(
+                ts.all_events, contract, log_lines, ts.translator.estimated_cost_usd,
+                ts.tid, ts.phase, ts.generation,
+                self.config.cost_warn_usd, self.config.long_tool_secs,
+            )
+            record_findings(self.config.log_dir, ts.tid, ts.phase, findings, now,
+                            log_lines=log_lines)
+        except Exception as exc:
+            print(f'agent-observer: finding evaluation failed for '
+                  f'{ts.tid}/{ts.phase}: {exc}', file=sys.stderr)
+
     def poll_once(self):
         """One pass: discover new streams, tail each, release finished ones.
 
@@ -514,6 +1092,9 @@ class Observer:
             for line in lines:
                 events.extend(ts.translator.feed_line(line, now))
             self._write_events(ts, events)
+            if events:
+                ts.all_events.extend(events)
+                self._evaluate_and_record_findings(ts, now)
 
             terminal_seen = (
                 ts.translator.finalized_at is not None

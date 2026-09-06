@@ -1927,6 +1927,37 @@ class WorkerStdioAndEnvTest(unittest.TestCase):
         finally:
             os.waitpid(pid, 0)
 
+    def test_spawn_phase_worker_writes_a_contract_when_observer_enabled(self):
+        """agent-observer Inc 3: the contract is written at spawn under the flag."""
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+        from fleetd.supervisor import spawn_phase_worker
+
+        with mock.patch.object(sup_mod, 'FLEET_OBSERVER_ENABLE', True):
+            pid, session_id, spawn = spawn_phase_worker(
+                'TST-CTR', 'STEP_1', 1, str(self.workspace),
+                log_file='/w/logs/TST-CTR-pipeline.log',
+                cmd_override=[sys.executable, '-c', 'pass'],
+            )
+        os.waitpid(pid, 0)
+        contract_path = self.workspace / 'TST-CTR-appraise-contract.json'
+        self.assertTrue(contract_path.is_file())
+        contract = json.loads(contract_path.read_text())
+        self.assertEqual(contract['phase'], 'APPRAISE')
+        self.assertEqual(contract['tid'], 'TST-CTR')
+
+    def test_spawn_phase_worker_writes_no_contract_when_observer_disabled(self):
+        from fleetd.supervisor import spawn_phase_worker
+
+        pid, session_id, spawn = spawn_phase_worker(
+            'TST-CTR2', 'STEP_1', 1, str(self.workspace),
+            log_file='/w/logs/TST-CTR2-pipeline.log',
+            cmd_override=[sys.executable, '-c', 'pass'],
+        )
+        os.waitpid(pid, 0)
+        self.assertFalse(
+            (self.workspace / 'TST-CTR2-appraise-contract.json').is_file())
+
     def test_redirection_failure_does_not_abort_spawn(self):
         """A stdio-redirect failure still lets the worker spawn and exec."""
         from fleetd.supervisor import Supervisor

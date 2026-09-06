@@ -607,6 +607,368 @@ class SweepFixTest(unittest.TestCase):
         self.assertFalse((self.state_dir / 'CRE-9-verify-gen1-exit.json').exists())
 
 
+def _tool_pair(tool_use_id, name, is_error, input_json='{}', observed_at=None):
+    call = {'kind': 'tool_call', 'tool_use_id': tool_use_id, 'name': name,
+            'input': input_json}
+    result = {'kind': 'tool_result', 'tool_use_id': tool_use_id,
+             'is_error': is_error}
+    if observed_at:
+        call['observed_at'] = observed_at[0]
+        result['observed_at'] = observed_at[1]
+    return call, result
+
+
+class RuleClaimContradictionTest(unittest.TestCase):
+    CONTRACT = {
+        'success_criteria': {'claimed_verdict_in': ['PASS']},
+        'claim_predicates': {'command_substrings': ['pytest']},
+    }
+    LOG_PASS_CLAIM = [
+        '2026-09-06T10:00:00Z|META|phase-result|info|' + json.dumps(
+            {'phase': 'VERIFY', 'claimed_verdict': 'PASS', 'parse_status': 'ok'}),
+    ]
+
+    def test_fires_when_last_matching_run_failed(self):
+        call, result = _tool_pair('t1', 'Bash', True, '{"command":"pytest"}')
+        finding = observer.rule_claim_contradiction(
+            [call, result], self.CONTRACT, self.LOG_PASS_CLAIM, 'CRE-9', 'VERIFY', 1)
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding['type'], 'CLAIM_CONTRADICTION')
+        self.assertEqual(finding['severity'], 'HIGH')
+
+    def test_true_negative_when_a_later_run_passed(self):
+        c1, r1 = _tool_pair('t1', 'Bash', True, '{"command":"pytest"}')
+        c2, r2 = _tool_pair('t2', 'Bash', False, '{"command":"pytest"}')
+        finding = observer.rule_claim_contradiction(
+            [c1, r1, c2, r2], self.CONTRACT, self.LOG_PASS_CLAIM, 'CRE-9', 'VERIFY', 1)
+        self.assertIsNone(finding)
+
+    def test_true_negative_when_no_matching_run_at_all(self):
+        finding = observer.rule_claim_contradiction(
+            [], self.CONTRACT, self.LOG_PASS_CLAIM, 'CRE-9', 'VERIFY', 1)
+        self.assertIsNone(finding)
+
+    def test_disabled_when_contract_is_none(self):
+        call, result = _tool_pair('t1', 'Bash', True, '{"command":"pytest"}')
+        self.assertIsNone(observer.rule_claim_contradiction(
+            [call, result], None, self.LOG_PASS_CLAIM, 'CRE-9', 'VERIFY', 1))
+
+    def test_disabled_when_claimed_verdict_is_unknown(self):
+        log = ['2026-09-06T10:00:00Z|META|phase-result|info|' + json.dumps(
+            {'phase': 'VERIFY', 'claimed_verdict': 'UNKNOWN', 'parse_status': 'invalid'})]
+        call, result = _tool_pair('t1', 'Bash', True, '{"command":"pytest"}')
+        self.assertIsNone(observer.rule_claim_contradiction(
+            [call, result], self.CONTRACT, log, 'CRE-9', 'VERIFY', 1))
+
+
+class RuleRepeatedFailureTest(unittest.TestCase):
+    def test_fires_at_the_threshold(self):
+        events = []
+        for i in range(3):
+            call, result = _tool_pair(f't{i}', 'Bash', True, '{"command":"flaky"}')
+            events.extend([call, result])
+        findings = observer.rule_repeated_failure(events, [], 'CRE-9', 'IMPLEMENT', 1)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]['evidence']['count'], 3)
+
+    def test_true_negative_below_threshold(self):
+        call, result = _tool_pair('t1', 'Bash', True, '{"command":"flaky"}')
+        self.assertEqual(
+            observer.rule_repeated_failure([call, result], [], 'CRE-9', 'IMPLEMENT', 1), [])
+
+    def test_true_negative_when_not_failing(self):
+        events = []
+        for i in range(3):
+            call, result = _tool_pair(f't{i}', 'Bash', False, '{"command":"flaky"}')
+            events.extend([call, result])
+        self.assertEqual(
+            observer.rule_repeated_failure(events, [], 'CRE-9', 'IMPLEMENT', 1), [])
+
+
+class RuleScopeViolationTest(unittest.TestCase):
+    CONTRACT = {'allowed_paths': ['/repo/CRE-9--fix']}
+
+    def test_fires_for_a_write_outside_allowed_paths(self):
+        events = [{'kind': 'tool_call', 'tool_use_id': 't1', 'name': 'Write',
+                  'path': '/etc/passwd'}]
+        findings = observer.rule_scope_violation(events, self.CONTRACT, [], 'CRE-9', 'IMPLEMENT', 1)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]['severity'], 'HIGH')
+
+    def test_true_negative_for_a_write_inside_allowed_paths(self):
+        events = [{'kind': 'tool_call', 'tool_use_id': 't1', 'name': 'Write',
+                  'path': '/repo/CRE-9--fix/src/x.py'}]
+        self.assertEqual(
+            observer.rule_scope_violation(events, self.CONTRACT, [], 'CRE-9', 'IMPLEMENT', 1), [])
+
+    def test_disabled_when_allowed_paths_unresolved(self):
+        events = [{'kind': 'tool_call', 'tool_use_id': 't1', 'name': 'Write',
+                  'path': '/etc/passwd'}]
+        contract = {'allowed_paths': None}
+        self.assertEqual(
+            observer.rule_scope_violation(events, contract, [], 'CRE-9', 'IMPLEMENT', 1), [])
+
+    def test_read_is_not_scope_checked(self):
+        events = [{'kind': 'tool_call', 'tool_use_id': 't1', 'name': 'Read',
+                  'path': '/etc/passwd'}]
+        self.assertEqual(
+            observer.rule_scope_violation(events, self.CONTRACT, [], 'CRE-9', 'IMPLEMENT', 1), [])
+
+
+class RuleUnexpectedToolTest(unittest.TestCase):
+    CONTRACT = {'allowed_tools': ['Bash', 'Read']}
+
+    def test_fires_for_a_disallowed_tool(self):
+        events = [{'kind': 'tool_call', 'tool_use_id': 't1', 'name': 'Write'}]
+        findings = observer.rule_unexpected_tool(events, self.CONTRACT, [], 'CRE-9', 'APPRAISE', 1)
+        self.assertEqual(len(findings), 1)
+
+    def test_true_negative_for_an_allowed_tool(self):
+        events = [{'kind': 'tool_call', 'tool_use_id': 't1', 'name': 'Bash'}]
+        self.assertEqual(
+            observer.rule_unexpected_tool(events, self.CONTRACT, [], 'CRE-9', 'APPRAISE', 1), [])
+
+    def test_disabled_when_allowed_tools_is_none(self):
+        events = [{'kind': 'tool_call', 'tool_use_id': 't1', 'name': 'Write'}]
+        contract = {'allowed_tools': None}
+        self.assertEqual(
+            observer.rule_unexpected_tool(events, contract, [], 'CRE-9', 'APPRAISE', 1), [])
+
+    def test_deduplicates_repeat_offenses_of_the_same_tool(self):
+        events = [
+            {'kind': 'tool_call', 'tool_use_id': 't1', 'name': 'Write'},
+            {'kind': 'tool_call', 'tool_use_id': 't2', 'name': 'Write'},
+        ]
+        findings = observer.rule_unexpected_tool(events, self.CONTRACT, [], 'CRE-9', 'APPRAISE', 1)
+        self.assertEqual(len(findings), 1)
+
+
+class RuleRunawayCostTest(unittest.TestCase):
+    def test_fires_over_threshold(self):
+        finding = observer.rule_runaway_cost(3.5, [], 'CRE-9', 'IMPLEMENT', 1, 2.0)
+        self.assertIsNotNone(finding)
+        self.assertEqual(finding['type'], 'RUNAWAY_COST')
+
+    def test_true_negative_under_threshold(self):
+        self.assertIsNone(observer.rule_runaway_cost(0.5, [], 'CRE-9', 'IMPLEMENT', 1, 2.0))
+
+
+class RuleLongToolCallTest(unittest.TestCase):
+    def test_fires_over_threshold(self):
+        call, result = _tool_pair('t1', 'Bash', False,
+                                  observed_at=('2026-09-06T10:00:00Z', '2026-09-06T10:05:00Z'))
+        findings = observer.rule_long_tool_call([call, result], [], 'CRE-9', 'VERIFY', 1, 120)
+        self.assertEqual(len(findings), 1)
+        self.assertEqual(findings[0]['evidence']['elapsed_secs'], 300.0)
+
+    def test_true_negative_under_threshold(self):
+        call, result = _tool_pair('t1', 'Bash', False,
+                                  observed_at=('2026-09-06T10:00:00Z', '2026-09-06T10:00:05Z'))
+        self.assertEqual(
+            observer.rule_long_tool_call([call, result], [], 'CRE-9', 'VERIFY', 1, 120), [])
+
+
+class RuleDegradedSessionTest(unittest.TestCase):
+    def test_fires_for_a_relevant_degraded_server(self):
+        events = [{'kind': 'session_start', 'mcp_servers': [
+            {'name': 'linear-server', 'status': 'failed'},
+        ]}]
+        findings = observer.rule_degraded_session(events, [], 'CRE-9', 'APPRAISE', 1)
+        self.assertEqual(len(findings), 1)
+
+    def test_true_negative_for_an_unrelated_degraded_server(self):
+        events = [{'kind': 'session_start', 'mcp_servers': [
+            {'name': 'plugin:cloudflare:cloudflare-api', 'status': 'needs-auth'},
+        ]}]
+        self.assertEqual(
+            observer.rule_degraded_session(events, [], 'CRE-9', 'APPRAISE', 1), [])
+
+    def test_true_negative_for_a_connected_server(self):
+        events = [{'kind': 'session_start', 'mcp_servers': [
+            {'name': 'linear-server', 'status': 'connected'},
+        ]}]
+        self.assertEqual(
+            observer.rule_degraded_session(events, [], 'CRE-9', 'APPRAISE', 1), [])
+
+    def test_verify_phase_also_checks_playwright(self):
+        events = [{'kind': 'session_start', 'mcp_servers': [
+            {'name': 'plugin_playwright_playwright', 'status': 'failed'},
+        ]}]
+        findings = observer.rule_degraded_session(events, [], 'CRE-9', 'VERIFY', 1)
+        self.assertEqual(len(findings), 1)
+
+
+class RulePermissionDeniedTest(unittest.TestCase):
+    def test_fires_when_denials_present(self):
+        events = [{'kind': 'session_end', 'permission_denials': [{'tool_name': 'Bash'}]}]
+        findings = observer.rule_permission_denied(events, [], 'CRE-9', 'IMPLEMENT', 1)
+        self.assertEqual(len(findings), 1)
+
+    def test_true_negative_when_empty(self):
+        events = [{'kind': 'session_end', 'permission_denials': []}]
+        self.assertEqual(
+            observer.rule_permission_denied(events, [], 'CRE-9', 'IMPLEMENT', 1), [])
+
+    def test_true_negative_with_no_session_end(self):
+        self.assertEqual(
+            observer.rule_permission_denied([], [], 'CRE-9', 'IMPLEMENT', 1), [])
+
+
+class RecordFindingsTest(unittest.TestCase):
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.log_dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _finding(self, fingerprint='fp1'):
+        return {'type': 'UNEXPECTED_TOOL', 'severity': 'HIGH', 'tid': 'CRE-9',
+               'phase': 'APPRAISE', 'gen': 1, 'fingerprint': fingerprint,
+               'evidence': {'tool': 'Write'}}
+
+    def _findings_lines(self):
+        path = self.log_dir / 'CRE-9-appraise-findings.jsonl'
+        if not path.is_file():
+            return []
+        return [json.loads(ln) for ln in path.read_text().splitlines() if ln.strip()]
+
+    def _pipeline_lines(self):
+        path = self.log_dir / 'CRE-9-pipeline.log'
+        if not path.is_file():
+            return []
+        return path.read_text().splitlines()
+
+    def test_a_new_finding_is_written_once_to_both_files(self):
+        created = observer.record_findings(
+            str(self.log_dir), 'CRE-9', 'APPRAISE', [self._finding()], time.time())
+        self.assertEqual(len(created), 1)
+        self.assertEqual(len(self._findings_lines()), 1)
+        self.assertEqual(len(self._pipeline_lines()), 1)
+
+    def test_a_repeat_fingerprint_increments_count_without_duplicating(self):
+        observer.record_findings(
+            str(self.log_dir), 'CRE-9', 'APPRAISE', [self._finding()], time.time())
+        created2 = observer.record_findings(
+            str(self.log_dir), 'CRE-9', 'APPRAISE', [self._finding()], time.time())
+        self.assertEqual(created2, [])
+        lines = self._findings_lines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(lines[0]['count'], 2)
+        # No repeat pipeline-log spam (design.md D5 anti-spam precedent).
+        self.assertEqual(len(self._pipeline_lines()), 1)
+
+    def test_pipeline_log_line_is_withheld_once_the_ticket_is_terminal(self):
+        # Regression: found during Inc 3 development — appending an
+        # observer-finding line after META|outcome flips
+        # _log_reached_terminal from True to False.
+        log_lines = [
+            '2026-09-06T10:00:00Z|IMPLEMENT|implement|done|ok',
+            '2026-09-06T10:01:00Z|META|outcome|info|complete',
+        ]
+        created = observer.record_findings(
+            str(self.log_dir), 'CRE-9', 'APPRAISE', [self._finding()], time.time(),
+            log_lines=log_lines)
+        self.assertEqual(len(created), 1)  # findings.jsonl still gets it
+        self.assertEqual(len(self._findings_lines()), 1)
+        self.assertEqual(self._pipeline_lines(), [])  # pipeline log untouched
+
+    def test_no_findings_writes_nothing(self):
+        created = observer.record_findings(
+            str(self.log_dir), 'CRE-9', 'APPRAISE', [], time.time())
+        self.assertEqual(created, [])
+        self.assertEqual(self._findings_lines(), [])
+
+
+class TerminalClassificationParityTest(unittest.TestCase):
+    """task 4.10: _log_reached_terminal must be byte-identical with and
+    without an injected META|observer-finding line, in every state that
+    matters — not just the completed-ticket case RecordFindingsTest already
+    covers from the writer side."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _classify(self, tid):
+        import sys as _sys
+        _sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+        from fleetd.supervisor import _log_reached_terminal
+        return _log_reached_terminal(str(self.state_dir), tid)
+
+    def _write_log(self, tid, lines):
+        (self.state_dir / f'{tid}-pipeline.log').write_text('\n'.join(lines) + '\n')
+
+    def test_non_terminal_log_stays_non_terminal_with_a_mid_run_finding(self):
+        self._write_log('CRE-1', [
+            '2026-09-06T10:00:00Z|VERIFY|verify|waiting|Agent launched',
+        ])
+        before = self._classify('CRE-1')
+        with open(self.state_dir / 'CRE-1-pipeline.log', 'a') as fh:
+            fh.write('2026-09-06T10:00:30Z|META|observer-finding|done|'
+                    'type=UNEXPECTED_TOOL sev=HIGH gen=1 fp=abc\n')
+        after = self._classify('CRE-1')
+        self.assertEqual(before, after)
+        self.assertFalse(after)
+
+    def test_terminal_log_stays_terminal_when_finding_precedes_outcome(self):
+        self._write_log('CRE-2', [
+            '2026-09-06T10:00:00Z|IMPLEMENT|implement|done|ok',
+            '2026-09-06T10:00:30Z|META|observer-finding|done|'
+            'type=UNEXPECTED_TOOL sev=HIGH gen=1 fp=abc',
+            '2026-09-06T10:01:00Z|META|outcome|info|complete',
+        ])
+        self.assertTrue(self._classify('CRE-2'))
+
+
+class ObserverIncompleteImmuneToRulesTest(unittest.TestCase):
+    """task 4.11: no configuration of observer failure changes a ticket's
+    phase progression. Exercised at the unit level here (the finding
+    evaluator and writer never raise, and never touch anything but their
+    own files); ObserverSupervisionTest already covers process-level
+    crash isolation."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.log_dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def test_evaluate_rules_never_raises_on_a_missing_contract(self):
+        findings = observer.evaluate_rules(
+            [{'kind': 'tool_call', 'tool_use_id': 't1', 'name': 'Write', 'path': '/x'}],
+            None, [], 0.0, 'CRE-9', 'IMPLEMENT', 1, 2.0, 120)
+        self.assertIsInstance(findings, list)
+
+    def test_evaluate_rules_never_raises_on_malformed_events(self):
+        findings = observer.evaluate_rules(
+            [{'kind': 'tool_call'}, {'not_even_a_kind': True}, {}],
+            {'allowed_tools': ['Bash']}, [], 0.0, 'CRE-9', 'IMPLEMENT', 1, 2.0, 120)
+        self.assertIsInstance(findings, list)
+
+    def test_a_crashing_rule_evaluation_never_touches_the_pipeline_log(self):
+        from unittest import mock
+
+        cfg = observer.ObserverConfig(log_dir=str(self.log_dir), grace_secs=0)
+        obs_instance = observer.Observer(cfg)
+        ts = observer.TrackedStream(
+            path='/x', tid='CRE-9', phase='IMPLEMENT', generation=1,
+            reader=observer.TailReader('/x'),
+            translator=observer.PhaseStreamTranslator(
+                'CRE-9', 'IMPLEMENT', 1, lambda t: t, 512),
+            last_activity=time.time(),
+        )
+        with mock.patch.object(observer, 'evaluate_rules',
+                              side_effect=RuntimeError('boom')):
+            obs_instance._evaluate_and_record_findings(ts, time.time())
+        # Must not raise, and must not have created a pipeline log.
+        self.assertFalse((self.log_dir / 'CRE-9-pipeline.log').exists())
+
+
 class ObserverEnabledTest(unittest.TestCase):
     def test_disabled_by_default(self):
         env = os.environ.pop('FLEET_OBSERVER_ENABLE', None)

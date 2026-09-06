@@ -1313,5 +1313,170 @@ class TestDriftPreventionCoverage(unittest.TestCase):
         self.assertNotIn('GATE', LOOP_BEARING_PHASES)
 
 
+class TestPhaseContract(unittest.TestCase):
+    """agent-observer Inc 3 (design.md D4/D7): build_phase_contract.
+
+    Uses an injected `ticket_auto_root`/env file rather than ambient machine
+    state — a real, observed staleness (the installed plugin cache missing a
+    newly-added agent .md) surfaced during this change's own development and
+    must not make these tests flaky depending on what happens to be
+    installed on the machine running them.
+    """
+
+    def setUp(self):
+        self.table = DispatchTable.load(TABLE_PATH)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name)
+        (self.root / 'agents').mkdir(parents=True)
+        self.repos_root = self.root / 'repos'
+        self.repos_root.mkdir()
+        self.env_file = self.root / 'env.sh'
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    def _write_agent_md(self, name, tools):
+        (self.root / 'agents' / f'{name}.md').write_text(
+            f'---\nname: {name}\ntools: {tools}\n---\nbody\n')
+
+    def _write_env(self, **kv):
+        lines = [f'export {k}="{v}"' for k, v in kv.items()]
+        self.env_file.write_text('\n'.join(lines) + '\n')
+
+    def _ticket_dir(self, tid, slug='fix-thing'):
+        d = self.repos_root / f'{tid}--{slug}'
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _contract(self, step_id, tid='CRE-9', env_file=None):
+        return phase_dispatch.build_phase_contract(
+            self.table, step_id, tid,
+            env_file=str(env_file) if env_file else None,
+            ticket_auto_root=self.root)
+
+    def test_objective_and_expected_behaviour_come_from_the_table(self):
+        c = self._contract('STEP_1')
+        self.assertEqual(c['objective'],
+                         'Investigate the ticket and produce complexity score')
+        self.assertEqual(c['expected_behaviour'], 'Follow the skill exactly.')
+
+    def test_allowed_tools_read_from_agent_frontmatter(self):
+        self._write_agent_md('ticket-appraise-agent', 'Bash, Read, Grep')
+        c = self._contract('STEP_1')
+        self.assertEqual(c['allowed_tools'], ['Bash', 'Read', 'Grep'])
+
+    def test_allowed_tools_is_none_when_agent_md_is_missing(self):
+        c = self._contract('STEP_1')  # no agent .md written
+        self.assertIsNone(c['allowed_tools'])
+
+    def test_success_and_failure_criteria_for_a_loop_bearing_phase(self):
+        # Per _VERDICT_TOKENS minus _FAILING_VERDICTS['VERIFY'] — the
+        # universal phase-result-schema.md VERDICT enum is not phase-
+        # restricted (classify_phase itself checks `verdict in failing`
+        # against the full enum, not a phase-specific subset), so this
+        # matches classify_phase's actual behavior rather than VERIFY's
+        # own "normally only PASS/FAIL" convention.
+        c = self._contract('STEP_4_5')  # VERIFY
+        self.assertEqual(c['success_criteria']['claimed_verdict_in'],
+                         ['BLOCK', 'PASS', 'WARN'])
+        self.assertEqual(c['failure_conditions']['claimed_verdict_in'], ['FAIL'])
+        self.assertEqual(c['failure_conditions']['gate_stop_code'], 'VERIFY_EXHAUSTED')
+
+    def test_non_loop_bearing_phase_has_no_verdict_vocabulary(self):
+        c = self._contract('STEP_1')  # APPRAISE
+        self.assertEqual(c['success_criteria'], {})
+        self.assertEqual(c['failure_conditions']['claimed_verdict_in'], [])
+        self.assertIsNone(c['failure_conditions']['gate_stop_code'])
+
+    def test_allowed_paths_resolves_ticket_dir_for_appraise(self):
+        self._ticket_dir('CRE-9')
+        self._write_env(REPOS_ROOT=str(self.repos_root))
+        c = self._contract('STEP_1', env_file=self.env_file)
+        self.assertEqual(c['allowed_paths'], [str(self.repos_root / 'CRE-9--fix-thing')])
+        self.assertIsNone(c['allowed_paths_disabled_reason'])
+
+    def test_allowed_paths_disabled_when_ticket_dir_does_not_exist(self):
+        self._write_env(REPOS_ROOT=str(self.repos_root))
+        c = self._contract('STEP_1', env_file=self.env_file)
+        self.assertIsNone(c['allowed_paths'])
+        self.assertIn('unresolved', c['allowed_paths_disabled_reason'])
+
+    def test_allowed_paths_disabled_when_repos_root_unavailable(self):
+        c = self._contract('STEP_1')  # no env file at all
+        self.assertIsNone(c['allowed_paths'])
+        self.assertIn('REPOS_ROOT', c['allowed_paths_disabled_reason'])
+
+    def test_allowed_paths_disabled_when_ticket_dir_is_ambiguous(self):
+        self._ticket_dir('CRE-9', slug='fix-thing')
+        self._ticket_dir('CRE-9', slug='alt-slug')
+        self._write_env(REPOS_ROOT=str(self.repos_root))
+        c = self._contract('STEP_1', env_file=self.env_file)
+        self.assertIsNone(c['allowed_paths'])
+
+    def test_implement_resolves_ticket_dir_and_worktree_when_both_exist(self):
+        self._ticket_dir('CRE-9')
+        self._write_env(REPOS_ROOT=str(self.repos_root))
+        wt = self.repos_root / '.ticket-auto' / 'worktrees' / 'CRE-9' / 'my-repo'
+        wt.mkdir(parents=True)
+        c = self._contract('STEP_4', env_file=self.env_file)
+        self.assertEqual(set(c['allowed_paths']),
+                         {str(self.repos_root / 'CRE-9--fix-thing'), str(wt)})
+
+    def test_implement_disabled_when_no_worktree_exists_yet(self):
+        # The common case for a first IMPLEMENT attempt (design.md task 3.3
+        # note) — ensure_worktree creates the directory *during* the phase
+        # this contract is built before, not before it.
+        self._ticket_dir('CRE-9')
+        self._write_env(REPOS_ROOT=str(self.repos_root))
+        c = self._contract('STEP_4', env_file=self.env_file)
+        self.assertIsNone(c['allowed_paths'])
+        self.assertIn('WORKTREE', c['allowed_paths_disabled_reason'])
+
+    def test_claim_predicates_include_project_test_commands_from_env(self):
+        self._write_env(REPOS_ROOT=str(self.repos_root), BE_TEST_CMD='./gradlew test')
+        c = self._contract('STEP_4_5', env_file=self.env_file)  # VERIFY
+        self.assertIn('./gradlew test', c['claim_predicates']['command_substrings'])
+        self.assertIn('pytest', c['claim_predicates']['command_substrings'])
+
+    def test_verify_claim_predicates_include_playwright_tool_prefix(self):
+        c = self._contract('STEP_4_5')  # VERIFY
+        self.assertEqual(c['claim_predicates']['tool_name_prefixes'],
+                         ['mcp__plugin_playwright_'])
+
+    def test_non_verify_phase_has_no_playwright_predicate(self):
+        c = self._contract('STEP_1')
+        self.assertNotIn('tool_name_prefixes', c['claim_predicates'])
+
+    def test_write_phase_contract_writes_the_expected_file(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            contract = phase_dispatch.write_phase_contract(
+                state_dir, self.table, 'STEP_1', 'CRE-9',
+                ticket_auto_root=self.root)
+            expected = Path(state_dir) / 'CRE-9-appraise-contract.json'
+            self.assertTrue(expected.is_file())
+            on_disk = json.loads(expected.read_text())
+            self.assertEqual(on_disk, contract)
+
+    def test_write_phase_contract_never_raises_on_unwritable_dir(self):
+        # Fail-soft: a write failure costs the observer's contract-dependent
+        # rules for this generation, not the spawn itself.
+        contract = phase_dispatch.write_phase_contract(
+            '/nonexistent/deeply/nested/dir', self.table, 'STEP_1', 'CRE-9',
+            ticket_auto_root=self.root)
+        self.assertEqual(contract['phase'], 'APPRAISE')
+
+    def test_parse_env_file_reads_export_lines(self):
+        self._write_env(REPOS_ROOT='/x/y', BE_TEST_CMD='pytest -x')
+        env = phase_dispatch._parse_env_file(str(self.env_file))
+        self.assertEqual(env['REPOS_ROOT'], '/x/y')
+        self.assertEqual(env['BE_TEST_CMD'], 'pytest -x')
+
+    def test_parse_env_file_missing_file_returns_empty_dict(self):
+        self.assertEqual(phase_dispatch._parse_env_file('/nonexistent'), {})
+
+    def test_parse_env_file_none_returns_empty_dict(self):
+        self.assertEqual(phase_dispatch._parse_env_file(None), {})
+
+
 if __name__ == '__main__':
     unittest.main()

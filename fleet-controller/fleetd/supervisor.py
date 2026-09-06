@@ -2090,6 +2090,16 @@ def spawn_phase_worker(tid, step_id, generation, state_dir, log_file,
     # reads them.
     session_id = str(uuid.uuid4())
     _phase_write_identity(tid, spawn, session_id)
+    if FLEET_OBSERVER_ENABLE:
+        # Only under the flag — byte-identical to today otherwise (design.md
+        # Goals). Fail-soft: a contract write failure costs this
+        # generation's observer rule coverage, never the spawn itself.
+        try:
+            _phase_mod.write_phase_contract(state_dir, table, step_id, tid,
+                                            env_file=env_file)
+        except Exception as exc:
+            print(f"fleetd[{os.getpid()}]: phase contract write failed for "
+                  f"{tid}/{spawn.phase}: {exc}", file=sys.stderr)
 
     pid, session_id = spawn_worker(
         tid, generation, state_dir, reason=reason, cmd_override=cmd_override,

@@ -33,6 +33,7 @@ Stdlib only. Third-party dependencies stay quarantined in `otel.py` (D11).
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -107,6 +108,11 @@ _FAILING_VERDICTS = {
     'PR-REVIEW': frozenset({'BLOCK'}),
     'IMPLEMENT': frozenset({'FAIL'}),
 }
+
+# docs/phase-result-schema.md's VERDICT enum, reused unchanged (agent-observer
+# Inc 3's build_phase_contract derives success/failure sets from this plus
+# _FAILING_VERDICTS rather than re-parsing the markdown doc at runtime).
+_VERDICT_TOKENS = frozenset({'PASS', 'FAIL', 'WARN', 'BLOCK'})
 
 
 class DispatchTableError(RuntimeError):
@@ -1027,6 +1033,278 @@ def build_phase_spawn(table, step_id, tid, log_file, hb_log_file='',
         next_phase=(spawn.get('next_phase') or phase),
         agent=spawn.get('agent') or None,
     )
+
+
+# ── Phase contract (agent-observer Inc 3, design.md D4/D7) ─────────────────
+# What a phase worker is contractually allowed and expected to do, assembled
+# from sources that already exist elsewhere in this codebase rather than a
+# new authoring surface — the one new thing is `allowed_paths` templating.
+
+_PLUGIN_CACHE_ROOT = Path.home() / '.claude' / 'plugins' / 'cache'
+
+
+def _newest_installed_ticket_auto_pipeline_root():
+    """Newest versioned `ticket-auto-pipeline` plugin-cache install, or None.
+
+    Mirrors `grill-seal.sh`'s "Level 1: newest version in a versioned plugin
+    cache" resolution for the same class of problem: an agent `.md`'s tools
+    allowlist must reflect what a real `--agent` spawn actually binds, which
+    is whatever the CLI resolves from its plugin cache — not necessarily
+    this git checkout, which may be a stale or in-progress working tree.
+    """
+    try:
+        candidates = list(_PLUGIN_CACHE_ROOT.glob('*/ticket-auto-pipeline/*'))
+    except OSError:
+        return None
+    versioned = []
+    for path in candidates:
+        if not path.is_dir():
+            continue
+        parts = path.name.split('.')
+        if not parts or not all(p.isdigit() for p in parts):
+            continue
+        versioned.append((tuple(int(p) for p in parts), path))
+    if not versioned:
+        return None
+    return max(versioned, key=lambda pair: pair[0])[1]
+
+
+def _agent_md_path(agent_ref, ticket_auto_root=None):
+    """`ticket-auto-pipeline:ticket-appraise-agent` -> its `agents/*.md` path.
+
+    None for a step with no dedicated agent type (the worker runs
+    unrestricted — same as `PhaseSpawn.agent`'s own None case).
+
+    `ticket_auto_root` overrides ambient plugin-cache resolution — tests
+    inject a controlled directory rather than depending on whatever happens
+    to be installed on the machine running them, which (a stale plugin
+    cache missing a newly-added agent file, observed during this change's
+    own development) is real, environment-dependent state a unit test must
+    not depend on.
+    """
+    name = (agent_ref or '').split(':', 1)[-1]
+    if not name:
+        return None
+    root = ticket_auto_root
+    if root is None:
+        root = _newest_installed_ticket_auto_pipeline_root()
+    if root is None:
+        root = _PLUGIN_ROOT / 'ticket-auto-pipeline'
+    return Path(root) / 'agents' / f'{name}.md'
+
+
+_FRONTMATTER_TOOLS_RE = re.compile(r'^tools:\s*(.+)$', re.MULTILINE)
+
+
+def _parse_agent_frontmatter_tools(path):
+    """The `tools:` line of an agent `.md`'s YAML frontmatter, as a list.
+
+    None when the file is missing, unreadable, has no frontmatter, or the
+    frontmatter has no `tools:` line — the caller treats None as "no
+    allowlist known", never as "allow everything" or "allow nothing".
+    """
+    try:
+        text = path.read_text()
+    except (OSError, TypeError):
+        return None
+    if not text.startswith('---'):
+        return None
+    end = text.find('\n---', 3)
+    if end == -1:
+        return None
+    match = _FRONTMATTER_TOOLS_RE.search(text[3:end])
+    if not match:
+        return None
+    return [t.strip() for t in match.group(1).split(',') if t.strip()]
+
+
+_ENV_EXPORT_RE = re.compile(r'^export\s+(\w+)="(.*)"\s*$', re.MULTILINE)
+
+
+def _parse_env_file(env_file):
+    """`export NAME="value"` lines from a `spawn_write_env`-shaped file.
+
+    Returns {} on any read failure — the caller's job is to disable
+    (never guess) whatever depended on a value this couldn't find, not to
+    raise. Values are the literal quoted text; `spawn_write_env` writes
+    plain strings without embedded double quotes in every field it defines.
+    """
+    if not env_file:
+        return {}
+    try:
+        text = Path(env_file).read_text()
+    except (OSError, TypeError):
+        return {}
+    return dict(_ENV_EXPORT_RE.findall(text))
+
+
+def _resolve_ticket_dir(tid, repos_root):
+    """Mirrors `lib/ticket-dir.sh`'s `resolve_ticket_dir`: the one directory
+    under `repos_root` (depth <= 2) matching `{tid}--[a-z0-9-]+`.
+
+    None (unresolved) when zero or more-than-one match — a ticket directory
+    is either found uniquely or it isn't; ambiguity is not this caller's to
+    guess at, same as the bash original refusing on `count -eq 2`.
+    """
+    if not repos_root:
+        return None
+    root = Path(repos_root)
+    if not root.is_dir():
+        return None
+    pattern = re.compile(rf'^{re.escape(tid)}--[a-z0-9-]+$', re.IGNORECASE)
+    matches = []
+    for depth_glob in ('*', '*/*'):
+        for candidate in root.glob(depth_glob):
+            if candidate.is_dir() and pattern.match(candidate.name):
+                matches.append(candidate)
+    matches = sorted(set(matches))
+    if len(matches) == 1:
+        return str(matches[0])
+    return None
+
+
+def _resolve_worktrees(tid, repos_root):
+    """Every existing git worktree for `tid`, per `lib/worktree.sh`'s formula
+    `$REPOS_ROOT/.ticket-auto/worktrees/{TICKET_ID}/{repo-slug}`.
+
+    Globs rather than requiring a specific repo slug, since IMPLEMENT may
+    touch more than one repo. Returns [] (unresolved) when none exist yet —
+    the common case for a first IMPLEMENT attempt, since `ensure_worktree`
+    creates the directory *during* the phase this contract is built before,
+    not before it. A retry attempt, whose worktree already exists from the
+    first, resolves normally.
+    """
+    if not repos_root:
+        return []
+    base = Path(repos_root) / '.ticket-auto' / 'worktrees' / tid
+    if not base.is_dir():
+        return []
+    return sorted(str(p) for p in base.iterdir() if p.is_dir())
+
+
+def _resolve_allowed_paths(templates, tid, env_vars):
+    """Resolve each `{TEMPLATE}` in `templates` against `env_vars`.
+
+    Returns `(resolved_paths, disabled_reason)` — exactly one is truthy.
+    Design.md D4: an unresolvable template disables the rule for that phase
+    rather than guessing a default, because a wrong default produces
+    confident false SCOPE_VIOLATION findings, the fastest way to get the
+    whole subsystem ignored.
+    """
+    if not templates:
+        return [], 'no allowed_paths declared for this step'
+    repos_root = env_vars.get('REPOS_ROOT')
+    if not repos_root:
+        return [], 'REPOS_ROOT unavailable (env file missing or unreadable)'
+
+    resolved = []
+    for template in templates:
+        if template == '{TICKET_DIR}':
+            path = _resolve_ticket_dir(tid, repos_root)
+            if path is None:
+                return [], f'{{TICKET_DIR}} unresolved for {tid!r} under {repos_root!r}'
+            resolved.append(path)
+        elif template == '{WORKTREE}':
+            paths = _resolve_worktrees(tid, repos_root)
+            if not paths:
+                return [], f'{{WORKTREE}} unresolved for {tid!r} (no worktree created yet)'
+            resolved.extend(paths)
+        else:
+            return [], f'unknown allowed_paths template {template!r}'
+    return resolved, None
+
+
+def _claim_predicates(phase, env_vars):
+    """Test-class command patterns whose exit code is evidence for
+    CLAIM_CONTRADICTION (design.md D3) — a phase's claimed PASS is
+    contradicted when the *last* observed run of one of these has
+    `is_error=true` and no later passing run of the same command follows.
+
+    Project-specific test commands (`BE_TEST_CMD`/`BE_TEST_RUNNER`/
+    `FE_TEST_CMD`) come from the env file when available; generic ones
+    (`pytest`, `npm test`, `mvn test`) are substring patterns matched
+    against a tool_call's command regardless of project config, since a
+    phase agent may run them directly even when a project-specific wrapper
+    also exists. VERIFY additionally treats any `mcp__plugin_playwright_*`
+    tool call as test-class evidence — its "test" is a browser action, not
+    a shell command.
+    """
+    patterns = ['pytest', 'npm test', 'npm run test', 'mvn test']
+    for key in ('BE_TEST_CMD', 'BE_TEST_RUNNER', 'FE_TEST_CMD'):
+        value = env_vars.get(key)
+        if value and value not in patterns:
+            patterns.append(value)
+    predicates = {'command_substrings': patterns}
+    if phase == 'VERIFY':
+        predicates['tool_name_prefixes'] = ['mcp__plugin_playwright_']
+    return predicates
+
+
+def build_phase_contract(table, step_id, tid, env_file=None, ticket_auto_root=None):
+    """The phase contract observer.py's deterministic rules compare against.
+
+    Assembled entirely from sources that already exist — `dispatch-table.json`
+    step descriptions, the step's agent `.md` frontmatter, the existing
+    `LOOP_BEARING_PHASES`/`_FAILING_VERDICTS` constants (phase-result-schema.md's
+    VERDICT enum, already encoded in this module) and the step's own `loop`
+    dict's `gate_stop_code` when present. `allowed_paths` is the one templated
+    field, resolved here from `FLEET_TICKET_ENV_FILE`'s contents.
+
+    Never raises: every field that cannot be resolved records why instead of
+    a guessed value (design.md D4), because a rule computed from a wrong
+    default is worse than a rule that stays disabled.
+    """
+    step, spawn = _spawn_spec(table, step_id)
+    phase = (spawn.get('phase') or '').upper()
+    env_vars = _parse_env_file(env_file)
+
+    agent_ref = spawn.get('agent')
+    agent_md = _agent_md_path(agent_ref, ticket_auto_root=ticket_auto_root)
+    allowed_tools = _parse_agent_frontmatter_tools(agent_md) if agent_md else None
+
+    failing = sorted(_FAILING_VERDICTS.get(phase, frozenset()))
+    passing = (sorted(_VERDICT_TOKENS - set(failing))
+              if phase in LOOP_BEARING_PHASES else [])
+
+    allowed_paths, disabled_reason = _resolve_allowed_paths(
+        spawn.get('allowed_paths'), tid, env_vars)
+
+    return {
+        'tid': tid,
+        'phase': phase,
+        'step_id': step_id,
+        'objective': spawn.get('description') or step.get('description') or '',
+        'expected_behaviour': spawn.get('instructions') or '',
+        'allowed_tools': allowed_tools,
+        'success_criteria': {'claimed_verdict_in': passing} if passing else {},
+        'failure_conditions': {
+            'claimed_verdict_in': failing,
+            'gate_stop_code': (step.get('loop') or {}).get('gate_stop_code') or None,
+        },
+        'allowed_paths': allowed_paths or None,
+        'allowed_paths_disabled_reason': disabled_reason,
+        'claim_predicates': _claim_predicates(phase, env_vars),
+    }
+
+
+def contract_path(state_dir, tid, phase):
+    """`{tid}-{phase}-contract.json` — mirrors `spawn_worker`'s own slug."""
+    return Path(state_dir) / f'{tid}-{phase.lower()}-contract.json'
+
+
+def write_phase_contract(state_dir, table, step_id, tid, env_file=None,
+                         ticket_auto_root=None):
+    """Write the phase contract at spawn. Never raises — a write failure
+    costs the observer's contract-dependent rules for this generation, not
+    the spawn itself (same fail-soft posture as `_phase_write_identity`)."""
+    contract = build_phase_contract(table, step_id, tid, env_file=env_file,
+                                    ticket_auto_root=ticket_auto_root)
+    try:
+        contract_path(state_dir, tid, contract['phase']).write_text(
+            json.dumps(contract))
+    except OSError:
+        pass
+    return contract
 
 
 # ── Hook identity (design.md D15, task 4.13) ────────────────────────────────
