@@ -73,6 +73,13 @@ from fleetd.phase_dispatch import (  # noqa: E402
     PR_ITERATE,
     build_pr_iterate_spawn,
     resolve_ticket_type,
+    needs_retro,
+    RetroDecision,
+    RETRO_REASON_GATE_STOP,
+    RETRO_REASON_NO_SUCCESS,
+    RETRO_REASON_FALLBACK,
+    RETRO_REASON_VERIFY_EXHAUSTED,
+    RETRO_REASON_VERIFY_FAIL,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -1679,6 +1686,140 @@ class TestResolveTicketType(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             lib_dir = self._fake_lib_dir(tmp, {})
             self.assertIsNone(resolve_ticket_type('CRE-9', lib_dir=lib_dir))
+
+
+class TestNeedsRetro(unittest.TestCase):
+    """STEP_6's 5-condition retro auto-trigger, ported from SKILL.md
+    (task 10.1.6)."""
+
+    def setUp(self):
+        self.table = DispatchTable.load(TABLE_PATH)
+
+    def _log(self, tmp, lines):
+        path = Path(tmp) / 'CRE-1-pipeline.log'
+        path.write_text('\n'.join(lines) + ('\n' if lines else ''))
+        return str(path)
+
+    def _clean_success_lines(self):
+        return [
+            '2026-09-06T10:00:00Z|VERIFY|verify|done|PASS (1 attempts)',
+            '2026-09-06T10:01:00Z|PR-REVIEW|pr-review|done|OK',
+        ]
+
+    def test_a_clean_success_run_does_not_trigger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(tmp, self._clean_success_lines())
+            decision = needs_retro(self.table, log_file)
+        self.assertFalse(decision.needed)
+        self.assertEqual(decision.reasons, ())
+        self.assertFalse(decision.drift_detected)
+
+    def test_a_gate_stop_line_triggers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(
+                tmp, self._clean_success_lines() +
+                ['2026-09-06T10:02:00Z|META|gate-stop|fail|VERIFY_EXHAUSTED'])
+            decision = needs_retro(self.table, log_file)
+        self.assertTrue(decision.needed)
+        self.assertIn(RETRO_REASON_GATE_STOP, decision.reasons)
+
+    def test_missing_verify_pass_triggers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(
+                tmp, ['2026-09-06T10:01:00Z|PR-REVIEW|pr-review|done|OK'])
+            decision = needs_retro(self.table, log_file)
+        self.assertTrue(decision.needed)
+        self.assertIn(RETRO_REASON_NO_SUCCESS, decision.reasons)
+
+    def test_missing_pr_review_ok_triggers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(
+                tmp,
+                ['2026-09-06T10:00:00Z|VERIFY|verify|done|PASS (1 attempts)'])
+            decision = needs_retro(self.table, log_file)
+        self.assertTrue(decision.needed)
+        self.assertIn(RETRO_REASON_NO_SUCCESS, decision.reasons)
+
+    def test_a_pr_review_warn_verdict_does_not_satisfy_the_ok_check(self):
+        # PR-REVIEW's own verdict tokens are OK/WARN/BLOCK, never PASS — the
+        # bug this condition exists to catch (GitHub #149) was exactly a
+        # check that could never distinguish a real success from any other
+        # outcome.
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(
+                tmp, [
+                    '2026-09-06T10:00:00Z|VERIFY|verify|done|PASS (1 attempts)',
+                    '2026-09-06T10:01:00Z|PR-REVIEW|pr-review|done|WARN',
+                ])
+            decision = needs_retro(self.table, log_file)
+        self.assertTrue(decision.needed)
+        self.assertIn(RETRO_REASON_NO_SUCCESS, decision.reasons)
+
+    def test_a_heartbeat_fallback_event_triggers_and_reports_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(tmp, self._clean_success_lines())
+            hb_file = Path(tmp) / 'CRE-1-heartbeat.log'
+            hb_file.write_text(
+                '2026-09-06T10:00:30Z|fallback|uat-url|warn|no CLAUDE.md '
+                'UAT_URL, falling back to localhost\n')
+            decision = needs_retro(self.table, log_file,
+                                   hb_log_file=str(hb_file))
+        self.assertTrue(decision.needed)
+        self.assertIn(RETRO_REASON_FALLBACK, decision.reasons)
+        self.assertTrue(decision.drift_detected)
+
+    def test_a_missing_heartbeat_file_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(tmp, self._clean_success_lines())
+            decision = needs_retro(
+                self.table, log_file,
+                hb_log_file=str(Path(tmp) / 'nonexistent.log'))
+        self.assertFalse(decision.needed)
+        self.assertFalse(decision.drift_detected)
+
+    def test_verify_exhausted_anywhere_triggers_as_a_safety_net(self):
+        # Condition 4 is deliberately redundant with condition 1 — a
+        # gate-stop line written inside an agent sub-shell may not be
+        # visible to the router's own file descriptor.
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(
+                tmp, ['2026-09-06T10:02:00Z|META|note|info|VERIFY_EXHAUSTED '
+                     'mentioned mid-message'])
+            decision = needs_retro(self.table, log_file)
+        self.assertTrue(decision.needed)
+        self.assertIn(RETRO_REASON_VERIFY_EXHAUSTED, decision.reasons)
+
+    def test_an_explicit_verify_fail_line_triggers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(
+                tmp,
+                ['2026-09-06T10:00:00Z|VERIFY|verify|fail|no UI to test'])
+            decision = needs_retro(self.table, log_file)
+        self.assertTrue(decision.needed)
+        self.assertIn(RETRO_REASON_VERIFY_FAIL, decision.reasons)
+
+    def test_a_missing_pipeline_log_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decision = needs_retro(self.table,
+                                   str(Path(tmp) / 'nonexistent.log'))
+        # No lines to read means every positive-marker check fails closed,
+        # which is itself a trigger (condition 2) — matches grep -q's own
+        # behaviour against a file it cannot read.
+        self.assertTrue(decision.needed)
+        self.assertEqual(decision.reasons, (RETRO_REASON_NO_SUCCESS,))
+
+    def test_multiple_conditions_all_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(
+                tmp, [
+                    '2026-09-06T10:00:00Z|META|gate-stop|fail|VERIFY_EXHAUSTED',
+                    '2026-09-06T10:01:00Z|VERIFY|verify|fail|timeout',
+                ])
+            decision = needs_retro(self.table, log_file)
+        self.assertEqual(
+            decision.reasons,
+            (RETRO_REASON_GATE_STOP, RETRO_REASON_NO_SUCCESS,
+             RETRO_REASON_VERIFY_EXHAUSTED, RETRO_REASON_VERIFY_FAIL))
 
 
 if __name__ == '__main__':

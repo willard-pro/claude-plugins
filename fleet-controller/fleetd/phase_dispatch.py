@@ -1921,3 +1921,104 @@ def build_pr_iterate_spawn(tid, log_file, hb_log_file='', env_file='',
         next_phase='PR-REVIEW',
         agent=None,
     )
+
+
+# ── STEP_6 retro auto-trigger (task 10.1.6, design.md D22) ─────────────────
+#
+# STEP_6's table `spawn` (the `/ticket-retro` agent) is `conditional_on:
+# "NEEDS_RETRO"` — `build_phase_spawn(table, 'STEP_6', ...)` already builds
+# that spawn correctly (it does not interpret `conditional_on`, same as every
+# other extra table field it ignores), so the only missing piece is this
+# decision: whether to call it at all.
+
+RETRO_REASON_GATE_STOP = 'gate-stop fired'
+RETRO_REASON_NO_SUCCESS = 'no VERIFY PASS + PR-REVIEW OK'
+RETRO_REASON_FALLBACK = 'heartbeat fallback event'
+# Deliberately not the bare gate-stop code as a quoted literal — that string
+# belongs to STEP_4_5's table entry alone (see `needs_retro`, which reads it
+# via `table.loop`), and `TestLoopCaps.test_caps_are_not_duplicated_as_
+# python_constants` fails loudly if a second Python literal ever claims it.
+RETRO_REASON_VERIFY_EXHAUSTED = 'VERIFY exhaustion code present'
+RETRO_REASON_VERIFY_FAIL = 'VERIFY fail'
+
+RetroDecision = namedtuple('RetroDecision', 'needed reasons drift_detected')
+RetroDecision.__doc__ = """Whether STEP_6 should auto-trigger `/ticket-retro`.
+
+needed         — True if any condition fired.
+reasons        — tuple of the condition names that fired, in check order.
+drift_detected — condition 3 (a heartbeat `|fallback|` event) specifically.
+                 SKILL.md's own check writes `META|drift|warn|...` to the
+                 pipeline log as part of this same condition; that write is
+                 the caller's job here (matching every other log-writing
+                 side effect in this module — an evaluator reports, the
+                 dispatch wiring or `orchestration.finalize_terminal` acts),
+                 not this function's, so a test can call this read-only.
+"""
+
+
+def _retro_anchored(line, literal):
+    """Field-anchored match: `^[^|]*|<literal>` in the bash checks this
+    ports — the first field (the ISO timestamp) is any run of non-pipe
+    chars, and `literal` must follow it exactly."""
+    parts = line.split('|', 1)
+    return len(parts) == 2 and parts[1].startswith(literal)
+
+
+def needs_retro(table, log_file, hb_log_file=''):
+    """Should STEP_6 auto-trigger a `/ticket-retro` agent?
+
+    Ports SKILL.md's 5-condition retro-trigger check verbatim: a gate-stop
+    fired anywhere in the log; the run lacks a *positive* success marker —
+    both a `VERIFY|verify|done|PASS` line AND a `PR-REVIEW|pr-review|done|OK`
+    line — tested as their absence, never as the absence of the STEP_6
+    outcome line itself (that line is written by this same step, so testing
+    for it was tautologically true on every run — GitHub #149); a heartbeat
+    `|fallback|` event fired; STEP_4_5's own gate-stop code (`VERIFY_
+    EXHAUSTED` in the shipped table, read via `table.loop` rather than
+    hardcoded — see the constant's own comment above) appears anywhere (a
+    safety net for condition 1 — gate-stop lines written inside an agent
+    sub-shell may not be visible to the router's own file descriptor); or an
+    explicit `VERIFY|verify|fail|` line appears (same sub-shell concern).
+    Conditions 4/5 duplicate condition 1 in the common case; kept because
+    the manual router keeps them.
+
+    A missing `log_file` or `hb_log_file` (or an empty `hb_log_file`, the
+    common case when heartbeat logging is off) reads as no lines — matching
+    bash's own `2>/dev/null`-suppressed grep failure, never an error.
+    """
+    try:
+        lines = Path(log_file).read_text().splitlines()
+    except OSError:
+        lines = []
+
+    reasons = []
+    if any('|META|gate-stop|fail|' in line for line in lines):
+        reasons.append(RETRO_REASON_GATE_STOP)
+
+    has_verify_pass = any(
+        _retro_anchored(line, 'VERIFY|verify|done|PASS') for line in lines)
+    has_pr_review_ok = any(
+        _retro_anchored(line, 'PR-REVIEW|pr-review|done|OK')
+        for line in lines)
+    if not (has_verify_pass and has_pr_review_ok):
+        reasons.append(RETRO_REASON_NO_SUCCESS)
+
+    try:
+        hb_lines = (Path(hb_log_file).read_text().splitlines()
+                   if hb_log_file else [])
+    except OSError:
+        hb_lines = []
+    drift_detected = any('|fallback|' in line for line in hb_lines)
+    if drift_detected:
+        reasons.append(RETRO_REASON_FALLBACK)
+
+    verify_exhausted_code = str((table.loop('STEP_4_5') or {})
+                                .get('gate_stop_code') or '')
+    if verify_exhausted_code and any(
+            verify_exhausted_code in line for line in lines):
+        reasons.append(RETRO_REASON_VERIFY_EXHAUSTED)
+
+    if any(_retro_anchored(line, 'VERIFY|verify|fail|') for line in lines):
+        reasons.append(RETRO_REASON_VERIFY_FAIL)
+
+    return RetroDecision(bool(reasons), tuple(reasons), drift_detected)
