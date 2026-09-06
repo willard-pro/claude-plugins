@@ -308,20 +308,29 @@ increments get **dropped** — that is an intended outcome, not a failure.
 
 **Plan:** `~/.claude/plans/delightful-spinning-snowglobe.md`
 **Memory:** `project_agent-observer-plan`
+**Openspec change:** `agent-observer` (implemented 2026-09-06, 43/43 tasks; `openspec/` is
+gitignored, exists only on local disk).
 
-Independent execution record from worker `stream-json` output, plus deterministic findings.
-Fleet-wide `fleetd/observer.py` modelled on `otel.py`. MVP is evidence record + deterministic
-findings, no LLM tier.
+**Implemented 2026-09-06 on `feat/agent-observer` (fleet-controller 0.25.0), PR #309 open,
+pending merge.** `fleetd/observer.py`, a fleet-wide sidecar modelled on `otel.py`'s own
+spawn/backoff/reap/stop supervision, tails phase workers' `--output-format stream-json
+--verbose` transcripts (opt-in via `FLEET_OBSERVER_ENABLE`) and computes 8 deterministic
+findings — `CLAIM_CONTRADICTION`, `REPEATED_FAILURE`, `SCOPE_VIOLATION`, `UNEXPECTED_TOOL`,
+`RUNAWAY_COST`, `LONG_TOOL_CALL`, `DEGRADED_SESSION`, `PERMISSION_DENIED` — against a
+per-phase contract (`build_phase_contract`) sourced from the dispatch table and each agent's
+own `agents/*.md` frontmatter. Findings surface via a new `findings` table (schema v3,
+PROJECTION class), `/health` counts, a `fleet-dashboard.sh` FINDINGS column, and
+`detect_observer_findings` (16th detection engine, hard-capped at WARN). Fully inert by
+default — confirmed via two full `make test` runs with `FLEET_OBSERVER_ENABLE` unset.
 
-**Hard dependency on Step 4:** the `CLAIM_CONTRADICTION` engine anchors on phase-result
-`claimed_verdict`, never on prose. Built before RLVR it has nothing to anchor on.
+Both urgent side-findings from the plan were resolved as part of this change rather than
+filed separately: `--agent` threading turned out to already exist (the plan's premise was
+stale against an installed-plugin-cache lag, corrected in the change's own design doc), and
+the phase-slug sweep leak (`fleetd/supervisor.py`'s stale-generation-file sweep matching only
+`{tid}-gen{N}`, never `{tid}-{phase}-gen{N}.*`) was fixed directly in Inc 1
+(`_sweep_stale_generation_files` now takes a `phase` param).
 
-Both of its urgent side-findings are already extracted: `--agent` into Step 0, and the
-phase-slug sweep leak (`fleetd/supervisor.py:1240` matches only `{tid}-gen{N}`, never
-`{tid}-{phase}-gen{N}.*`) should be filed as its own issue rather than carried here.
-
-Probe fixtures are ready at `fleet-controller/fleetd/tests/fixtures/stream-json-*.ndjson`
-(currently untracked).
+Probe fixtures used: `fleet-controller/fleetd/tests/fixtures/stream-json-*.ndjson`.
 
 ---
 
