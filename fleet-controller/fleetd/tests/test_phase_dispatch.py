@@ -73,6 +73,7 @@ from fleetd.phase_dispatch import (  # noqa: E402
     PR_ITERATE,
     build_pr_iterate_spawn,
     resolve_ticket_type,
+    resolve_ticket_complexity,
     needs_retro,
     RetroDecision,
     RETRO_REASON_GATE_STOP,
@@ -1686,6 +1687,55 @@ class TestResolveTicketType(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             lib_dir = self._fake_lib_dir(tmp, {})
             self.assertIsNone(resolve_ticket_type('CRE-9', lib_dir=lib_dir))
+
+
+class TestResolveTicketComplexity(unittest.TestCase):
+    """`ticket-dir.sh` + `notes-parse.sh` shelled out to, never reimplemented
+    (task 10.1.7)."""
+
+    def _workspace(self, tmp, tid, notes_body):
+        repos_root = Path(tmp)
+        ticket_dir = repos_root / f'{tid}--test-ticket'
+        ticket_dir.mkdir()
+        (ticket_dir / 'notes.md').write_text(notes_body)
+        return str(repos_root)
+
+    def test_resolves_simple(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repos_root = self._workspace(
+                tmp, 'CRE-9', '## Complexity\n**Score:** simple\n')
+            self.assertEqual(
+                resolve_ticket_complexity('CRE-9', repos_root=repos_root,
+                                          lib_dir=str(TICKET_AUTO_LIB)),
+                'simple')
+
+    def test_resolves_complex(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repos_root = self._workspace(
+                tmp, 'CRE-9', '## Complexity\n**Score:** complex\n')
+            self.assertEqual(
+                resolve_ticket_complexity('CRE-9', repos_root=repos_root,
+                                          lib_dir=str(TICKET_AUTO_LIB)),
+                'complex')
+
+    def test_no_workspace_directory_returns_empty_not_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                resolve_ticket_complexity('CRE-9', repos_root=tmp,
+                                          lib_dir=str(TICKET_AUTO_LIB)), '')
+
+    def test_no_complexity_section_returns_empty_not_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repos_root = self._workspace(tmp, 'CRE-9', '# Notes\nno score here\n')
+            self.assertEqual(
+                resolve_ticket_complexity('CRE-9', repos_root=repos_root,
+                                          lib_dir=str(TICKET_AUTO_LIB)), '')
+
+    def test_missing_lib_returns_empty_not_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                resolve_ticket_complexity('CRE-9', repos_root=tmp,
+                                          lib_dir=tmp), '')
 
 
 class TestNeedsRetro(unittest.TestCase):

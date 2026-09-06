@@ -196,6 +196,19 @@ class TestAutoMerge(unittest.TestCase):
         self.assertEqual(result.status, orchestration.OK)
         self.assertIn(['pr', 'merge', '412', '--squash', '--auto'], self.calls)
 
+    def test_wired_through_step_4_6s_own_post_dispatch(self):
+        # task 10.1.7 — confirms the table-driven path (the real STEP_4_6
+        # entry, not a hand-called run_auto_merge) reaches the merge, given a
+        # ctx populated the way the eventual dispatch wiring will populate
+        # it (autonomy/integration_branch from PreambleResult.fields,
+        # complexity from resolve_ticket_complexity).
+        table = DispatchTable.load(TABLE_PATH)
+        results = orchestration.run_step_orchestration(
+            table, 'STEP_4_6', 'post_dispatch', self._ctx())
+        self.assertIn(['pr', 'merge', '412', '--squash', '--auto'], self.calls)
+        self.assertTrue(any(r.kind == 'auto_merge' and r.status == orchestration.OK
+                            for r in results))
+
     def test_manual_mode_never_merges(self):
         result = orchestration.run_auto_merge({'kind': 'auto_merge'},
                                               self._ctx(autonomy='manual'))

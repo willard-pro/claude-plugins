@@ -1709,6 +1709,48 @@ def resolve_ticket_type(tid, lib_dir=None, timeout=30):
     return None
 
 
+# ── Ticket complexity resolution (task 10.1.7, design.md D22) ──────────────
+#
+# `orchestration.run_auto_merge` (STEP_4_6's `auto_merge` post_dispatch item)
+# was already implemented and already tested against a hand-built `ctx` —
+# what it never had was a live source for `ctx['complexity']`. `autonomy` and
+# `integration_branch` are already resolved once per ticket by
+# `preamble.run_preamble` (its `PreambleResult.fields['AUTONOMY']`/
+# `['INTEGRATION_BRANCH']`); complexity is not a preamble concern — it is set
+# by the appraise phase into `notes.md`'s `## Complexity` section, and
+# `detect-resume.sh` derives its own COMPLEXITY variable from exactly that
+# file, via `ticket-dir.sh`'s `resolve_ticket_dir` + `notes-parse.sh`'s
+# `get_complexity`. This resolves the same pair rather than a second
+# implementation of either.
+
+
+def resolve_ticket_complexity(tid, repos_root='', lib_dir=None, timeout=30):
+    """The ticket's complexity score (`simple`/`complex`), or `''` if
+    unresolvable.
+
+    `run_auto_merge` treats anything but the literal `'simple'` as
+    ineligible, so an unresolvable complexity (no workspace directory found,
+    no `notes.md`, no `## Complexity` section) fails closed the same way an
+    absent `AUTONOMY` already does — never raises.
+    """
+    lib_dir = lib_dir or os.environ.get(
+        'CLAUDE_SKILLS_LIB', os.path.expanduser('~/.claude/skills/lib'))
+    script = (
+        f'source "{lib_dir}/ticket-dir.sh" >/dev/null 2>&1 && '
+        f'source "{lib_dir}/notes-parse.sh" >/dev/null 2>&1 && '
+        f'_dir=$(resolve_ticket_dir "$1" "$2") && get_complexity "$_dir"'
+    )
+    try:
+        proc = subprocess.run(
+            ['bash', '-c', script, 'bash', tid, repos_root or '.'],
+            capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return ''
+    if proc.returncode != 0:
+        return ''
+    return (proc.stdout or '').strip()
+
+
 # ── Step transitions (task 10.1, design.md D22) ─────────────────────────────
 #
 # Groups 1-9/11 give fleetd every primitive to run ONE phase. Nothing decided
