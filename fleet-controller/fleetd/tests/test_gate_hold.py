@@ -56,6 +56,10 @@ class GateHoldTestBase(unittest.TestCase):
         self.log.write_text('2026-09-03T09:00:00Z|META|schema|info|1\n')
 
     def _reconcile(self, exit_code, lines, **row):
+        # A held ticket's row always carries a real hold_kind (set_hold
+        # requires one); default to 'gate' here so every pre-existing test
+        # below keeps exercising the 'gate' release predicate unchanged.
+        row.setdefault('hold_kind', 'gate')
         return gate_hold.reconcile_hold(
             self.table, 'CRE-9', row, str(self.log),
             entry_gate=_gate(exit_code, lines))
@@ -141,9 +145,10 @@ class TestGateStop(GateHoldTestBase):
             return gate_hold.GATE_ENTRY_PASS, [PASS_LINE]
 
         cap = self.table.loop('STEP_3_5')['max_iterations']
-        gate_hold.reconcile_hold(self.table, 'CRE-9',
-                                 {'reconcile_cycle': cap}, str(self.log),
-                                 entry_gate=probe)
+        gate_hold.reconcile_hold(
+            self.table, 'CRE-9',
+            {'reconcile_cycle': cap, 'hold_kind': 'gate'}, str(self.log),
+            entry_gate=probe)
         self.assertEqual(calls, [])
 
     def test_one_below_the_cap_still_releases(self):
@@ -155,15 +160,16 @@ class TestGateStop(GateHoldTestBase):
 
 class TestUnanswerableProbe(GateHoldTestBase):
 
-    def test_a_timeout_leaves_the_hold_untouched(self):
+    def test_a_timeout_is_unavailable_not_held(self):
+        """A gate that could not run is a different fact from one that held
+        — UNAVAILABLE is never collapsed into HOLD (design.md D7)."""
         d = self._reconcile(None, [])
-        self.assertEqual(d.action, gate_hold.HOLD)
+        self.assertEqual(d.action, gate_hold.UNAVAILABLE)
         self.assertIn('did not answer', d.detail)
 
-    def test_an_undocumented_exit_code_is_not_read_as_held(self):
-        """A gate that could not run is a different fact from one that held."""
+    def test_an_undocumented_exit_code_is_unavailable_not_held(self):
         d = self._reconcile(127, [])
-        self.assertEqual(d.action, gate_hold.HOLD)
+        self.assertEqual(d.action, gate_hold.UNAVAILABLE)
         self.assertIn('did not answer', d.detail)
         self.assertNotEqual(d.detail, 'still held')
 
@@ -171,6 +177,94 @@ class TestUnanswerableProbe(GateHoldTestBase):
         before = self._log_lines()
         self._reconcile(127, [STOP_LINE])
         self.assertEqual(self._log_lines(), before)
+
+
+class TestUnregisteredHoldKind(GateHoldTestBase):
+    """'human' is permitted by the schema's CHECK constraint but has no
+    registered predicate until human-hold-protocol. It must resolve to
+    UNAVAILABLE — never a release (a premise nothing evaluated) and never a
+    gate-stop (killing a ticket over a missing feature)."""
+
+    def test_human_kind_yields_unavailable(self):
+        calls = []
+
+        def probe(tid, hb_log_file='', lib_dir=None):
+            calls.append(tid)
+            return gate_hold.GATE_ENTRY_PASS, [PASS_LINE]
+
+        d = gate_hold.reconcile_hold(
+            self.table, 'CRE-9', {'hold_kind': 'human'}, str(self.log),
+            entry_gate=probe)
+        self.assertEqual(d.action, gate_hold.UNAVAILABLE)
+        # No predicate is registered for 'human' — the gate probe (which
+        # would only be meaningful for 'gate') must never be invoked.
+        self.assertEqual(calls, [])
+
+    def test_human_kind_leaves_the_row_untouched(self):
+        before = self._log_lines()
+        gate_hold.reconcile_hold(
+            self.table, 'CRE-9', {'hold_kind': 'human'}, str(self.log))
+        self.assertEqual(self._log_lines(), before)
+
+    def test_an_empty_hold_kind_is_also_unavailable(self):
+        """A row with no hold_kind at all (should not occur once set_hold
+        always writes one, but the dispatch must not guess) is unavailable,
+        not silently treated as 'gate'."""
+        d = gate_hold.reconcile_hold(
+            self.table, 'CRE-9', {}, str(self.log))
+        self.assertEqual(d.action, gate_hold.UNAVAILABLE)
+
+
+class TestHoldIdThreading(GateHoldTestBase):
+    """hold_id/hold_generation are carried from the row into every decision
+    so the caller can release with store.release_hold's CAS guard."""
+
+    def test_hold_id_and_generation_are_carried_through_every_action(self):
+        for exit_code, lines in (
+            (gate_hold.GATE_ENTRY_HELD, [HELD_LINE]),
+            (gate_hold.GATE_ENTRY_PASS, [PASS_LINE]),
+            (gate_hold.GATE_ENTRY_STOP, [STOP_LINE]),
+            (127, []),
+        ):
+            d = self._reconcile(
+                exit_code, lines,
+                hold_id='hold:CRE-9:g3:a1', hold_generation=3)
+            self.assertEqual(d.hold_id, 'hold:CRE-9:g3:a1')
+            self.assertEqual(d.hold_generation, 3)
+
+    def test_unregistered_kind_also_carries_hold_id(self):
+        d = gate_hold.reconcile_hold(
+            self.table, 'CRE-9',
+            {'hold_kind': 'human', 'hold_id': 'hold:CRE-9:g1:a1',
+             'hold_generation': 1},
+            str(self.log))
+        self.assertEqual(d.hold_id, 'hold:CRE-9:g1:a1')
+        self.assertEqual(d.hold_generation, 1)
+
+
+class TestNeverReapprove(GateHoldTestBase):
+    """--mode reapprove writes APPROVAL_REVOKED on any non-pass and would
+    gate-stop a ticket whose human simply has not looked yet — the entry
+    probe must never take that path."""
+
+    def test_run_entry_gate_always_passes_mode_entry(self):
+        captured = {}
+        real_run = gate_hold.subprocess.run
+
+        def _capture(argv, **kwargs):
+            captured['argv'] = argv
+            raise gate_hold.subprocess.TimeoutExpired(cmd=argv, timeout=1)
+
+        gate_hold.subprocess.run = _capture
+        lib_dir = REPO_ROOT / 'ticket-auto-pipeline' / 'lib'
+        try:
+            gate_hold.run_entry_gate('CRE-9', lib_dir=str(lib_dir))
+        finally:
+            gate_hold.subprocess.run = real_run
+
+        argv = captured.get('argv', [])
+        self.assertIn('entry', argv)
+        self.assertNotIn('reapprove', argv)
 
 
 class TestCadence(unittest.TestCase):

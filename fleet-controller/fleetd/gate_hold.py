@@ -1,7 +1,7 @@
 """Gate-hold reconciliation for fleetd (design.md D14, task 4.14).
 
 A ticket that fails its approval gate is **parked as a row**, not as a
-process. `tickets.gate_held` is set, dispatch stops, and nothing stays alive.
+process. `tickets.held` is set, dispatch stops, and nothing stays alive.
 That is what makes an indefinite wait for a human survivable across a fleetd
 restart — and it is the property that ruled out execution engines which cannot
 pause. D1 rejects native dynamic workflows on exactly this ground, so the pause
@@ -31,6 +31,22 @@ Three things here are decisions rather than mechanics:
   scratch log, and its lines are appended to the real one only when the answer
   changed: released, or gate-stopped.
 
+* **A gate that could not run is not a gate that held.** `UNAVAILABLE` is a
+  fourth result alongside `release`/`hold`/`gate-stop`, returned for a probe
+  timeout, an undocumented exit code, or a `hold_kind` with no registered
+  predicate. It leaves the row untouched and is never collapsed into `hold`:
+  a genuine hold is evidence a human has not acted and may legitimately feed
+  an escalation clock, while `UNAVAILABLE` is evidence of nothing — an hour
+  of API downtime must not look like an hour of human silence. It is also
+  never a `release` (resuming on a premise nothing evaluated) or a
+  `gate-stop` (killing a ticket over a missing feature rather than an unmet
+  condition).
+
+The release predicate is selected by the row's `hold_kind` (design.md D6).
+`'gate'` maps to `run_entry_gate` below, unchanged. Any other kind —
+`'human'`, until `human-hold-protocol` registers its own predicate —
+resolves to `UNAVAILABLE`.
+
 Stdlib only.
 """
 
@@ -56,21 +72,30 @@ GATE_RECONCILE_STEP = 'STEP_3_5'
 RELEASE = 'release'
 HOLD = 'hold'
 GATE_STOP = 'gate-stop'
+UNAVAILABLE = 'unavailable'
 
 DEFAULT_RECONCILE_INTERVAL_SECS = 300
 
 GateHoldDecision = namedtuple(
     'GateHoldDecision',
-    'action tid cycle exit_code gate_stop_code position detail',
+    'action tid cycle exit_code gate_stop_code position detail '
+    'hold_id hold_generation',
+    defaults=('', 0),
 )
 GateHoldDecision.__doc__ = """What to do with one held ticket, right now.
 
 action   — 'release' (clear the hold, dispatch GATE_RECONCILE_STEP, resume
-           from `position`), 'hold' (nothing changed), or 'gate-stop'.
+           from `position`), 'hold' (nothing changed, evidence a human has
+           not yet acted), 'gate-stop', or 'unavailable' (the release
+           predicate could not run or did not answer — evidence of nothing,
+           and never collapsed into 'hold': see the module docstring on
+           UNAVAILABLE).
 cycle    — the reconcile cycle this decision belongs to.
 position — where dispatch had reached when the hold was set; what a release
            resumes from. fleetd recorded it as dispatch happened, so it is
            known rather than reconstructed (design.md D7).
+hold_id / hold_generation — carried from the row so the caller can release
+           with store.release_hold's compare-and-swap guard.
 """
 
 
@@ -136,14 +161,49 @@ def run_entry_gate(tid, hb_log_file='', lib_dir=None, timeout=120):
 
 def reconcile_hold(table, tid, ticket_row, log_file, hb_log_file='',
                    lib_dir=None, entry_gate=None):
-    """Decide the fate of one held ticket, and write only what changed.
+    """Decide the fate of one held ticket, dispatched by its `hold_kind`.
 
-    `entry_gate` is the probe callable, injected so a test can drive every
-    branch without a Linear account; it defaults to `run_entry_gate`.
+    An unregistered kind resolves to `UNAVAILABLE` rather than a guess —
+    never a `release` (a premise nothing evaluated) and never a `gate-stop`
+    (killing a ticket over a missing feature). This is what lets this change
+    and `human-hold-protocol` ship in either review order without a window
+    where a `'human'` row is mishandled (design.md D6).
+
+    `entry_gate` is the probe callable for the `'gate'` predicate, injected
+    so a test can drive every branch without a Linear account; it defaults
+    to `run_entry_gate`.
     """
+    kind = (ticket_row or {}).get('hold_kind') or ''
+    hold_id = (ticket_row or {}).get('hold_id') or ''
+    hold_generation = int((ticket_row or {}).get('hold_generation') or 0)
     cycle = int((ticket_row or {}).get('reconcile_cycle') or 0)
     position = (ticket_row or {}).get('position') or ''
 
+    predicate = _RELEASE_PREDICATES.get(kind)
+    if predicate is None:
+        return GateHoldDecision(
+            UNAVAILABLE, tid, cycle, None, '', position,
+            f'no release predicate registered for hold_kind {kind!r}',
+            hold_id, hold_generation)
+
+    return predicate(
+        table=table, tid=tid, cycle=cycle, position=position,
+        hold_id=hold_id, hold_generation=hold_generation,
+        log_file=log_file, hb_log_file=hb_log_file, lib_dir=lib_dir,
+        entry_gate=entry_gate)
+
+
+def _reconcile_gate_hold(table, tid, cycle, position, hold_id,
+                         hold_generation, log_file, hb_log_file='',
+                         lib_dir=None, entry_gate=None):
+    """The `'gate'` release predicate: today's `run_entry_gate`, unchanged.
+
+    `gate-check.sh` remains the only authority on "is this approved" — this
+    still runs `--mode entry` (never `--mode reapprove`, which writes
+    `APPROVAL_REVOKED` on any non-pass and would gate-stop a ticket whose
+    human simply has not looked yet) against a scratch log, appending its
+    lines to the real pipeline log only when the answer changed.
+    """
     # The cap is `STEP_3_5`'s, read from the table, and it is a pre-dispatch
     # cap: it refuses to dispatch reconcile again, rather than interrupting a
     # reconcile already under way.
@@ -152,7 +212,8 @@ def reconcile_hold(table, tid, ticket_row, log_file, hb_log_file='',
         when='pre_dispatch')
     if loop.action == phase_dispatch.LOOP_GATE_STOP:
         return GateHoldDecision(GATE_STOP, tid, cycle, None,
-                                loop.gate_stop_code, position, loop.detail)
+                                loop.gate_stop_code, position, loop.detail,
+                                hold_id, hold_generation)
 
     probe = entry_gate or run_entry_gate
     exit_code, lines = probe(tid, hb_log_file=hb_log_file, lib_dir=lib_dir)
@@ -162,23 +223,33 @@ def reconcile_hold(table, tid, ticket_row, log_file, hb_log_file='',
         return GateHoldDecision(
             RELEASE, tid, cycle + 1, exit_code, '', position,
             f'gate passed on re-check; resuming from '
-            f'{position or "the start"}')
+            f'{position or "the start"}', hold_id, hold_generation)
 
     if exit_code == GATE_ENTRY_STOP:
         # The gate wrote its own reason; those lines are the record.
         _append(log_file, lines)
         return GateHoldDecision(GATE_STOP, tid, cycle, exit_code, '', position,
-                                'entry gate returned a structural failure')
+                                'entry gate returned a structural failure',
+                                hold_id, hold_generation)
 
     if exit_code == GATE_ENTRY_HELD:
         # Nothing changed. Deliberately silent — see the module docstring.
         return GateHoldDecision(HOLD, tid, cycle, exit_code, '', position,
-                                'still held')
+                                'still held', hold_id, hold_generation)
 
-    # Timed out, or an exit code the gate does not document. Not a hold
-    # decision at all: leave the row exactly as it is and try again next pass.
-    return GateHoldDecision(HOLD, tid, cycle, exit_code, '', position,
-                            f'entry gate did not answer (exit {exit_code!r})')
+    # Timed out (None), or an exit code the gate does not document. Not a
+    # hold decision at all — a gate that could not run is a different fact
+    # from a gate that held (design.md D7) — so leave the row exactly as it
+    # is and try again next pass.
+    return GateHoldDecision(
+        UNAVAILABLE, tid, cycle, exit_code, '', position,
+        f'entry gate did not answer (exit {exit_code!r})',
+        hold_id, hold_generation)
+
+
+_RELEASE_PREDICATES = {
+    'gate': _reconcile_gate_hold,
+}
 
 
 def _append(log_file, lines):

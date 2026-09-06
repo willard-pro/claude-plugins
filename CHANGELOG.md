@@ -17,6 +17,51 @@ marketplace. Where a release also moved `ticket-planner`, `fleet-controller`, or
 > - **0.19.0 never existed.** `plugin.json` went 0.18.0 → 0.20.0. The Phase 2
 >   commit message claims `0.19.0→0.20.0`, but no 0.19.0 was ever committed.
 
+## fleet-controller 0.23.0 (2026-09-06)
+
+`human-hold-store-foundation` (`next.md` Step 3, foundation half). `gate_hold.py`
+encoded the right idea — a hold is a row, not a process — and had zero live
+callers: `run_observe` had no hold step, `tickets.gate_held` was written by
+nothing, and a held ticket's only record was a log line an orphan reconciler
+could re-enqueue past. Separately, `store.py` hard-refused any schema version
+it didn't recognise and told the operator to delete the store, which also
+destroys the `tickets`/`workers` rows nothing can rebuild from logs.
+
+- **Schema v2, additive forward migration.** A store found at an older version
+  migrates in one transaction, provided every step in the gap is declared
+  `additive` in a per-version table (data, never inferred from a schema diff);
+  a non-additive step, or any newer-than-expected version, still refuses. The
+  v1→v2 hold-column rename is the one declared exception, taken because no
+  production store existed at the time — every version from here on must be
+  additive or ship a real migration.
+- **Hold columns become kind-agnostic.** `gate_held`/`gate_hold_reason`/
+  `gate_held_at` → `held`/`hold_reason`/`held_at`, plus `hold_kind` (`CHECK IN
+  ('', 'gate', 'human')`), `hold_id`, `hold_generation`, `hold_attempts`, and
+  the not-yet-written `notify_state`/`notified_at`/`escalated_at`.
+- **`Store.set_hold`/`release_hold`** replace `set_gate_hold` (no alias) as a
+  compare-and-swap pair — `UPDATE ... WHERE held=0` / `WHERE held=1 AND
+  hold_id=?` — whose rowcount is the whole idempotency proof, no lock
+  required. `hold_id = hold:{tid}:g{generation}:a{attempt}`, minted only by
+  `Store.mint_hold_id`.
+- **The spawn queue consults the row**: `_consume_queue_locked` defers a
+  `held=1` ticket's entry rather than dropping or spawning it.
+- **`gate_hold.py` gets a live caller.** `Supervisor._hold_reconcile_pass` runs
+  from `run_observe` on `FLEET_GATE_RECONCILE_INTERVAL`'s own cadence (never
+  the still-dormant phase-dispatch path) and dispatches the release predicate
+  by `hold_kind` — `'gate'` keeps today's `gate-check.sh --mode entry` probe
+  verbatim; `'human'` is reserved by the schema but has no predicate yet, so
+  it resolves to a new fourth outcome, `UNAVAILABLE`, distinct from `hold` —
+  an unreachable check is evidence of nothing, never evidence a human hasn't
+  acted, and it is never collapsed into a release or a gate-stop.
+- Spec drift correction: `fleet-worker-lifecycle`'s classification requirement
+  now documents the `held: ` prefix match (code already had it, from Step 0),
+  pinned by a new regression test in both the bash and Python classifiers.
+
+Non-goals, explicitly deferred to `human-hold-protocol`: the `=== HUMAN_HOLD
+===` agent-facing marker, its parser, `held: human` outcomes, the Linear hold
+comment, and the Slack notifier. This change ships the row and its wiring;
+nothing yet writes `hold_kind='human'`.
+
 ## 0.42.0 (2026-09-05)
 
 **Skill prompt fingerprints.** Every pipeline phase was already attributable to a

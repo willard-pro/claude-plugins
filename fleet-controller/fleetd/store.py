@@ -37,7 +37,24 @@ from pathlib import Path
 
 # Bumped when the schema changes shape. fleetd refuses to operate against a
 # version it does not recognise rather than misreading tables that moved.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+
+# Per-version migration steps, keyed by the version they migrate *to*: an
+# ordered list of statements plus an explicit `additive` flag. Data, never
+# inferred by diffing the live schema against schema.sql — whether a change
+# preserves the meaning of already-stored rows is a judgement made once, at
+# authoring time, and recorded here (design.md D3). A version missing from
+# this table, or present with `additive: False`, refuses to migrate.
+#
+# v2 renames the hold columns (gate_held/gate_hold_reason/gate_held_at ->
+# held/hold_reason/held_at) and is therefore declared non-additive: a v1
+# store is refused with a recreate instruction, not migrated. This is a
+# deliberate, one-time exception taken because no production store exists
+# yet (verified 2026-09-06) — every version from v2 onward must either be
+# additive or ship with a real data migration.
+_MIGRATIONS = {
+    2: {'additive': False, 'statements': []},
+}
 
 DEFAULT_DB_NAME = 'fleet-state.db'
 SCHEMA_FILE = Path(__file__).with_name('schema.sql')
@@ -122,7 +139,7 @@ class FleetStore:
         if not self.read_only:
             self._ensure_schema()
         else:
-            self._check_version()
+            self._check_version(allow_migrate=False)
         return self
 
     def close(self):
@@ -166,9 +183,25 @@ class FleetStore:
                 'VALUES (1, ?, ?)', (SCHEMA_VERSION, _now_iso()))
             self.conn.commit()
         else:
-            self._check_version()
+            self._check_version(allow_migrate=True)
 
-    def _check_version(self):
+    def _check_version(self, allow_migrate):
+        """Refuse a newer version outright; migrate or refuse an older one.
+
+        `found > SCHEMA_VERSION` always refuses (design.md D3, unchanged): a
+        database written by a newer fleetd may have moved a column this code
+        reads by name, and reading it anyway produces confidently wrong
+        answers about which processes are alive — the one class of error a
+        supervisor must not make. Downgrade is an operator action, not
+        something a daemon may infer.
+
+        `found < SCHEMA_VERSION` migrates forward when every step in the gap
+        is declared additive and `allow_migrate` is set (the read-write open
+        path); otherwise it refuses. A read-only connection never migrates —
+        it cannot write — so an older store opened read-only refuses too,
+        with a message distinguishing it from both the newer-version refusal
+        and a genuinely non-additive gap.
+        """
         try:
             row = self.conn.execute(
                 'SELECT version FROM schema_version WHERE id = 1').fetchone()
@@ -178,11 +211,73 @@ class FleetStore:
         if row is None:
             raise SchemaVersionError(f'{self.path}: schema_version table is empty')
         found = row['version']
-        if found != SCHEMA_VERSION:
+        if found == SCHEMA_VERSION:
+            return
+        if found > SCHEMA_VERSION:
             raise SchemaVersionError(
-                f'{self.path}: schema version {found} is not supported by this '
-                f'fleetd (expects {SCHEMA_VERSION}). Refusing to read it. '
-                f'Delete the store to rebuild from logs, or run a matching fleetd.')
+                f'{self.path}: schema version {found} is newer than this '
+                f'fleetd supports (expects {SCHEMA_VERSION}). Refusing to '
+                f'read it — a newer fleetd may have moved a column this code '
+                f'reads by name. Run a matching or newer fleetd against this '
+                f'store.')
+        if not allow_migrate:
+            raise SchemaVersionError(
+                f'{self.path}: schema version {found} is older than this '
+                f'fleetd expects ({SCHEMA_VERSION}) and this connection is '
+                f'read-only, so it cannot migrate. Open the store read-write '
+                f'once (the fleetd supervisor does this on startup) to '
+                f'migrate it.')
+        self._migrate_forward(found)
+
+    def _migrate_forward(self, found):
+        """Apply every declared step between `found` and SCHEMA_VERSION.
+
+        Refuses before touching the database if any step in the gap is not
+        declared additive — `tickets` and `workers` are fleetd-authored and
+        AUTHORITATIVE, present in no log, so "delete and rebuild" is correct
+        advice only for the projection tables. Migration runs inside one
+        transaction and re-stamps `schema_version` in the same transaction,
+        so a partial migration is not a state that can exist: a failing step
+        rolls the whole gap back and leaves the stamped version untouched.
+        """
+        gap = list(range(found + 1, SCHEMA_VERSION + 1))
+        for v in gap:
+            decl = _MIGRATIONS.get(v)
+            if decl is None or not decl.get('additive'):
+                raise SchemaVersionError(
+                    f'{self.path}: schema version {v} is a non-additive '
+                    f'change (store at {found}, fleetd expects '
+                    f'{SCHEMA_VERSION}). This is not the newer-version '
+                    f'refusal — a column rename, drop, type change or '
+                    f'tightened CHECK cannot be migrated automatically. '
+                    f'The store must be recreated.')
+        # True autocommit for the duration of the migration: Python's sqlite3
+        # module otherwise silently commits any open transaction *before* a
+        # DDL statement under its default implicit-transaction handling,
+        # which would defeat the rollback below. SQLite itself supports
+        # transactional DDL fine — this only disables the driver's own
+        # interception so our explicit BEGIN/COMMIT/ROLLBACK are the ones
+        # that take effect.
+        saved_isolation_level = self.conn.isolation_level
+        self.conn.isolation_level = None
+        try:
+            self.conn.execute('BEGIN')
+            try:
+                for v in gap:
+                    for stmt in _MIGRATIONS[v]['statements']:
+                        self.conn.execute(stmt)
+                self.conn.execute(
+                    'UPDATE schema_version SET version = ?, applied_at = ? '
+                    'WHERE id = 1', (SCHEMA_VERSION, _now_iso()))
+                self.conn.commit()
+            except sqlite3.Error as exc:
+                self.conn.rollback()
+                raise SchemaVersionError(
+                    f'{self.path}: migration from version {found} to '
+                    f'{SCHEMA_VERSION} failed and was rolled back ({exc}); '
+                    f'store remains at version {found}.') from exc
+        finally:
+            self.conn.isolation_level = saved_isolation_level
 
     def version(self):
         row = self.conn.execute(
@@ -246,32 +341,67 @@ class FleetStore:
             return None
         return {'position': row['position'], 'source': row['position_source']}
 
-    def set_gate_hold(self, tid, held, reason=''):
-        """Park or release a ticket at its approval gate.
+    def mint_hold_id(self, tid, generation, attempt):
+        """The only site that mints a hold_id: `hold:{tid}:g{gen}:a{attempt}`.
 
-        A hold is a row, not a live process: this is what lets the automated
-        path pause indefinitely for a human without keeping anything running,
-        which is the property that ruled out engines that cannot survive
-        process exit.
+        Deterministic from state fleetd already owns (design.md D4): a
+        retried decision mints the same id, so `set_hold`'s compare-and-swap
+        collapses the retry to a no-op instead of minting what looks like a
+        fresh hold. Human-typeable, because a person is later asked to quote
+        it back.
         """
-        self.update_ticket(
-            tid,
-            gate_held=1 if held else 0,
-            gate_hold_reason=reason if held else '',
-            gate_held_at=_now_iso() if held else '')
+        return f'hold:{tid}:g{int(generation)}:a{int(attempt)}'
+
+    def set_hold(self, tid, kind, hold_id, reason='', generation=0):
+        """Park a ticket at a hold — a conditional UPDATE, not a read-then-write.
+
+        `WHERE held = 0` makes the rowcount the whole idempotency proof
+        (design.md D2): `1` means this call performed the transition, `0`
+        means it was already held (by an earlier pass, a duplicate callback,
+        or another thread) and the caller does nothing further. A hold is a
+        row rather than a live process because that is what lets an
+        indefinite wait for a human survive a fleetd restart.
+        """
+        self._ensure_ticket(tid)
+        now = _now_iso()
+        cur = self.conn.execute(
+            'UPDATE tickets SET held = 1, hold_kind = ?, hold_id = ?, '
+            'hold_reason = ?, held_at = ?, hold_generation = ?, '
+            'hold_attempts = hold_attempts + 1, updated_at = ? '
+            'WHERE tid = ? AND held = 0',
+            (kind, hold_id, reason or '', now, int(generation), now, tid))
+        self.conn.commit()
+        return cur.rowcount
+
+    def release_hold(self, tid, hold_id):
+        """Clear a hold, but only the one named by `hold_id`.
+
+        The `hold_id` predicate is what makes a stale release a no-op rather
+        than a resurrection (design.md D2): a release naming a hold_id that
+        is no longer current — superseded by a later hold on the same
+        ticket — cannot clear the hold that replaced it.
+        """
+        now = _now_iso()
+        cur = self.conn.execute(
+            "UPDATE tickets SET held = 0, hold_kind = '', hold_id = '', "
+            'released_at = ?, updated_at = ? '
+            'WHERE tid = ? AND held = 1 AND hold_id = ?',
+            (now, now, tid, hold_id))
+        self.conn.commit()
+        return cur.rowcount
 
     def held_tickets(self):
-        """Every ticket parked at its approval gate, oldest hold first.
+        """Every currently held ticket, oldest hold first, carrying its kind.
 
-        The input to the gate-hold reconciliation pass (D14). Oldest first
-        because a ticket held longest is the one whose human has had most time
-        to act, so it is the likeliest to be releasable — and because a fleet
-        with more held tickets than one pass can probe should make progress on
+        The input to the hold-reconciliation pass. Oldest first because a
+        ticket held longest is the one whose human has had most time to act,
+        so it is the likeliest to be releasable — and because a fleet with
+        more held tickets than one pass can probe should make progress on
         the front of the queue rather than the back.
         """
         rows = self.conn.execute(
-            'SELECT * FROM tickets WHERE gate_held = 1 '
-            'ORDER BY gate_held_at ASC, tid ASC').fetchall()
+            'SELECT * FROM tickets WHERE held = 1 '
+            'ORDER BY held_at ASC, tid ASC').fetchall()
         return [dict(r) for r in rows]
 
     def bump_reconcile_cycle(self, tid, cycle):
