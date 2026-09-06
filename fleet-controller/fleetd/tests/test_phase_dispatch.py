@@ -65,6 +65,24 @@ from fleetd.phase_dispatch import (  # noqa: E402
     last_verify_checkpoint,
     parse_detect_resume_block,
     resolve_dispatch_position,
+    next_step,
+    NextStep,
+    NEXT_ADVANCE,
+    NEXT_TERMINAL,
+    NEXT_HOLD,
+    PR_ITERATE,
+    build_pr_iterate_spawn,
+    resolve_ticket_type,
+    resolve_ticket_complexity,
+    resolve_loop_counters,
+    run_gate_check,
+    needs_retro,
+    RetroDecision,
+    RETRO_REASON_GATE_STOP,
+    RETRO_REASON_NO_SUCCESS,
+    RETRO_REASON_FALLBACK,
+    RETRO_REASON_VERIFY_EXHAUSTED,
+    RETRO_REASON_VERIFY_FAIL,
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
@@ -1476,6 +1494,466 @@ class TestPhaseContract(unittest.TestCase):
 
     def test_parse_env_file_none_returns_empty_dict(self):
         self.assertEqual(phase_dispatch._parse_env_file(None), {})
+
+
+class TestNextStep(unittest.TestCase):
+    """The step-transition function (task 10.1, design.md D22).
+
+    Each test is named after the SKILL.md section / detect-resume.sh branch
+    it ports, so a future reader can trace a transition back to its source
+    of truth rather than trusting the Python alone.
+    """
+
+    def setUp(self):
+        self.table = DispatchTable.load(TABLE_PATH)
+
+    def _done(self, verdict=''):
+        return PhaseOutcome('done', verdict, 'phase-result', 'test')
+
+    def _fail(self, verdict=''):
+        return PhaseOutcome('fail', verdict, 'phase-result', 'test')
+
+    def test_appraise_done_bug_ticket_goes_to_reproduce(self):
+        r = next_step(self.table, 'STEP_1', self._done(), {}, is_bug=True)
+        self.assertEqual((r.kind, r.step_id), (NEXT_ADVANCE, 'STEP_1_5'))
+
+    def test_appraise_done_non_bug_ticket_skips_reproduce(self):
+        r = next_step(self.table, 'STEP_1', self._done(), {}, is_bug=False)
+        self.assertEqual((r.kind, r.step_id), (NEXT_ADVANCE, 'STEP_2'))
+
+    def test_reproduce_done_goes_to_exec(self):
+        r = next_step(self.table, 'STEP_1_5', self._done(), {})
+        self.assertEqual((r.kind, r.step_id), (NEXT_ADVANCE, 'STEP_2'))
+
+    def test_exec_done_goes_to_gate_check(self):
+        r = next_step(self.table, 'STEP_2', self._done(), {})
+        self.assertEqual((r.kind, r.step_id), (NEXT_ADVANCE, 'STEP_2_5'))
+
+    def test_gate_check_exit_0_auto_approves_to_implement(self):
+        r = next_step(self.table, 'STEP_2_5', 0, {})
+        self.assertEqual((r.kind, r.step_id), (NEXT_ADVANCE, 'STEP_4'))
+
+    def test_gate_check_exit_1_holds(self):
+        r = next_step(self.table, 'STEP_2_5', 1, {})
+        self.assertEqual((r.kind, r.hold_kind), (NEXT_HOLD, 'gate'))
+
+    def test_gate_check_exit_1_hold_resumes_at_gate_reconcile(self):
+        # The release probe (_hold_reconcile_pass) never touches position —
+        # the resume target must be recorded at hold-creation time.
+        r = next_step(self.table, 'STEP_2_5', 1, {})
+        self.assertEqual(r.resume_step_id, 'STEP_3_5')
+
+    def test_gate_check_exit_2_is_a_structural_terminal(self):
+        r = next_step(self.table, 'STEP_2_5', 2, {})
+        self.assertEqual((r.kind, r.exit_code), (NEXT_TERMINAL, 1))
+
+    def test_step_3_alias_routes_identically_to_step_2_5(self):
+        r = next_step(self.table, 'STEP_3', 0, {})
+        self.assertEqual((r.kind, r.step_id), (NEXT_ADVANCE, 'STEP_4'))
+
+    def test_gate_reconcile_clean_advances_to_implement(self):
+        lines = ['2026-09-06T10:00:00Z|GATE|reconcile|done|clean']
+        r = next_step(self.table, 'STEP_3_5', self._done(), {}, log_lines=lines)
+        self.assertEqual((r.kind, r.step_id), (NEXT_ADVANCE, 'STEP_4'))
+
+    def test_gate_reconcile_held_again_holds(self):
+        lines = ['2026-09-06T10:00:00Z|GATE|reconcile|done|cycle#1|held: still open']
+        r = next_step(self.table, 'STEP_3_5', self._done(), {}, log_lines=lines)
+        self.assertEqual((r.kind, r.hold_kind), (NEXT_HOLD, 'gate'))
+        self.assertEqual(r.resume_step_id, 'STEP_3_5')
+
+    def test_gate_reconcile_exhausted_is_terminal(self):
+        r = next_step(self.table, 'STEP_3_5', self._done(), {'RECONCILE_CYCLE': 3},
+                      log_lines=[])
+        self.assertEqual(r.kind, NEXT_TERMINAL)
+        self.assertEqual(r.gate_stop_code, 'RECONCILE_EXHAUSTED')
+
+    def test_implement_done_goes_to_verify(self):
+        r = next_step(self.table, 'STEP_4', self._done(), {})
+        self.assertEqual((r.kind, r.step_id), (NEXT_ADVANCE, 'STEP_4_5'))
+
+    def test_verify_pass_advances_to_pr_review(self):
+        r = next_step(self.table, 'STEP_4_5', self._done('PASS'), {'VERIFY_ATTEMPTS': 0})
+        self.assertEqual((r.kind, r.step_id), (NEXT_ADVANCE, 'STEP_4_6'))
+
+    def test_verify_fail_under_cap_retries_implement(self):
+        r = next_step(self.table, 'STEP_4_5', self._fail('FAIL'), {'VERIFY_ATTEMPTS': 0})
+        self.assertEqual((r.kind, r.step_id), (NEXT_ADVANCE, 'STEP_4'))
+
+    def test_verify_fail_at_cap_is_exhausted(self):
+        r = next_step(self.table, 'STEP_4_5', self._fail('FAIL'), {'VERIFY_ATTEMPTS': 2})
+        self.assertEqual(r.kind, NEXT_TERMINAL)
+        self.assertEqual(r.gate_stop_code, 'VERIFY_EXHAUSTED')
+
+    def test_pr_review_ok_advances_to_document(self):
+        r = next_step(self.table, 'STEP_4_6', self._done('OK'), {'ITERATION': 0})
+        self.assertEqual((r.kind, r.step_id), (NEXT_ADVANCE, 'STEP_5'))
+
+    def test_pr_review_warn_under_cap_goes_to_pr_iterate(self):
+        r = next_step(self.table, 'STEP_4_6', self._done('WARN'), {'ITERATION': 0})
+        self.assertEqual((r.kind, r.step_id), (NEXT_ADVANCE, PR_ITERATE))
+
+    def test_pr_review_warn_at_cap_is_exhausted(self):
+        r = next_step(self.table, 'STEP_4_6', self._done('WARN'), {'ITERATION': 3})
+        self.assertEqual(r.kind, NEXT_TERMINAL)
+        self.assertEqual(r.gate_stop_code, 'PR_REVIEW_EXHAUSTED')
+
+    def test_pr_review_block_is_terminal(self):
+        r = next_step(self.table, 'STEP_4_6', self._fail('BLOCK'), {'ITERATION': 0})
+        self.assertEqual(r.kind, NEXT_TERMINAL)
+
+    def test_pr_iterate_done_goes_back_to_implement(self):
+        r = next_step(self.table, PR_ITERATE, self._done(), {})
+        self.assertEqual((r.kind, r.step_id), (NEXT_ADVANCE, 'STEP_4'))
+
+    def test_document_and_wiki_maintenance_skip_pr_comment_reconciliation(self):
+        # D22: STEP_5_5 is deliberately not ported — always advance to STEP_6.
+        r = next_step(self.table, 'STEP_5', self._done(), {})
+        self.assertEqual((r.kind, r.step_id), (NEXT_ADVANCE, 'STEP_6'))
+
+    def test_report_is_the_terminal_success(self):
+        r = next_step(self.table, 'STEP_6', self._done(), {})
+        self.assertEqual((r.kind, r.exit_code, r.gate_stop_code),
+                        (NEXT_TERMINAL, 0, ''))
+
+    def test_unknown_step_id_raises(self):
+        with self.assertRaises(DispatchTableError):
+            next_step(self.table, 'STEP_NOPE', self._done(), {})
+
+
+class TestBuildPrIterateSpawn(unittest.TestCase):
+    """The one spawn with no dispatch-table entry (PR_ITERATE)."""
+
+    def test_shape_matches_a_real_phase_spawn(self):
+        spawn = build_pr_iterate_spawn('CRE-9', '/tmp/x-pipeline.log')
+        self.assertEqual(spawn.step_id, PR_ITERATE)
+        self.assertEqual(spawn.phase, 'PR-REVIEW')
+        self.assertEqual(spawn.skill, '/ticket-pr-iterate')
+        self.assertIn('CRE-9', spawn.prompt)
+        self.assertEqual(spawn.env['FLEET_TICKET_ID'], 'CRE-9')
+        self.assertEqual(spawn.env['FLEET_DISPATCH_STEP_ID'], PR_ITERATE)
+        self.assertTrue(spawn.loop_bearing)
+        self.assertIsNone(spawn.agent)
+
+    def test_env_file_is_threaded_through(self):
+        spawn = build_pr_iterate_spawn(
+            'CRE-9', '/tmp/x-pipeline.log', env_file='/tmp/x-env.sh')
+        self.assertEqual(spawn.env['FLEET_TICKET_ENV_FILE'], '/tmp/x-env.sh')
+
+    def test_extra_env_is_merged(self):
+        spawn = build_pr_iterate_spawn(
+            'CRE-9', '/tmp/x-pipeline.log', extra_env={'FLEET_GENERATION': '3'})
+        self.assertEqual(spawn.env['FLEET_GENERATION'], '3')
+
+
+class TestResolveTicketType(unittest.TestCase):
+    """`get_issue` shelled out to, never reimplemented (task 10.1.2)."""
+
+    def _fake_lib_dir(self, tmp, issue_json):
+        lib_dir = Path(tmp)
+        (lib_dir / 'linear-api.sh').write_text(
+            'get_issue() { cat <<EOF\n' + json.dumps(issue_json) + '\nEOF\n}\n'
+        )
+        return str(lib_dir)
+
+    def test_resolves_the_bug_label(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lib_dir = self._fake_lib_dir(
+                tmp, {'labels': {'nodes': [{'name': 'bug'}, {'name': 'planned'}]}})
+            self.assertEqual(resolve_ticket_type('CRE-9', lib_dir=lib_dir), 'bug')
+
+    def test_resolves_the_feature_label_case_insensitively(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lib_dir = self._fake_lib_dir(
+                tmp, {'labels': {'nodes': [{'name': 'Feature'}]}})
+            self.assertEqual(resolve_ticket_type('CRE-9', lib_dir=lib_dir), 'feature')
+
+    def test_no_type_label_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lib_dir = self._fake_lib_dir(
+                tmp, {'labels': {'nodes': [{'name': 'planned'}]}})
+            self.assertIsNone(resolve_ticket_type('CRE-9', lib_dir=lib_dir))
+
+    def test_missing_lib_returns_none_not_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertIsNone(resolve_ticket_type('CRE-9', lib_dir=tmp))
+
+    def test_malformed_json_returns_none_not_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lib_dir = Path(tmp)
+            (lib_dir / 'linear-api.sh').write_text(
+                'get_issue() { echo "not json"; }\n')
+            self.assertIsNone(resolve_ticket_type('CRE-9', lib_dir=str(lib_dir)))
+
+    def test_no_labels_field_returns_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            lib_dir = self._fake_lib_dir(tmp, {})
+            self.assertIsNone(resolve_ticket_type('CRE-9', lib_dir=lib_dir))
+
+
+class TestResolveTicketComplexity(unittest.TestCase):
+    """`ticket-dir.sh` + `notes-parse.sh` shelled out to, never reimplemented
+    (task 10.1.7)."""
+
+    def _workspace(self, tmp, tid, notes_body):
+        repos_root = Path(tmp)
+        ticket_dir = repos_root / f'{tid}--test-ticket'
+        ticket_dir.mkdir()
+        (ticket_dir / 'notes.md').write_text(notes_body)
+        return str(repos_root)
+
+    def test_resolves_simple(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repos_root = self._workspace(
+                tmp, 'CRE-9', '## Complexity\n**Score:** simple\n')
+            self.assertEqual(
+                resolve_ticket_complexity('CRE-9', repos_root=repos_root,
+                                          lib_dir=str(TICKET_AUTO_LIB)),
+                'simple')
+
+    def test_resolves_complex(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repos_root = self._workspace(
+                tmp, 'CRE-9', '## Complexity\n**Score:** complex\n')
+            self.assertEqual(
+                resolve_ticket_complexity('CRE-9', repos_root=repos_root,
+                                          lib_dir=str(TICKET_AUTO_LIB)),
+                'complex')
+
+    def test_no_workspace_directory_returns_empty_not_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                resolve_ticket_complexity('CRE-9', repos_root=tmp,
+                                          lib_dir=str(TICKET_AUTO_LIB)), '')
+
+    def test_no_complexity_section_returns_empty_not_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repos_root = self._workspace(tmp, 'CRE-9', '# Notes\nno score here\n')
+            self.assertEqual(
+                resolve_ticket_complexity('CRE-9', repos_root=repos_root,
+                                          lib_dir=str(TICKET_AUTO_LIB)), '')
+
+    def test_missing_lib_returns_empty_not_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(
+                resolve_ticket_complexity('CRE-9', repos_root=tmp,
+                                          lib_dir=tmp), '')
+
+
+class TestNeedsRetro(unittest.TestCase):
+    """STEP_6's 5-condition retro auto-trigger, ported from SKILL.md
+    (task 10.1.6)."""
+
+    def setUp(self):
+        self.table = DispatchTable.load(TABLE_PATH)
+
+    def _log(self, tmp, lines):
+        path = Path(tmp) / 'CRE-1-pipeline.log'
+        path.write_text('\n'.join(lines) + ('\n' if lines else ''))
+        return str(path)
+
+    def _clean_success_lines(self):
+        return [
+            '2026-09-06T10:00:00Z|VERIFY|verify|done|PASS (1 attempts)',
+            '2026-09-06T10:01:00Z|PR-REVIEW|pr-review|done|OK',
+        ]
+
+    def test_a_clean_success_run_does_not_trigger(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(tmp, self._clean_success_lines())
+            decision = needs_retro(self.table, log_file)
+        self.assertFalse(decision.needed)
+        self.assertEqual(decision.reasons, ())
+        self.assertFalse(decision.drift_detected)
+
+    def test_a_gate_stop_line_triggers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(
+                tmp, self._clean_success_lines() +
+                ['2026-09-06T10:02:00Z|META|gate-stop|fail|VERIFY_EXHAUSTED'])
+            decision = needs_retro(self.table, log_file)
+        self.assertTrue(decision.needed)
+        self.assertIn(RETRO_REASON_GATE_STOP, decision.reasons)
+
+    def test_missing_verify_pass_triggers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(
+                tmp, ['2026-09-06T10:01:00Z|PR-REVIEW|pr-review|done|OK'])
+            decision = needs_retro(self.table, log_file)
+        self.assertTrue(decision.needed)
+        self.assertIn(RETRO_REASON_NO_SUCCESS, decision.reasons)
+
+    def test_missing_pr_review_ok_triggers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(
+                tmp,
+                ['2026-09-06T10:00:00Z|VERIFY|verify|done|PASS (1 attempts)'])
+            decision = needs_retro(self.table, log_file)
+        self.assertTrue(decision.needed)
+        self.assertIn(RETRO_REASON_NO_SUCCESS, decision.reasons)
+
+    def test_a_pr_review_warn_verdict_does_not_satisfy_the_ok_check(self):
+        # PR-REVIEW's own verdict tokens are OK/WARN/BLOCK, never PASS — the
+        # bug this condition exists to catch (GitHub #149) was exactly a
+        # check that could never distinguish a real success from any other
+        # outcome.
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(
+                tmp, [
+                    '2026-09-06T10:00:00Z|VERIFY|verify|done|PASS (1 attempts)',
+                    '2026-09-06T10:01:00Z|PR-REVIEW|pr-review|done|WARN',
+                ])
+            decision = needs_retro(self.table, log_file)
+        self.assertTrue(decision.needed)
+        self.assertIn(RETRO_REASON_NO_SUCCESS, decision.reasons)
+
+    def test_a_heartbeat_fallback_event_triggers_and_reports_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(tmp, self._clean_success_lines())
+            hb_file = Path(tmp) / 'CRE-1-heartbeat.log'
+            hb_file.write_text(
+                '2026-09-06T10:00:30Z|fallback|uat-url|warn|no CLAUDE.md '
+                'UAT_URL, falling back to localhost\n')
+            decision = needs_retro(self.table, log_file,
+                                   hb_log_file=str(hb_file))
+        self.assertTrue(decision.needed)
+        self.assertIn(RETRO_REASON_FALLBACK, decision.reasons)
+        self.assertTrue(decision.drift_detected)
+
+    def test_a_missing_heartbeat_file_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(tmp, self._clean_success_lines())
+            decision = needs_retro(
+                self.table, log_file,
+                hb_log_file=str(Path(tmp) / 'nonexistent.log'))
+        self.assertFalse(decision.needed)
+        self.assertFalse(decision.drift_detected)
+
+    def test_verify_exhausted_anywhere_triggers_as_a_safety_net(self):
+        # Condition 4 is deliberately redundant with condition 1 — a
+        # gate-stop line written inside an agent sub-shell may not be
+        # visible to the router's own file descriptor.
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(
+                tmp, ['2026-09-06T10:02:00Z|META|note|info|VERIFY_EXHAUSTED '
+                     'mentioned mid-message'])
+            decision = needs_retro(self.table, log_file)
+        self.assertTrue(decision.needed)
+        self.assertIn(RETRO_REASON_VERIFY_EXHAUSTED, decision.reasons)
+
+    def test_an_explicit_verify_fail_line_triggers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(
+                tmp,
+                ['2026-09-06T10:00:00Z|VERIFY|verify|fail|no UI to test'])
+            decision = needs_retro(self.table, log_file)
+        self.assertTrue(decision.needed)
+        self.assertIn(RETRO_REASON_VERIFY_FAIL, decision.reasons)
+
+    def test_a_missing_pipeline_log_is_not_an_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            decision = needs_retro(self.table,
+                                   str(Path(tmp) / 'nonexistent.log'))
+        # No lines to read means every positive-marker check fails closed,
+        # which is itself a trigger (condition 2) — matches grep -q's own
+        # behaviour against a file it cannot read.
+        self.assertTrue(decision.needed)
+        self.assertEqual(decision.reasons, (RETRO_REASON_NO_SUCCESS,))
+
+    def test_multiple_conditions_all_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = self._log(
+                tmp, [
+                    '2026-09-06T10:00:00Z|META|gate-stop|fail|VERIFY_EXHAUSTED',
+                    '2026-09-06T10:01:00Z|VERIFY|verify|fail|timeout',
+                ])
+            decision = needs_retro(self.table, log_file)
+        self.assertEqual(
+            decision.reasons,
+            (RETRO_REASON_GATE_STOP, RETRO_REASON_NO_SUCCESS,
+             RETRO_REASON_VERIFY_EXHAUSTED, RETRO_REASON_VERIFY_FAIL))
+
+
+class TestResolveLoopCounters(unittest.TestCase):
+    """The four loop-cap counters, derived from the log (task 10.1.8)."""
+
+    def test_empty_log_is_all_zero(self):
+        counters = resolve_loop_counters([])
+        self.assertEqual(counters, {
+            'RECONCILE_CYCLE': 0, 'VERIFY_ATTEMPTS': 0,
+            'ITERATION': 0, 'PR_FEEDBACK_CYCLE': 0,
+        })
+
+    def test_reconcile_cycle_counts_gate_reconcile_done_cycle_lines(self):
+        lines = [
+            '2026-09-06T10:00:00Z|GATE|reconcile|done|cycle#1',
+            '2026-09-06T10:05:00Z|GATE|reconcile|done|cycle#2',
+            '2026-09-06T10:06:00Z|GATE|gate|fail|held: gate',
+        ]
+        self.assertEqual(resolve_loop_counters(lines)['RECONCILE_CYCLE'], 2)
+
+    def test_verify_attempts_counts_verify_fail_lines(self):
+        lines = [
+            '2026-09-06T10:00:00Z|VERIFY|verify|fail|timeout',
+            '2026-09-06T10:01:00Z|VERIFY|verify|fail|assertion mismatch',
+            '2026-09-06T10:02:00Z|VERIFY|verify|done|PASS (2 attempts)',
+        ]
+        self.assertEqual(resolve_loop_counters(lines)['VERIFY_ATTEMPTS'], 2)
+
+    def test_iteration_counts_pr_review_done_warn_lines(self):
+        lines = [
+            '2026-09-06T10:00:00Z|PR-REVIEW|pr-review|done|WARN',
+            '2026-09-06T10:01:00Z|PR-REVIEW|pr-iterate|done|',
+            '2026-09-06T10:02:00Z|PR-REVIEW|pr-review|done|OK',
+        ]
+        self.assertEqual(resolve_loop_counters(lines)['ITERATION'], 1)
+
+    def test_pr_feedback_cycle_counts_pr_reconcile_done_cycle_lines(self):
+        lines = [
+            '2026-09-06T10:00:00Z|PR-REVIEW|pr-reconcile|done|cycle#1',
+            '2026-09-06T10:01:00Z|PR-REVIEW|pr-reconcile|done|cycle#2',
+            '2026-09-06T10:02:00Z|PR-REVIEW|pr-reconcile|done|cycle#3',
+        ]
+        self.assertEqual(resolve_loop_counters(lines)['PR_FEEDBACK_CYCLE'], 3)
+
+    def test_counters_are_independent_of_each_other(self):
+        lines = (
+            ['2026-09-06T10:00:00Z|GATE|reconcile|done|cycle#1'] * 1
+            + ['2026-09-06T10:01:00Z|VERIFY|verify|fail|x'] * 2
+            + ['2026-09-06T10:02:00Z|PR-REVIEW|pr-review|done|WARN'] * 3
+            + ['2026-09-06T10:03:00Z|PR-REVIEW|pr-reconcile|done|cycle#1'] * 4
+        )
+        self.assertEqual(resolve_loop_counters(lines), {
+            'RECONCILE_CYCLE': 1, 'VERIFY_ATTEMPTS': 2,
+            'ITERATION': 3, 'PR_FEEDBACK_CYCLE': 4,
+        })
+
+
+class TestRunGateCheck(unittest.TestCase):
+    """STEP_2_5/STEP_3's synchronous bash gate (task 10.1.9)."""
+
+    def test_a_missing_lib_dir_fails_closed_to_structural_failure(self):
+        with tempfile.TemporaryDirectory() as empty_lib:
+            with tempfile.TemporaryDirectory() as tmp:
+                log_file = Path(tmp) / 'CRE-1-pipeline.log'
+                log_file.write_text('')
+                code = run_gate_check('CRE-1', str(log_file), lib_dir=empty_lib)
+        self.assertEqual(code, 2)
+
+    def test_a_real_script_runs_against_the_real_lib(self):
+        # A nonexistent ticket has no notes.md, no complexity, no Linear
+        # context to auto-approve against — what is under test is that the
+        # real script was reached and its own exit code came back, one of
+        # the table's three defined codes, not that it approved anything.
+        with tempfile.TemporaryDirectory() as tmp:
+            log_file = Path(tmp) / 'CRE-NONEXISTENT-pipeline.log'
+            log_file.write_text('')
+            hb_log_file = Path(tmp) / 'CRE-NONEXISTENT-heartbeat.log'
+            hb_log_file.write_text('')
+            code = run_gate_check(
+                'CRE-NONEXISTENT', str(log_file), str(hb_log_file),
+                lib_dir=TICKET_AUTO_LIB, timeout=30)
+        self.assertIn(code, (0, 1, 2))
 
 
 if __name__ == '__main__':
