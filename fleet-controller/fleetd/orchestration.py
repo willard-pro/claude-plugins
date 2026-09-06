@@ -392,18 +392,19 @@ def plan_step(table, step_id, when, ctx):
     return runnable, unsupported
 
 
-def run_step_orchestration(table, step_id, when, ctx, lib_dir=None,
-                           runners=None):
-    """Run every declared item for one step, in table order.
+def _run_items(items, ctx, lib_dir=None, runners=None):
+    """Run a literal list of orchestration items, in order.
 
     Stops at the first blocking failure and returns what ran; an advisory
     failure is recorded and the sequence continues. `runners` is injected so a
     test can drive the ordering and the stop-on-blocking rule without a Linear
-    account or a shell.
+    account or a shell. Factored out of `run_step_orchestration` so
+    `finalize_terminal` can run a synthetic one-item list (a bare `finalize`,
+    no `worktree`) through the same loop instead of a second copy of it.
     """
     runners = _RUNNERS if runners is None else runners
     results = []
-    for item in orchestration_items(table, step_id, when):
+    for item in items:
         kind = item.get('kind')
         runner = runners.get(kind)
         if runner is None:
@@ -419,6 +420,42 @@ def run_step_orchestration(table, step_id, when, ctx, lib_dir=None,
         if result.status == FAILED and result.blocking:
             break
     return results
+
+
+def run_step_orchestration(table, step_id, when, ctx, lib_dir=None,
+                           runners=None):
+    """Run every declared item for one step, in table order."""
+    items = orchestration_items(table, step_id, when)
+    return _run_items(items, ctx, lib_dir=lib_dir, runners=runners)
+
+
+def finalize_terminal(table, tid, exit_code, gate_stop_code, log_file,
+                      lib_dir=None, runners=None):
+    """Run the finalize path a `phase_dispatch.next_step` `Terminal` result
+    requires (task 10.1.5, design.md D22).
+
+    Mirrors the manual router's own exit points (SKILL.md), not just
+    `pipeline-finalize.sh` in isolation: every gate-stop/exhaustion exit first
+    writes `META|gate-stop|fail|<CODE>` — the line `pipeline-finalize.sh`'s own
+    outcome derivation greps for — then calls it alone, with NO worktree
+    release (SKILL.md's gate-stop/exhaustion exit points never release the
+    worktree; a ticket stopped for cause usually still needs a human looking
+    at it). Worktree release only happens on a clean STEP_6 completion
+    (SKILL.md ~1312-1326), and reuses STEP_6's own declared `post_dispatch`
+    pair (`worktree` then `finalize`, in that table order) via
+    `run_step_orchestration` rather than duplicating it — `next_step` only
+    ever returns `exit_code=0` for STEP_6's own terminal, so branching on that
+    is equivalent to branching on "did STEP_6 finish" without threading a
+    second flag through.
+    """
+    if gate_stop_code:
+        _append(log_file, f'|META|gate-stop|fail|{gate_stop_code}')
+    ctx = {'tid': tid, 'exit_code': exit_code, 'LOG_FILE': log_file}
+    if exit_code == 0:
+        return run_step_orchestration(table, 'STEP_6', 'post_dispatch', ctx,
+                                      lib_dir=lib_dir, runners=runners)
+    finalize_item = {'kind': 'finalize', 'script': 'pipeline-finalize.sh'}
+    return _run_items([finalize_item], ctx, lib_dir=lib_dir, runners=runners)
 
 
 def _unsupported_runner(kind):
