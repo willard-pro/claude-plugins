@@ -692,6 +692,76 @@ detect_abandoned() {
   fi
 }
 
+# 5b. Human-hold visibility (human-hold-protocol) — a ticket parked waiting
+# on a person. Log-only, one code path (the file's own rule against a
+# detector that behaves differently depending on its caller): whether the
+# invalid-record branch or the age branch fires depends entirely on what the
+# log itself carries, not on who called this function or whether the ticket
+# is currently classified held.
+#
+# Severity is capped at 1 — NEVER 2/3/4, for any hold age. In this codebase
+# severity 2 is already an intervention (KILL: touch stop files, finalize the
+# pipeline log). Applied to a held ticket that has no process to kill — the
+# router exited cleanly when the agent asked — finalizing would write a
+# terminal outcome *over* the `held:` outcome that is the hold's own audit
+# record and the exact line both terminal classifiers key on, making the
+# waiting ticket look finished to the very machinery that was just taught to
+# recognise it. See human-hold-protocol design.md D6. Escalation for a
+# long-unanswered hold lives in `fleet_notify_hold` instead, not here.
+detect_human_hold() {
+  local tid="$1"
+  local workspace="${2:-${FLEET_PIPELINE_LOG_DIR:-./logs}}"
+
+  if ! _pipeline_has_history "$tid" "$workspace"; then
+    echo "0"
+    return
+  fi
+
+  # An invalid (unparseable) human-hold request is visible regardless of
+  # whether the ticket is currently held — a swallowed ask is the exact
+  # defect this channel exists to fix, and a human resolves it directly. The
+  # `parse_status` marker comes straight from the canonical JSON
+  # `human-hold-parse.sh` already wrote; no re-parsing of agent prose here.
+  local latest_hold_line
+  latest_hold_line=$(_pipeline_lines "$tid" "$workspace" |
+    command grep '|META|human-hold|waiting|' | tail -1)
+  if [ -n "$latest_hold_line" ]; then
+    case "$latest_hold_line" in
+    *'"parse_status":"invalid"'*)
+      echo "1"
+      return
+      ;;
+    esac
+  fi
+
+  # Otherwise, a human hold is a log fact exactly like a gate hold: the
+  # `held: human` outcome pipeline-finalize.sh writes for an unreleased
+  # valid request.
+  if ! _pipeline_is_held "$tid" "$workspace"; then
+    echo "0"
+    return
+  fi
+
+  local msg
+  msg=$(_pipeline_last_outcome_msg "$tid" "$workspace")
+  if [ "$msg" != "held: human" ]; then
+    # Held for a different kind (e.g. `held: gate`) — not this detector's
+    # concern; detect_abandoned's held-aware branch already covers it.
+    echo "0"
+    return
+  fi
+
+  local age warn_secs
+  age=$(_pipeline_last_age_secs "$tid" "$workspace")
+  warn_secs=$((${FLEET_HOLD_WARN_HOURS:-2} * 3600))
+
+  if [ "$age" -ge "$warn_secs" ]; then
+    echo "1"
+  else
+    echo "0"
+  fi
+}
+
 # 6. Flow failure detection — scan heartbeat log for retry|flow-sh|fail entries
 detect_flow_failures() {
   local tid="$1"
@@ -1410,10 +1480,13 @@ _fleet_workspace_guard() {
 }
 
 # ── Aggregator ───────────────────────────────────────────────────────────────────
-# Enumerates active pipeline logs, runs all 14 detectors: 8 legacy per-ticket
-# detectors + planner_feedback + blocked_by + initiative_dispatch +
-# epic_branch_ready + runaway_calls + workspace_config. Detectors 9-10 run
-# per-ticket; 10-13 have fleet-wide scans collected into the fleet_wide array.
+# Enumerates active pipeline logs and runs every registered detector: 8
+# legacy per-ticket detectors + planner_feedback + blocked_by +
+# initiative_dispatch + epic_branch_ready + runaway_calls + human_hold +
+# workspace_config. Detectors 9-10 run per-ticket; 10-13 have fleet-wide
+# scans collected into the fleet_wide array; human_hold runs only inside the
+# held-ticket branch (see fleet-controller/CLAUDE.md's detector table for the
+# current count — this comment deliberately does not restate it).
 # Outputs JSON results array.
 # Usage: fleet_detect_all <workspace>
 fleet_detect_all() {
@@ -1478,15 +1551,16 @@ fleet_detect_all() {
 
     total=$((total + 1))
 
-    # Run all 10 per-ticket detectors (1-8 + planner_feedback + epic-branch), collect max severity
-    local s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 max_sev anomaly_types
+    # Run all per-ticket detectors, collect max severity
+    local s1 s2 s3 s4 s5 s6 s7 s8 s9 s10 s11 s12 max_sev anomaly_types
     if _pipeline_is_held "$tid" "$workspace"; then
       # The router has already exited cleanly for a held ticket — no live
-      # process, no open bracket, no heartbeat. The other 10 detectors
+      # process, no open bracket, no heartbeat. The other detectors
       # assume an actively running pipeline and would false-positive
       # (stalls/zombies/loops in particular) within minutes of a clean
-      # hold. Only detect_abandoned's held-aware branch (WARN-capped, no
-      # kill/restart) is meaningful here.
+      # hold. Only detect_abandoned's held-aware branch and
+      # detect_human_hold (both WARN-capped, no kill/restart) are
+      # meaningful here.
       s1=0
       s2=0
       s3=0
@@ -1498,6 +1572,7 @@ fleet_detect_all() {
       s9=0
       s10=0
       s11=0
+      s12=$(detect_human_hold "$tid" "$workspace")
     else
       s1=$(detect_phase_failures "$tid" "$workspace")
       s2=$(detect_stalls "$tid" "$workspace")
@@ -1510,12 +1585,13 @@ fleet_detect_all() {
       s9=$(detect_planner_feedback "$tid" "$workspace")
       s10=$(detect_epic_branch_ready "$tid" "$workspace")
       s11=$(detect_runaway_calls "$tid" "$workspace")
+      s12=0
     fi
 
     max_sev=0
     anomaly_types=""
 
-    for s in "$s1" "$s2" "$s3" "$s4" "$s5" "$s6" "$s7" "$s8" "$s9" "$s10" "$s11"; do
+    for s in "$s1" "$s2" "$s3" "$s4" "$s5" "$s6" "$s7" "$s8" "$s9" "$s10" "$s11" "$s12"; do
       [ "$s" -gt "$max_sev" ] && max_sev="$s"
     done
 
@@ -1531,6 +1607,7 @@ fleet_detect_all() {
     [ "$s9" -ge 1 ] && anomaly_types="${anomaly_types} planner-feedback(S${s9})"
     [ "$s10" -ge 1 ] && anomaly_types="${anomaly_types} epic-branch-ready(S${s10})"
     [ "$s11" -ge 1 ] && anomaly_types="${anomaly_types} runaway-calls(S${s11})"
+    [ "$s12" -ge 1 ] && anomaly_types="${anomaly_types} human-hold(S${s12})"
     anomaly_types=$(echo "$anomaly_types" | sed 's/^ //')
 
     # Cap severity at 2 (KILL) when auto-restart is disabled

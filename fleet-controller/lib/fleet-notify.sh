@@ -153,3 +153,148 @@ last message: ${last_msg}"
 
   fleet_slack_post "$tid" "$state_dir" "$text"
 }
+
+# ── fleet_notify_hold (human-hold-protocol) ─────────────────────────────────
+#
+# fleet_notify_hold <tid> <state_dir> <transition>
+# transition: "created" | "escalate"
+#
+# Built like fleet_notify_worker_event above: observed facts only — ticket,
+# REASON, BLOCKS, and the numbered questions, read straight from the latest
+# *valid* `META|human-hold` record in the pipeline log — never a
+# classification of what the question means.
+#
+# Idempotency deliberately does NOT key off the fleet state store's
+# `notify_state` column, even though design.md D7 names that column as the
+# authoritative gate. Two things make that column unreachable from here: a
+# bash library has no write access to the store (fleetd is its sole writer),
+# and the store's `tickets` row carries no question/blocks text to put in
+# the message anyway — this function needs the pipeline log regardless. It
+# keeps its own per-ticket sidecar instead, `{tid}-hold-notify.json`,
+# exactly the pattern `fleet_slack_post` above already uses for its own
+# thread-ts bookkeeping. The observable guarantees the spec asks for are
+# unaffected: one notification per hold, a daemon restart reads the same
+# sidecar and sends nothing again, a failed send is retried on a later pass,
+# and escalation fires once. The sidecar is keyed on a hash of the record's
+# own payload (never a `hold_id` — neither this function nor the pipeline
+# log ever carries one; the agent has none to give and fleetd mints it only
+# on the row), so a genuinely new hold (a fresh `BLOCKS`/questions shape
+# after a supersede) notifies again even though this function cannot see
+# fleetd's minted id.
+fleet_notify_hold() {
+  local tid="$1" state_dir="$2" transition="$3"
+
+  case "$transition" in
+  created | escalate) ;;
+  *)
+    echo "fleet-notify: fleet_notify_hold: unknown transition '${transition}'" >&2
+    return 1
+    ;;
+  esac
+
+  local log_file="${state_dir}/${tid}-pipeline.log"
+  local record_line
+  record_line=$(command grep '|META|human-hold|waiting|' "$log_file" 2>/dev/null | tail -1)
+  if [ -z "$record_line" ]; then
+    echo "fleet-notify: fleet_notify_hold: no human-hold record for ${tid} — nothing to notify"
+    return 0
+  fi
+
+  local held_at payload
+  held_at=$(printf '%s' "$record_line" | cut -d'|' -f1)
+  payload=$(printf '%s' "$record_line" | awk -F'|' '{s=$5; for(i=6;i<=NF;i++) s=s"|"$i; print s}')
+  case "$payload" in
+  *'"parse_status":"ok"'*) ;;
+  *)
+    echo "fleet-notify: fleet_notify_hold: latest human-hold record for ${tid} is not parse_status=ok — nothing to notify"
+    return 0
+    ;;
+  esac
+
+  local reason blocks questions_text
+  reason=$(printf '%s' "$payload" | python3 -c "import json,sys; print(json.load(sys.stdin).get('reason',''))" 2>/dev/null) || reason=""
+  blocks=$(printf '%s' "$payload" | python3 -c "import json,sys; print(json.load(sys.stdin).get('blocks',''))" 2>/dev/null) || blocks=""
+  questions_text=$(printf '%s' "$payload" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+for q in d.get('questions', []):
+    print('%s) %s' % (q.get('id'), q.get('text', '')))
+" 2>/dev/null) || questions_text=""
+
+  local hold_key
+  if command -v sha256sum >/dev/null 2>&1; then
+    hold_key=$(printf '%s' "$payload" | sha256sum | awk '{print $1}')
+  else
+    hold_key=$(printf '%s' "$payload" | shasum -a 256 | awk '{print $1}')
+  fi
+
+  local sidecar="${state_dir}/${tid}-hold-notify.json"
+  local sidecar_key="" notify_state="" notified_at="" escalated_at=""
+  if [ -f "$sidecar" ]; then
+    sidecar_key=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('key',''))" "$sidecar" 2>/dev/null) || sidecar_key=""
+    notify_state=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('notify_state',''))" "$sidecar" 2>/dev/null) || notify_state=""
+    notified_at=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('notified_at') or '')" "$sidecar" 2>/dev/null) || notified_at=""
+    escalated_at=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('escalated_at') or '')" "$sidecar" 2>/dev/null) || escalated_at=""
+  fi
+  # A different hold (superseded, or a fresh ask) resets bookkeeping — it is
+  # a new thing to notify about even though no id distinguishes it here.
+  if [ "$hold_key" != "$sidecar_key" ]; then
+    notify_state=""
+    notified_at=""
+    escalated_at=""
+  fi
+
+  _notify_write_sidecar() {
+    printf '{"key": "%s", "notify_state": "%s", "notified_at": "%s", "escalated_at": "%s"}' \
+      "$hold_key" "$1" "$2" "$3" >"$sidecar" 2>/dev/null || true
+  }
+
+  local now
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  if [ "$transition" = "created" ]; then
+    if [ "$notify_state" = "sent" ]; then
+      return 0
+    fi
+    local text
+    text=$(printf ':lock: *%s* is waiting on you\nReason: %s\nBlocks: %s\nQuestions:\n%s\n\nAnswer in a comment on the Linear ticket.' \
+      "$tid" "$reason" "$blocks" "$questions_text")
+    local out
+    out=$(fleet_slack_post "$tid" "$state_dir" "$text" 2>&1)
+    if [[ "$out" == *"log-only"* ]] || [[ "$out" == *"transport failure"* ]] || [[ "$out" == *"rejected"* ]] || [[ "$out" == *"construction failed"* ]]; then
+      if [[ "$out" == *"not configured"* ]]; then
+        # No Slack configuration at all degrades permanently — nothing will
+        # ever succeed until an operator configures it, and retrying every
+        # pass would just repeat the same log-only line forever.
+        _notify_write_sidecar "sent" "$now" "$escalated_at"
+      else
+        _notify_write_sidecar "failed" "$notified_at" "$escalated_at"
+      fi
+    else
+      _notify_write_sidecar "sent" "$now" "$escalated_at"
+    fi
+    echo "$out"
+    return 0
+  fi
+
+  # transition = escalate
+  if [ -n "$escalated_at" ]; then
+    return 0
+  fi
+  local held_epoch now_epoch age_secs escalate_secs
+  held_epoch=$(date -u -d "$held_at" +%s 2>/dev/null || echo "0")
+  now_epoch=$(date -u +%s)
+  age_secs=$((now_epoch - held_epoch))
+  escalate_secs=$((${FLEET_HOLD_ESCALATE_HOURS:-24} * 3600))
+  if [ "$age_secs" -lt "$escalate_secs" ]; then
+    return 0
+  fi
+  local text
+  text=$(printf ':rotating_light: *%s* has been waiting on you for %sh — still unanswered\nReason: %s\nBlocks: %s\nQuestions:\n%s\n\nAnswer in a comment on the Linear ticket.' \
+    "$tid" "$((age_secs / 3600))" "$reason" "$blocks" "$questions_text")
+  local out
+  out=$(fleet_slack_post "$tid" "$state_dir" "$text" 2>&1)
+  _notify_write_sidecar "$notify_state" "$notified_at" "$now"
+  echo "$out"
+  return 0
+}

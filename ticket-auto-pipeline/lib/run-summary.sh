@@ -185,6 +185,23 @@ run_summary_json() {
   complexity=$(grep '|META|complexity|info|' "$log_file" 2>/dev/null | tail -1 | _rs_field5) || true
   autonomy=$(grep '|META|autonomy|info|' "$log_file" 2>/dev/null | tail -1 | _rs_field5) || true
 
+  # ── human_hold_requested / human_hold_parse_status (human-hold-protocol
+  # task 8.1) ────────────────────────────────────────────────────────────
+  # Whether THIS run's own window carries a META|human-hold record at all,
+  # and the parse_status of the latest one. The whole point is to measure
+  # whether the preamble instruction is ever followed — task 8.2 reads this
+  # field across real runs, not this script's own logic — so the field must
+  # reflect exactly what's in the log, never a synthesized default.
+  local human_hold_line human_hold_requested human_hold_parse_status
+  human_hold_line=$(grep '|META|human-hold|waiting|' <<<"$window" 2>/dev/null | tail -1) || true
+  if [ -n "$human_hold_line" ]; then
+    human_hold_requested="true"
+    human_hold_parse_status=$(_rs_field5 <<<"$human_hold_line" | jq -r '.parse_status // empty' 2>/dev/null) || true
+  else
+    human_hold_requested="false"
+    human_hold_parse_status=""
+  fi
+
   jq -nc \
     --arg tid "$tid" \
     --arg run_id "$(jq -r '.run_id // empty' <<<"$run_id_json" 2>/dev/null)" \
@@ -214,6 +231,8 @@ run_summary_json() {
     --argjson tok_in "$tok_in" --argjson tok_out "$tok_out" --argjson tok_cache "$tok_cache" \
     --argjson cache_read "$cache_read" --argjson cache_write "$cache_write" \
     --argjson phase_elapsed_ms "$phase_elapsed_json" \
+    --argjson human_hold_requested "$human_hold_requested" \
+    --arg human_hold_parse_status "${human_hold_parse_status:-}" \
     '{
       kind: "run",
       tid: $tid,
@@ -243,6 +262,8 @@ run_summary_json() {
       merge_decision: (if $merge_decision == "" then null else $merge_decision end),
       tokens: {in: $tok_in, out: $tok_out, cache: $tok_cache, cache_read: $cache_read, cache_write: $cache_write},
       phase_elapsed_ms: $phase_elapsed_ms,
+      human_hold_requested: $human_hold_requested,
+      human_hold_parse_status: (if $human_hold_parse_status == "" then null else $human_hold_parse_status end),
       observed_at: (now | strftime("%Y-%m-%dT%H:%M:%SZ"))
     }' 2>/dev/null
 }

@@ -187,6 +187,115 @@ EOF
   }
 }
 
+test_json_resumed_after_human_hold_ms() {
+  # Regression pin (human-hold-protocol task 3.3): the gate_held_at /
+  # resumed_after_hold_ms bridge matches the `held:` PREFIX, not the exact
+  # string `held: gate` — verified at run-summary.sh:110 that it already
+  # does. This is a pin against a future accidental tightening to an exact
+  # match, not a fix.
+  _setup
+  local log="$_ws/CRE-12-pipeline.log"
+  cat >"$log" <<'EOF'
+2026-09-01T00:00:00Z|META|schema|info|1
+2026-09-01T00:00:01Z|META|run-id|info|{"run_id":"CRE-12-a","gen":null,"trigger":"manual","pid":1}
+2026-09-01T00:00:04Z|META|outcome|info|held: human
+2026-09-01T00:01:04Z|META|run-id|info|{"run_id":"CRE-12-b","gen":null,"trigger":"manual","pid":2}
+2026-09-01T00:01:05Z|META|outcome|info|completed: STEP_6
+EOF
+  local json held resumed_ms
+  json=$(run_summary_json "CRE-12" "$log" 0)
+  held=$(echo "$json" | jq -r '.gate_held_at')
+  resumed_ms=$(echo "$json" | jq -r '.resumed_after_hold_ms')
+  _teardown
+  [ "$held" = "2026-09-01T00:00:04Z" ] || {
+    echo "expected gate_held_at=2026-09-01T00:00:04Z, got $held"
+    return 1
+  }
+  [ "$resumed_ms" = "60000" ] || {
+    echo "expected resumed_after_hold_ms=60000, got $resumed_ms"
+    return 1
+  }
+}
+
+test_json_human_hold_requested_true_with_parse_status() {
+  _setup
+  local log="$_ws/CRE-13-pipeline.log"
+  cat >"$log" <<'EOF'
+2026-09-01T00:00:00Z|META|schema|info|1
+2026-09-01T00:00:01Z|META|run-id|info|{"run_id":"CRE-13-a","gen":null,"trigger":"manual","pid":1}
+2026-09-01T00:00:02Z|META|human-hold|waiting|{"schema_version":1,"phase":"APPRAISE","reason":"SCOPE_UNDEFINED","blocks":"notes.md#AC-2","supersedes":"","questions":[{"id":1,"text":"which archive?"}],"parse_status":"ok","parse_error":""}
+2026-09-01T00:00:03Z|META|outcome|info|held: human
+EOF
+  local json requested status
+  json=$(run_summary_json "CRE-13" "$log" 0)
+  requested=$(echo "$json" | jq -r '.human_hold_requested')
+  status=$(echo "$json" | jq -r '.human_hold_parse_status')
+  _teardown
+  [ "$requested" = "true" ] || {
+    echo "expected human_hold_requested=true, got $requested"
+    return 1
+  }
+  [ "$status" = "ok" ] || {
+    echo "expected human_hold_parse_status=ok, got $status"
+    return 1
+  }
+}
+
+test_json_human_hold_requested_false_when_absent() {
+  _setup
+  local log="$_ws/CRE-14-pipeline.log"
+  cat >"$log" <<'EOF'
+2026-09-01T00:00:00Z|META|schema|info|1
+2026-09-01T00:00:01Z|META|run-id|info|{"run_id":"CRE-14-a","gen":null,"trigger":"manual","pid":1}
+2026-09-01T00:00:02Z|META|outcome|info|completed: STEP_6
+EOF
+  local json requested status
+  json=$(run_summary_json "CRE-14" "$log" 0)
+  requested=$(echo "$json" | jq -r '.human_hold_requested')
+  status=$(echo "$json" | jq -r '.human_hold_parse_status')
+  _teardown
+  [ "$requested" = "false" ] && [ "$status" = "null" ]
+}
+
+test_json_human_hold_requested_scoped_to_current_run_window() {
+  # A human-hold record from a PREVIOUS run must not leak into a later
+  # run's own event — matches verify_attempts' window isolation.
+  _setup
+  local log="$_ws/CRE-15-pipeline.log"
+  cat >"$log" <<'EOF'
+2026-09-01T00:00:00Z|META|schema|info|1
+2026-09-01T00:00:01Z|META|run-id|info|{"run_id":"CRE-15-a","gen":null,"trigger":"manual","pid":1}
+2026-09-01T00:00:02Z|META|human-hold|waiting|{"schema_version":1,"phase":"APPRAISE","reason":"SCOPE_UNDEFINED","blocks":"notes.md#AC-2","supersedes":"","questions":[{"id":1,"text":"x?"}],"parse_status":"ok","parse_error":""}
+2026-09-01T00:00:03Z|META|outcome|info|held: human
+2026-09-01T02:00:00Z|META|run-id|info|{"run_id":"CRE-15-b","gen":null,"trigger":"manual","pid":2}
+2026-09-01T02:00:01Z|META|outcome|info|completed: STEP_6
+EOF
+  local json requested
+  json=$(run_summary_json "CRE-15" "$log" 0)
+  requested=$(echo "$json" | jq -r '.human_hold_requested')
+  _teardown
+  [ "$requested" = "false" ] || {
+    echo "expected human_hold_requested=false for the later, unrelated run, got $requested"
+    return 1
+  }
+}
+
+test_json_human_hold_invalid_parse_status_carried() {
+  _setup
+  local log="$_ws/CRE-16-pipeline.log"
+  cat >"$log" <<'EOF'
+2026-09-01T00:00:00Z|META|schema|info|1
+2026-09-01T00:00:01Z|META|run-id|info|{"run_id":"CRE-16-a","gen":null,"trigger":"manual","pid":1}
+2026-09-01T00:00:02Z|META|human-hold|waiting|{"schema_version":1,"phase":"APPRAISE","reason":"","blocks":"","supersedes":"","questions":[],"parse_status":"invalid","parse_error":"missing required field: REASON"}
+2026-09-01T00:00:03Z|META|outcome|info|completed: STEP_6
+EOF
+  local json status
+  json=$(run_summary_json "CRE-16" "$log" 0)
+  status=$(echo "$json" | jq -r '.human_hold_parse_status')
+  _teardown
+  [ "$status" = "invalid" ]
+}
+
 test_json_pr_created_beats_checkout_pr() {
   _setup
   local log="$_ws/CRE-5-pipeline.log"
@@ -285,6 +394,11 @@ for fn in \
   test_window_falls_back_to_whole_log_without_run_id \
   test_json_verify_attempts_counts_only_later_run \
   test_json_resumed_after_hold_ms \
+  test_json_resumed_after_human_hold_ms \
+  test_json_human_hold_requested_true_with_parse_status \
+  test_json_human_hold_requested_false_when_absent \
+  test_json_human_hold_requested_scoped_to_current_run_window \
+  test_json_human_hold_invalid_parse_status_carried \
   test_json_pr_created_beats_checkout_pr \
   test_json_token_split_summed_across_phases \
   test_json_empty_window_is_valid_json_with_zero_counters \
