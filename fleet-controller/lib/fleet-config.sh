@@ -123,6 +123,18 @@ FLEET_OBSERVER_COST_WARN_USD="${FLEET_OBSERVER_COST_WARN_USD:-2.00}"
 # relative to the phase's other calls, not to police individual tool latency.
 FLEET_OBSERVER_LONG_TOOL_SECS="${FLEET_OBSERVER_LONG_TOOL_SECS:-120}"
 
+# ── Phase Dispatch Rollout ───────────────────────────────────────────────────────
+# When false (the default), fleetd's live queue dispatches every ticket the
+# existing way: one ticket-level `claude -p '/ticket-auto {tid} --auto'` process
+# that sequences its own phases. When true, this fleetd instance instead spawns
+# each phase as its own short-lived process (Supervisor.spawn_phase) and sequences
+# them itself via phase_dispatch.next_step (openspec/changes/fleetd-phase-supervisor,
+# task 10.1) — the mechanism FLEET_OBSERVER_ENABLE's stream-json tailing actually
+# needs to see real phase-worker traffic. Per-instance, same scoping as every other
+# FLEET_OBSERVER_*/FLEET_OTEL_* flag here: set it in one fleetd deployment's own env
+# to opt that project in while every other instance keeps the ticket-level default.
+FLEET_PHASE_DISPATCH_ENABLE="${FLEET_PHASE_DISPATCH_ENABLE:-false}"
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────────
 # When false (the default), fleetd sits idle — detection runs and health/status
 # are served, but no epic is auto-enqueued; dispatch happens only when explicitly

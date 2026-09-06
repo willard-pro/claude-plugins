@@ -1669,3 +1669,255 @@ def last_verify_checkpoint(log_lines):
     if last_step in _VERIFY_UNRESUMABLE_SUBSTEPS:
         return 'build-plan'
     return last_step
+
+
+# ── Ticket type resolution (task 10.1.2, design.md D22) ─────────────────────
+#
+# STEP_1_5's table `condition` ("bug tickets only") needs the ticket's type
+# label. Shells out to `linear-api.sh`'s own `get_issue` rather than
+# reimplementing the GraphQL query or the labels field shape (same
+# discipline as `preamble.py`'s D13/D17 calls) — resolve once at first
+# dispatch and cache the result; a ticket's type label is fixed at creation
+# and never toggled mid-run (`state-machine.json`'s `planner_labels` table).
+
+_TICKET_TYPE_LABELS = ('bug', 'feature', 'improvement', 'security', 'chore')
+
+
+def resolve_ticket_type(tid, lib_dir=None, timeout=30):
+    """The ticket's type label (`bug`/`feature`/...), or `None` if unresolvable.
+
+    A missing/unresolvable label degrades to `None` (treated as "not a bug"
+    by every caller) rather than raising — the same fail-soft posture
+    `_agent_md_path`/`_parse_env_file` already take for optional context this
+    module cannot get without a live Linear read.
+    """
+    lib_dir = lib_dir or os.environ.get(
+        'CLAUDE_SKILLS_LIB', os.path.expanduser('~/.claude/skills/lib'))
+    script = f'source "{lib_dir}/linear-api.sh" >/dev/null 2>&1 && get_issue "$1"'
+    try:
+        proc = subprocess.run(
+            ['bash', '-c', script, 'bash', tid],
+            capture_output=True, text=True, timeout=timeout)
+        issue = json.loads(proc.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return None
+    nodes = ((issue.get('labels') or {}).get('nodes')) or []
+    labels = {(n.get('name') or '').lower() for n in nodes}
+    for label in _TICKET_TYPE_LABELS:
+        if label in labels:
+            return label
+    return None
+
+
+# ── Step transitions (task 10.1, design.md D22) ─────────────────────────────
+#
+# Groups 1-9/11 give fleetd every primitive to run ONE phase. Nothing decided
+# which step_id comes next once a phase finishes — this is that function.
+# It plays the role `detect-resume.sh`'s backward log scan plays for the
+# manual router, but computes forward from "the step that just finished plus
+# its classified outcome" (already available from `classify_phase`/
+# `evaluate_loop`) rather than re-deriving position from scratch each time,
+# per D7's decision not to shell out to `detect-resume.sh` on the normal path.
+#
+# `PR_ITERATE` is a synthetic step_id, not present in `dispatch-table.json`.
+# SKILL.md's own PR-REVIEW/WARN loop body spawns `/ticket-pr-iterate` as a
+# hardcoded exception, never a table-declared step — the same is true here;
+# see `build_pr_iterate_spawn` below rather than `build_phase_spawn`, which
+# requires a real table entry.
+PR_ITERATE = 'PR_ITERATE'
+
+NEXT_ADVANCE = 'advance'
+NEXT_TERMINAL = 'terminal'
+NEXT_HOLD = 'hold'
+
+NextStep = namedtuple(
+    'NextStep',
+    'kind step_id exit_code gate_stop_code hold_kind resume_step_id detail',
+)
+NextStep.__doc__ = """Where dispatch goes after one step finishes.
+
+kind           — 'advance' (dispatch `step_id` next), 'terminal' (write the
+                 finalize record and stop dispatching this ticket) or 'hold'
+                 (create a `gate`-kind hold row and stop dispatching — the
+                 already-live `Supervisor._hold_reconcile_pass`
+                 (human-hold-store-foundation) does the release probe; this
+                 function only ever creates the row).
+step_id        — the next step to dispatch, kind='advance' only. May be
+                 `PR_ITERATE`, which is not a real dispatch-table step_id —
+                 see `build_pr_iterate_spawn`.
+exit_code      — the code `pipeline-finalize.sh`'s equivalent should use,
+                 kind='terminal' only (0 success, 1 gate-stop/exhaustion).
+gate_stop_code — the named gate-stop code to record, kind='terminal' only,
+                 '' when the terminal is a clean success (STEP_6 done).
+hold_kind      — always 'gate' today (kind='hold' only) — `human` holds are
+                 created by `human-hold-parse.sh`/`gate_hold.py`'s own path,
+                 never by a step transition.
+resume_step_id — always `STEP_3_5` today (kind='hold' only). `_hold_reconcile_pass`
+                 clears the hold row but never touches `position` (design.md
+                 D5 — it must stay a thin, generic reconciler, not a second
+                 phase-dispatch authority). The caller must record this as
+                 the ticket's position *at hold-creation time*, alongside
+                 `store.set_hold`, so the position a plain release leaves
+                 behind is already correct — mirrors `detect-resume.sh`'s own
+                 `GATE_HELD` + approved-label → `STEP_3_5` transition, the
+                 manual router's parity requirement (both hold sites, the
+                 first hold from `STEP_2_5` and a re-hold from `STEP_3_5`
+                 itself, resume at the same place — the reconcile agent,
+                 never straight back to the bash gate).
+detail         — human-readable reason, for logging only.
+"""
+
+
+def _advance(step_id, detail=''):
+    return NextStep(NEXT_ADVANCE, step_id, None, '', '', '', detail)
+
+
+def _terminal(exit_code, gate_stop_code='', detail=''):
+    return NextStep(NEXT_TERMINAL, '', exit_code, gate_stop_code, '', '', detail)
+
+
+def _hold(kind, detail=''):
+    return NextStep(NEXT_HOLD, '', None, '', kind, 'STEP_3_5', detail)
+
+
+def _gate_reconcile_held(log_lines):
+    """Did the most recent GATE-reconcile completion hold again?
+
+    Mirrors `detect-resume.sh`'s own distinction exactly: `GATE|reconcile|
+    done|clean` advances the pipeline, `GATE|reconcile|done|cycle#N|held:
+    ...` does not, even though both are `done` (GATE is not loop-bearing/
+    phase-result-bearing, so `classify_phase` cannot tell them apart — this
+    is intentionally a GATE-specific check, not a generalizable one).
+    """
+    for line in reversed(log_lines):
+        fields = line.split('|', 4)
+        if len(fields) == 5 and fields[1] == 'GATE' \
+                and fields[2] == 'reconcile' and fields[3] == 'done':
+            return 'held:' in fields[4]
+    return False
+
+
+def next_step(table, step_id, result, counters, log_lines=(), is_bug=False):
+    """Given the step that just finished and its result, what happens next.
+
+    `result` is a `PhaseOutcome` (from `classify_phase`) for every agent-
+    spawning step, or a plain `int` exit code for a bash-only step
+    (`STEP_2_5`/`STEP_3` — `gate-check.sh`, already run by
+    `orchestration.run_bash_item`, which owns the exit-code semantics; this
+    function only routes on the number). `log_lines` must be scoped to the
+    step's own bracket, same contract as `classify_phase`. `counters` is the
+    same dict `evaluate_loop` already takes. `is_bug` resolves STEP_1_5's
+    table `condition` — see the caller-side note on caching it per ticket,
+    not re-fetching per step.
+
+    Ported step by step from `SKILL.md`'s Dispatch Loop / `detect-resume.sh`
+    — see design.md D22 for the full transition table and the two things
+    deliberately not ported (STEP_5_5 PR-comment reconciliation, phase
+    inspectors).
+    """
+    counters = counters or {}
+
+    if step_id == 'STEP_1':
+        return _advance('STEP_1_5' if is_bug else 'STEP_2', 'appraise done')
+
+    if step_id == 'STEP_1_5':
+        return _advance('STEP_2', 'reproduce done')
+
+    if step_id == 'STEP_2':
+        return _advance('STEP_2_5', 'exec done')
+
+    if step_id in ('STEP_2_5', 'STEP_3'):
+        exit_code = int(result)
+        if exit_code == 0:
+            return _advance('STEP_4', 'gate auto-approved')
+        if exit_code == 1:
+            return _hold('gate', 'gate held for approval')
+        return _terminal(1, '', 'gate-check structural failure (exit 2)')
+
+    if step_id == 'STEP_3_5':
+        loop_decision = evaluate_loop(
+            table, step_id, counters, when='pre_dispatch')
+        if loop_decision.action == LOOP_GATE_STOP:
+            return _terminal(
+                1, loop_decision.gate_stop_code, loop_decision.detail)
+        if _gate_reconcile_held(log_lines):
+            return _hold('gate', 'gate reconcile held again')
+        return _advance('STEP_4', 'gate reconcile clean')
+
+    if step_id == 'STEP_4':
+        return _advance('STEP_4_5', 'implement done')
+
+    if step_id == 'STEP_4_5':
+        if result.result == 'done':
+            return _advance('STEP_4_6', 'verify passed')
+        loop_decision = evaluate_loop(
+            table, step_id, counters, when='post_dispatch')
+        if loop_decision.action == LOOP_GATE_STOP:
+            return _terminal(
+                1, loop_decision.gate_stop_code, loop_decision.detail)
+        return _advance('STEP_4', 'verify failed, retry implement')
+
+    if step_id == 'STEP_4_6':
+        verdict = result.verdict
+        if verdict == 'OK':
+            return _advance('STEP_5', 'pr-review passed')
+        if verdict == 'WARN':
+            loop_decision = evaluate_loop(
+                table, step_id, counters, when='post_dispatch')
+            if loop_decision.action == LOOP_GATE_STOP:
+                return _terminal(
+                    1, loop_decision.gate_stop_code, loop_decision.detail)
+            return _advance(PR_ITERATE, 'pr-review warn, iterate')
+        return _terminal(1, '', f'pr-review blocked (verdict={verdict!r})')
+
+    if step_id == PR_ITERATE:
+        return _advance('STEP_4', 'pr-iterate done, re-implement')
+
+    if step_id == 'STEP_5':
+        # STEP_5_5 (PR comment reconciliation) is deliberately not ported —
+        # design.md D22.
+        return _advance('STEP_6', 'document/wiki-maintenance done')
+
+    if step_id == 'STEP_6':
+        return _terminal(0, '', 'pipeline complete')
+
+    raise DispatchTableError(f'next_step: unknown step_id {step_id!r}')
+
+
+def build_pr_iterate_spawn(tid, log_file, hb_log_file='', env_file='',
+                          extra_env=None):
+    """The one spawn `next_step` can return with no dispatch-table entry.
+
+    Mirrors `build_phase_spawn`'s `PhaseSpawn` shape exactly, so a caller
+    never has to special-case the return type — only the source of the
+    values differs (hardcoded here, table-driven there), matching
+    SKILL.md's own treatment of this exact loop body as inline prose rather
+    than a table row.
+    """
+    env = {
+        'LOG_FILE': str(log_file or ''),
+        'HB_LOG_FILE': str(hb_log_file or ''),
+        'HUSKY': '0',
+        'FLEET_TICKET_ID': str(tid),
+        'FLEET_PHASE': 'PR-REVIEW',
+        'FLEET_STEP': 'pr-iterate',
+        'FLEET_DISPATCH_STEP_ID': PR_ITERATE,
+    }
+    if env_file:
+        env['FLEET_TICKET_ENV_FILE'] = str(env_file)
+    if extra_env:
+        env.update({k: str(v) for k, v in extra_env.items()})
+
+    return PhaseSpawn(
+        step_id=PR_ITERATE,
+        step='pr-iterate',
+        phase='PR-REVIEW',
+        skill='/ticket-pr-iterate',
+        prompt=f'/ticket-pr-iterate {tid}. '
+               f'Apply the requested changes from the PR review.',
+        env=env,
+        attempt=None,
+        loop_bearing=True,
+        next_phase='PR-REVIEW',
+        agent=None,
+    )

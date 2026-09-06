@@ -1812,6 +1812,15 @@ FLEET_WORKER_DISALLOWED_TOOLS = os.environ.get('FLEET_WORKER_DISALLOWED_TOOLS', 
 # writing NDJSON to a .ndjson stdout file instead of .json.
 FLEET_OBSERVER_ENABLE = os.environ.get('FLEET_OBSERVER_ENABLE', 'false') == 'true'
 
+# Phase-dispatch rollout (fleetd-phase-supervisor task 10.1, design.md D22).
+# False (the default) leaves the live queue byte-identical to today: every
+# ticket spawns as one ticket-level /ticket-auto worker. True routes this
+# fleetd instance's queue through Supervisor.spawn_phase + phase_dispatch's
+# step-transition function instead — per-instance, same scoping as
+# FLEET_OBSERVER_ENABLE.
+FLEET_PHASE_DISPATCH_ENABLE = os.environ.get(
+    'FLEET_PHASE_DISPATCH_ENABLE', 'false') == 'true'
+
 # Markers indicating CLAUDE_CMD already supplies its own permission mode —
 # fleetd must not double-specify (the CLI rejects conflicting/duplicate
 # permission flags).
