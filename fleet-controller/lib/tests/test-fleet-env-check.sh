@@ -137,6 +137,21 @@ test_repos_root_missing_when_no_claude_md() {
   [[ "$(_row "$out" "CLAUDE.md")" == *"|missing|"* ]] && [ "$exit_code" -gt 0 ]
 }
 
+test_repos_root_auto_derived_does_not_count_as_issue() {
+  # CLAUDE.md present but without a REPOS_ROOT field, and >=2 child repos to
+  # derive from — REPOS_ROOT should come back "auto" (successfully derived,
+  # nothing broken) and must NOT contribute to the exit-code issue count.
+  # Regression for a bug where the issues++ sat outside the auto/missing
+  # if/else and fired on both branches.
+  local tmpdir out exit_code=0
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/child-a/.git" "$tmpdir/child-b/.git"
+  echo "# no REPOS_ROOT declared here" >"$tmpdir/CLAUDE.md"
+  out=$(LINEAR_API_KEY=x CLAUDE_CMD="bash --dangerously-skip-permissions" bash "$LIB_DIR/fleet-env-check.sh" "$tmpdir" 2>/dev/null) || exit_code=$?
+  rm -rf "$tmpdir"
+  [[ "$(_row "$out" "REPOS_ROOT")" == *"|auto|"* ]] && [ "$exit_code" -eq 0 ]
+}
+
 # ── CLAUDE_BIN / CLAUDE_CMD ───────────────────────────────────────────────────
 
 test_claude_bin_default_ok_when_resolvable() {
@@ -309,6 +324,7 @@ for fn in \
   test_slack_bot_token_masks_value \
   test_repos_root_ok_when_declared \
   test_repos_root_missing_when_no_claude_md \
+  test_repos_root_auto_derived_does_not_count_as_issue \
   test_claude_bin_default_ok_when_resolvable \
   test_claude_cmd_overrides_and_resolves \
   test_claude_cmd_missing_binary_is_issue \

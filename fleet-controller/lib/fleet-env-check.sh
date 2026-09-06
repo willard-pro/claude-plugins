@@ -165,8 +165,8 @@ else
       _var "REPOS_ROOT" "auto" "$DERIVED" "CLAUDE.md" "add REPOS_ROOT = $DERIVED to CLAUDE.md"
     else
       _var "REPOS_ROOT" "missing" "" "CLAUDE.md" "parent directory of all project repos"
+      issues=$((issues + 1))
     fi
-    issues=$((issues + 1))
   fi
 fi
 
