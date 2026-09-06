@@ -674,6 +674,25 @@ class TestWorkerCostUsd(unittest.TestCase):
         self.assertIsNone(
             phase_dispatch.worker_cost_usd('/nonexistent/CRE-9-gen1.json'))
 
+    def test_ndjson_envelope_yields_the_terminal_frames_cost(self):
+        # Agent Observer: a phase worker spawned under FLEET_OBSERVER_ENABLE
+        # writes stream-json, so this must not silently regress to None.
+        raw = '\n'.join([
+            json.dumps({'type': 'assistant'}),
+            json.dumps({'type': 'result', 'total_cost_usd': 0.99}),
+        ])
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'CRE-9-verify-gen1.ndjson'
+            out.write_text(raw)
+            self.assertEqual(phase_dispatch.worker_cost_usd(out), 0.99)
+
+    def test_ndjson_with_no_result_line_yields_none(self):
+        raw = json.dumps({'type': 'assistant'})
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / 'CRE-9-verify-gen1.ndjson'
+            out.write_text(raw + '\n' + json.dumps({'type': 'system'}))
+            self.assertIsNone(phase_dispatch.worker_cost_usd(out))
+
     def test_non_numeric_value_yields_none(self):
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / 'CRE-9-gen1.json'

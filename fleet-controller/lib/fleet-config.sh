@@ -79,6 +79,34 @@ FLEET_OTEL_SPAN_GRACE_SECS="${FLEET_OTEL_SPAN_GRACE_SECS:-30}"
 # capped, with pipeline.tool_calls_truncated set when the cap bites.
 FLEET_OTEL_MAX_TOOL_EVENTS="${FLEET_OTEL_MAX_TOOL_EVENTS:-100}"
 
+# ── Agent Observer ───────────────────────────────────────────────────────────────
+# When false (the default), fleetd is byte-identical to today: phase-level workers
+# still spawn with --output-format json, and no fleetd/observer.py sidecar runs.
+# When true, phase-level workers (Supervisor.spawn_phase only — never ticket-level
+# /ticket-auto workers) spawn with --output-format stream-json --verbose instead,
+# and fleetd supervises an observer.py sidecar that tails the resulting NDJSON,
+# producing a normalized event record and deterministic findings. The observer is
+# non-authoritative under any configuration: it can never gate, fail, or delay a
+# ticket, and a crashed or misbehaving observer costs only its own findings.
+FLEET_OBSERVER_ENABLE="${FLEET_OBSERVER_ENABLE:-false}"
+
+# Seconds between the observer's poll passes over each phase's NDJSON file.
+FLEET_OBSERVER_POLL_SECS="${FLEET_OBSERVER_POLL_SECS:-5}"
+
+# Seconds a logical observer keeps draining after it sees the terminal `result`
+# frame (or the worker's exit-record file) before releasing — late-arriving lines
+# (a trailing hook_response, design.md E5) still get consumed.
+FLEET_OBSERVER_GRACE_SECS="${FLEET_OBSERVER_GRACE_SECS:-30}"
+
+# Byte cap on any single field written into events.jsonl/findings.jsonl. Stream
+# volume on a real phase is unmeasured beyond a toy run (design.md Risk) — a Read
+# result embedding a whole file could be orders of magnitude larger than probed.
+FLEET_OBSERVER_MAX_FIELD="${FLEET_OBSERVER_MAX_FIELD:-512}"
+
+# Generations of {tid}-{phase}-events.jsonl / -findings.jsonl kept per ticket;
+# older ones are swept alongside the existing gen-file retention sweep (D8).
+FLEET_OBSERVER_LOG_RETENTION="${FLEET_OBSERVER_LOG_RETENTION:-3}"
+
 # ── Dispatch ─────────────────────────────────────────────────────────────────────
 # When false (the default), fleetd sits idle — detection runs and health/status
 # are served, but no epic is auto-enqueued; dispatch happens only when explicitly

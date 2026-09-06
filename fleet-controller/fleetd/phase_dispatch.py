@@ -760,20 +760,27 @@ def worker_return_text(stdout_path):
     try:
         payload = json.loads(stripped)
     except (ValueError, TypeError):
-        return _worker_return_text_ndjson(raw) or raw
+        frame = _last_ndjson_result_frame(raw)
+        if frame is not None and isinstance(frame.get('result'), str):
+            return frame['result']
+        return raw
     if isinstance(payload, dict):
         return str(payload.get('result') or raw)
     return raw
 
 
-def _worker_return_text_ndjson(raw):
-    """The last `type: "result"` line's `.result` field in NDJSON `raw`.
+def _last_ndjson_result_frame(raw):
+    """The last `type: "result"` line's full object in NDJSON `raw`, or None.
 
-    Returns None when no such line parses, so the caller can fall back to
-    the raw text (matching `_pr_unwrap`'s final `cat -- "$file"`). Unparseable
-    lines are skipped rather than raising — a stream-json capture routinely
-    interleaves noise (hook lines, a mid-write partial line) that must not
-    abort extraction of the one line that matters.
+    Shared by `worker_return_text` and `worker_cost_usd` — both read the same
+    stdout envelope and both need the same object (`.result` text for one,
+    `.total_cost_usd` for the other), not just one field of it, so they scan
+    once through the same helper rather than duplicating the scan twice.
+    Unparseable lines are skipped rather than raising — a stream-json capture
+    routinely interleaves noise (hook lines, a mid-write partial line) that
+    must not abort extraction of the one line that matters. Takes the *last*
+    matching line, never the first, since a `hook_response` line can follow
+    the terminal `result` frame (design.md E5).
     """
     last = None
     for line in raw.splitlines():
@@ -784,30 +791,39 @@ def _worker_return_text_ndjson(raw):
             obj = json.loads(line)
         except (ValueError, TypeError):
             continue
-        if isinstance(obj, dict) and obj.get('type') == 'result' \
-                and isinstance(obj.get('result'), str):
-            last = obj['result']
+        if isinstance(obj, dict) and obj.get('type') == 'result':
+            last = obj
     return last
 
 
 def worker_cost_usd(stdout_path):
     """Extract `total_cost_usd` from a worker's captured stdout envelope.
 
-    Returns a float when the envelope is valid JSON with a numeric
-    `total_cost_usd` field, `None` on any anomaly (missing file, non-JSON
-    content, missing field, non-numeric value) — never raises. Cost
-    extraction must not be able to fail a reap or a fleet-kill (design.md
-    Decision 2), the two paths that guarantee tickets don't get stuck as
-    phantom-owned.
+    Returns a float when the envelope yields a numeric `total_cost_usd`
+    field, `None` on any anomaly (missing file, unparseable content, missing
+    field, non-numeric value) — never raises. Cost extraction must not be
+    able to fail a reap or a fleet-kill (design.md Decision 2), the two paths
+    that guarantee tickets don't get stuck as phantom-owned.
+
+    NDJSON-safe on the same terms as `worker_return_text` (agent-observer
+    Inc 0/1): a phase worker spawned under `FLEET_OBSERVER_ENABLE=true` writes
+    stream-json instead of a single JSON object, and this must still find the
+    terminal frame's cost rather than silently returning None for every
+    phase-level worker once the flag is on.
     """
     try:
         raw = Path(stdout_path).read_text()
     except OSError:
         return None
-    try:
-        payload = json.loads(raw)
-    except (ValueError, TypeError):
+    stripped = raw.strip()
+    if not stripped:
         return None
+    try:
+        payload = json.loads(stripped)
+    except (ValueError, TypeError):
+        payload = _last_ndjson_result_frame(raw)
+        if payload is None:
+            return None
     if not isinstance(payload, dict):
         return None
     cost = payload.get('total_cost_usd')
