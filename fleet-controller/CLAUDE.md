@@ -40,10 +40,11 @@ fleet-controller/
 - **Worker identity**: fleetd generates a `--session-id <uuid>` before exec (not the `SessionStart` hook — that can't fire for a worker SIGKILLed before startup completes) and appends `--output-format json` for machine-readable `session_id`/`stop_reason`/`total_cost_usd`/`permission_denials`/`is_error` on the final turn. `FLEET_WORKER_PID` and `FLEET_WORKER_START_TICKS` (the child's own PID + `/proc` start-ticks) are stamped into the worker's env so the ticket-auto-pipeline watchdog (`spawn-helper.sh`) can tell a live worker from a stale/reused PID instead of trusting its own continued existence as a liveness proxy. `FLEET_GENERATION` (the worker's generation number) and `FLEET_VERSION` (the fleet-controller plugin version, read once from `plugin.json`, fail-soft to `''`) are stamped alongside them (Commercial Evidence MVP Branch C) so ticket-auto-pipeline's `run-identity.sh` can carry real `gen`/`fleet` values in `META|run-id`/`META|version` instead of the permanent `null` those fields carried for every fleetd-dispatched run before this.
 - **Explicit permission mode**: fleetd appends `--permission-mode ${FLEET_WORKER_PERMISSION_MODE:-bypassPermissions}` unless `CLAUDE_CMD` already specifies one. `dontAsk`/`auto` are deliberately never defaulted to — `auto` has no turn boundary in non-interactive mode, so one classifier denial silently poisons the rest of the run.
 - **Deterministic-failure circuit breaker**: a streak of `FLEET_DETERMINISTIC_FAILURE_COUNT` consecutive fast (`< FLEET_DETERMINISTIC_FAILURE_SECS`) non-zero-exit workers halts dispatch (`spawn_enabled=False`) instead of burning `FLEET_MAX_RESTARTS` per ticket — a bad `CLAUDE_CMD` or expired auth would otherwise restart every ticket in the fleet to the cap before anyone noticed.
+- **Startup env-check gate**: `__main__.py`'s `_run_startup_env_check()` shells out to `lib/fleet-env-check.sh` before constructing the `Supervisor` and refuses to start (nonzero exit) if it reports any issue — the daemon-process equivalent of ticket-auto-pipeline's Step-0 `validate-env` prose guard, which fleetd has no LLM turn to run inline. Reads `PROJECT_DIR` from fleetd's own cwd, same as a manual `/fleet-controller:fleet-env-check` run. Opt out with `FLEET_STARTUP_ENV_CHECK=false` (used by fleetd's own subprocess-spawning tests, which exercise supervisor mechanics only and have no reason to depend on a real `LINEAR_API_KEY`/`CLAUDE_CMD`).
 
 **Invocation:** `python -m fleet-controller.fleetd [--port PORT] [--state-dir DIR]`
 
-**Gating:** Set `FLEETD_SPAWN_ENABLED=1` to enable worker spawning. Default is observe-only (detection + health API, no spawns).
+**Gating:** Set `FLEETD_SPAWN_ENABLED=1` to enable worker spawning. Default is observe-only (detection + health API, no spawns). Startup itself is gated separately by the env-check above — this flag only controls whether an already-running fleetd spawns workers.
 
 **HTTP control surface (on-demand, loopback-bound):** alongside `GET /health`, fleetd serves `POST /dispatch` (scoped dispatch of one epic against the running daemon — same `fleet_dispatch_initiative` the skill and auto-sweep call, spawns immediately instead of waiting for the poll cycle), `POST /stop` (epic-scoped stop: purge queue, escalate-kill workers, write `stop-{epic}.json`; the single bash implementation is `fleet_stop_initiative`, also reachable via the skill's `stop` subcommand with the daemon down), and read-only `GET /workers`, `GET /workers/<tid>` (phase/anomalies/tokens/confidence per worker), `GET /queue`, `GET /epics`. Use these as an alternative to the `/fleet-controller dispatch` skill (on-demand, no restart-to-reconfigure) and to the fleet dashboard (per-ticket detail without re-rendering the whole fleet). Dispatch is the single start/resume/un-stop entry point: a stop-file gates every dispatch trigger path until an explicit `resume: true` clears it; the auto-sweep never clears. See README "HTTP API" for request/response shapes.
 
@@ -101,7 +102,7 @@ The pipeline log gains one new `META` step: `META|worker-exit|done|fail|code=<N>
 ## Skills
 
 - `fleet-controller` — `/fleet-controller:fleet-controller` slash command. Subcommands: `detect`, `intervene`, `dashboard`, `dispatch`, `feedback`.
-- `fleet-env-check` — `/fleet-controller:fleet-env-check` slash command. Validates `LINEAR_API_KEY`, `REPOS_ROOT`, the fleetd worker spawn command (`CLAUDE_BIN`/`CLAUDE_CMD`), and `jq`/`git`/`python3`/`gh`. Read-only, smaller scope than ticket-auto-pipeline's `ticket-env-check` (no hooks/spawn-permission/UAT_URL checks — those are ticket-auto concerns).
+- `fleet-env-check` — `/fleet-controller:fleet-env-check` slash command. Validates `LINEAR_API_KEY`, `REPOS_ROOT`, the fleetd worker spawn command (`CLAUDE_BIN`/`CLAUDE_CMD`), and `jq`/`git`/`python3`/`gh`. Read-only, smaller scope than ticket-auto-pipeline's `ticket-env-check` (no hooks/spawn-permission/UAT_URL checks — those are ticket-auto concerns). The same script also runs automatically, deterministically, at fleetd process startup (see "Startup env-check gate" above) — this skill is for a human to run it on demand and see the full table; it is not the only place it runs.
 
 ## Shared libraries (`lib/`)
 
@@ -277,6 +278,7 @@ All settings use `${VAR:-default}` pattern for env-var overrides:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `FLEET_STATE_DIR` | (workspace) | Directory for spawn queue, stop files, run registry, fence markers — survives reboot |
+| `FLEET_STARTUP_ENV_CHECK` | true | Gates fleetd process startup on `lib/fleet-env-check.sh` — a nonzero exit refuses to start. Set `false` to skip (used by fleetd's own subprocess-spawning tests) |
 | `FLEET_KILL_GRACE_SECS` | 10 | Wait for cooperative shutdown before SIGTERM |
 | `FLEET_KILL_VERIFY` | true | Fall back to stop-file-only kill when false |
 | `FLEET_FENCE_ENFORCE` | true | Enable generation fencing in flow.sh |

@@ -137,6 +137,21 @@ test_repos_root_missing_when_no_claude_md() {
   [[ "$(_row "$out" "CLAUDE.md")" == *"|missing|"* ]] && [ "$exit_code" -gt 0 ]
 }
 
+test_repos_root_auto_derived_does_not_count_as_issue() {
+  # CLAUDE.md present but without a REPOS_ROOT field, and >=2 child repos to
+  # derive from — REPOS_ROOT should come back "auto" (successfully derived,
+  # nothing broken) and must NOT contribute to the exit-code issue count.
+  # Regression for a bug where the issues++ sat outside the auto/missing
+  # if/else and fired on both branches.
+  local tmpdir out exit_code=0
+  tmpdir=$(mktemp -d)
+  mkdir -p "$tmpdir/child-a/.git" "$tmpdir/child-b/.git"
+  echo "# no REPOS_ROOT declared here" >"$tmpdir/CLAUDE.md"
+  out=$(LINEAR_API_KEY=x CLAUDE_CMD="bash --dangerously-skip-permissions" bash "$LIB_DIR/fleet-env-check.sh" "$tmpdir" 2>/dev/null) || exit_code=$?
+  rm -rf "$tmpdir"
+  [[ "$(_row "$out" "REPOS_ROOT")" == *"|auto|"* ]] && [ "$exit_code" -eq 0 ]
+}
+
 # ── CLAUDE_BIN / CLAUDE_CMD ───────────────────────────────────────────────────
 
 test_claude_bin_default_ok_when_resolvable() {
@@ -219,16 +234,21 @@ test_summary_file_written() {
 
 # ── Worker permission mode (worker-reap-recovery, task 2.7) ─────────────────
 
-test_permission_mode_missing_when_not_configured() {
-  local tmpdir out
+test_permission_mode_auto_when_not_configured_and_not_an_issue() {
+  local tmpdir out exit_code=0
   tmpdir=$(mktemp -d)
   _mk_project_dir "$tmpdir"
   out=$(
     unset CLAUDE_CMD
-    LINEAR_API_KEY=x _env_vars "$tmpdir"
-  )
+    # CLAUDE_BIN pinned to a binary guaranteed resolvable in CI (unlike the
+    # real 'claude' binary) so this test's exit-code assertion isolates the
+    # permission-mode default and isn't entangled with that unrelated row.
+    LINEAR_API_KEY=x CLAUDE_BIN=bash bash "$LIB_DIR/fleet-env-check.sh" "$tmpdir" 2>/dev/null
+  ) || exit_code=$?
   rm -rf "$tmpdir"
-  [[ "$(_row "$out" "FLEET_WORKER_PERMISSION_MODE")" == *"|missing|"* ]]
+  # fleetd's own documented zero-config default (bypassPermissions) must
+  # never be the reason fleetd's startup env-check gate refuses to boot.
+  [[ "$(_row "$out" "FLEET_WORKER_PERMISSION_MODE")" == *"|auto|"* ]] && [ "$exit_code" -eq 0 ]
 }
 
 test_permission_mode_ok_when_claude_cmd_specifies_one() {
@@ -309,6 +329,7 @@ for fn in \
   test_slack_bot_token_masks_value \
   test_repos_root_ok_when_declared \
   test_repos_root_missing_when_no_claude_md \
+  test_repos_root_auto_derived_does_not_count_as_issue \
   test_claude_bin_default_ok_when_resolvable \
   test_claude_cmd_overrides_and_resolves \
   test_claude_cmd_missing_binary_is_issue \
@@ -316,7 +337,7 @@ for fn in \
   test_gh_required_only_when_auto_pr_on \
   test_rowcount_matches_emitted_rows \
   test_summary_file_written \
-  test_permission_mode_missing_when_not_configured \
+  test_permission_mode_auto_when_not_configured_and_not_an_issue \
   test_permission_mode_ok_when_claude_cmd_specifies_one \
   test_not_root_ok_for_normal_user \
   test_claude_code_simple_ok_when_unset \

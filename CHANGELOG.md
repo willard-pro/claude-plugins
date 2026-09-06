@@ -55,6 +55,31 @@ path on a subset of real tickets and compare outcomes) and 10.4 (promotion)
 are deliberately left as follow-up operational work, not part of this
 release.
 
+fleetd now also gates its own startup on `lib/fleet-env-check.sh`, refusing
+to boot when the environment is misconfigured — the daemon-process
+equivalent of ticket-auto-pipeline's Step-0 `validate-env` guard, which
+fleetd has no LLM turn to run inline since it's the process doing the
+work, not a prompt reading a guard.
+
+- `_run_startup_env_check()` in `fleetd/__main__.py` shells out to the
+  existing check script before constructing the `Supervisor` and exits
+  nonzero on any reported issue. Previously the check only ran when a
+  human manually invoked `/fleet-controller:fleet-env-check` — nothing
+  ever gated real execution on it.
+- Opt out with `FLEET_STARTUP_ENV_CHECK=false`, now set by default inside
+  fleetd's own subprocess-spawning tests (they exercise supervisor
+  mechanics only, with no dependency on a real `LINEAR_API_KEY`/`CLAUDE_CMD`).
+- Fixed two pre-existing bugs in `fleet-env-check.sh` found while wiring
+  this up, both of the same shape — a status that means "this is fine"
+  was incrementing the issue counter as if it meant "this is missing,"
+  which would have made the new startup gate refuse to boot on a
+  perfectly valid, zero-config environment:
+  - an auto-derived `REPOS_ROOT` (status `auto` — successfully derived,
+    nothing wrong)
+  - `FLEET_WORKER_PERMISSION_MODE` left unset (status now `auto` —
+    fleetd's own documented default is to fall back to
+    `bypassPermissions`, not a gap the operator must close)
+
 ## fleet-controller 0.25.0 (2026-09-06)
 
 `agent-observer` (`next.md`). A phase worker's own claimed verdict is the only
