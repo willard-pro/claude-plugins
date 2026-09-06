@@ -37,6 +37,14 @@ FLEETD_DIR = Path(__file__).resolve().parent.parent
 FLEET_CONTROLLER_DIR = FLEETD_DIR.parent
 MODULE = 'fleet-controller.fleetd'
 
+# These tests spawn real fleetd subprocesses to exercise supervisor
+# mechanics (health endpoint, single-instance lock, registry, reap/advance
+# wiring) — none of that depends on a real LINEAR_API_KEY or CLAUDE_CMD, so
+# skip fleetd's startup env-check gate here rather than requiring every test
+# environment to satisfy it. setdefault, not assignment, so a test that
+# specifically wants to exercise the gate can still opt back in.
+os.environ.setdefault('FLEET_STARTUP_ENV_CHECK', 'false')
+
 
 def _fleetd_cmd(state_dir, pidfile, port, bind='127.0.0.1'):
     """Build a command line to launch fleetd in observe mode."""
@@ -170,6 +178,96 @@ class SingleInstanceTest(unittest.TestCase):
         finally:
             p2.send_signal(signal.SIGTERM)
             p2.wait(timeout=5)
+
+
+class StartupEnvCheckGateTest(unittest.TestCase):
+    """fleetd's own startup gate on fleet-env-check.sh (lib/fleet-env-check.sh).
+
+    Mirrors ticket-auto-pipeline's Step-0 validate-env guard, but fleetd has
+    no LLM turn to run a prose guard in — it IS the process doing the work —
+    so the gate runs once at process start (_run_startup_env_check in
+    __main__.py) instead. These tests override the module-wide
+    FLEET_STARTUP_ENV_CHECK=false default (see top of file) to actually
+    exercise it, and deliberately do not override `cwd` — fleetd's `-m`
+    invocation needs the repo root on sys.path, and the env check reads
+    PROJECT_DIR from that same cwd.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self._tmp.name)
+        self.pidfile = self.state_dir / 'fleetd.pid'
+        self.port = _find_free_port()
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    @staticmethod
+    def _env(**overrides):
+        env = {'PATH': os.environ.get('PATH', ''), 'HOME': os.environ.get('HOME', '')}
+        env.update(overrides)
+        return env
+
+    def test_startup_refuses_when_env_check_fails(self):
+        """No LINEAR_API_KEY, no resolvable worker binary — the gate must
+        refuse to start and the health port must never come up."""
+        cmd = _fleetd_cmd(self.state_dir, self.pidfile, self.port)
+        result = subprocess.run(
+            cmd,
+            env=self._env(
+                FLEET_STARTUP_ENV_CHECK='true',
+                CLAUDE_BIN='definitely-not-a-real-claude-binary-xyz',
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=15,
+        )
+        self.assertNotEqual(result.returncode, 0,
+                            "fleetd should refuse to start on a failing env check")
+        self.assertIn('startup env check failed', result.stderr.decode())
+        self.assertIsNone(_health_check(self.port, timeout=1),
+                          "health port must never come up when the gate blocks startup")
+
+    def test_startup_proceeds_when_gate_disabled(self):
+        """Same failing environment, but FLEET_STARTUP_ENV_CHECK=false —
+        confirms the opt-out the rest of this test module relies on."""
+        cmd = _fleetd_cmd(self.state_dir, self.pidfile, self.port)
+        p = subprocess.Popen(
+            cmd,
+            env=self._env(
+                FLEET_STARTUP_ENV_CHECK='false',
+                CLAUDE_BIN='definitely-not-a-real-claude-binary-xyz',
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            payload = _wait_health(self.port)
+            self.assertIsNotNone(payload, "fleetd should start with the gate disabled")
+        finally:
+            p.send_signal(signal.SIGTERM)
+            p.wait(timeout=5)
+
+    def test_startup_proceeds_when_env_check_passes(self):
+        """A satisfied environment (LINEAR_API_KEY + a resolvable, explicit
+        CLAUDE_CMD) must not be blocked by the gate."""
+        cmd = _fleetd_cmd(self.state_dir, self.pidfile, self.port)
+        p = subprocess.Popen(
+            cmd,
+            env=self._env(
+                FLEET_STARTUP_ENV_CHECK='true',
+                LINEAR_API_KEY='x',
+                CLAUDE_CMD='bash --dangerously-skip-permissions',
+            ),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        try:
+            payload = _wait_health(self.port)
+            self.assertIsNotNone(payload, "fleetd should start when the env check passes")
+        finally:
+            p.send_signal(signal.SIGTERM)
+            p.wait(timeout=5)
 
 
 class HealthEndpointTest(unittest.TestCase):
