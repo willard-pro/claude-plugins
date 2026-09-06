@@ -240,7 +240,10 @@ test_permission_mode_auto_when_not_configured_and_not_an_issue() {
   _mk_project_dir "$tmpdir"
   out=$(
     unset CLAUDE_CMD
-    LINEAR_API_KEY=x bash "$LIB_DIR/fleet-env-check.sh" "$tmpdir" 2>/dev/null
+    # CLAUDE_BIN pinned to a binary guaranteed resolvable in CI (unlike the
+    # real 'claude' binary) so this test's exit-code assertion isolates the
+    # permission-mode default and isn't entangled with that unrelated row.
+    LINEAR_API_KEY=x CLAUDE_BIN=bash bash "$LIB_DIR/fleet-env-check.sh" "$tmpdir" 2>/dev/null
   ) || exit_code=$?
   rm -rf "$tmpdir"
   # fleetd's own documented zero-config default (bypassPermissions) must
