@@ -1112,6 +1112,52 @@ def _store_release_hold(state_dir, tid, hold_id):
                      'release hold')
 
 
+def _store_mint_hold_id(state_dir, tid, generation, attempt):
+    return _store_do(
+        state_dir, lambda st: st.mint_hold_id(tid, generation, attempt),
+        'mint hold id')
+
+
+def _store_set_hold(state_dir, tid, kind, hold_id, reason='', generation=0):
+    return _store_do(
+        state_dir,
+        lambda st: st.set_hold(tid, kind, hold_id, reason=reason,
+                              generation=generation),
+        'set hold')
+
+
+def _create_phase_dispatch_hold(state_dir, tid, generation, reconcile_cycle,
+                                reason=''):
+    """Park a phase-dispatched ticket at a `gate` hold (task 10.1.4, D22).
+
+    The one live caller of `store.set_hold` for `hold_kind='gate'` —
+    `human-hold-store-foundation` shipped the release side
+    (`Supervisor._hold_reconcile_pass`) fully tested but with no creation
+    caller anywhere yet (the manual/bash router path has never called it
+    either; it only ever wrote a `held: gate` pipeline-log line and exited).
+    `attempt` is `reconcile_cycle` — the same counter `evaluate_loop` already
+    reads off `RECONCILE_CYCLE` — so a retried hold-creation call (a crash
+    between `set_hold` and the position write below) mints the identical
+    `hold_id` and `set_hold`'s `WHERE held = 0` collapses the retry to a
+    no-op rather than a second row.
+
+    Also records `position = STEP_3_5` in the same call — see design.md
+    D22's addendum: `_hold_reconcile_pass` only ever clears the hold, it
+    never touches position, so this is the only place that decides what a
+    plain release resumes at. Both hold sites (a fresh hold from `STEP_2_5`
+    and a re-hold from `STEP_3_5` itself) resume at the reconcile agent,
+    never straight back to the bash gate.
+    """
+    hold_id = _store_mint_hold_id(state_dir, tid, generation, reconcile_cycle)
+    if not hold_id:
+        return None
+    rowcount = _store_set_hold(
+        state_dir, tid, 'gate', hold_id, reason=reason, generation=generation)
+    if rowcount:
+        _store_record_position(state_dir, tid, 'STEP_3_5', source='dispatch')
+    return hold_id
+
+
 # ── OTel exporter lifecycle (D11, task 8.5) ────────────────────────────────
 # The exporter is supervised with the same primitives as any other worker —
 # fork/exec via spawn_worker, a run-registry entry, ChildReaper reaping, kill

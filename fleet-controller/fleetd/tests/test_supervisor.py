@@ -322,6 +322,91 @@ class ObserverFindingCountsTest(unittest.TestCase):
             p.wait(timeout=5)
 
 
+class PhaseDispatchHoldTest(unittest.TestCase):
+    """Task 10.1.4: the one live caller of `store.set_hold` for `hold_kind='gate'`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.state_dir = Path(self._tmp.name)
+
+    def tearDown(self):
+        _safe_tmp_cleanup(self._tmp)
+
+    def _ticket_row(self, tid):
+        from fleetd import store as store_mod
+        with store_mod.open_store(self.state_dir) as st:
+            return st.get_ticket(tid)
+
+    def test_creates_a_gate_hold_row(self):
+        from fleetd import supervisor as sup_mod
+
+        hold_id = sup_mod._create_phase_dispatch_hold(
+            str(self.state_dir), 'CRE-9', generation=1, reconcile_cycle=0)
+        self.assertIsNotNone(hold_id)
+        row = self._ticket_row('CRE-9')
+        self.assertEqual(row['held'], 1)
+        self.assertEqual(row['hold_kind'], 'gate')
+        self.assertEqual(row['hold_id'], hold_id)
+
+    def test_records_position_as_step_3_5(self):
+        from fleetd import supervisor as sup_mod
+
+        sup_mod._create_phase_dispatch_hold(
+            str(self.state_dir), 'CRE-9', generation=1, reconcile_cycle=0)
+        position = sup_mod._store_get_position(str(self.state_dir), 'CRE-9')
+        self.assertEqual(position['position'], 'STEP_3_5')
+
+    def test_reconcile_cycle_becomes_the_hold_attempt(self):
+        from fleetd import supervisor as sup_mod
+
+        hold_id_first = sup_mod._create_phase_dispatch_hold(
+            str(self.state_dir), 'CRE-9', generation=1, reconcile_cycle=0)
+        self.assertIn(':a0', hold_id_first)
+
+    def test_retry_with_same_generation_and_cycle_is_idempotent(self):
+        # A crash between set_hold and the position write, retried, must not
+        # mint a second row — mint_hold_id is deterministic from state fleetd
+        # already owns.
+        from fleetd import supervisor as sup_mod
+
+        first = sup_mod._create_phase_dispatch_hold(
+            str(self.state_dir), 'CRE-9', generation=2, reconcile_cycle=1)
+        second = sup_mod._create_phase_dispatch_hold(
+            str(self.state_dir), 'CRE-9', generation=2, reconcile_cycle=1)
+        self.assertEqual(first, second)
+
+    def test_disabled_store_returns_none_not_raise(self):
+        from unittest import mock
+        from fleetd import supervisor as sup_mod
+
+        with mock.patch.object(sup_mod, 'FLEET_STORE_ENABLE', False):
+            result = sup_mod._create_phase_dispatch_hold(
+                str(self.state_dir), 'CRE-9', generation=1, reconcile_cycle=0)
+        self.assertIsNone(result)
+
+    def test_a_held_ticket_is_released_by_the_existing_reconciler(self):
+        # Confirms task 10.1.4's requirement: no new release path — the
+        # already-live gate_hold reconciler (human-hold-store-foundation)
+        # is the sole release mechanism for a phase-dispatch-created hold.
+        from fleetd import gate_hold as gate_hold_mod
+        from fleetd import supervisor as sup_mod
+        from fleetd import phase_dispatch as phase_mod
+
+        hold_id = sup_mod._create_phase_dispatch_hold(
+            str(self.state_dir), 'CRE-9', generation=1, reconcile_cycle=0)
+        row = self._ticket_row('CRE-9')
+        table = phase_mod.DispatchTable.load()
+        log_file = self.state_dir / 'CRE-9-pipeline.log'
+        log_file.write_text('2026-09-06T10:00:00Z|META|schema|info|2\n')
+        decision = gate_hold_mod.reconcile_hold(
+            table, 'CRE-9', row, str(log_file),
+            entry_gate=lambda tid, hb_log_file='', lib_dir=None: (0, []))
+        self.assertEqual(decision.action, gate_hold_mod.RELEASE)
+        rowcount = sup_mod._store_release_hold(str(self.state_dir), 'CRE-9', hold_id)
+        self.assertEqual(rowcount, 1)
+        self.assertFalse(self._ticket_row('CRE-9')['held'])
+
+
 class RegistryObservationTest(unittest.TestCase):
     """Task 4.4: observe-only mode reads existing registry entries."""
 
